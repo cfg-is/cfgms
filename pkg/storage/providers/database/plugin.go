@@ -307,6 +307,19 @@ func (p *DatabaseProvider) CreateAssurancePolicyStore(config map[string]interfac
 	return store, nil
 }
 
+// CreateBlastRadiusPolicyStore creates a PostgreSQL-backed BlastRadiusPolicyStore (Issue #3698).
+func (p *DatabaseProvider) CreateBlastRadiusPolicyStore(config map[string]interface{}) (business.BlastRadiusPolicyStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseBlastRadiusPolicyStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database blast radius policy store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateTenantCrossingStore creates a PostgreSQL-backed TenantCrossingStore (ADR-025 Decision 2).
 func (p *DatabaseProvider) CreateTenantCrossingStore(config map[string]interface{}) (business.TenantCrossingStore, error) {
 	db, err := p.sharedPool(config)

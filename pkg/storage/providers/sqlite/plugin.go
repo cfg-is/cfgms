@@ -520,6 +520,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		PendingRefresh:      &SQLitePendingRefreshStore{db: db},
 		RefreshPolicy:       &SQLiteRefreshPolicyStore{db: db},
 		AssurancePolicy:     &SQLiteAssurancePolicyStore{db: db},
+		BlastRadiusPolicy:   &SQLiteBlastRadiusPolicyStore{db: db},
 		TenantCrossing:      &SQLiteTenantCrossingStore{db: db},
 		Case:                &SQLiteCaseStore{db: db},
 		Lease:               &SQLiteLeaseStore{db: db},

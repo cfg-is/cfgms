@@ -50,12 +50,13 @@ type BusinessStoreBundle struct {
 	Push                business.PushStore
 	PendingRegistration business.PendingRegistrationStore
 	IPTrust             business.IPTrustStore
-	PendingRefresh      business.PendingRefreshStore  // Issue #2098: registration-refresh approval queue
-	RefreshPolicy       business.RefreshPolicyStore   // Issue #2098: per-tenant refresh policy
-	AssurancePolicy     business.AssurancePolicyStore // Issue #2845: per-tenant assurance-policy overrides
-	TenantCrossing      business.TenantCrossingStore  // ADR-025 Decision 2: tenant-crossing grants and break-glass
-	Case                business.CaseStore            // ADR-022 §8: cockpit investigation cases
-	Lease               business.LeaseStore           // ADR-031 Decision 5: fenced singleton-claim leases
+	PendingRefresh      business.PendingRefreshStore    // Issue #2098: registration-refresh approval queue
+	RefreshPolicy       business.RefreshPolicyStore     // Issue #2098: per-tenant refresh policy
+	AssurancePolicy     business.AssurancePolicyStore   // Issue #2845: per-tenant assurance-policy overrides
+	BlastRadiusPolicy   business.BlastRadiusPolicyStore // Issue #3698: per-tenant operator-payload blast-radius overrides
+	TenantCrossing      business.TenantCrossingStore    // ADR-025 Decision 2: tenant-crossing grants and break-glass
+	Case                business.CaseStore              // ADR-022 §8: cockpit investigation cases
+	Lease               business.LeaseStore             // ADR-031 Decision 5: fenced singleton-claim leases
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -79,6 +80,14 @@ type RefreshStoreCreator interface {
 // Backends that do not implement this interface leave the store nil in the manager.
 type AssuranceStoreCreator interface {
 	CreateAssurancePolicyStore(config map[string]interface{}) (business.AssurancePolicyStore, error)
+}
+
+// BlastRadiusStoreCreator is an optional StorageProvider extension for backends that
+// support per-tenant blast-radius overrides for operator payload dispatch (Issue #3698).
+// Backends that do not implement this interface leave the store nil in the manager,
+// and resolveMaxTargetsForTenant falls back to the flat default for every tenant.
+type BlastRadiusStoreCreator interface {
+	CreateBlastRadiusPolicyStore(config map[string]interface{}) (business.BlastRadiusPolicyStore, error)
 }
 
 // TenantCrossingStoreCreator is an optional StorageProvider extension for backends that
@@ -701,6 +710,7 @@ type StorageManager struct {
 	pendingRefreshStore      business.PendingRefreshStore      // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore       // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore     // Issue #2845: per-tenant assurance-policy overrides
+	blastRadiusPolicyStore   business.BlastRadiusPolicyStore   // Issue #3698: per-tenant operator-payload blast-radius overrides
 	tenantCrossingStore      business.TenantCrossingStore      // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	caseStore                business.CaseStore                // ADR-022 §8: cockpit investigation cases
 	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
@@ -841,6 +851,17 @@ func (sm *StorageManager) GetAssurancePolicyStore() business.AssurancePolicyStor
 // SetAssurancePolicyStore wires the per-tenant assurance-policy store after construction.
 func (sm *StorageManager) SetAssurancePolicyStore(s business.AssurancePolicyStore) {
 	sm.assurancePolicyStore = s
+}
+
+// GetBlastRadiusPolicyStore returns the per-tenant blast-radius override store (Issue #3698).
+// Returns nil when not yet wired; callers must nil-check before use.
+func (sm *StorageManager) GetBlastRadiusPolicyStore() business.BlastRadiusPolicyStore {
+	return sm.blastRadiusPolicyStore
+}
+
+// SetBlastRadiusPolicyStore wires the per-tenant blast-radius policy store after construction.
+func (sm *StorageManager) SetBlastRadiusPolicyStore(s business.BlastRadiusPolicyStore) {
+	sm.blastRadiusPolicyStore = s
 }
 
 // GetTenantCrossingStore returns the ADR-025 Decision 2 tenant-crossing grant/break-glass
@@ -1197,6 +1218,16 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 			sm.SetAssurancePolicyStore(assurancePolicyStore)
 		}
 	}
+	// Wire blast radius policy store if the provider implements BlastRadiusStoreCreator (Issue #3698).
+	if brsc, ok := provider.(BlastRadiusStoreCreator); ok {
+		blastRadiusPolicyStore, err := brsc.CreateBlastRadiusPolicyStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create blast radius policy store: %w", err)
+		}
+		if blastRadiusPolicyStore != nil {
+			sm.SetBlastRadiusPolicyStore(blastRadiusPolicyStore)
+		}
+	}
 	// Wire tenant crossing store if the provider implements TenantCrossingStoreCreator (ADR-025).
 	if tcc, ok := provider.(TenantCrossingStoreCreator); ok {
 		tenantCrossingStore, err := tcc.CreateTenantCrossingStore(dbCfg)
@@ -1346,6 +1377,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		sm.SetPendingRefreshStore(bundle.PendingRefresh)
 		sm.SetRefreshPolicyStore(bundle.RefreshPolicy)
 		sm.SetAssurancePolicyStore(bundle.AssurancePolicy)
+		sm.SetBlastRadiusPolicyStore(bundle.BlastRadiusPolicy)
 		sm.SetTenantCrossingStore(bundle.TenantCrossing)
 		sm.SetCaseStore(bundle.Case)
 		if nonceStore != nil {
