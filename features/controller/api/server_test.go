@@ -1404,21 +1404,22 @@ func TestServer_CertificateRevoke_RouteRegisteredAndGated(t *testing.T) {
 
 // TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
 // propagates the server's fleet query to the workflow handler (Issue #609).
-// This exercises the integration path: server.clusterFleetQuery → handler.fleetQuery.
-// Issue #3495: SetWorkflowHandler now propagates clusterFleetQuery (not fleetQuery) so
-// the workflow handler sees cluster-wide steward data.
+// This exercises the integration path: server.fleetQuery → handler.fleetQuery.
+// ADR-031 Decision 3, Issue #3764: SetWorkflowHandler now propagates the single
+// cluster-safe-by-construction fleetQuery (retires the Issue #3495 clusterFleetQuery
+// split) so the workflow handler sees fleet-wide steward data.
 func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
 	server := setupTestServer(t)
-	// server.clusterFleetQuery is always set by New() via fleet.NewMemoryQuery.
-	require.NotNil(t, server.clusterFleetQuery, "server must have a cluster fleet query after New()")
+	// server.fleetQuery is always set by New() via fleet.NewMemoryQuery.
+	require.NotNil(t, server.fleetQuery, "server must have a fleet query after New()")
 
 	handler := NewWorkflowHandler(nil, nil, nil, logging.NewNoopLogger())
 	assert.Nil(t, handler.fleetQuery, "handler fleetQuery must be nil before SetWorkflowHandler")
 
 	server.SetWorkflowHandler(handler)
 
-	assert.Equal(t, server.clusterFleetQuery, handler.fleetQuery,
-		"SetWorkflowHandler must propagate the cluster fleet query to the handler")
+	assert.Equal(t, server.fleetQuery, handler.fleetQuery,
+		"SetWorkflowHandler must propagate the fleet query to the handler")
 }
 
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe verifies that passing nil to

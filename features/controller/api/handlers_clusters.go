@@ -6,7 +6,6 @@ import (
 	"context"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -45,8 +44,9 @@ type ClusterResourceStatus struct {
 
 // stewardsToFleetData converts the controller service's StewardInfo slice to the
 // fleet.StewardData slice required by clusterregistry.BuildRegistry. It mirrors
-// controllerServiceAdapter.GetAllStewards (server.go) but reads from the cluster-wide
-// GetAllStewardsCluster, so stewards attached to peer nodes are now included.
+// controllerServiceAdapter.GetAllStewards (server.go), reading from the fleet-wide
+// ListFleetStewards (ADR-031 Decision 3, Issue #3764), so stewards attached to peer
+// nodes are included.
 //
 // Two views of the same scoped snapshot are returned:
 //   - the fragment-only fleet.StewardData slice clusterregistry.BuildRegistry parses.
@@ -54,7 +54,7 @@ type ClusterResourceStatus struct {
 //     needs because cluster role owners are expressed as node hostnames, not steward
 //     IDs (see dnaHostname).
 //
-// Both are built from one GetAllStewardsCluster() call so the registry and the liveness
+// Both are built from one ListFleetStewards() call so the registry and the liveness
 // index can never disagree about which stewards exist.
 //
 // Access rules:
@@ -66,28 +66,17 @@ type ClusterResourceStatus struct {
 // Intended behavior change (Issue #3495): stewards attached to peer nodes are now
 // visible here. Previously this was node-local; now it is cluster-wide.
 func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData, map[string]string) {
-	// Build a scoped context so GetAllStewardsCluster applies tenant filtering internally.
+	// Build a scoped context so ListFleetStewards applies tenant filtering internally.
 	ctx := context.Background()
 	if callerTenant != "" {
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenant)
 	}
-	infos := s.controllerService.GetAllStewardsCluster(ctx)
-	if infos == nil {
-		// Cluster cache not yet populated (before first StartClusterRefresh cycle);
-		// degrade gracefully to node-local with the same subtree-tenant filter that
-		// GetAllStewardsCluster would apply via the context.
-		local := s.controllerService.GetAllStewards()
-		for _, st := range local {
-			if callerTenant == "" || st.TenantID == callerTenant || strings.HasPrefix(st.TenantID, callerTenant+"/") {
-				infos = append(infos, st)
-			}
-		}
-	}
+	infos := s.controllerService.ListFleetStewards(ctx)
 	result := make([]fleet.StewardData, 0, len(infos))
 	hostnameOwners := make(map[string]string, len(infos))
 	// hostnameClaims records which steward currently holds each hostname entry so a
 	// second steward publishing the same hostname resolves deterministically instead
-	// of by GetAllStewardsCluster iteration order: the most recent heartbeat wins, ties
+	// of by ListFleetStewards iteration order: the most recent heartbeat wins, ties
 	// broken by the lexicographically smaller steward ID.
 	type hostnameClaim struct {
 		stewardID string
@@ -95,7 +84,7 @@ func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData
 	}
 	hostnameClaims := make(map[string]hostnameClaim, len(infos))
 	for _, info := range infos {
-		// Tenant filtering is already applied by GetAllStewardsCluster via the context.
+		// Tenant filtering is already applied by ListFleetStewards via the context.
 		var frags []*commonpb.Fragment
 		if info.DNA != nil {
 			// Fragments carry cluster:<name> membership and resource_owner state

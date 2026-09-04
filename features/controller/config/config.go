@@ -374,6 +374,17 @@ type Config struct {
 	// loopback or private IP address and must never be Internet-published.
 	InternalListenAddr string `yaml:"internal_listen_addr,omitempty"`
 
+	// InternalDeliveryListenAddr is the private gRPC listener for the internal
+	// controller-to-controller delivery service (ADR-031 Decision 3, Issue
+	// #3764) — the first inter-node RPC other than Raft's own transport. It is
+	// mTLS-secured with the same certificate infrastructure as
+	// InternalListenAddr (the HA peer CA) but binds a separate port: gRPC
+	// requires ownership of its listener's connections, so it cannot share
+	// InternalListenAddr's plain-HTTP Raft listener. Like InternalListenAddr it
+	// must bind a loopback or private IP address and must never be
+	// Internet-published.
+	InternalDeliveryListenAddr string `yaml:"internal_delivery_listen_addr,omitempty"`
+
 	// External URL for controller API callbacks (used by scripts and external integrations)
 	ExternalURL string `yaml:"external_url"`
 

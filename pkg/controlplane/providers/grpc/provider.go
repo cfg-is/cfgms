@@ -841,7 +841,7 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	conn, ok := p.registry.Get(cmd.Command.StewardID)
 	if !ok {
 		p.deliveryFailures.Add(1)
-		return fmt.Errorf("steward %s not connected", cmd.Command.StewardID)
+		return fmt.Errorf("steward %s not connected: %w", cmd.Command.StewardID, interfaces.ErrStewardNotConnected)
 	}
 
 	msg := &transportpb.ControlMessage{

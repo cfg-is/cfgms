@@ -130,7 +130,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// can authenticate the command before updating its trust set.
 		oldSigner := s.buildRotatingSigner(oldSerial)
 
-		stewards := controllerSvc.GetAllStewards()
+		stewards := controllerSvc.ListFleetStewards(ctx)
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{
 			"cert_pem":           certPEM,

@@ -70,6 +70,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
@@ -164,6 +165,7 @@ type Server struct {
 	haManager               *ha.Manager
 	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
 	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
+	clusterAwareSender      *internaldelivery.ClusterAwareSender        // ADR-031 Decision 3, Issue #3764: dispatch-path cluster fallback; nil outside cluster mode
 	admissionQueues         *ingestAdmissionQueues                      // Issue #3759: per-tenant ingest admission gates, split by bucket-key trust level
 	heartbeatService        *heartbeat.Service
 	commandPublisher        *commands.Publisher
@@ -819,6 +821,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	var commandPublisher *commands.Publisher
 	var executionQueue *scriptmodule.ExecutionQueue
 	var jobDispatcher *dispatcher.Dispatcher
+	// ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery
+	// RPC service handler and the dispatch-path cluster fallback it backs. Both
+	// stay nil outside cluster mode (see the wiring block below).
+	var deliveryServer *internaldelivery.Server
+	var clusterAwareSender *internaldelivery.ClusterAwareSender
 	// hoistedSigner is the static signing cert captured at boot. It is kept for
 	// the config handler's nil-certManager fallback path. The command publisher and
 	// dispatcher use commandSigner (a DynamicSigner) instead (Issue #1844).
@@ -863,9 +870,24 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// memProvisionStore is used when the hyperv feature is not configured so
 		// the controller boots cleanly without any hyperv-specific configuration.
 		completionReconciler := hypervcompletion.New(hyperv.NewMemProvisionStore(), logger)
+		// ADR-031 Decision 3, Issue #3764: shared steward-routing table. Composed
+		// into the connect hook chain unconditionally — routingTableConnectHook is
+		// a no-op when routingStore is nil (no provider support / non-cluster
+		// deployment), so this never changes connect behavior outside cluster mode.
+		routingStore := storageManager.GetRoutingStore()
+		routingHook := &routingTableConnectHook{routingStore: routingStore, logger: logger}
+		if haManager != nil {
+			routingHook.localNodeID = haManager.GetLocalNode().ID
+		}
+		// Issue #3757/#3764: drain a reconnecting steward's durable outbox backlog
+		// immediately rather than waiting for the next dispatch attempt. publisher
+		// is nil here (commands.Publisher does not exist yet — same init-cycle
+		// break as signingRotationSvc below) and wired in via SetPublisher once it
+		// does.
+		drainHook := service.NewPendingDeliveryDrainHook(storageManager.GetCommandStore(), stewardStore, nil, logger)
 		if certManager != nil {
 			signingRotationSvc = service.NewSigningRotationService(certManager, logger)
-			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler)
+			composite := service.NewCompositeOnConnectHook(logger, signingRotationSvc, registryConnectHook, completionReconciler, routingHook, drainHook)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -877,7 +899,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 				grpcCP.WithStewardTenantResolver(tenantResolver),
 			)
 		} else {
-			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler)
+			composite := service.NewCompositeOnConnectHook(logger, registryConnectHook, completionReconciler, routingHook, drainHook)
 			controlPlane = grpcCP.New(
 				grpcCP.ModeServer,
 				grpcCP.WithOnConnectHook(composite),
@@ -987,6 +1009,58 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			})
 		}
 
+		// ADR-031 Decision 3, Issue #3764: shared steward-routing table + internal
+		// controller-to-controller delivery RPC. dispatchControlPlane defaults to
+		// the node-local controlPlane and is only replaced with a cluster-aware
+		// wrapper when this deployment actually has both a routing store and HA
+		// cluster mode — a single-node deployment dispatches exactly as before.
+		//
+		// deliveryServer wraps the RAW controlPlane (never dispatchControlPlane):
+		// it is what a PEER node's forwarded command resolves to locally, and
+		// wrapping the cluster-aware sender here would let a delivery attempt for
+		// a steward this node does not have recurse into forwarding it right back
+		// out.
+		var dispatchControlPlane = controlPlane
+		deliveryServer = internaldelivery.NewServer(connRegistry, controlPlane, logger)
+		if haManager != nil && cfg.HA.IsClusterMode() && routingStore != nil && certManager != nil && cfg.InternalDeliveryListenAddr != "" {
+			deliveryClientCert, dErr := certManager.GetCurrentCertForPurpose(cert.PurposeTransport)
+			if dErr != nil {
+				logger.Warn("internaldelivery: transport certificate unavailable, cluster dispatch fallback disabled", "error", dErr)
+			} else {
+				caCertPEM, caErr := certManager.GetCACertificate()
+				if caErr != nil {
+					logger.Warn("internaldelivery: CA certificate unavailable, cluster dispatch fallback disabled", "error", caErr)
+				} else {
+					deliveryClientTLS, tlsErr := cert.CreateClientTLSConfig(
+						deliveryClientCert.CertificatePEM, deliveryClientCert.PrivateKeyPEM, caCertPEM, "", tls.VersionTLS13)
+					if tlsErr != nil {
+						logger.Warn("internaldelivery: failed to build client TLS config, cluster dispatch fallback disabled", "error", tlsErr)
+					} else {
+						resolver, resErr := newHAClusterNodeResolver(haManager, cfg.InternalDeliveryListenAddr, logger)
+						if resErr != nil {
+							logger.Warn("internaldelivery: invalid InternalDeliveryListenAddr, cluster dispatch fallback disabled", "error", resErr)
+						} else {
+							clusterAwareSender = internaldelivery.NewClusterAwareSender(
+								controlPlane, haManager.GetLocalNode().ID, routingStore, resolver, deliveryClientTLS, logger)
+							dispatchControlPlane = clusterAwareSender
+							logger.Info("internaldelivery: cluster-aware dispatch fallback enabled",
+								"local_node_id", haManager.GetLocalNode().ID,
+								"delivery_listen_addr", cfg.InternalDeliveryListenAddr)
+						}
+					}
+				}
+			}
+		}
+		if routingStore != nil {
+			connRegistry.OnDisconnect(func(stewardID string) {
+				if err := routingStore.RemoveConnection(context.Background(), stewardID, routingHook.localNodeID); err != nil {
+					logger.Warn("internaldelivery: failed to remove routing connection on disconnect",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+			})
+		}
+
 		// Initialize execution queue and job dispatcher (Issue #1672).
 		// The dispatcher drains the execution queue on every steward heartbeat and
 		// on a 30-second polling loop. The heartbeat service wires dispatcher.OnHeartbeat
@@ -1007,7 +1081,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		var dispatcherErr error
 		jobDispatcher, dispatcherErr = dispatcher.New(&dispatcher.Config{
 			Queue:              executionQueue,
-			ControlPlane:       controlPlane,
+			ControlPlane:       dispatchControlPlane,
 			Signer:             commandSigner,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
 			Logger:             logger,
@@ -1105,7 +1179,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// carries the current Raft term for steward-side fencing (#3436).
 		logger.Info("Initializing command publisher...")
 		commandPublisher, err = commands.New(&commands.Config{
-			ControlPlane: controlPlane,
+			ControlPlane: dispatchControlPlane,
 			Signer:       commandSigner,
 			TermSource:   haManager,
 			Logger:       logger,
@@ -1122,6 +1196,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			signingRotationSvc.SetPublisher(commandPublisher)
 			logger.Info("Signing rotation service wired (refresh-on-connect enabled)")
 		}
+		// Issue #3757/#3764: wire the publisher into the pending-delivery drain
+		// hook now that it exists (same init-cycle break as above).
+		drainHook.SetPublisher(commandPublisher)
 
 		// Issue #2524: Wire DNA hash mismatch detection so that a heartbeat
 		// carrying an unexpected DNA hash automatically triggers a full sync.
@@ -1165,7 +1242,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// calls out the identical startup-gap pattern this mirrors).
 		if controllerService != nil && heartbeatService != nil {
 			warmed := 0
-			for _, steward := range controllerService.GetAllStewards() {
+			for _, steward := range controllerService.ListFleetStewards(context.Background()) {
 				if steward.DNA != nil {
 					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
 					if hashErr != nil {
@@ -1470,6 +1547,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		httpServer.SetRegistry(connRegistry)
 	}
 
+	// Wire the internal controller-to-controller delivery RPC service (ADR-031
+	// Decision 3, Issue #3764). A nil deliveryServer or empty
+	// InternalDeliveryListenAddr leaves the delivery listener unstarted — the
+	// expected state outside cluster mode.
+	httpServer.SetDeliveryHandler(deliveryServer, cfg.InternalDeliveryListenAddr)
+
 	// Issue #1816: Wire signing rotation service so the rotate endpoint is available.
 	if signingRotationSvc != nil {
 		signingRotationSvc.SetControllerService(controllerService)
@@ -1535,9 +1618,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
 		haManager:               haManager,
-		controlPlane:            controlPlane,    // Story #363 / #514
-		connRegistry:            connRegistry,    // Issue #1572: shared with CP provider re-init in Start()
-		admissionQueues:         admissionQueues, // Issue #3759: connect/heartbeat gate wired above; DNA/bulk gate taken in Start()
+		controlPlane:            controlPlane,       // Story #363 / #514
+		connRegistry:            connRegistry,       // Issue #1572: shared with CP provider re-init in Start()
+		clusterAwareSender:      clusterAwareSender, // ADR-031 Decision 3, Issue #3764: nil outside cluster mode
+		admissionQueues:         admissionQueues,    // Issue #3759: connect/heartbeat gate wired above; DNA/bulk gate taken in Start()
 		heartbeatService:        heartbeatService,
 		commandPublisher:        commandPublisher,
 		registrationTokenStore:  regStore,
@@ -2328,6 +2412,15 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Close cluster-aware dispatch fallback's dialed peer connections (ADR-031
+	// Decision 3, Issue #3764) before HA manager stops — Close only tears down
+	// this node's outbound clients, independent of HA's own lifecycle.
+	if s.clusterAwareSender != nil {
+		if err := s.clusterAwareSender.Close(); err != nil {
+			s.logger.Warn("Failed to close cluster-aware delivery sender", "error", err)
+		}
+	}
+
 	// Stop HA manager first
 	if s.haManager != nil {
 		if err := s.haManager.Stop(context.Background()); err != nil {
@@ -2566,7 +2659,7 @@ func (s *Server) resumePendingPushes(ctx context.Context) {
 			}
 			continue
 		}
-		stewards := s.controllerService.GetAllStewards()
+		stewards := s.controllerService.ListFleetStewards(ctx)
 		result := push.Fanout(ctx, &cfg, stewards, s.commandPublisher, s.logger)
 		s.logger.Info("Resumed push fan-out complete",
 			"push_id", record.ID,
@@ -3318,7 +3411,7 @@ func (r *applyOutcomeEIDResolver) verifiedClusterName() string {
 	}
 	tenantID := info.TenantID
 
-	allStewards := controllerSvc.GetAllStewards()
+	allStewards := controllerSvc.ListFleetStewards(context.Background())
 	fleetData := make([]controllerFleet.StewardData, 0, len(allStewards))
 	for _, si := range allStewards {
 		if si == nil || si.TenantID != tenantID {
@@ -3876,12 +3969,13 @@ type serverFleetStewardProvider struct {
 
 // serverFleetStewardProvider adapts *service.ControllerService to
 // controllerFleet.StewardProvider for use by MemoryQuery.
-// Population source is deliberately node-local (GetAllStewards, dispatch-safe). Field
-// composition — tags merged, DNAFragments populated — must match controllerServiceAdapter
-// in features/controller/api/server.go for any steward both adapters can see. (Issue #3495)
+// Population source is ListFleetStewards (ADR-031 Decision 3, Issue #3764): the
+// single cluster-safe-by-construction fleet source. Field composition — tags
+// merged, DNAFragments populated — must match controllerServiceAdapter in
+// features/controller/api/server.go for any steward both adapters can see.
+// (Issue #3495, #3764)
 func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
-	infos := p.svc.GetAllStewards()
-	tagStore := p.svc.TagStore()
+	infos := p.svc.ListFleetStewards(context.Background())
 	result := make([]controllerFleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		var attrs map[string]string
@@ -3890,8 +3984,9 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
 			frags = info.DNA.Fragments
 		}
-		if tagStore != nil {
-			attrs = mergeControllerTags(attrs, tagStore.TagsFor(info.ID))
+		// ListFleetStewards already merges controller-stored tags into info.Tags.
+		if len(info.Tags) > 0 {
+			attrs = mergeControllerTags(attrs, info.Tags)
 		}
 		result = append(result, controllerFleet.StewardData{
 			ID:            info.ID,

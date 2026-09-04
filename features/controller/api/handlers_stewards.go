@@ -278,7 +278,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	includeDeregistered := r.URL.Query().Get("include_deregistered") == "true"
 	includeQuarantined := r.URL.Query().Get("include_quarantined") == "true"
 	includeHidden := r.URL.Query().Get("include_hidden") == "true"
-	stewards := s.controllerService.GetAllStewards()
+	stewards := s.controllerService.ListFleetStewards(r.Context())
 
 	// The in-process map only holds stewards THIS node handled, so on a cluster
 	// it is a fraction of the fleet. Start from the durable store — authoritative

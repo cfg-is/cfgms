@@ -54,6 +54,7 @@ var (
 	_ interfaces.StorageProvider            = (*DatabaseProvider)(nil)
 	_ interfaces.NonceStoreCreator          = (*DatabaseProvider)(nil)
 	_ interfaces.LeaseStoreCreator          = (*DatabaseProvider)(nil)
+	_ interfaces.RoutingStoreCreator        = (*DatabaseProvider)(nil)
 	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
 )
@@ -361,6 +362,21 @@ func (p *DatabaseProvider) CreateLeaseStore(config map[string]interface{}) (busi
 	store, err := NewDatabaseLeaseStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database lease store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateRoutingStore creates a PostgreSQL-backed RoutingStore — the shared
+// steward-routing table (ADR-031 Decision 3, Issue #3764).
+// Implements interfaces.RoutingStoreCreator.
+func (p *DatabaseProvider) CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseRoutingStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database routing store: %w", err)
 	}
 	return store, nil
 }

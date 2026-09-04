@@ -118,15 +118,21 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build matched-ID set, then filter GetAllStewards() to those IDs.
+	// Build matched-ID set, then filter ListFleetStewards() to those IDs.
 	// This bridges fleet.StewardResult → *service.StewardInfo for Fanout
 	// without any new interface methods.
 	matchedIDs := make(map[string]struct{}, len(results))
 	for _, res := range results {
 		matchedIDs[res.ID] = struct{}{}
 	}
+	// Unscoped read: matchedIDs above is already the authoritative, correctly
+	// scoped set (filter.TenantSubtree = cfg.TenantID, never the caller's own
+	// tenant — see handleConfigPush's doc comment). Passing r.Context() here
+	// would additionally scope by the caller's tenant and could silently drop
+	// a legitimately matched steward for a caller whose own tenant sits above
+	// cfg.TenantID in the hierarchy.
 	targeted := make([]*service.StewardInfo, 0, len(matchedIDs))
-	for _, st := range s.controllerService.GetAllStewards() {
+	for _, st := range s.controllerService.ListFleetStewards(context.Background()) {
 		if _, hit := matchedIDs[st.ID]; hit {
 			targeted = append(targeted, st)
 		}

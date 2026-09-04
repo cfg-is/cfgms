@@ -21,7 +21,10 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/mux"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
+	clusterdeliverypb "github.com/cfgis/cfgms/api/proto/clusterdelivery"
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	"github.com/cfgis/cfgms/features/controller/cluster"
@@ -44,6 +47,7 @@ import (
 	tenantsecurity "github.com/cfgis/cfgms/features/tenant/security"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/ha"
 	"github.com/cfgis/cfgms/pkg/lease"
@@ -68,6 +72,9 @@ type Server struct {
 	httpServer                      *http.Server
 	metricsHTTPServer               *http.Server
 	internalHTTPServer              *http.Server
+	deliveryHandler                 *internaldelivery.Server // ADR-031 Decision 3, Issue #3764: internal controller-to-controller delivery RPC
+	deliveryListenAddr              string
+	deliveryGRPCServer              *grpc.Server
 	router                          *mux.Router
 	metricsRouter                   *mux.Router
 	internalRouter                  *mux.Router
@@ -97,8 +104,7 @@ type Server struct {
 	dataProvider                    reportinterfaces.DataProvider            // Issue #3265: drift-based compliance derivation
 	workflowHandler                 *WorkflowHandler                         // Story #414: Workflow engine REST API
 	approvalHook                    RegistrationApprovalHook                 // Issue #422: Registration approval hook
-	fleetQuery                      fleet.FleetQuery                         // Issue #603: node-local (controllerServiceAdapter); dispatch-safe consumers only
-	clusterFleetQuery               fleet.FleetQuery                         // Issue #3495: cluster-wide (clusterServiceAdapter); individually-vetted consumers only
+	fleetQuery                      fleet.FleetQuery                         // ADR-031 Decision 3, Issue #3764: one cluster-safe-by-construction fleet source (retires the Issue #603/#3495 node-local vs. cluster-wide split)
 	gitSyncWebhookHandler           http.Handler                             // Issue #666: git-sync webhook endpoint (optional)
 	auditManager                    *audit.Manager                           // Issue #775: registration audit events
 	scriptTracker                   script.ExecutionTracker                  // Issue #708: durable execution audit records
@@ -493,11 +499,12 @@ func New(
 	// M-AUTH-1: Do NOT generate default API keys (security anti-pattern)
 	// API keys must be explicitly created by administrators
 
-	// Issue #603: node-local fleet query for dispatch-safe consumers.
+	// ADR-031 Decision 3, Issue #3764: one cluster-safe-by-construction fleet
+	// source for every consumer. Retires the Issue #603/#3495 node-local vs.
+	// cluster-wide split — dispatch through pkg/controlplane/internaldelivery's
+	// ClusterAwareSender (wired in cluster mode) resolves node locality itself,
+	// so a fleet-wide steward list is no longer unsafe to dispatch against.
 	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: controllerService})
-	// Issue #3495: cluster-wide fleet query for individually-vetted consumers only.
-	// New callers must independently verify delivery-path safety before using this field.
-	server.clusterFleetQuery = fleet.NewMemoryQuery(&clusterServiceAdapter{svc: controllerService})
 
 	// Issue #1521: register save=deploy fanout callback so every successful SetConfiguration
 	// automatically distributes to all active stewards of the affected tenant.
@@ -510,7 +517,7 @@ func New(
 				AppliedAt: time.Now().UTC(),
 				Source:    "save-deploy",
 			}
-			allStewards := controllerService.GetAllStewards()
+			allStewards := controllerService.ListFleetStewards(context.Background())
 			var tenantStewards []*service.StewardInfo
 			for _, st := range allStewards {
 				if st.TenantID == tenantID {
@@ -547,44 +554,22 @@ func New(
 }
 
 // controllerServiceAdapter adapts *service.ControllerService to fleet.StewardProvider.
-// Population source is deliberately node-local (GetAllStewards, dispatch-safe). Field
-// composition — tags merged, DNAFragments populated — must match serverFleetStewardProvider
-// for any steward both adapters can see; use buildStewardFleetData to keep them in sync.
-// (Issue #603, #3495)
+// Population source is ListFleetStewards (ADR-031 Decision 3, Issue #3764): the single
+// cluster-safe-by-construction fleet source, replacing the former node-local
+// controllerServiceAdapter / cluster-wide clusterServiceAdapter split (Issue #603, #3495).
+// Dispatching to any steward this adapter returns is safe regardless of which controller
+// node currently holds its connection — see ListFleetStewards's doc comment.
 type controllerServiceAdapter struct {
 	svc *service.ControllerService
 }
 
 func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
-	infos := a.svc.GetAllStewards()
-	tagStore := a.svc.TagStore()
-	result := make([]fleet.StewardData, 0, len(infos))
-	for _, info := range infos {
-		var ctrlTags []string
-		if tagStore != nil {
-			ctrlTags = tagStore.TagsFor(info.ID)
-		}
-		result = append(result, buildStewardFleetData(info, ctrlTags))
-	}
-	return result
-}
-
-// clusterServiceAdapter adapts *service.ControllerService to fleet.StewardProvider using the
-// cluster-aware GetAllStewardsCluster method. Its population source is cluster-wide — NOT
-// node-local like controllerServiceAdapter — so every new caller must be independently vetted
-// for delivery-path safety before being pointed at it or at s.clusterFleetQuery. Do not assume
-// it is safe by default. (Issue #3495)
-type clusterServiceAdapter struct {
-	svc *service.ControllerService
-}
-
-func (a *clusterServiceAdapter) GetAllStewards() []fleet.StewardData {
 	// context.Background: tenant scoping is applied downstream by MemoryQuery.Search via
 	// Filter.TenantSubtree/TenantID, not at the provider level.
-	infos := a.svc.GetAllStewardsCluster(context.Background())
+	infos := a.svc.ListFleetStewards(context.Background())
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
-		// GetAllStewardsCluster already copies Tags from the tag store on each refresh.
+		// ListFleetStewards already copies Tags from the tag store.
 		result = append(result, buildStewardFleetData(info, info.Tags))
 	}
 	return result
@@ -592,10 +577,8 @@ func (a *clusterServiceAdapter) GetAllStewards() []fleet.StewardData {
 
 // buildStewardFleetData converts *service.StewardInfo to fleet.StewardData with both
 // DNAAttributes (flattened from fragments + ctrlTags merged) and DNAFragments populated.
-// controllerServiceAdapter passes tagStore.TagsFor(info.ID) as ctrlTags; clusterServiceAdapter
-// passes info.Tags (already populated by GetAllStewardsCluster). Using this helper for both
-// adapters ensures their field composition stays identical for any steward both can see.
-// (Issue #3495)
+// controllerServiceAdapter passes info.Tags (already populated by ListFleetStewards).
+// (Issue #3495, #3764)
 func buildStewardFleetData(info *service.StewardInfo, ctrlTags []string) fleet.StewardData {
 	var attrs map[string]string
 	var frags []*commonpb.Fragment
@@ -923,6 +906,31 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Internal controller-to-controller delivery RPC (ADR-031 Decision 3, Issue
+	// #3764): a separate listener from the Raft one above — gRPC needs to own
+	// its connections directly rather than sharing net/http's listener — reusing
+	// the same mTLS trust material (internalTLSConfig, the HA peer CA).
+	var deliveryListener net.Listener
+	if internalTLSConfig != nil && s.deliveryHandler != nil && s.deliveryListenAddr != "" {
+		if err := validatePrivateListenAddr(s.deliveryListenAddr); err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			if internalListener != nil {
+				_ = internalListener.Close()
+			}
+			return fmt.Errorf("invalid internal delivery listener: %w", err)
+		}
+		deliveryListener, err = net.Listen("tcp", s.deliveryListenAddr)
+		if err != nil {
+			_ = publicListener.Close()
+			_ = metricsListener.Close()
+			if internalListener != nil {
+				_ = internalListener.Close()
+			}
+			return fmt.Errorf("bind private delivery listener: %w", err)
+		}
+	}
+
 	// Create HTTPS server only after TLS preflight and listener binding succeed.
 	s.httpServer = &http.Server{
 		Addr:              publicListener.Addr().String(),
@@ -986,6 +994,17 @@ func (s *Server) Start() error {
 			s.logger.Info("Starting private mTLS Raft server", "address", internalServer.Addr)
 			if serveErr := internalServer.Serve(internalTLSListener); serveErr != nil && serveErr != http.ErrServerClosed {
 				s.logger.Error("Private Raft server failed", "error", serveErr)
+			}
+		}()
+	}
+	if deliveryListener != nil {
+		deliveryServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(internalTLSConfig)))
+		clusterdeliverypb.RegisterDeliveryServiceServer(deliveryServer, s.deliveryHandler)
+		s.deliveryGRPCServer = deliveryServer
+		go func() {
+			s.logger.Info("Starting private mTLS internal delivery server", "address", deliveryListener.Addr().String())
+			if serveErr := deliveryServer.Serve(deliveryListener); serveErr != nil {
+				s.logger.Error("Private internal delivery server failed", "error", serveErr)
 			}
 		}()
 	}
@@ -1208,6 +1227,24 @@ func (s *Server) Close(ctx context.Context) error {
 				firstErr = err
 			}
 		}
+		if s.deliveryGRPCServer != nil {
+			// grpc.Server has no context-aware Shutdown; bound GracefulStop by ctx
+			// the same way the auth-defense/secret-store teardown above does, so a
+			// slow-draining internal delivery RPC cannot hang Close indefinitely.
+			deliveryStopped := make(chan struct{})
+			go func() {
+				s.deliveryGRPCServer.GracefulStop()
+				close(deliveryStopped)
+			}()
+			select {
+			case <-deliveryStopped:
+			case <-ctx.Done():
+				s.deliveryGRPCServer.Stop()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out stopping internal delivery server: %w", ctx.Err())
+				}
+			}
+		}
 
 	})
 
@@ -1321,11 +1358,13 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workflowHandler = h
-	// Use clusterFleetQuery for consistency. Both workflow nodes that would consume a
-	// propagated fleet.FleetQuery are unreachable in production (see Issue #3495, Problem
+	// ADR-031 Decision 3, Issue #3764: s.fleetQuery is now the single
+	// cluster-safe-by-construction fleet source (the former clusterFleetQuery
+	// split is retired). Both workflow nodes that would consume a propagated
+	// fleet.FleetQuery are unreachable in production (see Issue #3495, Problem
 	// being fixed), so this rewiring has no behavioural effect today.
-	if h != nil && s.clusterFleetQuery != nil {
-		h.SetFleetQuery(s.clusterFleetQuery)
+	if h != nil && s.fleetQuery != nil {
+		h.SetFleetQuery(s.fleetQuery)
 	}
 	if h == nil {
 		return
@@ -1450,6 +1489,22 @@ func (s *Server) SetRegistry(r registry.Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry = r
+}
+
+// SetDeliveryHandler wires the internal controller-to-controller delivery RPC
+// service (ADR-031 Decision 3, Issue #3764). handler must be constructed
+// against the same registry passed to SetRegistry and the node-local (not
+// cluster-aware) control-plane provider, so the delivery service's own local
+// delivery attempt can never recurse into cluster forwarding. listenAddr is
+// the internal delivery gRPC listener address (cfg.InternalDeliveryListenAddr).
+// Call this after New() returns but before Start() is called. A nil handler
+// or empty listenAddr leaves the delivery service unstarted — the expected
+// state for a single-node (non-cluster) deployment.
+func (s *Server) SetDeliveryHandler(handler *internaldelivery.Server, listenAddr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveryHandler = handler
+	s.deliveryListenAddr = listenAddr
 }
 
 // Registry returns the wired active-steward connection registry, or nil if

@@ -584,10 +584,11 @@ func TestStewardsInTenantScope_DuplicateHostnameClaim(t *testing.T) {
 }
 
 // TestStewardsInTenantScope_PeerAttachedSteward proves the cluster-aware read path
-// (Issue #3495): a steward whose only record lives in durable fleet storage — never
-// registered through this controller node, so absent from the node-local live registry —
-// becomes visible to stewardsInTenantScope once the cluster inventory has refreshed.
-// Pre-story code read GetAllStewards() and could never see it.
+// (Issue #3495, ADR-031 Decision 3 / Issue #3764): a steward whose only record lives
+// in durable fleet storage — never registered through this controller node, so absent
+// from the node-local live registry — is visible to stewardsInTenantScope immediately,
+// since ListFleetStewards reads durable storage directly on every call. Pre-story code
+// read GetAllStewards() and could never see it.
 func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
 	ctx := context.Background()
 
@@ -614,40 +615,29 @@ func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
 
 	peerSvc := service.NewControllerServiceWithStorage(logging.NewNoopLogger(), stg)
 
-	// The node-local view must not contain the peer steward; that is the gap #3495 closes.
-	for _, s := range peerSvc.GetAllStewards() {
-		require.NotEqual(t, "peer-steward", s.ID, "peer steward must not be in the node-local view")
-	}
-
 	server := setupTestServer(t)
 	server.controllerService = peerSvc
 
-	refreshCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(cancel)
-	// StartClusterRefresh performs its first refresh immediately; the long interval keeps
-	// the ticker from firing again during the test.
-	peerSvc.StartClusterRefresh(refreshCtx, 24*time.Hour)
-	require.Eventually(t, func() bool {
-		for _, s := range peerSvc.GetAllStewardsCluster(ctx) {
-			if s.ID == "peer-steward" {
-				return true
-			}
+	// ListFleetStewards reads durable storage directly — no refresh step needed.
+	found := false
+	for _, s := range peerSvc.ListFleetStewards(ctx) {
+		if s.ID == "peer-steward" {
+			found = true
 		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond,
-		"peer steward must appear in the cluster inventory after refresh")
+	}
+	require.True(t, found, "peer steward must appear in the fleet-wide view immediately")
 
 	stewards, hostnames := server.stewardsInTenantScope("")
-	found := false
+	foundInScope := false
 	for _, sd := range stewards {
 		if sd.ID == "peer-steward" {
-			found = true
+			foundInScope = true
 			assert.NotEmpty(t, sd.DNAFragments,
 				"the peer steward's durable DNA fragments must survive the conversion")
 		}
 	}
-	require.True(t, found,
-		"peer steward must be visible in stewardsInTenantScope once the cluster inventory refreshed")
+	require.True(t, foundInScope,
+		"peer steward must be visible in stewardsInTenantScope immediately")
 	assert.NotNil(t, hostnames, "the hostname index must still be built alongside the scoped view")
 
 	// Tenant scoping still applies to the cluster-wide source.

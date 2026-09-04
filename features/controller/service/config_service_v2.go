@@ -66,26 +66,23 @@ type clusterRegistryAdapter struct {
 //
 // Bug fix (Issue #3495): previously node-local (GetAllStewards), so a steward
 // whose cluster-tagged fragment was only observed by a peer controller node was
-// invisible here. Now uses GetAllStewardsCluster so peer-node fragments are included.
+// invisible here. Now uses ListFleetStewards so peer-node fragments are included.
 func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
-	// Use the cluster-wide inventory so peer-attached stewards with cluster
+	// Use the fleet-wide source so peer-attached stewards with cluster
 	// membership fragments are included. Pass context.Background() (unscoped)
 	// and apply exact-tenant filtering manually to preserve the prior exact-match
-	// scoping behaviour (GetAllStewardsCluster applies subtree scoping, which
-	// would be a wider change than intended for MemberClusters).
-	// Degrade to node-local if the cluster cache is not yet populated.
-	stewards := a.controllerSvc.GetAllStewardsCluster(context.Background())
-	if stewards == nil {
-		stewards = a.controllerSvc.GetAllStewards()
-	}
+	// scoping behaviour (ListFleetStewards applies subtree scoping, which
+	// would be a wider change than intended for MemberClusters). ListFleetStewards
+	// reads durable storage directly on every call (ADR-031 Decision 3, Issue
+	// #3764), so there is no populate-lag window to degrade around.
+	stewards := a.controllerSvc.ListFleetStewards(context.Background())
 
 	// Resolve the queried steward's own tenant, which scopes the member list.
 	// The node-local registry is checked first: it is the freshest view for a
-	// steward attached to this node, so live tenant moves are picked up before
-	// the next cluster refresh. A steward attached to a peer node is absent
-	// there, so fall back to the cluster inventory — without this the cluster-wide
-	// read above could never be reached for exactly the stewards it exists to
-	// serve, and their membership stayed invisible (Issue #3495).
+	// steward attached to this node. A steward attached to a peer node is
+	// absent there, so fall back to the fleet-wide result — without this the
+	// fleet-wide read above could never be reached for exactly the stewards it
+	// exists to serve, and their membership stayed invisible (Issue #3495).
 	tenantID, known := "", false
 	if info, exists := a.controllerSvc.GetStewardInfo(stewardID); exists {
 		tenantID, known = info.TenantID, true

@@ -109,11 +109,10 @@ func setupRunServer(t *testing.T, stewards []fleet.StewardResult) (*Server, *con
 	queue := newTestRunQueue(t)
 
 	server.SetRunManager(manager, queue)
-	// Issue #3495: run synthesis uses clusterFleetQuery; enforceExecTenantScope uses
-	// fleetQuery (out-of-scope per issue spec). Both are overridden here so the static
-	// steward fixtures reach both code paths.
+	// ADR-031 Decision 3, Issue #3764: run synthesis and enforceExecTenantScope now
+	// share the single fleetQuery field (retires the Issue #3495 clusterFleetQuery
+	// split). Overridden here so the static steward fixtures reach both code paths.
 	static := &staticRunFleetQuery{results: stewards}
-	server.clusterFleetQuery = static
 	server.fleetQuery = static
 
 	// Issue #3694: operator-signature verification for POST /runs/command now runs
