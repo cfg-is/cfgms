@@ -149,6 +149,8 @@ type Server struct {
 	webSessionManager               session.Manager                          // Issue #2492: second session manager for browser cookie auth (ADR-018 §1,2)
 	csrfTokens                      sync.Map                                 // Issue #2493: sessionID → session-bound CSRF token; populated on login, deleted on logout/revoke
 	membershipStore                 cluster.MembershipStore                  // Issue #2283: cluster node membership (nil when cluster not configured)
+	routingStore                    business.RoutingStore                    // Issue #3895: shared steward-routing table (ADR-031 Decision 3), consulted for the decommission drain-wait's target-node session count; nil falls back to the local registry
+	decommissionTimeout             time.Duration                            // Issue #3895: how long the decommission drain-wait polls before forcing decommission; defaults to defaultDecommissionTimeout in NewServer, overridable in tests
 	clusterDraining                 atomic.Bool                              // Issue #2283: true after drain is initiated; causes /health to return 503
 	batchJobStore                   business.BatchJobStore                   // Issue #2296: durable batch-job persistence
 	batchJobExecutor                jobExecutor                              // Issue #2296: rolling-batch executor for fleet-wide updates
@@ -374,6 +376,9 @@ func New(
 		// Issue #3761: default poll interval for runRollout to notice a halt persisted
 		// by a peer node during a ring soak; tests shrink this for determinism.
 		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
+		// Issue #3895: default decommission drain-wait timeout; tests shrink this for
+		// determinism.
+		decommissionTimeout: defaultDecommissionTimeout,
 	}
 
 	// Issue #3761: divide each per-source rate limiter's configured budget across
@@ -1821,6 +1826,18 @@ func (s *Server) SetMembershipStore(store cluster.MembershipStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.membershipStore = store
+}
+
+// SetRoutingStore wires the shared steward-routing table consulted by the
+// decommission drain-wait to resolve the target node's session count under
+// any-node routing (Issue #3895). When nil (default), the decommission
+// handler falls back to the local registry's Count(), which is only correct
+// when the request happens to land on the node being decommissioned. Call
+// after New() but before Start().
+func (s *Server) SetRoutingStore(store business.RoutingStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routingStore = store
 }
 
 // SetBatchJobStore wires the durable BatchJobStore used by the batch job endpoints

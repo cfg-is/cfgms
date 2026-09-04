@@ -1728,8 +1728,23 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update durable storage.
-	if err := s.stewardStore.UpdateStewardTenant(r.Context(), stewardID, newTenantID); err != nil {
+	// Update durable storage. Guarded by a compare-and-swap on oldTenantID — the
+	// snapshot read via GetSteward above (Issue #3895): two concurrent moves
+	// racing against the same stale snapshot must not both blindly overwrite
+	// the tenant column. GetSteward above already confirmed the steward exists,
+	// so a guard-loss error here means a concurrent move already changed its
+	// tenant — a conflict, not a fresh not-found.
+	if err := s.stewardStore.UpdateStewardTenant(r.Context(), stewardID, oldTenantID, newTenantID); err != nil {
+		if err == business.ErrStewardNotFound {
+			s.logger.Info("steward move lost the compare-and-swap: tenant changed concurrently",
+				"steward_id", stewardIDForLog,
+				"expected_tenant_id", oldTenantIDForLog,
+				"new_tenant_id", newTenantIDForLog,
+			)
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Steward was moved concurrently; reload and retry", "STEWARD_MOVE_CONFLICT")
+			return
+		}
 		s.logger.Error("steward move: failed to update durable store",
 			"steward_id", stewardIDForLog,
 			"new_tenant_id", newTenantIDForLog,

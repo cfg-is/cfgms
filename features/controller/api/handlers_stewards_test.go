@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2561,6 +2562,72 @@ func TestHandleMoveSteward_HappyPath(t *testing.T) {
 	assert.Equal(t, "moved", resp.Data["status"])
 	assert.Equal(t, "dest-tenant", resp.Data["tenant_id"])
 	assert.Equal(t, "source-tenant", resp.Data["previous_tenant"])
+}
+
+// TestMoveSteward_ConcurrentMovesToDifferentDestinationsCAS is the [REQUIRED TEST]
+// for Issue #3895: handleMoveSteward reads record.TenantID, validates against it,
+// then used to call UpdateStewardTenant unconditionally — two concurrent moves of
+// the same steward to different destinations both validated against the same
+// stale snapshot and both blindly overwrote the tenant column, last-write-wins.
+// The fix guards the durable write with a compare-and-swap on the tenant read
+// alongside GetSteward, so of two concurrent moves racing the same steward,
+// exactly one wins and the other loses cleanly (409) rather than silently
+// overwriting the tenant column. Two *Server instances share one durable
+// StewardStore, modeling two cluster nodes behind the same database. Run under
+// -race.
+func TestMoveSteward_ConcurrentMovesToDifferentDestinationsCAS(t *testing.T) {
+	nodeA, st, _ := setupMoveStewardServer(t)
+	nodeB := setupTestServer(t)
+	nodeB.SetStewardStore(st)
+
+	ctx := context.Background()
+	for _, srv := range []*Server{nodeA, nodeB} {
+		for _, id := range []string{"dest-tenant-a", "dest-tenant-b"} {
+			_, err := srv.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+			require.NoError(t, err, "creating tenant %q", id)
+		}
+	}
+
+	// Registered only on nodeA's live registry — nodeB models a peer that has
+	// never seen this steward connect, exactly as any-node routing allows a move
+	// request to land on a node the steward has no live session on.
+	require.NoError(t, nodeA.controllerService.RegisterSteward("s-race", "source-tenant", "addr", "registered"))
+	seedSteward(t, st, &business.StewardRecord{ID: "s-race", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+
+	var wg sync.WaitGroup
+	var recA, recB *httptest.ResponseRecorder
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		recA = postMoveSteward(nodeA, "s-race", "dest-tenant-a")
+	}()
+	go func() {
+		defer wg.Done()
+		recB = postMoveSteward(nodeB, "s-race", "dest-tenant-b")
+	}()
+	wg.Wait()
+
+	codes := []int{recA.Code, recB.Code}
+	successes, conflicts := 0, 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			successes++
+		case http.StatusConflict:
+			conflicts++
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one concurrent move must succeed: %v (A: %s, B: %s)",
+		codes, recA.Body.String(), recB.Body.String())
+	assert.Equal(t, 1, conflicts, "exactly one concurrent move must lose the compare-and-swap (409): %v", codes)
+
+	final, err := st.GetSteward(context.Background(), "s-race")
+	require.NoError(t, err)
+	if recA.Code == http.StatusOK {
+		assert.Equal(t, "dest-tenant-a", final.TenantID, "final tenant must match only the winner's destination")
+	} else {
+		assert.Equal(t, "dest-tenant-b", final.TenantID, "final tenant must match only the winner's destination")
+	}
 }
 
 // TestHandleMoveSteward_InMemoryRegistryUpdated verifies that after a move, the live

@@ -146,3 +146,23 @@ func (s *FlatFileRoutingStore) RemoveConnection(_ context.Context, stewardID, no
 	delete(entries, stewardID)
 	return s.save(entries)
 }
+
+// CountByNode implements business.RoutingStore.CountByNode. Staleness is
+// evaluated against this process's own clock, mirroring LookupNode, so a
+// crashed node's abandoned records are not counted as live sessions.
+func (s *FlatFileRoutingStore) CountByNode(_ context.Context, nodeID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := s.load()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.NodeID == nodeID && time.Since(entry.UpdatedAt) <= business.RoutingStaleAfter {
+			count++
+		}
+	}
+	return count, nil
+}

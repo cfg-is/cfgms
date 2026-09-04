@@ -67,13 +67,14 @@ func (s *DatabaseCaseStore) CreateCase(ctx context.Context, c *business.Case) er
 		return fmt.Errorf("database: failed to marshal ticket for case %s: %w", c.ID, err)
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO cases (id, tenant_id, status, ticket_json, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
+		INSERT INTO cases (id, tenant_id, status, ticket_json, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 1, $5, $6)`,
 		c.ID, c.TenantID, string(c.Status), ticketJSON, c.CreatedAt, c.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("database: failed to create case %s: %w", c.ID, err)
 	}
+	c.Version = 1
 	return nil
 }
 
@@ -83,7 +84,7 @@ func (s *DatabaseCaseStore) GetCase(ctx context.Context, id string) (*business.C
 		return nil, fmt.Errorf("database: case ID cannot be empty")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, tenant_id, status, ticket_json, created_at, updated_at
+		SELECT id, tenant_id, status, ticket_json, version, created_at, updated_at
 		FROM cases WHERE id = $1`, id)
 
 	c, err := scanDBCase(row)
@@ -113,7 +114,7 @@ func (s *DatabaseCaseStore) ListCases(ctx context.Context, tenantID string) ([]*
 		return nil, fmt.Errorf("database: tenant ID cannot be empty")
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, tenant_id, status, ticket_json, created_at, updated_at
+		SELECT id, tenant_id, status, ticket_json, version, created_at, updated_at
 		FROM cases WHERE tenant_id = $1 OR tenant_id LIKE $2 ORDER BY created_at DESC`,
 		tenantID, tenantID+"/%")
 	if err != nil {
@@ -159,6 +160,42 @@ func (s *DatabaseCaseStore) UpdateCase(ctx context.Context, c *business.Case) er
 		return business.ErrCaseNotFound
 	}
 	return nil
+}
+
+// UpdateCaseCAS implements business.CaseStore.UpdateCaseCAS: a compare-and-swap
+// write guarded by "AND version = expectedVersion", mirroring persistAccountCAS
+// (Issue #3895). RowsAffected == 0 means either the case does not exist or a
+// concurrent writer already advanced its version — both report ok=false so the
+// caller (which already resolved existence via its own GetCase) treats this as
+// a lost race, not a fresh not-found.
+func (s *DatabaseCaseStore) UpdateCaseCAS(ctx context.Context, c *business.Case, expectedVersion int) (int, bool, error) {
+	if c == nil {
+		return 0, false, fmt.Errorf("database: case cannot be nil")
+	}
+	if c.ID == "" {
+		return 0, false, fmt.Errorf("database: case ID is required")
+	}
+	ticketJSON, err := dbMarshalTicket(c.Ticket)
+	if err != nil {
+		return 0, false, fmt.Errorf("database: failed to marshal ticket for case %s: %w", c.ID, err)
+	}
+	newVersion := expectedVersion + 1
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE cases SET status = $1, ticket_json = $2, version = $3, updated_at = now()
+		WHERE id = $4 AND version = $5`,
+		string(c.Status), ticketJSON, newVersion, c.ID, expectedVersion,
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf("database: failed to update case %s: %w", c.ID, err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("database: failed to get rows affected: %w", err)
+	}
+	if n == 0 {
+		return 0, false, nil
+	}
+	return newVersion, true, nil
 }
 
 // AddPin attaches a pin to an existing case.
@@ -295,7 +332,7 @@ func (s *DatabaseCaseStore) listContentInternal(ctx context.Context, caseID stri
 func scanDBCase(row *sql.Row) (*business.Case, error) {
 	var c business.Case
 	var status, ticketStr string
-	err := row.Scan(&c.ID, &c.TenantID, &status, &ticketStr, &c.CreatedAt, &c.UpdatedAt)
+	err := row.Scan(&c.ID, &c.TenantID, &status, &ticketStr, &c.Version, &c.CreatedAt, &c.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrCaseNotFound
 	}
@@ -314,7 +351,7 @@ func scanDBCase(row *sql.Row) (*business.Case, error) {
 func scanDBCaseRow(rows *sql.Rows) (*business.Case, error) {
 	var c business.Case
 	var status, ticketStr string
-	if err := rows.Scan(&c.ID, &c.TenantID, &status, &ticketStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := rows.Scan(&c.ID, &c.TenantID, &status, &ticketStr, &c.Version, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("database: failed to scan case row: %w", err)
 	}
 	c.Status = business.CaseStatus(status)

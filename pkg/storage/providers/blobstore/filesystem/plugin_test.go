@@ -5,9 +5,12 @@ package filesystem
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -467,4 +470,99 @@ func TestFilesystemBlobStore_PathTraversal(t *testing.T) {
 		_, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: "t", Namespace: "../etc"})
 		assert.Error(t, err, "ListBlobs should reject path traversal in Namespace")
 	})
+}
+
+// TestFilesystemBlobStore_PutBlobIfAbsent_FirstCallWins verifies the happy path:
+// an absent key accepts the write and the blob is retrievable afterward.
+func TestFilesystemBlobStore_PutBlobIfAbsent_FirstCallWins(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key := testKey("first.bin")
+
+	err := s.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("winner")), blob.BlobMeta{})
+	require.NoError(t, err)
+
+	rc, meta, err := s.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("winner"), got)
+	assert.NotEmpty(t, meta.Checksum)
+}
+
+// TestFilesystemBlobStore_PutBlobIfAbsent_RejectsExistingKey verifies a second
+// call for the same key is rejected with ErrBlobAlreadyExists and does not
+// overwrite the first caller's data.
+func TestFilesystemBlobStore_PutBlobIfAbsent_RejectsExistingKey(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key := testKey("taken.bin")
+
+	require.NoError(t, s.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("first")), blob.BlobMeta{}))
+
+	err := s.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("second")), blob.BlobMeta{})
+	require.ErrorIs(t, err, blob.ErrBlobAlreadyExists)
+
+	rc, _, err := s.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("first"), got, "the losing call must not overwrite the winner's data")
+}
+
+// TestFilesystemBlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins is the
+// [REQUIRED TEST] regression coverage for Issue #3895's TOCTOU fix at the storage
+// layer: N concurrent PutBlobIfAbsent calls for the same key must produce exactly
+// one success and every other call must fail with ErrBlobAlreadyExists — never
+// two silent successes overwriting each other. Run with -race.
+func TestFilesystemBlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	key := testKey("race.bin")
+
+	const attempts = 8
+	results := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			content := []byte(fmt.Sprintf("attempt-%d", i))
+			results <- s.PutBlobIfAbsent(ctx, key, bytes.NewReader(content), blob.BlobMeta{})
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, blob.ErrBlobAlreadyExists):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	assert.Equal(t, 1, successes, "exactly one concurrent PutBlobIfAbsent must succeed")
+	assert.Equal(t, attempts-1, conflicts, "every other call must be rejected with ErrBlobAlreadyExists")
+
+	rc, _, err := s.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(got, []byte("attempt-")), "stored content must be exactly one full attempt's data, not a mix")
+}
+
+// TestFilesystemBlobStore_PutBlobIfAbsent_TenantRequired verifies the same
+// validation contract as PutBlob.
+func TestFilesystemBlobStore_PutBlobIfAbsent_TenantRequired(t *testing.T) {
+	s := newTestStore(t)
+	err := s.PutBlobIfAbsent(context.Background(), blob.BlobKey{Namespace: "ns", Name: "n"}, bytes.NewReader([]byte("x")), blob.BlobMeta{})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }

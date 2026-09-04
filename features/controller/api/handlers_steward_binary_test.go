@@ -11,12 +11,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -377,6 +379,54 @@ func TestPublishEndpoint_DuplicatePublishReturns409(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec2.Code)
 	body := rec2.Body.String()
 	assert.Contains(t, body, "DUPLICATE_BINARY")
+}
+
+// TestPublishStewardBinary_ConcurrentPublishesExactlyOneWins is the [REQUIRED TEST]
+// for Issue #3895: handlePublishStewardBinary's GetBlob-then-PutBlob duplicate check
+// was a TOCTOU race — two concurrent publishes without force=true could both pass
+// the not-found pre-check and both PutBlob, silently overwriting each other while
+// both reported success. The fix routes the non-force path through
+// blob.BlobStore.PutBlobIfAbsent, whose conditional-create is atomic at the storage
+// layer, so exactly one concurrent publish for the same version/platform/arch key can
+// ever succeed. Run under -race.
+func TestPublishStewardBinary_ConcurrentPublishesExactlyOneWins(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+
+	const attempts = 8
+	type publishResult struct {
+		code int
+		body string
+	}
+	results := make(chan publishResult, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			content := []byte(fmt.Sprintf("attempt-%d", i))
+			sig := fix.signContent(content, "v1.0.0", "linux", "amd64")
+			rec := doPublish(server, "v1.0.0", "linux", "amd64", "test-tenant", sig, content)
+			results <- publishResult{code: rec.Code, body: rec.Body.String()}
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for r := range results {
+		switch r.code {
+		case http.StatusOK:
+			successes++
+		case http.StatusConflict:
+			conflicts++
+			assert.Contains(t, r.body, "DUPLICATE_BINARY")
+		default:
+			t.Fatalf("unexpected status %d: %s", r.code, r.body)
+		}
+	}
+
+	assert.Equal(t, 1, successes, "exactly one concurrent publish must succeed")
+	assert.Equal(t, attempts-1, conflicts, "every other publish must be rejected with 409, never silently overwritten")
 }
 
 // TestPublishEndpoint_ValidatesPlatformAndArch verifies that the handler returns 400

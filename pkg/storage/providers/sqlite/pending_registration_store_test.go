@@ -149,6 +149,31 @@ func TestPendingRegistrationStore_UpdateStatus_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
 }
 
+// TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry is the
+// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer: an
+// approve (or deny) transition guarded with "AND status = 'pending'" must not
+// flip an already-claimed entry back to approved/denied, reopening the claim
+// window handleRegistrationStatus's own "AND status = 'approved'" guard exists
+// to close.
+func TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-claimed", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-claimed", business.PendingRegistrationStatusApproved))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-claimed", business.PendingRegistrationStatusClaimed))
+
+	err := store.UpdateStatus(ctx, "pr-claimed", business.PendingRegistrationStatusApproved)
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound, "a guard-loss on a claimed entry must report the same not-found/conflict sentinel")
+
+	err = store.UpdateStatus(ctx, "pr-claimed", business.PendingRegistrationStatusDenied)
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+
+	got, err := store.GetPendingByID(ctx, "pr-claimed")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened")
+}
+
 func TestPendingRegistrationStore_ListPending_AllTenants(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()

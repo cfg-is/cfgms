@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,36 @@ func newTestFlatFileLeaseStore(t *testing.T) business.LeaseStore {
 	t.Helper()
 	st, err := flatfile.NewFlatFileLeaseStore(t.TempDir())
 	require.NoError(t, err, "creating flat-file lease store")
+	return st
+}
+
+// newTestFlatFileRoutingStore returns a real flat-file business.RoutingStore
+// rooted at t.TempDir() (ADR-031 Decision 3, Issue #3764), for tests that model
+// two cluster nodes sharing a durable routing store — e.g. the decommission
+// drain-wait's target-node session count (Issue #3895). The concrete flatfile
+// import is confined to this allowlisted */providers_test.go path.
+func newTestFlatFileRoutingStore(t *testing.T) business.RoutingStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileRoutingStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file routing store")
+	return st
+}
+
+// newUnreadableTestFlatFileRoutingStore returns a real flat-file
+// business.RoutingStore whose backing routing.json is corrupt, so every read
+// (CountByNode included) genuinely fails. This models the store outage the
+// decommission drain-wait must not misread as a drained node (Issue #3895):
+// the failure is produced by driving a real store against unparsable durable
+// state, not by substituting a fake implementation. The concrete flatfile
+// import is confined to this allowlisted */providers_test.go path.
+func newUnreadableTestFlatFileRoutingStore(t *testing.T) business.RoutingStore {
+	t.Helper()
+	root := t.TempDir()
+	st, err := flatfile.NewFlatFileRoutingStore(root)
+	require.NoError(t, err, "creating flat-file routing store")
+	require.NoError(t,
+		os.WriteFile(filepath.Join(root, "routing", "routing.json"), []byte("{ not json"), 0600),
+		"corrupting the routing store's durable state")
 	return st
 }
 

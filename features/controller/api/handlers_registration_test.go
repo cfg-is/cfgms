@@ -1188,6 +1188,138 @@ func TestHandleDenyRegistration(t *testing.T) {
 	})
 }
 
+// staleListPendingStore wraps a real business.PendingRegistrationStore and makes
+// ListPending return a fixed, stale snapshot instead of querying the store. It
+// models a bulk handler (approve-all / approve-by-cidr) whose ListPending read
+// raced a concurrent claim: the snapshot still shows the entry as "pending" even
+// though the underlying store has since moved it to "claimed". All other methods
+// delegate to the real store, so the resulting UpdateStatus call exercises the
+// real guarded SQL, not a fake.
+type staleListPendingStore struct {
+	business.PendingRegistrationStore
+	staleSnapshot []*business.PendingRegistrationEntry
+}
+
+func (s *staleListPendingStore) ListPending(_ context.Context, _ string) ([]*business.PendingRegistrationEntry, error) {
+	return s.staleSnapshot, nil
+}
+
+// TestApproveRegistration_CannotReopenClaimedEntry is the [REQUIRED TEST] for
+// Issue #3895: handleApproveRegistration, handleDenyRegistration,
+// handleApproveAllRegistrations, and handleApproveByCIDR must not transition an
+// already-claimed (or otherwise non-pending) entry back to approved/denied,
+// which would reopen the claim window handleRegistrationStatus's own
+// "AND status = 'approved'" guard exists to close and enable a second
+// certificate issuance for one registration. Table-driven across all four
+// handlers.
+func TestApproveRegistration_CannotReopenClaimedEntry(t *testing.T) {
+	t.Run("handleApproveRegistration", func(t *testing.T) {
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-approve"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-approve", "default", "10.0.0.1")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/approve", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, "re-approving a claimed entry must be rejected, not silently succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed")
+	})
+
+	t.Run("handleDenyRegistration", func(t *testing.T) {
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-deny"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-deny", "default", "10.0.0.2")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/deny", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, "denying a claimed entry must be rejected, not silently succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed")
+	})
+
+	t.Run("handleApproveAllRegistrations", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-approve-all"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-approve-all", "tenant-a", "10.0.0.3")
+		staleSnapshot, err := pendingStore.ListPending(context.Background(), "")
+		require.NoError(t, err)
+		require.Len(t, staleSnapshot, 1, "sanity: the stale snapshot must capture the entry while still pending")
+
+		// Simulate a concurrent claim landing after the (now-stale) list read above.
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		server.SetPendingStore(&staleListPendingStore{PendingRegistrationStore: pendingStore, staleSnapshot: staleSnapshot})
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-all", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "the bulk endpoint itself must still succeed: %s", rec.Body.String())
+		var result struct {
+			Approved int `json:"approved"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+		assert.Equal(t, 0, result.Approved, "the guard-rejected entry must not be counted as approved")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened by the stale bulk list")
+	})
+
+	t.Run("handleApproveByCIDR", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-claimed-cidr"
+		addPendingEntry(t, pendingStore, pendingID, "steward-claimed-cidr", "tenant-a", "192.168.1.50")
+		staleSnapshot, err := pendingStore.ListPending(context.Background(), "")
+		require.NoError(t, err)
+		require.Len(t, staleSnapshot, 1, "sanity: the stale snapshot must capture the entry while still pending")
+
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed))
+
+		server.SetPendingStore(&staleListPendingStore{PendingRegistrationStore: pendingStore, staleSnapshot: staleSnapshot})
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/approve-by-cidr",
+			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "test-admin"))
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "the bulk endpoint itself must still succeed: %s", rec.Body.String())
+		var result struct {
+			Approved int `json:"approved"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
+		assert.Equal(t, 0, result.Approved, "the guard-rejected entry must not be counted as approved")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened by the stale bulk list")
+	})
+}
+
 // TestExtractSourceIP_XFFIgnoredWhenPeerNotProxy verifies that a spoofed
 // X-Forwarded-For header is ignored when the TCP peer is not in the
 // TrustedProxies list. The TCP peer address must be used instead (Issue #1695).

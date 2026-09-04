@@ -108,12 +108,16 @@ func (s *DatabasePendingRegistrationStore) GetPendingByToken(ctx context.Context
 }
 
 // UpdateStatus updates the status of the entry.
-// When status is "claimed", claimed_at is also set to now.
+// When status is "claimed", claimed_at is also set to now. Returns
+// ErrPendingRegistrationNotFound if no record exists, or (Issue #3895) if a
+// guarded transition's precondition on the entry's current status no longer
+// holds.
 func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pendingID, status string) error {
 	var res sql.Result
 	var err error
 
-	if status == business.PendingRegistrationStatusClaimed {
+	switch status {
+	case business.PendingRegistrationStatusClaimed:
 		// Guard with AND status = 'approved' so concurrent polls of the same entry
 		// result in exactly one winner: RowsAffected = 0 means already claimed.
 		res, err = s.db.ExecContext(ctx, `
@@ -122,7 +126,21 @@ func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pen
 			WHERE pending_id = $3 AND status = 'approved'`,
 			status, time.Now().UTC(), pendingID,
 		)
-	} else {
+	case business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusDenied:
+		// Issue #3895: guard with AND status = 'pending', mirroring the claimed
+		// transition's guard above. Without this, an approve/deny landing on an
+		// any-node request after the entry was already claimed (or already
+		// approved/denied by a concurrent request) would flip it back to
+		// approved/denied — reopening the claim window handleRegistrationStatus's
+		// own "AND status = 'approved'" guard exists to close, and enabling a
+		// second certificate issuance for one registration.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = $1
+			WHERE pending_id = $2 AND status = 'pending'`,
+			status, pendingID,
+		)
+	default:
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE cfgms_pending_registrations SET status = $1 WHERE pending_id = $2`,
 			status, pendingID,

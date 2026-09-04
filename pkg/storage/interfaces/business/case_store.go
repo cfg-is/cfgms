@@ -131,6 +131,12 @@ type Case struct {
 	Content   []*ContentEntry
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Version is the store's version for this record at the time it was read
+	// (Issue #3895, mirroring account.Version / persistAccountCAS). 1 for a
+	// freshly created case; GetCase/ListCases populate it from the store.
+	// Callers pass it back unchanged to UpdateCaseCAS as the expected version.
+	Version int
 }
 
 // CaseStore persists cockpit investigation cases per ADR-022 §8. It is a standard
@@ -148,6 +154,13 @@ type CaseStore interface {
 	// descendant tenant (tenantID exact match or prefixed with tenantID+"/").
 	ListCases(ctx context.Context, tenantID string) ([]*Case, error)
 	UpdateCase(ctx context.Context, c *Case) error
+	// UpdateCaseCAS writes c through a compare-and-swap keyed on c.Version — the
+	// version read alongside the record being transitioned (Issue #3895,
+	// mirroring persistAccountCAS). ok is false, with no error, when a
+	// concurrent writer already modified this case since it was read; the
+	// caller must treat that as a conflict; it must never retry with the stale
+	// in-memory value. On success, newVersion is the case's new version.
+	UpdateCaseCAS(ctx context.Context, c *Case, expectedVersion int) (newVersion int, ok bool, err error)
 	AddPin(ctx context.Context, caseID string, pin *Pin) error
 	RemovePin(ctx context.Context, caseID, pinID string) error
 	ListPins(ctx context.Context, caseID string) ([]*Pin, error)

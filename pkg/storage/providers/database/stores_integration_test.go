@@ -388,7 +388,7 @@ func TestDatabaseStewardStore_UpdateStewardTenant(t *testing.T) {
 	rec := makeSampleSteward("sw-move", "tenant-src")
 	require.NoError(t, store.RegisterSteward(ctx, rec))
 
-	require.NoError(t, store.UpdateStewardTenant(ctx, "sw-move", "tenant-dst"))
+	require.NoError(t, store.UpdateStewardTenant(ctx, "sw-move", "tenant-src", "tenant-dst"))
 
 	got, err := store.GetSteward(ctx, "sw-move")
 	require.NoError(t, err)
@@ -399,8 +399,30 @@ func TestDatabaseStewardStore_UpdateStewardTenant(t *testing.T) {
 
 func TestDatabaseStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
 	store := newTestStewardStore(t)
-	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-dst")
+	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-src", "tenant-dst")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestDatabaseStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses is the
+// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer: a
+// CAS write whose expectedTenantID no longer matches the record's current
+// tenant (a concurrent writer already moved it) must lose cleanly
+// (ErrStewardNotFound) without applying.
+func TestDatabaseStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := makeSampleSteward("sw-move-cas", "tenant-src")
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	require.NoError(t, store.UpdateStewardTenant(ctx, "sw-move-cas", "tenant-src", "tenant-dst-a"))
+
+	err := store.UpdateStewardTenant(ctx, "sw-move-cas", "tenant-src", "tenant-dst-b")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound, "a stale expectedTenantID CAS must lose cleanly")
+
+	got, err := store.GetSteward(ctx, "sw-move-cas")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst-a", got.TenantID, "the winner's destination must survive; the loser's must never apply")
 }
 
 func TestDatabaseStewardStore_SetStewardHidden(t *testing.T) {

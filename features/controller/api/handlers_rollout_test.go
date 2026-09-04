@@ -501,6 +501,67 @@ func TestRollout_HaltOnPeerNodeStopsTheOwningNodesGoroutine(t *testing.T) {
 		"no ring may be counted as completed after a peer-served halt")
 }
 
+// TestHaltRollout_StopsRingAdvancementFromPeerNode is the [REQUIRED TEST] named in
+// Issue #3895's acceptance criteria for this exact scenario. It is a second
+// instance of TestRollout_HaltOnPeerNodeStopsTheOwningNodesGoroutine's coverage,
+// re-verified independently under the story's own test name: two *Server
+// instances share one durable rolloutStore, runRollout is driven on node A, the
+// halt request is served by node B, and ring advancement must stop with the
+// durable status left halted — never overwritten back to in-progress by node A's
+// goroutine. The underlying fix (Issue #3761: runRollout polls the shared store
+// via rolloutShouldStop/waitOutSoak instead of relying solely on the per-process
+// rolloutHaltChans channel) already landed on develop; this test locks that
+// behavior in under the AC-mandated name so a regression here fails loudly.
+func TestHaltRollout_StopsRingAdvancementFromPeerNode(t *testing.T) {
+	const tenantID = "tenant-a"
+	const targetVersion = "v0.5.21"
+
+	// No stewards in either ring: absent the halt, ring 1 would soak, clear its
+	// (denominator-zero) health gate, and promote to ring 2 well within the sleep
+	// below — so promotion happening at all is unambiguous evidence the fix didn't
+	// take effect.
+	nodeA, rolloutStore, _ := setupRolloutServer(t, tenantID, nil)
+	nodeA.rolloutHaltPollInterval = 20 * time.Millisecond
+	nodeA.cfg.DeploymentRings.Rings[0].Soak = controllerconfig.Duration(300 * time.Millisecond)
+	nodeA.cfg.DeploymentRings.Rings[1].Soak = controllerconfig.Duration(0)
+
+	// nodeB models a different cluster node: it shares nodeA's rolloutStore (the
+	// cross-node serialization point) but has never seen nodeA's in-process haltCh.
+	nodeB := newMinimalServerForRollout(t)
+	nodeB.cfg = nodeA.cfg
+	nodeB.rolloutStore = rolloutStore
+
+	rec := doStartRollout(nodeA, tenantID, targetVersion)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	rolloutID := parseStartRolloutID(t, rec)
+	require.NotEmpty(t, rolloutID)
+
+	select {
+	case id := <-rolloutStore.soakC:
+		require.Equal(t, rolloutID, id, "unexpected rollout entered soak")
+	case <-time.After(2 * time.Second):
+		t.Fatal("node A's rollout goroutine did not reach soak within 2s")
+	}
+
+	haltRec := doHaltRollout(nodeB, tenantID, rolloutID)
+	require.Equal(t, http.StatusOK, haltRec.Code, "halt served by node B must succeed: %s", haltRec.Body.String())
+
+	// Give node A's goroutine time to notice the peer-persisted halt via its next
+	// rolloutHaltPollInterval re-read, with margin past ring 1's full soak
+	// duration — long enough that, absent the fix, the goroutine would have
+	// advanced to ring 2 and overwritten the halted status back to in-progress.
+	time.Sleep(500 * time.Millisecond)
+
+	final, err := rolloutStore.GetRollout(context.Background(), rolloutID)
+	require.NoError(t, err)
+	assert.Equal(t, string(business.RolloutStatusHalted), string(final.Status),
+		"node A's goroutine must not overwrite the halted status back to in-progress")
+	assert.Equal(t, "pre-release", final.CurrentRing,
+		"node A's goroutine must never promote ring 2 after node B served the halt")
+	assert.Equal(t, 0, final.RingsCompleted,
+		"no ring may be counted as completed after a peer-served halt")
+}
+
 // haltPersistFailingStore wraps a *testRolloutStore and fails only the halt-status
 // UpdateRolloutProgress call, letting every other write through unchanged. Simulates
 // a durable-store outage landing exactly when an operator halts a rollout.

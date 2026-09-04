@@ -112,12 +112,15 @@ func (s *SQLitePendingRegistrationStore) GetPendingByToken(ctx context.Context, 
 
 // UpdateStatus updates the status of the entry identified by pendingID.
 // When status is "claimed", claimed_at is also set to the current UTC time.
-// Returns ErrPendingRegistrationNotFound if no record exists.
+// Returns ErrPendingRegistrationNotFound if no record exists, or (Issue #3895)
+// if a guarded transition's precondition on the entry's current status no
+// longer holds.
 func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendingID, status string) error {
 	var res sql.Result
 	var err error
 
-	if status == business.PendingRegistrationStatusClaimed {
+	switch status {
+	case business.PendingRegistrationStatusClaimed:
 		// Guard with AND status = 'approved' so concurrent polls of the same entry
 		// result in exactly one winner: RowsAffected = 0 means already claimed.
 		res, err = s.db.ExecContext(ctx, `
@@ -126,7 +129,21 @@ func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendi
 			WHERE pending_id = ? AND status = 'approved'`,
 			status, formatTime(nowUTC()), pendingID,
 		)
-	} else {
+	case business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusDenied:
+		// Issue #3895: guard with AND status = 'pending', mirroring the claimed
+		// transition's guard above. Without this, an approve/deny landing on an
+		// any-node request after the entry was already claimed (or already
+		// approved/denied by a concurrent request) would flip it back to
+		// approved/denied — reopening the claim window handleRegistrationStatus's
+		// own "AND status = 'approved'" guard exists to close, and enabling a
+		// second certificate issuance for one registration.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = ?
+			WHERE pending_id = ? AND status = 'pending'`,
+			status, pendingID,
+		)
+	default:
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE cfgms_pending_registrations SET status = ? WHERE pending_id = ?`,
 			status, pendingID,

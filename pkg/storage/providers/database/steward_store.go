@@ -242,10 +242,10 @@ func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID 
 }
 
 // UpdateStewardTenant moves a steward to a different tenant by updating its tenant_id column.
-func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error {
+func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE steward_records SET tenant_id = $2 WHERE id = $1`,
-		stewardID, newTenantID)
+		`UPDATE steward_records SET tenant_id = $2 WHERE id = $1 AND tenant_id = $3`,
+		stewardID, newTenantID, expectedTenantID)
 	if err != nil {
 		return fmt.Errorf("database: failed to update tenant for steward %s: %w", stewardID, err)
 	}

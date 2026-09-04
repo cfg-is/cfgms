@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"sync"
 	"testing"
 	"time"
 
@@ -421,6 +422,107 @@ func TestDatabasePendingRegistrationStore_UpdateStatus_Claimed_SetsClaimed(t *te
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status)
 	require.NotNil(t, got.ClaimedAt, "claimed_at must be set when status transitions to claimed")
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry is the
+// regression coverage for Issue #3895 on the real-Postgres backend, mirroring
+// TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry in the sqlite
+// provider: an approve (or deny) transition guarded with "AND status = 'pending'" must
+// not flip an already-claimed entry back to approved/denied, reopening the claim window
+// handleRegistrationStatus's own "AND status = 'approved'" guard exists to close.
+func TestDatabasePendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-claimed", "tenant-db-guard")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-claimed", business.PendingRegistrationStatusApproved))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-claimed", business.PendingRegistrationStatusClaimed))
+
+	err := store.UpdateStatus(ctx, "pr-db-claimed", business.PendingRegistrationStatusApproved)
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound, "a guard-loss on a claimed entry must report the same not-found/conflict sentinel")
+
+	err = store.UpdateStatus(ctx, "pr-db-claimed", business.PendingRegistrationStatusDenied)
+	assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound)
+
+	got, err := store.GetPendingByID(ctx, "pr-db-claimed")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened")
+	require.NotNil(t, got.ClaimedAt, "claimed_at must survive the rejected transitions")
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReresolved
+// covers the other half of the Issue #3895 guard on Postgres: once an entry has left
+// "pending", a second approve/deny — the shape produced by two admin requests landing
+// on different controller nodes — loses the guard rather than overwriting the first
+// decision.
+func TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReresolved(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-approved", "tenant-db-guard")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusApproved))
+
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusDenied),
+		business.ErrPendingRegistrationNotFound, "a deny must not overwrite an existing approval")
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusApproved),
+		business.ErrPendingRegistrationNotFound, "a duplicate approve must lose the guard")
+
+	got, err := store.GetPendingByID(ctx, "pr-db-approved")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-denied", "tenant-db-guard")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-denied", business.PendingRegistrationStatusDenied))
+
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-denied", business.PendingRegistrationStatusApproved),
+		business.ErrPendingRegistrationNotFound, "an approve must not resurrect a denied registration")
+
+	got, err = store.GetPendingByID(ctx, "pr-db-denied")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_ConcurrentApproveHasOneWinner
+// exercises the Issue #3895 guard under the concurrency it exists for. Postgres
+// serialises the row updates, so exactly one of N simultaneous approvals of the same
+// pending entry may observe RowsAffected = 1; every other caller must get
+// ErrPendingRegistrationNotFound rather than a second successful decision (which on
+// the claim path would allow a second certificate issuance for one registration).
+func TestDatabasePendingRegistrationStore_UpdateStatus_ConcurrentApproveHasOneWinner(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-race", "tenant-db-guard")))
+
+	const racers = 8
+	var start sync.WaitGroup
+	var done sync.WaitGroup
+	start.Add(1)
+	errs := make([]error, racers)
+	for i := 0; i < racers; i++ {
+		done.Add(1)
+		go func(idx int) {
+			defer done.Done()
+			start.Wait()
+			errs[idx] = store.UpdateStatus(ctx, "pr-db-race", business.PendingRegistrationStatusApproved)
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		assert.ErrorIs(t, err, business.ErrPendingRegistrationNotFound, "loser %d must report the conflict sentinel", i)
+	}
+	assert.Equal(t, 1, winners, "exactly one concurrent approve may win the guard")
+
+	got, err := store.GetPendingByID(ctx, "pr-db-race")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
 }
 
 // TestDatabasePendingRegistrationStore_TenantScoping verifies the three-way scoping

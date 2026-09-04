@@ -79,6 +79,35 @@ func (s *SQLiteRoutingStore) RemoveConnection(ctx context.Context, stewardID, no
 	return nil
 }
 
+// CountByNode implements business.RoutingStore.CountByNode. Staleness is
+// evaluated the same way as LookupNode: against nowUTC() using the same
+// RoutingStaleAfter window, so a crashed node's abandoned records are not
+// counted as live sessions.
+func (s *SQLiteRoutingStore) CountByNode(ctx context.Context, nodeID string) (int, error) {
+	const query = `SELECT updated_at FROM cfgms_routing WHERE node_id = ?`
+	rows, err := s.db.QueryContext(ctx, query, nodeID)
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: failed to count routing connections for %q: %w", nodeID, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	now := nowUTC()
+	count := 0
+	for rows.Next() {
+		var updatedAtStr string
+		if err := rows.Scan(&updatedAtStr); err != nil {
+			return 0, fmt.Errorf("sqlite: failed to scan routing connection for %q: %w", nodeID, err)
+		}
+		if now.Sub(parseTime(updatedAtStr)) <= business.RoutingStaleAfter {
+			count++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("sqlite: failed to count routing connections for %q: %w", nodeID, err)
+	}
+	return count, nil
+}
+
 // Close closes the underlying database connection.
 func (s *SQLiteRoutingStore) Close() error {
 	if s.db != nil {

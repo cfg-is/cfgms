@@ -258,14 +258,22 @@ func (s *FlatFileStewardStore) SetStewardHidden(_ context.Context, stewardID str
 	return s.writeSteward(record)
 }
 
-// UpdateStewardTenant moves a steward to a different tenant by updating its TenantID field.
-func (s *FlatFileStewardStore) UpdateStewardTenant(_ context.Context, stewardID, newTenantID string) error {
+// UpdateStewardTenant moves a steward to a different tenant by updating its
+// TenantID field, guarded by a compare-and-swap on the steward's current
+// tenant (Issue #3895): the write only applies if the on-disk record's
+// TenantID still equals expectedTenantID at the instant this call re-reads it
+// under the held mutex — the mutex alone only prevents intra-process races, not
+// a caller's earlier GetSteward read going stale before this call runs.
+func (s *FlatFileStewardStore) UpdateStewardTenant(_ context.Context, stewardID, expectedTenantID, newTenantID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	record, err := s.readSteward(stewardID)
 	if err != nil {
 		return err
+	}
+	if record.TenantID != expectedTenantID {
+		return business.ErrStewardNotFound
 	}
 	record.TenantID = newTenantID
 	return s.writeSteward(record)

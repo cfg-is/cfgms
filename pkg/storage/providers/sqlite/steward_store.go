@@ -254,14 +254,16 @@ func (s *SQLiteStewardStore) GetStewardsSeen(ctx context.Context, since time.Tim
 	return scanStewardRows(rows)
 }
 
-// UpdateStewardTenant moves a steward to a different tenant by updating its tenant_id column.
-func (s *SQLiteStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error {
+// UpdateStewardTenant moves a steward to a different tenant by updating its
+// tenant_id column, guarded by a compare-and-swap on the steward's current
+// tenant (Issue #3895).
+func (s *SQLiteStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error {
 	var res sql.Result
 	err := retryOnBusy(ctx, func() error {
 		var e error
 		res, e = s.db.ExecContext(ctx,
-			`UPDATE stewards SET tenant_id = ? WHERE id = ?`,
-			newTenantID, stewardID,
+			`UPDATE stewards SET tenant_id = ? WHERE id = ? AND tenant_id = ?`,
+			newTenantID, stewardID, expectedTenantID,
 		)
 		return e
 	})

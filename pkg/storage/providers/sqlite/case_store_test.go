@@ -228,6 +228,74 @@ func TestCaseStore_UpdateCase_NotFound(t *testing.T) {
 	assert.ErrorIs(t, err, business.ErrCaseNotFound)
 }
 
+// TestCaseStore_UpdateCaseCAS_WinnerSucceeds verifies the happy path: a CAS
+// update at the correct expected version succeeds and returns the new version.
+func TestCaseStore_UpdateCaseCAS_WinnerSucceeds(t *testing.T) {
+	store := newTestCaseStore(t)
+	ctx := context.Background()
+
+	c := makeCase("case-cas-1", "tenant-a")
+	require.NoError(t, store.CreateCase(ctx, c))
+	assert.Equal(t, 1, c.Version, "CreateCase must populate Version")
+
+	c.Status = business.CaseStatusClosed
+	newVersion, ok, err := store.UpdateCaseCAS(ctx, c, c.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 2, newVersion)
+
+	got, err := store.GetCase(ctx, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.CaseStatusClosed, got.Status)
+	assert.Equal(t, 2, got.Version)
+}
+
+// TestCaseStore_UpdateCaseCAS_StaleVersionLoses is the [REQUIRED TEST] regression
+// coverage for Issue #3895 at the storage layer: two writers read the same case
+// (version 1), both submit conflicting updates; the first CAS at version 1 must
+// win, and the second CAS — still using the now-stale version 1 — must lose
+// cleanly (ok=false, no error) without overwriting the winner's write.
+func TestCaseStore_UpdateCaseCAS_StaleVersionLoses(t *testing.T) {
+	store := newTestCaseStore(t)
+	ctx := context.Background()
+
+	c := makeCase("case-cas-2", "tenant-a")
+	require.NoError(t, store.CreateCase(ctx, c))
+
+	winner := *c
+	winner.Status = business.CaseStatusClosed
+	newVersion, ok, err := store.UpdateCaseCAS(ctx, &winner, c.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, 2, newVersion)
+
+	// loser still holds the stale version read before winner's write landed.
+	loser := *c
+	loser.Ticket.Title = business.TicketField{Value: "loser edit", Source: business.TicketFieldSourceOperator, Filled: true}
+	_, ok, err = store.UpdateCaseCAS(ctx, &loser, c.Version)
+	require.NoError(t, err, "a lost race is ok=false, not an error")
+	assert.False(t, ok, "a stale-version CAS must lose cleanly")
+
+	got, err := store.GetCase(ctx, c.ID)
+	require.NoError(t, err)
+	assert.Equal(t, business.CaseStatusClosed, got.Status, "the winner's write must survive")
+	assert.NotEqual(t, "loser edit", got.Ticket.Title.Value, "the loser's write must never apply")
+	assert.Equal(t, 2, got.Version)
+}
+
+// TestCaseStore_UpdateCaseCAS_NotFound verifies ok=false, no error, for a
+// non-existent case — mirroring the not-found-vs-conflict ambiguity
+// persistAccountCAS documents for CompareAndSwapSecret.
+func TestCaseStore_UpdateCaseCAS_NotFound(t *testing.T) {
+	store := newTestCaseStore(t)
+	ctx := context.Background()
+
+	c := makeCase("no-such-case-cas", "tenant-x")
+	_, ok, err := store.UpdateCaseCAS(ctx, c, 1)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
 // TestCaseStore_RemovePin verifies that removed pins are absent from ListPins.
 func TestCaseStore_RemovePin(t *testing.T) {
 	store := newTestCaseStore(t)

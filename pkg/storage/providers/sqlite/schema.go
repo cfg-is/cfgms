@@ -406,6 +406,32 @@ func backfillCommandDeliveryColumns(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillCaseColumns adds the version column (Issue #3895, UpdateCaseCAS) to a
+// pre-existing cases table created without it. Fresh databases (table absent)
+// are skipped. Column-existence is checked via PRAGMA before the ALTER TABLE so
+// the pass is fully idempotent.
+func backfillCaseColumns(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "cases")
+	if err != nil {
+		return fmt.Errorf("sqlite: cases back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	present, err := columnExists(ctx, db, "cases", "version")
+	if err != nil {
+		return fmt.Errorf("sqlite: cases back-fill column probe failed (version): %w", err)
+	}
+	if present {
+		return nil
+	}
+	const ddl = `ALTER TABLE cases ADD COLUMN version INTEGER NOT NULL DEFAULT 1`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("sqlite: cases back-fill failed: %w\nSQL: %s", err, ddl)
+	}
+	return nil
+}
+
 // initializeSchema creates all tables and tracks schema version.
 // It is safe to call multiple times (all statements use IF NOT EXISTS).
 // All DDL statements are executed inside a single transaction to reduce WAL
@@ -431,6 +457,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillCfgmsPendingRegistrationColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillCaseColumns(ctx, db); err != nil {
 		return err
 	}
 	if err := backfillCommandDeliveryColumns(ctx, db); err != nil {
@@ -965,6 +994,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			tenant_id    TEXT NOT NULL,
 			status       TEXT NOT NULL DEFAULT 'open',
 			ticket_json  TEXT NOT NULL DEFAULT '{}',
+			version      INTEGER NOT NULL DEFAULT 1,
 			created_at   TEXT NOT NULL,
 			updated_at   TEXT NOT NULL
 		)`,

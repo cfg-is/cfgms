@@ -99,3 +99,39 @@ func TestSQLiteRoutingStore_RecordConnection_RejectsEmptyIDs(t *testing.T) {
 	require.Error(t, store.RecordConnection(ctx, "", "node-a"))
 	require.Error(t, store.RecordConnection(ctx, "steward-1", ""))
 }
+
+func TestSQLiteRoutingStore_CountByNode(t *testing.T) {
+	store := newTestRoutingStore(t)
+	ctx := context.Background()
+
+	count, err := store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "an unknown node must count zero")
+
+	require.NoError(t, store.RecordConnection(ctx, "steward-1", "node-a"))
+	require.NoError(t, store.RecordConnection(ctx, "steward-2", "node-a"))
+	require.NoError(t, store.RecordConnection(ctx, "steward-3", "node-b"))
+
+	count, err = store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	count, err = store.CountByNode(ctx, "node-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestSQLiteRoutingStore_CountByNode_ExcludesStaleRecords(t *testing.T) {
+	store := newTestRoutingStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.RecordConnection(ctx, "steward-1", "node-a"))
+
+	stale := nowUTC().Add(-business.RoutingStaleAfter - time.Minute)
+	_, err := store.db.ExecContext(ctx, `UPDATE cfgms_routing SET updated_at = ? WHERE steward_id = ?`, formatTime(stale), "steward-1")
+	require.NoError(t, err)
+
+	count, err := store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "a stale routing record must not be counted as a live session")
+}
