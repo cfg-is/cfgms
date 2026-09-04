@@ -22,6 +22,11 @@ func newTestPendingRefreshStore(t *testing.T) *SQLitePendingRefreshStore {
 	return &SQLitePendingRefreshStore{db: db}
 }
 
+// testRefreshCSRPEM is a representative PEM CERTIFICATE REQUEST body for the
+// csr_pem column (Issue #3781). Its exact bytes are what must survive the
+// round-trip; the store treats the value as opaque text.
+const testRefreshCSRPEM = "-----BEGIN CERTIFICATE REQUEST-----\nMIIBTESTCSRBODY\n-----END CERTIFICATE REQUEST-----\n"
+
 // testRefreshEntry returns a PendingRefreshEntry with sensible defaults.
 func testRefreshEntry(pendingID, deviceID, tenantID string) *business.PendingRefreshEntry {
 	now := time.Now().UTC().Truncate(time.Second)
@@ -32,6 +37,7 @@ func testRefreshEntry(pendingID, deviceID, tenantID string) *business.PendingRef
 		SourceIP:                "10.0.0.5",
 		ProvenanceMatchedFields: 3,
 		ProvenanceTotalFields:   5,
+		CSRPEM:                  testRefreshCSRPEM,
 		Status:                  business.PendingRefreshStatusPending,
 		CreatedAt:               now,
 		ExpiresAt:               now.Add(65 * time.Second),
@@ -59,6 +65,10 @@ func TestPendingRefreshStore_RoundTrip(t *testing.T) {
 	assert.Equal(t, "10.0.0.5", got.SourceIP)
 	assert.Equal(t, 3, got.ProvenanceMatchedFields)
 	assert.Equal(t, 5, got.ProvenanceTotalFields)
+	// csr_pem sits between claim_bundle and status in the INSERT and in all three
+	// SELECT column lists (Issue #3781); asserting it alongside its neighbours is
+	// what catches a scan-order slip in either scan function.
+	assert.Equal(t, testRefreshCSRPEM, got.CSRPEM)
 	assert.Equal(t, business.PendingRefreshStatusPending, got.Status)
 	assert.WithinDuration(t, entry.CreatedAt, got.CreatedAt, time.Second)
 	assert.WithinDuration(t, entry.ExpiresAt, got.ExpiresAt, time.Second)
@@ -72,6 +82,8 @@ func TestPendingRefreshStore_RoundTrip(t *testing.T) {
 	got2, err := store.GetPendingRefreshByID(ctx, "pr-rt-1")
 	require.NoError(t, err)
 	assert.Equal(t, bundle, got2.ClaimBundle)
+	assert.Equal(t, testRefreshCSRPEM, got2.CSRPEM,
+		"storing the claim bundle must not disturb the adjacent csr_pem column")
 
 	// UpdateRefreshStatus to approved (terminal — sets resolved_at)
 	before := time.Now().UTC()
@@ -172,6 +184,43 @@ func TestPendingRefreshStore_ListPendingRefresh_FilterByTenant(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "pr-t2", entries[0].PendingID)
+}
+
+// TestPendingRefreshStore_CSRPEM_ListRoundTrip covers the second scan function:
+// ListPendingRefresh reads csr_pem through scanRefreshRow rather than
+// scanRefreshEntry, so a column-position slip there is invisible to the
+// GetPendingRefreshByID round-trip. Per-entry distinct CSR bodies also prove the
+// value is not being read from a neighbouring column.
+func TestPendingRefreshStore_CSRPEM_ListRoundTrip(t *testing.T) {
+	store := newTestPendingRefreshStore(t)
+	ctx := context.Background()
+
+	first := testRefreshEntry("pr-csr-1", "dev-csr-1", "tenant-csr")
+	first.CSRPEM = "-----BEGIN CERTIFICATE REQUEST-----\nfirst\n-----END CERTIFICATE REQUEST-----\n"
+	require.NoError(t, store.AddPendingRefresh(ctx, first))
+
+	// An entry written without a CSR must come back empty, not carrying the
+	// previous row's value or a neighbouring column's.
+	second := testRefreshEntry("pr-csr-2", "dev-csr-2", "tenant-csr")
+	second.CSRPEM = ""
+	second.CreatedAt = second.CreatedAt.Add(time.Second)
+	require.NoError(t, store.AddPendingRefresh(ctx, second))
+
+	entries, err := store.ListPendingRefresh(ctx, "tenant-csr")
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	byID := map[string]*business.PendingRefreshEntry{}
+	for _, e := range entries {
+		byID[e.PendingID] = e
+	}
+	require.Contains(t, byID, "pr-csr-1")
+	require.Contains(t, byID, "pr-csr-2")
+	assert.Equal(t, first.CSRPEM, byID["pr-csr-1"].CSRPEM)
+	assert.Equal(t, business.PendingRefreshStatusPending, byID["pr-csr-1"].Status,
+		"status must not be shifted by the csr_pem column")
+	assert.Empty(t, byID["pr-csr-2"].CSRPEM, "an entry stored without a CSR must read back empty")
+	assert.Equal(t, business.PendingRefreshStatusPending, byID["pr-csr-2"].Status)
 }
 
 func TestPendingRefreshStore_ExpireStaleRefresh(t *testing.T) {

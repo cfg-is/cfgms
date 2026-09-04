@@ -152,6 +152,20 @@ digest = sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
 
 **Any deviation between the two implementations is a security bug.**
 
+**Amended (Issue #3781):** completion follows the same CSR-based signing flow ADR-032
+gives initial registration. The steward generates a **fresh** local keypair for the
+renewed mTLS credential and submits its public half as `csr_pem` alongside the PoP
+signature; the controller rejects a request with `csr_pem` unset or containing
+embedded private-key material before any certificate is signed. On the immediate
+(`200`) path, `RefreshCompleteResponse` carries `client_cert`, `ca_cert`, and an
+optional `issuer_chain` (ADR-032 chain-aware distribution) — **no `client_key`
+field exists**. The controller signs the caller-submitted CSR via
+`SignClientCertificateRequest`; it never generates or sees a private key for this
+credential. The queued (`202`, manual-review or auto-accept-demoted) path persists
+the submitted CSR alongside the pending entry so the same public key is signed once
+an admin approves it — the admin-approval response (`AdminRefreshApproveResponse`)
+likewise carries no `client_key`.
+
 ### 5. Revocation-before-PoP ordering invariant (mandatory)
 
 The controller `/refresh/complete` handler MUST follow this order; each step short-circuits:

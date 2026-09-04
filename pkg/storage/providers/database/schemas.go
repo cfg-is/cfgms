@@ -1112,6 +1112,7 @@ func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, 
 			provenance_matched_fields   INTEGER NOT NULL DEFAULT 0,
 			provenance_total_fields     INTEGER NOT NULL DEFAULT 0,
 			claim_bundle                BYTEA NOT NULL DEFAULT ''::bytea,
+			csr_pem                     TEXT NOT NULL DEFAULT '',
 			status                      TEXT NOT NULL DEFAULT 'pending',
 			created_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
 			expires_at                  TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -1119,6 +1120,12 @@ func (s DatabaseSchemas) CreatePendingRefreshRequestsTable(ctx context.Context, 
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create pending_refresh_requests table: %w", err)
+	}
+	// Idempotent migration for existing deployments (Issue #3781).
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE pending_refresh_requests ADD COLUMN IF NOT EXISTS csr_pem TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return fmt.Errorf("failed to backfill pending_refresh_requests csr_pem column: %w", err)
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_pending_refresh_tenant_id  ON pending_refresh_requests(tenant_id);",

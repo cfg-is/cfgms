@@ -321,12 +321,13 @@ type APIPendingRefreshEntry struct {
 	ExpiresAt               time.Time `json:"expires_at"`
 }
 
-// APIApproveRefreshResponse is the CLI view of the approve response.
+// APIApproveRefreshResponse is the CLI view of the approve response. No client_key
+// field exists on the wire (Issue #3781): the controller never generates or sees a
+// private key for this credential.
 type APIApproveRefreshResponse struct {
 	Status      string `json:"status"`
 	PendingID   string `json:"pending_id"`
 	ClientCert  string `json:"client_cert,omitempty"`
-	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
 	SigningCert string `json:"signing_cert,omitempty"`
 }

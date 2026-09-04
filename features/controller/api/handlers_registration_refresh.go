@@ -73,6 +73,12 @@ type RefreshCompleteRequest struct {
 	IssuedAt   int64             `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
 	Signature  string            `json:"signature"` // base64url Ed25519 sig over PoP message
 	Provenance map[string]string `json:"provenance,omitempty"`
+
+	// CSRPEM is a PEM-encoded CERTIFICATE REQUEST over a fresh keypair the steward
+	// generates locally for the renewed credential (Issue #3781). The controller signs
+	// this public key into the renewed mTLS client certificate; the matching private
+	// key never crosses the wire.
+	CSRPEM string `json:"csr_pem,omitempty"`
 }
 
 // RefreshCompleteResponse is returned by POST /api/v1/stewards/{device_id}/refresh/complete.
@@ -81,7 +87,6 @@ type RefreshCompleteResponse struct {
 	PendingID string `json:"pending_id,omitempty"` // set when queued for approval
 	// Certificate fields: populated only on the auto-accept path
 	ClientCert  string `json:"client_cert,omitempty"`
-	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
 	IssuerChain string `json:"issuer_chain,omitempty"` // Issue #3778: chain from ClientCert's direct issuer up to (not including) CACert
 	SigningCert string `json:"signing_cert,omitempty"`
@@ -214,9 +219,14 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleRefreshComplete handles POST /api/v1/stewards/{device_id}/refresh/complete.
-// Gate order (ADR-010 §3): (1) lookup, (2) revocation, (3) nonce, (4) IssuedAt,
-// (5) consume nonce, (6) PoP verify, (7) lifecycle policy, (8) issue cert or queue.
-// Audit is emitted before WriteHeader on every outcome.
+// Gate order (ADR-010 §3): (1) lookup, (2) revocation, (3) cross-tenant,
+// (4) CSR validation, (5) nonce, (6) IssuedAt, (7) consume nonce, (8) PoP verify,
+// (9) lifecycle policy, (10) issue cert or queue. Audit is emitted before
+// WriteHeader on every outcome. CSR validation (Issue #3781) is a pure request-
+// format check — device-independent — but runs after revocation and cross-tenant
+// so a rejection for either of those never depends on whether the caller also
+// bothered to send a well-formed CSR (mirrors the existing revoked-before-PoP
+// invariant: the security-relevant gates never take a back seat to format checks).
 func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	deviceID := mux.Vars(r)["device_id"]
 
@@ -268,6 +278,25 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			business.AuditResultDenied, business.AuditSeverityCritical,
 			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
 		http.Error(w, "tenant mismatch", http.StatusForbidden)
+		return
+	}
+
+	// CSR validation (Issue #3781) — the steward generates its renewed mTLS
+	// keypair locally and submits only the public half. Rejected before any nonce
+	// operation or certificate is signed, mirroring the registration handler's
+	// same two checks (handlers_registration.go handleRegister).
+	if req.CSRPEM == "" {
+		http.Error(w, "csr_pem is required", http.StatusBadRequest)
+		return
+	}
+	if containsPrivateKeyMaterial(req.CSRPEM) {
+		http.Error(w, "private key material is not accepted", http.StatusBadRequest)
+		return
+	}
+	if _, err := parseAndVerifyCSR(req.CSRPEM); err != nil {
+		s.logger.Warn("Rejected invalid certificate signing request at refresh complete",
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "invalid certificate signing request", http.StatusBadRequest)
 		return
 	}
 
@@ -377,13 +406,13 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	switch record.Status {
 	case business.StewardStatusArchived:
 		// Archived: add pending refresh and return 202 — policy is skipped.
-		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, 0, 0, "archived")
+		s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "archived")
 
 	default:
 		// active / registered / dormant / lost / deregistered — consult policy.
 		if s.refreshPolicyStore == nil {
 			// No policy store: default to require_approval.
-			s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, 0, 0, "no_policy_store")
+			s.handleRefreshQueueEntry(w, r, record, deviceID, req.Provenance, req.CSRPEM, 0, 0, "no_policy_store")
 			return
 		}
 		policy, err := s.refreshPolicyStore.GetPolicy(r.Context(), record.TenantID)
@@ -396,7 +425,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to get refresh policy", http.StatusInternalServerError)
 			return
 		}
-		s.handleRefreshByPolicy(w, r, record, deviceID, req.Provenance, policy)
+		s.handleRefreshByPolicy(w, r, record, deviceID, req.Provenance, req.CSRPEM, policy)
 	}
 }
 
@@ -404,7 +433,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRefreshByPolicy(
 	w http.ResponseWriter, r *http.Request,
 	record *business.StewardRecord, deviceID string,
-	provenance map[string]string, policy *business.RefreshPolicy,
+	provenance map[string]string, csrPEM string, policy *business.RefreshPolicy,
 ) {
 	switch policy.Mode {
 	case "reject":
@@ -423,13 +452,13 @@ func (s *Server) handleRefreshByPolicy(
 			result := pm.FuzzyMatch(record.LastProvenanceJSON, provenance)
 			if result.Score < registration.ProvenanceMatchThreshold {
 				// Demote to require_approval (demote-only invariant).
-				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance,
+				s.handleRefreshQueueEntry(w, r, record, deviceID, provenance, csrPEM,
 					result.MatchedFields, result.TotalFields, "auto_accept_demoted")
 				return
 			}
 		}
 		// No stored provenance baseline, or sufficient provenance match: issue cert immediately.
-		resp, err := s.buildRefreshClaimResponse(r.Context(), record)
+		resp, err := s.buildRefreshClaimResponse(r.Context(), record, csrPEM)
 		if err != nil {
 			s.logger.Error("Failed to issue refresh certificate", "steward_id", record.ID, "error", err)
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -445,14 +474,15 @@ func (s *Server) handleRefreshByPolicy(
 			map[string]interface{}{"decision": "approved", "reason": "auto_accept"})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// #nosec G117 -- authenticated refresh intentionally delivers the newly
-		// issued key over TLS after policy, identity, and provenance checks.
+		// #nosec G117 -- authenticated refresh returns the signed client certificate;
+		// no private key is ever generated or held by the controller for this
+		// credential (Issue #3781).
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			s.logger.Error("Failed to encode refresh complete response", "error", err)
 		}
 
 	default: // require_approval (and unknown modes)
-		s.handleRefreshQueueEntry(w, r, record, deviceID, provenance, 0, 0, "require_approval")
+		s.handleRefreshQueueEntry(w, r, record, deviceID, provenance, csrPEM, 0, 0, "require_approval")
 	}
 }
 
@@ -460,7 +490,7 @@ func (s *Server) handleRefreshByPolicy(
 func (s *Server) handleRefreshQueueEntry(
 	w http.ResponseWriter, r *http.Request,
 	record *business.StewardRecord, deviceID string,
-	_ map[string]string, matchedFields, totalFields int, reason string,
+	_ map[string]string, csrPEM string, matchedFields, totalFields int, reason string,
 ) {
 	if s.pendingRefreshStore == nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -477,6 +507,7 @@ func (s *Server) handleRefreshQueueEntry(
 		DeviceID:                deviceID,
 		TenantID:                record.TenantID,
 		SourceIP:                extractSourceIP(r, s.trustedProxies),
+		CSRPEM:                  csrPEM,
 		ProvenanceMatchedFields: matchedFields,
 		ProvenanceTotalFields:   totalFields,
 		Status:                  business.PendingRefreshStatusPending,
@@ -503,8 +534,8 @@ func (s *Server) handleRefreshQueueEntry(
 		})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	// #nosec G117 -- this queued response contains only status and pending ID;
-	// the embedded response type's ClientKey field remains empty.
+	// #nosec G117 -- this queued response contains only status and pending ID; the
+	// RefreshCompleteResponse type carries no private-key field at all (Issue #3781).
 	if err := json.NewEncoder(w).Encode(RefreshCompleteResponse{
 		Status:    "queued",
 		PendingID: pendingID,
@@ -513,9 +544,11 @@ func (s *Server) handleRefreshQueueEntry(
 	}
 }
 
-// buildRefreshClaimResponse generates a new mTLS certificate for a steward that has
-// passed the registration-refresh gate. Mirrors the cert issuance in buildClaimResponse.
-func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business.StewardRecord) (*RefreshCompleteResponse, error) {
+// buildRefreshClaimResponse signs the steward-submitted CSR into a new mTLS
+// certificate for a steward that has passed the registration-refresh gate
+// (Issue #3781). Mirrors the cert issuance in buildClaimResponse — the
+// controller never generates or sees a private key for this credential.
+func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business.StewardRecord, csrPEM string) (*RefreshCompleteResponse, error) {
 	if s.certManager == nil {
 		return nil, fmt.Errorf("certificate manager not initialized")
 	}
@@ -525,14 +558,19 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		validityDays = s.cfg.Certificate.ClientCertValidityDays
 	}
 
-	clientCert, err := s.certManager.GenerateClientCertificate(&cert.ClientCertConfig{
+	csr, err := parseAndVerifyCSR(csrPEM)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse refresh certificate signing request: %w", err)
+	}
+
+	clientCert, err := s.certManager.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
 		CommonName:   record.ID,
 		Organization: "CFGMS Stewards",
 		ClientID:     record.ID,
 		ValidityDays: validityDays,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate client certificate: %w", err)
+		return nil, fmt.Errorf("failed to sign client certificate: %w", err)
 	}
 
 	caCert, err := s.certManager.GetCACertificate()
@@ -543,7 +581,6 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 	resp := &RefreshCompleteResponse{
 		Status:      "approved",
 		ClientCert:  string(clientCert.CertificatePEM),
-		ClientKey:   string(clientCert.PrivateKeyPEM),
 		CACert:      string(caCert),
 		IssuerChain: string(clientCert.IssuerChainPEM),
 	}
@@ -592,7 +629,6 @@ type AdminRefreshApproveResponse struct {
 	Status      string `json:"status"`
 	PendingID   string `json:"pending_id"`
 	ClientCert  string `json:"client_cert,omitempty"`
-	ClientKey   string `json:"client_key,omitempty"`
 	CACert      string `json:"ca_cert,omitempty"`
 	IssuerChain string `json:"issuer_chain,omitempty"`
 	SigningCert string `json:"signing_cert,omitempty"`
@@ -775,7 +811,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certResp, err := s.buildRefreshClaimResponse(r.Context(), record)
+	certResp, err := s.buildRefreshClaimResponse(r.Context(), record, entry.CSRPEM)
 	if err != nil {
 		s.logger.Error("Failed to build refresh cert for approval", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,
@@ -820,13 +856,13 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	// #nosec G117 -- an authenticated administrator approved this one-time TLS
-	// delivery of the freshly issued client key to the approval caller.
+	// #nosec G117 -- an authenticated administrator approved this delivery of the
+	// signed client certificate; no private key is ever generated or held by the
+	// controller for this credential (Issue #3781).
 	if err := json.NewEncoder(w).Encode(AdminRefreshApproveResponse{
 		Status:      "approved",
 		PendingID:   pendingID,
 		ClientCert:  certResp.ClientCert,
-		ClientKey:   certResp.ClientKey,
 		CACert:      certResp.CACert,
 		IssuerChain: certResp.IssuerChain,
 		SigningCert: certResp.SigningCert,

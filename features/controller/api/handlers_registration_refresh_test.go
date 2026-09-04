@@ -5,12 +5,18 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,6 +29,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/rbac"
+	stwreg "github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -234,6 +241,7 @@ func buildValidCompleteRequest(
 		IssuedAt:   int64(challenge.ServerTS),
 		Signature:  base64.RawURLEncoding.EncodeToString(sig),
 		Provenance: provenance,
+		CSRPEM:     testValidCSRPEM,
 	}
 }
 
@@ -644,6 +652,7 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 		PendingID: pendingID,
 		DeviceID:  testDeviceID,
 		TenantID:  testTenantID,
+		CSRPEM:    testValidCSRPEM,
 		Status:    business.PendingRefreshStatusPending,
 		CreatedAt: time.Now().UTC(),
 		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
@@ -661,8 +670,12 @@ func TestHandleRefreshApprove_ApprovesEntry(t *testing.T) {
 	assert.Equal(t, "approved", resp.Status)
 	assert.Equal(t, pendingID, resp.PendingID)
 	assert.NotEmpty(t, resp.ClientCert, "client cert must be in response")
-	assert.NotEmpty(t, resp.ClientKey, "client key must be in response")
 	assert.NotEmpty(t, resp.CACert, "CA cert must be in response")
+
+	var rawApproveResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawApproveResp))
+	assert.NotContains(t, rawApproveResp, "client_key",
+		"AdminRefreshApproveResponse must never carry client_key (Issue #3781)")
 
 	// Verify the store was updated.
 	updated, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
@@ -998,6 +1011,61 @@ func TestHandleSetRefreshPolicy_CrossTenantReturns404(t *testing.T) {
 	assert.Equal(t, "require_approval", policy.Mode)
 }
 
+// TestHandleRefreshComplete_MissingCSRPEM_400 verifies that a refresh-complete
+// request with csr_pem unset is rejected before any certificate is signed
+// (Issue #3781 AC, mirrors #3780's registration-side test).
+func TestHandleRefreshComplete_MissingCSRPEM_400(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "s-active",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	challenge := issueChallenge(t, f.server, testDeviceID, testTenantID)
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, nil)
+	req.CSRPEM = "" // intentionally omitted
+
+	rec := postComplete(f.server, testDeviceID, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "csr_pem")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when csr_pem is missing")
+}
+
+// TestHandleRefreshComplete_CSRContainsPrivateKeyMaterial_400 verifies that a csr_pem
+// body smuggling private key material alongside the CERTIFICATE REQUEST block is
+// rejected (via containsPrivateKeyMaterial) before any certificate is signed
+// (Issue #3781 AC).
+func TestHandleRefreshComplete_CSRContainsPrivateKeyMaterial_400(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "s-active",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+
+	smugglePriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(smugglePriv)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	challenge := issueChallenge(t, f.server, testDeviceID, testTenantID)
+	req := buildValidCompleteRequest(t, testDeviceID, testTenantID, challenge, priv, nil)
+	req.CSRPEM = testValidCSRPEM + string(keyPEM)
+
+	rec := postComplete(f.server, testDeviceID, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "private key material")
+	assert.NotContains(t, rec.Body.String(), "BEGIN CERTIFICATE", "no certificate may be signed when the CSR carries embedded private key material")
+}
+
 func TestRefresh_NoPolicyDefault(t *testing.T) {
 	pub, priv := newTestEd25519KeyPair(t)
 	f := newRefreshFixture(t, nil)
@@ -1047,9 +1115,12 @@ func TestRefresh_AutoAccept_NoProvenanceBaseline(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "approved", resp.Status)
 	assert.NotEmpty(t, resp.ClientCert)
-	assert.NotEmpty(t, resp.ClientKey)
 	assert.NotEmpty(t, resp.CACert)
 	assert.Empty(t, resp.IssuerChain, "issuer_chain must be empty for a root-only CA (self-hosted default)")
+
+	var rawResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawResp))
+	assert.NotContains(t, rawResp, "client_key", "refresh complete response must never carry client_key (Issue #3781)")
 }
 
 // TestRefresh_AutoAccept_IntermediateCA_IncludesIssuerChain verifies issuer_chain
@@ -1080,6 +1151,141 @@ func TestRefresh_AutoAccept_IntermediateCA_IncludesIssuerChain(t *testing.T) {
 	assert.Equal(t, "approved", resp.Status)
 	assert.NotEmpty(t, resp.ClientCert)
 	assert.NotEmpty(t, resp.IssuerChain, "issuer_chain must be present and non-empty when the cert manager is backed by an intermediate CA")
+}
+
+// TestRefresh_EndToEnd_CompleteToMTLSHandshake drives the full CSR-based
+// registration-refresh flow with no mocks: a real pkg/cert-backed controller (via
+// the real HTTP router) is refreshed against by a real
+// features/steward/registration.HTTPClient, through challenge -> proof-of-possession
+// -> CSR submission -> immediate cert issuance, and the resulting controller-signed
+// certificate is paired with the steward's own freshly generated local key to
+// complete a genuine mTLS handshake against a throwaway listener. It also proves the
+// renewed key is provably different from the pre-refresh key — the old key must not
+// silently persist as a usable credential for the new certificate (Issue #3781 AC).
+func TestRefresh_EndToEnd_CompleteToMTLSHandshake(t *testing.T) {
+	certMgr := newTestCertManager(t)
+	f := newRefreshFixture(t, certMgr)
+	pub, priv := newTestEd25519KeyPair(t)
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "s-e2e-refresh",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pub),
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "auto_accept"})
+
+	ts := httptest.NewServer(f.server.router)
+	defer ts.Close()
+
+	stewardClient, err := stwreg.NewHTTPClient(&stwreg.HTTPConfig{
+		ControllerURL: ts.URL,
+		Logger:        logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	// Step 1: Challenge. The real steward client requests a nonce.
+	challenge, err := stewardClient.RefreshChallenge(context.Background(), testDeviceID)
+	require.NoError(t, err)
+
+	// Step 2: Compute the proof-of-possession signature exactly as ADR-011 §4
+	// specifies, over the steward's device-identity Ed25519 key (unrelated to the
+	// mTLS keypair generated below).
+	nonceBytes, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
+	require.NoError(t, err)
+	var tsBytes [8]byte
+	binary.BigEndian.PutUint64(tsBytes[:], challenge.ServerTS)
+	h := sha256.New()
+	h.Write(nonceBytes)
+	h.Write([]byte(testDeviceID))
+	h.Write(tsBytes[:])
+	pop := ed25519.Sign(priv, h.Sum(nil))
+
+	// Step 3: Generate a fresh mTLS keypair for the renewed credential and submit
+	// only its public half as a CSR (Issue #3781) — the controller never generates
+	// or sees this private key.
+	renewedKey, err := stwreg.GenerateStewardKeypair()
+	require.NoError(t, err)
+	csrPEM, err := stwreg.BuildRegistrationCSR(renewedKey, testDeviceID)
+	require.NoError(t, err)
+
+	// A "pre-refresh" key, standing in for whatever mTLS key the steward held
+	// before this refresh — generated independently, never submitted anywhere.
+	oldKey, err := stwreg.GenerateStewardKeypair()
+	require.NoError(t, err)
+	oldKeyPEM, err := stwreg.EncodeECDSAPrivateKeyPEM(oldKey)
+	require.NoError(t, err)
+
+	completeResp, err := stewardClient.RefreshComplete(context.Background(), testDeviceID, testTenantID,
+		challenge.Nonce, int64(challenge.ServerTS), pop, csrPEM)
+	require.NoError(t, err)
+	require.NotNil(t, completeResp)
+	require.NotEmpty(t, completeResp.ClientCert)
+
+	renewedKeyPEM, err := stwreg.EncodeECDSAPrivateKeyPEM(renewedKey)
+	require.NoError(t, err)
+	require.NotEqual(t, oldKeyPEM, renewedKeyPEM, "the renewed key must differ from the pre-refresh key")
+
+	// The pre-refresh key must NOT pair with the renewed certificate — it must not
+	// silently persist as a usable credential for the new cert.
+	_, err = tls.X509KeyPair([]byte(completeResp.ClientCert), []byte(oldKeyPEM))
+	assert.Error(t, err, "the pre-refresh key must not form a usable pair with the renewed certificate")
+
+	// Step 4: Combine the steward-held renewed key with the controller-issued
+	// certificate exactly as the steward's own transport layer does, and complete a
+	// real mTLS handshake against a throwaway listener that requires and verifies
+	// the client certificate against the same CA.
+	stewardTLSCert, err := tls.X509KeyPair([]byte(completeResp.ClientCert), []byte(renewedKeyPEM))
+	require.NoError(t, err, "controller-issued certificate and the renewed steward-held key must form a usable TLS pair")
+
+	caCertPool := x509.NewCertPool()
+	require.True(t, caCertPool.AppendCertsFromPEM([]byte(completeResp.CACert)))
+
+	listenerCert, err := certMgr.GenerateServerCertificate(&cert.ServerCertConfig{
+		CommonName:   "mtls-listener-refresh.test",
+		DNSNames:     []string{"mtls-listener-refresh.test"},
+		Organization: "CFGMS Test",
+		ValidityDays: 1,
+	})
+	require.NoError(t, err)
+	listenerTLSCert, err := tls.X509KeyPair(listenerCert.CertificatePEM, listenerCert.PrivateKeyPEM)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{listenerTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caCertPool,
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+
+	accepted := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			accepted <- acceptErr
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			accepted <- fmt.Errorf("accepted connection is not a *tls.Conn")
+			return
+		}
+		accepted <- tlsConn.HandshakeContext(context.Background())
+	}()
+
+	clientConn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+		Certificates: []tls.Certificate{stewardTLSCert},
+		RootCAs:      caCertPool,
+		ServerName:   "mtls-listener-refresh.test",
+		MinVersion:   tls.VersionTLS12,
+	})
+	require.NoError(t, err, "the renewed steward-held key and controller-issued certificate must complete a real mTLS handshake")
+	defer func() { _ = clientConn.Close() }()
+
+	require.NoError(t, <-accepted, "the listener must accept and verify the steward's renewed client certificate against the delivered CA")
 }
 
 // ---- Root-scoped ADR-025 Decision 1 guard tests for handleApproveRefresh (Issue #3303) ---

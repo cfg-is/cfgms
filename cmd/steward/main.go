@@ -1007,12 +1007,12 @@ type approvedRegistration struct {
 	TransportAddress string
 	ClientCert       string
 	// ClientKey holds the steward's locally generated private key PEM (Issue
-	// #3780) — never a value read off the wire. For the immediate-approval and
-	// manual-review poll-approval paths it comes from RegistrationResponse's /
+	// #3780, #3781) — never a value read off the wire. For the immediate-approval
+	// and manual-review poll-approval paths it comes from RegistrationResponse's /
 	// RegistrationStatusResponse's local (non-wire) ClientKeyPEM field, populated
-	// by the registration client from the keypair it generated for the CSR. The
-	// registration-refresh path (S5) still sources this from the wire until it is
-	// migrated to the same CSR-based shape.
+	// by the registration client from the keypair it generated for the CSR. For
+	// the registration-refresh path it comes from the fresh keypair
+	// refreshAndConnect generates locally before submitting the refresh CSR.
 	ClientKey      string
 	CACert         string
 	ServerCert     string
@@ -1763,6 +1763,47 @@ func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.Fi
 	}
 }
 
+// completeRefreshWithFreshKeypair performs the credential half of a registration
+// refresh (Issue #3781): it generates a fresh keypair for the renewed credential,
+// submits only its public half as a CSR to /refresh/complete, and returns the
+// controller's response paired with the PEM encoding of the private key it just
+// generated.
+//
+// The private key never crosses the wire and is never read off the response —
+// RefreshCompleteResponse carries no key field. The controller signs the CSR's
+// public key into resp.ClientCert, so the returned keyPEM is the only value that
+// completes the renewed mTLS identity: the caller must store that pair together.
+//
+// Errors from RefreshComplete (ErrRefreshPending on HTTP 202, ErrRefreshRejected
+// on HTTP 403) are returned unwrapped so callers can match them with errors.Is.
+func completeRefreshWithFreshKeypair(
+	ctx context.Context,
+	httpClient *registration.HTTPClient,
+	deviceID, tenantID, nonce string,
+	serverTS int64,
+	pop []byte,
+) (*registration.RefreshCompleteResponse, string, error) {
+	renewedKey, err := registration.GenerateStewardKeypair()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate renewed steward keypair: %w", err)
+	}
+	csrPEM, err := registration.BuildRegistrationCSR(renewedKey, deviceID)
+	if err != nil {
+		return nil, "", fmt.Errorf("build refresh certificate signing request: %w", err)
+	}
+
+	completeResp, err := httpClient.RefreshComplete(ctx, deviceID, tenantID, nonce, serverTS, pop, csrPEM)
+	if err != nil {
+		return nil, "", err // ErrRefreshPending or ErrRefreshRejected propagated to caller
+	}
+
+	renewedKeyPEM, err := registration.EncodeECDSAPrivateKeyPEM(renewedKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("encode renewed steward private key: %w", err)
+	}
+	return completeResp, renewedKeyPEM, nil
+}
+
 // refreshAndConnect performs the registration-refresh handshake (ADR-011, Issue #2094)
 // for a steward whose mTLS cert has expired. The handshake proves device identity via
 // an Ed25519 proof-of-possession signature over a server-issued nonce.
@@ -1831,7 +1872,9 @@ func refreshAndConnect(
 	// #nosec G115 -- the controller-provided uint64 timestamp is explicitly
 	// rejected above unless it fits the signed protocol field.
 	serverTS := int64(challenge.ServerTS)
-	completeResp, err := httpClient.RefreshComplete(completeCtx, ks.DeviceID(), id.TenantID, challenge.Nonce, serverTS, pop)
+
+	completeResp, renewedKeyPEM, err := completeRefreshWithFreshKeypair(
+		completeCtx, httpClient, ks.DeviceID(), id.TenantID, challenge.Nonce, serverTS, pop)
 	if err != nil {
 		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
 	}
@@ -1861,9 +1904,10 @@ func refreshAndConnect(
 		TenantID:         id.TenantID,
 		TransportAddress: updatedID.TransportAddress,
 		ClientCert:       completeResp.ClientCert,
-		ClientKey:        completeResp.ClientKey,
+		ClientKey:        renewedKeyPEM,
 		CACert:           completeResp.CACert,
 		ServerCert:       updatedID.ServerCertPEM,
+		IssuerChain:      completeResp.IssuerChain,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
 	// Preserve the stored trust mode on refresh — the trust anchor is already established.

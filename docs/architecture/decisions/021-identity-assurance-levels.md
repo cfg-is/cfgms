@@ -1045,6 +1045,19 @@ under the same controller's custody, not an independent witness, so it is
 bounded the same way. The gap this amendment does not close is therefore
 uncompensated, not weakly compensated.
 
+### Restatement (ADR-032): the CSR-only claim is now system-wide
+
+"Every other credential this epic introduces is CSR-based" was scoped to Epic
+#3711 when this amendment was written. As of #3780 (steward registration) and
+#3781 (registration refresh) — both amended into the trust hierarchy by
+ADR-032 — steward registration and registration-refresh join the CSR-only
+rule too: the steward generates its own keypair locally in both flows and
+submits only a CSR, and neither the initial `RegistrationResponse` nor the
+`RefreshCompleteResponse` carries a `client_key` field on the wire. The claim
+in the paragraph above is therefore true system-wide, not just for Epic
+#3711's credentials. The admin bootstrap bundle (`IssueAdminBundle`) remains
+the sole exception this amendment confines — that has not changed.
+
 ## Amendment 6 (2026-08-28): Credential marker authority is bounded by the approver's own authority (Epic #3711 Story #3718)
 
 **Status:** Accepted · **Deciders:** Founder, Architecture · **Extends:** Amendment 5
