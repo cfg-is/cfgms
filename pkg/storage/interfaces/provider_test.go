@@ -423,11 +423,24 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 		if routingStore == nil {
 			t.Fatal("RoutingStore should not be nil for the SQLite provider")
 		}
+
+		// Issue #3763: the node registry store also opens its own dedicated
+		// SQLite connection, so Close() must close it too — same leaked-handle
+		// class as the routing store above (a Linux run does not surface it;
+		// Windows' file-locking does on t.TempDir() cleanup).
+		nodeRegistryStore := manager.GetNodeRegistryStore()
+		if nodeRegistryStore == nil {
+			t.Fatal("NodeRegistryStore should not be nil for the SQLite provider")
+		}
+
 		if err := manager.Close(); err != nil {
 			t.Fatalf("manager.Close() failed: %v", err)
 		}
 		if err := routingStore.RecordConnection(ctx, "steward-after-close", "node-1"); err == nil {
 			t.Fatal("expected RecordConnection to fail after manager.Close(), routing store's DB handle was not closed")
+		}
+		if err := nodeRegistryStore.RegisterNode(ctx, business.NodeRecord{ID: "node-after-close", Address: "127.0.0.1:1"}); err == nil {
+			t.Fatal("expected RegisterNode to fail after manager.Close(), node registry store's DB handle was not closed")
 		}
 	})
 

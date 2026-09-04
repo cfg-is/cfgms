@@ -1074,6 +1074,7 @@ func (sm *StorageManager) Close() error {
 		sm.nonceStore,
 		sm.leaseStore,
 		sm.routingStore,
+		sm.nodeRegistryStore,
 	}
 	var firstErr error
 	for _, s := range slots {
