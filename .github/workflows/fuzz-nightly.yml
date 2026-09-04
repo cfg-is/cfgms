@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.27.0'
+  GO_VERSION: '1.27.1'
   FUZZTIME: 60s
 
 # Deny by default at the workflow level; each job re-grants only what it needs.

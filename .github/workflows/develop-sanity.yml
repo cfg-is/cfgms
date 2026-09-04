@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 env:
-  GO_VERSION: '1.27.0'
+  GO_VERSION: '1.27.1'
 
 jobs:
   build-sanity:
