@@ -93,12 +93,59 @@ func rlsSetupStewardRecords(t *testing.T, db *sql.DB) string {
 		require.NoError(t, tx.Commit())
 	}
 
-	// A non-superuser role is mandatory: superusers ignore RLS, so a superuser
-	// connection cannot distinguish the fixed policy from the broken one.
+	return provisionStewardRecordsProbeRole(t, db)
+}
+
+// provisionStewardRecordsProbeRole creates (or re-provisions) a dedicated
+// non-superuser role that can read/write steward_records and returns a DSN for
+// it. A non-superuser role is mandatory: superusers ignore RLS — even under
+// FORCE ROW LEVEL SECURITY — so a superuser connection cannot distinguish the
+// fixed policy from the broken one, or the enforced policy from an unenforced
+// one.
+//
+// The role is granted USAGE on whatever schema steward_records actually
+// resolves to under db's search_path, and its own search_path is pinned to
+// match. This matters because test/sql/01-init-test-db.sql pins the test
+// database's bootstrap role to a non-default search_path
+// (`cfgms_test,public`) for its own isolation purposes, which — as an
+// unqualified `CREATE TABLE IF NOT EXISTS` always targets the first schema on
+// the creator's search_path — means steward_records lives in `cfgms_test`, not
+// `public`, in that environment. A freshly created role defaults to
+// `"$user",public` and cannot resolve the unqualified table name at all,
+// producing "relation does not exist" rather than a permission error.
+// Production carries no such override (lab-datasvc-bootstrap.sh creates the
+// service role with no ALTER ROLE ... SET search_path), so this is a
+// test-infrastructure artifact, not a production gap — but the probe role must
+// still match whatever schema this test run's table actually landed in.
+func provisionStewardRecordsProbeRole(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	ctx := context.Background()
+
+	var schemaName string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT n.nspname FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = 'steward_records'
+		ORDER BY array_position(current_schemas(false), n.nspname)
+		LIMIT 1`).Scan(&schemaName),
+		"must resolve the schema steward_records actually lives in")
+	schemaIdent := pq.QuoteIdentifier(schemaName)
+
+	// Best-effort: a role left over from an interrupted prior run (or a
+	// persisted test-database volume) may still hold grants that block
+	// DROP ROLE with "cannot be dropped because some objects depend on it"
+	// (2BP01). DROP OWNED BY strips every privilege the role holds in this
+	// database — including the schema USAGE and table grants below — before
+	// we try to drop it. Ignore the error: it fails with "role does not
+	// exist" on a first-ever run, which is the common case.
+	_, _ = db.ExecContext(ctx, fmt.Sprintf(`DROP OWNED BY %s`, rlsTestRole))
+
 	cfg := getTestConfig()
 	for _, stmt := range []string{
 		fmt.Sprintf(`DROP ROLE IF EXISTS %s`, rlsTestRole),
 		fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s'`, rlsTestRole, rlsTestPassword),
+		fmt.Sprintf(`ALTER ROLE %s SET search_path = %s, public`, rlsTestRole, schemaIdent),
+		fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`, schemaIdent, rlsTestRole),
 		fmt.Sprintf(`GRANT SELECT, INSERT ON steward_records TO %s`, rlsTestRole),
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -106,8 +153,9 @@ func rlsSetupStewardRecords(t *testing.T, db *sql.DB) string {
 		}
 	}
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), fmt.Sprintf(`REVOKE ALL ON steward_records FROM %s`, rlsTestRole))
-		_, _ = db.ExecContext(context.Background(), fmt.Sprintf(`DROP ROLE IF EXISTS %s`, rlsTestRole))
+		cleanupCtx := context.Background()
+		_, _ = db.ExecContext(cleanupCtx, fmt.Sprintf(`DROP OWNED BY %s`, rlsTestRole))
+		_, _ = db.ExecContext(cleanupCtx, fmt.Sprintf(`DROP ROLE IF EXISTS %s`, rlsTestRole))
 	})
 
 	return fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=%s",

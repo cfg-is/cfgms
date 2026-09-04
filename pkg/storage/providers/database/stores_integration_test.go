@@ -7,10 +7,12 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -454,6 +456,14 @@ func TestDatabaseStewardStore_GetStewardsSeen(t *testing.T) {
 // TestDatabaseStewardStore_CrossTenantIsolation verifies that the steward_records RLS policy
 // (FORCE ROW LEVEL SECURITY, rls_read FOR SELECT) enforces per-tenant visibility when
 // app.current_tenant is set inside a transaction via set_config.
+//
+// Reads run through a dedicated non-superuser probe role (provisionStewardRecordsProbeRole,
+// shared with rls_unscoped_read_test.go), not through store.db. store.db connects as the
+// database's owning role, which in this test environment is the Postgres bootstrap
+// superuser (POSTGRES_USER) — and superusers bypass row-level security unconditionally,
+// even under FORCE ROW LEVEL SECURITY. A query issued through store.db would therefore see
+// every row regardless of whether the RLS policy is correct, enforced, or even present,
+// silently passing against a real cross-tenant leak.
 func TestDatabaseStewardStore_CrossTenantIsolation(t *testing.T) {
 	store := newTestStewardStore(t)
 	ctx := context.Background()
@@ -463,57 +473,65 @@ func TestDatabaseStewardStore_CrossTenantIsolation(t *testing.T) {
 	require.NoError(t, store.RegisterSteward(ctx, recA))
 	require.NoError(t, store.RegisterSteward(ctx, recB))
 
-	// Without tenant context (empty string), the permissive RLS read policy shows all rows.
-	all, err := store.ListStewardsByStatus(ctx, business.StewardStatusRegistered)
+	probeDSN := provisionStewardRecordsProbeRole(t, store.db)
+	probe, err := sql.Open("postgres", probeDSN)
 	require.NoError(t, err)
-	ids := make(map[string]bool)
-	for _, r := range all {
-		ids[r.ID] = true
-	}
-	assert.True(t, ids["iso-sw-a"], "no-context query must see tenant-a steward")
-	assert.True(t, ids["iso-sw-b"], "no-context query must see tenant-b steward")
+	defer func() { _ = probe.Close() }()
+	// One underlying connection only, so app.current_tenant state below is deterministic
+	// (see rls_unscoped_read_test.go for why a shared pooled connection is unsafe here).
+	probe.SetMaxOpenConns(1)
+	require.NoError(t, probe.Ping())
+
+	// Without tenant context, the permissive rls_read branch shows all rows. This must run
+	// before any set_config call on this connection: current_setting() only reports NULL
+	// (the permissive branch) on a connection that has never set the GUC.
+	unscoped := crossTenantIsolationVisibleIDs(t, probe, nil)
+	assert.True(t, unscoped["iso-sw-a"], "no-context query must see tenant-a steward")
+	assert.True(t, unscoped["iso-sw-b"], "no-context query must see tenant-b steward")
 
 	// With tenant A context set in a tx, the rls_read policy filters to tenant A only.
-	txA, err := store.db.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	defer func() { _ = txA.Rollback() }()
-	require.NoError(t, setTenantLocal(ctx, txA, "tenant-sw-iso-a"))
-	rowsA, err := txA.QueryContext(ctx,
-		`SELECT id FROM steward_records WHERE status = $1`,
-		string(business.StewardStatusRegistered))
-	require.NoError(t, err)
-	defer func() { _ = rowsA.Close() }()
-	var tenantAVisible []string
-	for rowsA.Next() {
-		var id string
-		require.NoError(t, rowsA.Scan(&id))
-		tenantAVisible = append(tenantAVisible, id)
-	}
-	require.NoError(t, rowsA.Err())
-	assert.Contains(t, tenantAVisible, "iso-sw-a", "tenant A must see its own steward")
-	assert.NotContains(t, tenantAVisible, "iso-sw-b", "tenant A must not see tenant B steward (RLS)")
-	require.NoError(t, txA.Commit())
+	tenantA := "tenant-sw-iso-a"
+	visibleA := crossTenantIsolationVisibleIDs(t, probe, &tenantA)
+	assert.True(t, visibleA["iso-sw-a"], "tenant A must see its own steward")
+	assert.False(t, visibleA["iso-sw-b"], "tenant A must not see tenant B steward (RLS)")
 
 	// With tenant B context set in a tx, only tenant B's steward is visible.
-	txB, err := store.db.BeginTx(ctx, nil)
+	tenantB := "tenant-sw-iso-b"
+	visibleB := crossTenantIsolationVisibleIDs(t, probe, &tenantB)
+	assert.True(t, visibleB["iso-sw-b"], "tenant B must see its own steward")
+	assert.False(t, visibleB["iso-sw-a"], "tenant B must not see tenant A steward (RLS)")
+}
+
+// crossTenantIsolationVisibleIDs runs the registered-status steward query used by
+// TestDatabaseStewardStore_CrossTenantIsolation against probe, optionally scoping the
+// transaction to tenant via set_config first, and returns the set of visible steward IDs
+// among this test's own fixture rows.
+func crossTenantIsolationVisibleIDs(t *testing.T, probe *sql.DB, tenant *string) map[string]bool {
+	t.Helper()
+	ctx := context.Background()
+
+	tx, err := probe.BeginTx(ctx, nil)
 	require.NoError(t, err)
-	defer func() { _ = txB.Rollback() }()
-	require.NoError(t, setTenantLocal(ctx, txB, "tenant-sw-iso-b"))
-	rowsB, err := txB.QueryContext(ctx,
-		`SELECT id FROM steward_records WHERE status = $1`,
-		string(business.StewardStatusRegistered))
-	require.NoError(t, err)
-	defer func() { _ = rowsB.Close() }()
-	var tenantBVisible []string
-	for rowsB.Next() {
-		var id string
-		require.NoError(t, rowsB.Scan(&id))
-		tenantBVisible = append(tenantBVisible, id)
+	defer func() { _ = tx.Rollback() }()
+	if tenant != nil {
+		require.NoError(t, setTenantLocal(ctx, tx, *tenant))
 	}
-	require.NoError(t, rowsB.Err())
-	assert.Contains(t, tenantBVisible, "iso-sw-b", "tenant B must see its own steward")
-	assert.NotContains(t, tenantBVisible, "iso-sw-a", "tenant B must not see tenant A steward (RLS)")
-	require.NoError(t, txB.Commit())
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM steward_records WHERE status = $1 AND id = ANY($2)`,
+		string(business.StewardStatusRegistered), pq.Array([]string{"iso-sw-a", "iso-sw-b"}))
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	visible := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		visible[id] = true
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, tx.Commit())
+	return visible
 }
 
 // ── command store tests ───────────────────────────────────────────────────────
