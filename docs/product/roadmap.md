@@ -408,7 +408,7 @@ Opened after this document's 2026-07-21 pass; not yet placed in a named mileston
 - [x] Epic #2931 — WebAuthn step-up (implements #2737 for the web session): gives a password-authenticated web operator a path to `AssuranceStrong` so privileged enrollment/fleet actions stop 401'ing with `WWW-Authenticate: CFGMS-StepUp`
 - [x] Epic #2890 — Capability-driven observe DNA (ADR-024): decouples DNA observation from convergence so a steward reports rich state for everything it can see, not only what it's told to manage. `twin`
 - [x] Epic #2911 — DNA clean-break: `commonpb.DNA.attributes` removed (Issue #3331); retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
-- [ ] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
+- [x] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
 
 #### v0.11.0 - Outpost Foundation
 
