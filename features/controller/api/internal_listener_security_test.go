@@ -9,26 +9,6 @@ import (
 	"time"
 )
 
-func TestPublicRouterDoesNotExposeRaftMessages(t *testing.T) {
-	s := setupRouteTestServer(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/raft/message", nil)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	rec := httptest.NewRecorder()
-	s.router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("public Raft route returned %d, want 404", rec.Code)
-	}
-
-	internalReq := httptest.NewRequest(http.MethodPost, "/raft/message", nil)
-	internalReq.Header.Set("Content-Type", "application/octet-stream")
-	internalRec := httptest.NewRecorder()
-	s.internalRouter.ServeHTTP(internalRec, internalReq)
-	if internalRec.Code == http.StatusNotFound {
-		t.Fatal("private Raft router does not contain the Raft message endpoint")
-	}
-}
-
 func TestPrivateListenAddressValidation(t *testing.T) {
 	t.Parallel()
 

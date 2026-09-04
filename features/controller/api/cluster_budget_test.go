@@ -35,7 +35,7 @@ func TestClusterBudgetDivisor_ReflectsDeploymentShape(t *testing.T) {
 		cfg := ha.DefaultConfig()
 		cfg.Mode = ha.BlueGreenMode
 		cfg.Node.ID = "test-bluegreen-node"
-		manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+		manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil)
 		require.NoError(t, err)
 		t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 

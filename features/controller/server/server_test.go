@@ -27,22 +27,6 @@ import (
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
-// newTestCertManager creates a real cert.Manager for tests that exercise cluster mode,
-// which requires a cert manager to generate the mTLS peer transport certificate.
-func newTestCertManager(t *testing.T) *cert.Manager {
-	t.Helper()
-	mgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "CFGMS Server Test",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
-	return mgr
-}
-
 // testNonClusterProvider implements interfaces.StorageProvider with ClusterCapable() == false.
 // All store factory methods return business.ErrNotSupported. Used to verify that
 // assertClusterBackendsReady rejects non-cluster-capable backends.
@@ -420,7 +404,7 @@ func TestInitializeHAManager_UsesDefaultConfig(t *testing.T) {
 	require.NotNil(t, haManager, "HA manager must be initialized")
 
 	// Single-server mode: always the leader, node ID auto-generated.
-	assert.True(t, haManager.IsLeader(), "single-server node must always be leader")
+	assert.True(t, haManager.HasLeadership(), "single-server node must always be leader")
 
 	node := haManager.GetLocalNode()
 	require.NotNil(t, node)
@@ -446,7 +430,7 @@ func TestInitializeHAManager_UsesConfigMode(t *testing.T) {
 		},
 	}
 
-	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.NoError(t, err, "initializeHAManager must succeed with ha.mode=cluster and CFGMS_NODE_ID set")
 	require.NotNil(t, haManager)
 	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
@@ -485,7 +469,7 @@ func TestInitializeHAManager_ClusterModeRequiresLeaseStore(t *testing.T) {
 	// A nil storage manager supplies no lease store — the same condition an
 	// operator hits with a storage provider that does not implement
 	// interfaces.LeaseStoreCreator.
-	_, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil, newTestCertManager(t), "")
+	_, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil)
 	require.Error(t, err, "cluster mode must not start without a leadership lease store")
 	assert.Contains(t, err.Error(), "requires a leadership lease store",
 		"error must name the missing substrate so an operator can act on it")
@@ -501,7 +485,7 @@ func TestInitializeHAManager_SingleServerModeNeedsNoLeaseStore(t *testing.T) {
 		},
 	}
 
-	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), nil)
 	require.NoError(t, err, "SingleServerMode must not require a lease store")
 	require.NotNil(t, haManager)
 	t.Cleanup(func() { _ = haManager.Stop(context.Background()) })
@@ -564,7 +548,7 @@ func TestInitializeHAManager_ClusterModeRejectsNodeLocalLeaseStore(t *testing.T)
 
 	cfg := &config.Config{HA: &config.HAConfig{Mode: "cluster"}}
 
-	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.Error(t, err, "cluster mode must refuse a node-local leadership lease substrate")
 	assert.Contains(t, err.Error(), "node-local lease store",
 		"error must name the substrate defect")
@@ -590,7 +574,7 @@ func TestInitializeHAManager_EnvClusterModeWithNodeLocalTierRefused(t *testing.T
 	// cfg.HA.Mode is "single", so server.New composed the node-local tier above.
 	cfg := &config.Config{HA: &config.HAConfig{Mode: "single"}}
 
-	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.Error(t, err,
 		"an env-promoted cluster mode running on the node-local storage tier must be refused")
 	assert.Contains(t, err.Error(), "node-local lease store")
@@ -611,7 +595,7 @@ func TestInitializeHAManager_BlueGreenModeHasNoLeaseAuthority(t *testing.T) {
 
 	cfg := &config.Config{HA: &config.HAConfig{Mode: "blue-green"}}
 
-	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm, newTestCertManager(t), "")
+	haManager, err := initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.NoError(t, err, "blue-green must still start on the node-local storage tier")
 	require.NotNil(t, haManager)
 	assert.Equal(t, ha.BlueGreenMode, haManager.GetDeploymentMode())
@@ -650,7 +634,7 @@ func TestInitializeHAManager_InvalidMode(t *testing.T) {
 		},
 	}
 
-	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm, nil, "")
+	_, err = initializeHAManager(cfg, logging.NewNoopLogger(), sm)
 	require.Error(t, err, "initializeHAManager must return error for invalid ha.mode")
 	assert.Contains(t, err.Error(), "invalid HA mode",
 		"error must identify the bad mode string")

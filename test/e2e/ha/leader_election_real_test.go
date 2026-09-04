@@ -9,44 +9,55 @@
 // established (cfgms-ctrl-01, cfgms-ha-node2, cfgms-ha-node3; see
 // docs/testing/controller-ha-real-cluster-runbook.md §3).
 //
+// Rewritten for Issue #3763 (ADR-031 Decision 5): leadership is no longer a
+// Raft protocol property polled from GET /api/v1/raft/status (deleted along
+// with the Raft transport it depended on). This suite now polls
+// GET /api/v1/ha/status (is_leader, lease-backed via pkg/lease) and
+// GET /api/v1/ha/leader (the current lease holder's node ID) — the same
+// admission primitive HasLeadership() exposes in-process, over HTTP.
+//
 // Unlike test/integration/ha's Docker-Compose suite (local containers,
 // FastElectionConfig-adjacent timing), this suite drives the real hosts over
-// the network: mTLS admin REST calls to GET /api/v1/raft/status on all 3
-// nodes, SSH to abruptly kill the leader's controller process, and remote
-// Hyper-V PowerShell to power off the leader's VM outright. It measures both
-// failure modes' real wall-clock re-election time against production
-// defaults (pkg/ha.DefaultConfig: ElectionTimeout 10s, HeartbeatInterval 2s
-// — this suite deliberately does NOT use FastElectionConfig, which exists
-// only to keep CPU-contended unit tests fast and would invalidate the
-// real-world comparison this suite exists to produce).
+// the network: mTLS admin REST calls to GET /api/v1/ha/status and
+// GET /api/v1/ha/leader on all 3 nodes, SSH to abruptly kill the leader's
+// controller process, and remote Hyper-V PowerShell to power off the leader's
+// VM outright. It measures both failure modes' real wall-clock re-election
+// time against production defaults (pkg/ha.DefaultConfig: ElectionTimeout
+// 10s, HeartbeatInterval 2s — this suite deliberately does NOT use
+// FastElectionConfig, which exists only to keep CPU-contended unit tests fast
+// and would invalidate the real-world comparison this suite exists to
+// produce). ElectionTimeout still governs the derived lease TTL
+// (ClusterConfig.LeaseDuration, ADR-029 Decision 1), so it remains the
+// correct knob for this comparison post-cutover.
 //
 // Safety (this cluster serves the real lab fleet — see the story's
 // Constraints): every kill is preceded by a live 3-way leader-agreement
-// check (proving quorum is currently healthy) and only ever removes ONE of
-// the 3 nodes, which cannot drop the cluster below pkg/ha.DefaultConfig's
-// MinQuorum of 2. Recovery is the delicate part: pkg/ha's Raft state is
-// entirely raft.MemoryStorage (never persisted to disk — runbook §3), so a
-// killed node that comes back while its two peers are still running
-// re-bootstraps as a fresh, self-elected single-node cluster and can
-// diverge/panic a peer that later tries to reconcile logs with it
-// (reproduced live during #3130: "panic: tocommit(4) is out of range
-// [lastIndex(3)]"). This suite never restarts a node solo: haRestoreQuorum
-// always stops the still-running peers first, brings the downed node back,
-// then starts the peers together — the same stop-all/start-all discipline
-// #3130's rollback drill used. The controller process's Restart=on-failure
-// systemd property (RestartSec=5) is also a landmine here — an unattended
-// kill would auto-respawn the node mid-test, 5 seconds into the very window
-// this suite is measuring, hitting the same solo-restart divergence risk
-// with no operator awareness. `systemctl set-property Restart=...` turned out
-// NOT to be settable at runtime on this unit (verified live against systemd
-// 257: "Cannot set property Restart, or unknown property" — Restart=
-// governs process lifecycle, not resource control, and isn't in the D-Bus
-// runtime-settable set), so haKillProcess instead races RestartSec's 5s
-// window directly: the SIGKILL and a `systemctl stop` are sent back-to-back
-// over one SSH connection, well inside 5s — `systemctl stop` cancels any
-// pending auto-restart job regardless of the unit's current state. This is a
-// genuine operational gap this story surfaces, not a simulation artifact —
-// see the runbook appendix this suite feeds.
+// check (proving the lease mechanism is currently healthy) and only ever
+// removes ONE of the 3 nodes, which cannot drop the cluster below
+// pkg/ha.DefaultConfig's MinQuorum of 2 — MinQuorum/ExpectedSize no longer
+// gate anything Raft-specific, but remain the config's own recorded cluster
+// size expectation. Recovery no longer carries the Raft-era divergence risk
+// this file used to document at length (a killed node's persisted Raft WAL
+// and ConfState could conflict with a still-running peer's log): the lease
+// substrate is the shared database, not node-local state, so a restarted
+// node simply resumes contending for the lease and re-registers itself in
+// the shared node registry (Issue #3763) — there is no log to diverge. This
+// suite keeps the conservative stop-all/start-all discipline in
+// haRestoreQuorum anyway, since it remains safe and this suite has no live
+// lab access to re-validate that a simpler solo-restart is equally safe.
+// The controller process's Restart=on-failure systemd property (RestartSec=5)
+// is also a landmine here — an unattended kill would auto-respawn the node
+// mid-test, 5 seconds into the very window this suite is measuring.
+// `systemctl set-property Restart=...` turned out NOT to be settable at
+// runtime on this unit (verified live against systemd 257: "Cannot set
+// property Restart, or unknown property" — Restart= governs process
+// lifecycle, not resource control, and isn't in the D-Bus runtime-settable
+// set), so haKillProcess instead races RestartSec's 5s window directly: the
+// SIGKILL and a `systemctl stop` are sent back-to-back over one SSH
+// connection, well inside 5s — `systemctl stop` cancels any pending
+// auto-restart job regardless of the unit's current state. This is a genuine
+// operational gap this story surfaces, not a simulation artifact — see the
+// runbook appendix this suite feeds.
 //
 // The suite is excluded from CI and `make test-complete` by the e2e build
 // tag, and skips cleanly when CFGMS_E2E_HA_CLUSTER_NODES is unset, following
@@ -83,8 +94,8 @@ import (
 // Optional:
 //
 //	CFGMS_E2E_HA_ADMIN_BUNDLE    path to the admin.bundle.yaml mTLS credential
-//	                             used for GET /api/v1/raft/status and
-//	                             /api/v1/stewards (default: platform admin
+//	                             used for GET /api/v1/ha/status, /api/v1/ha/leader
+//	                             and /api/v1/stewards (default: platform admin
 //	                             bundle path, matching cmd/cfg/cmd's own
 //	                             default lookup for a user-level bundle).
 //	CFGMS_E2E_HA_SSH_KEY         private key for reaching the node VMs
@@ -228,90 +239,113 @@ func getenvDefault(key, def string) string {
 	return def
 }
 
-// ─── raft/status polling ────────────────────────────────────────────────────
+// ─── ha/status and ha/leader polling ────────────────────────────────────────
 
-// haRaftStatus mirrors pkg/ha/raft_transport.go's raftStatusResponse. Fields
-// are concretely typed (not interface{}), so encoding/json preserves full
-// uint64 precision for the FNV node-ID hashes — the same precision-loss bug
-// class #3130 found and fixed (RaftCommand.Data) does not apply here because
-// this decodes directly into typed struct fields, never through interface{}.
-type haRaftStatus struct {
-	NodeID   uint64 `json:"node_id"`
+// haStatus mirrors features/controller/api/handlers_ha.go's HAStatusResponse
+// — the lease-backed status surface (ADR-031 Decision 5) that replaced the
+// deleted Raft-protocol raftStatusResponse (Issue #3763).
+type haStatus struct {
+	NodeID   string `json:"node_id"`
 	IsLeader bool   `json:"is_leader"`
-	Leader   uint64 `json:"leader"`
-	Term     uint64 `json:"term"`
-	Nodes    int    `json:"nodes"`
 }
 
-func haGetRaftStatus(ctx context.Context, client *http.Client, baseURL string) (haRaftStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/raft/status", nil)
+func haGetStatus(ctx context.Context, client *http.Client, baseURL string) (haStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/ha/status", nil)
 	if err != nil {
-		return haRaftStatus{}, err
+		return haStatus{}, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return haRaftStatus{}, err
+		return haStatus{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return haRaftStatus{}, fmt.Errorf("raft/status %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
+		return haStatus{}, fmt.Errorf("ha/status %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
 	}
-	var st haRaftStatus
+	var st haStatus
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		return haRaftStatus{}, err
+		return haStatus{}, err
 	}
 	return st, nil
 }
 
-// haWaitForAgreement polls urls until every one of them reports the SAME
-// nonzero leader that is not notLeader (the prior leader, when re-electing
-// after a kill — pass 0 for "no exclusion" on an initial baseline check).
-// A url that errors (e.g. the node just killed, briefly unreachable during a
-// VM stop) is simply not counted this poll — only currently-reachable nodes
-// need to agree, and all of urls must be reachable and agreeing to succeed.
-// Returns the agreed leader's raft node ID and elapsed wall-clock time.
-func haWaitForAgreement(ctx context.Context, t *testing.T, client *http.Client, urls []string, notLeader uint64, bound time.Duration) (uint64, time.Duration) {
+// haLeader mirrors features/controller/api/handlers_ha.go's HALeaderResponse.
+type haLeader struct {
+	NodeID string `json:"node_id"`
+	Health string `json:"health"`
+}
+
+func haGetLeaderID(ctx context.Context, client *http.Client, baseURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/ha/leader", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("ha/leader %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
+	}
+	var l haLeader
+	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
+		return "", err
+	}
+	return l.NodeID, nil
+}
+
+// haWaitForAgreement polls urls until every one of them reports (via
+// GET /api/v1/ha/leader) the SAME non-empty leader node ID that is not
+// notLeader (the prior leader, when re-electing after a kill — pass "" for
+// "no exclusion" on an initial baseline check). A url that errors (e.g. the
+// node just killed, briefly unreachable during a VM stop) is simply not
+// counted this poll — only currently-reachable nodes need to agree, and all
+// of urls must be reachable and agreeing to succeed. Returns the agreed
+// leader's node ID and elapsed wall-clock time.
+func haWaitForAgreement(ctx context.Context, t *testing.T, client *http.Client, urls []string, notLeader string, bound time.Duration) (string, time.Duration) {
 	t.Helper()
 	start := time.Now()
 	deadline := start.Add(bound)
 	for time.Now().Before(deadline) {
-		leader := uint64(0)
+		leader := ""
 		agree := true
 		seen := 0
 		for _, u := range urls {
-			st, err := haGetRaftStatus(ctx, client, u)
+			id, err := haGetLeaderID(ctx, client, u)
 			if err != nil {
 				agree = false
 				continue
 			}
 			seen++
-			if st.Leader == 0 || st.Leader == notLeader {
+			if id == "" || id == notLeader {
 				agree = false
 				continue
 			}
-			if leader == 0 {
-				leader = st.Leader
-			} else if leader != st.Leader {
+			if leader == "" {
+				leader = id
+			} else if leader != id {
 				agree = false
 			}
 		}
-		if agree && seen == len(urls) && leader != 0 {
+		if agree && seen == len(urls) && leader != "" {
 			return leader, time.Since(start)
 		}
 		time.Sleep(haPollInterval)
 	}
-	t.Fatalf("no leader agreement among %v within %v (excluding prior leader %d)", urls, bound, notLeader)
-	return 0, 0
+	t.Fatalf("no leader agreement among %v within %v (excluding prior leader %q)", urls, bound, notLeader)
+	return "", 0
 }
 
-// haNodeIndexByRaftID finds which nodes[] entry currently reports raftID as
-// its OWN node_id, resolving a raft node ID (opaque FNV hash) back to the
+// haNodeIndexByID finds which nodes[] entry currently reports id as its OWN
+// node_id via GET /api/v1/ha/status, resolving a leader node ID back to the
 // concrete node identity (SSH host, VM name) the rest of this suite acts on.
-func haNodeIndexByRaftID(ctx context.Context, client *http.Client, nodes []haNode, raftID uint64) int {
+func haNodeIndexByID(ctx context.Context, client *http.Client, nodes []haNode, id string) int {
 	for i, n := range nodes {
-		st, err := haGetRaftStatus(ctx, client, n.adminURL)
-		if err == nil && st.NodeID == raftID {
+		st, err := haGetStatus(ctx, client, n.adminURL)
+		if err == nil && st.NodeID == id {
 			return i
 		}
 	}
@@ -439,8 +473,8 @@ func haWaitSSHReachable(t *testing.T, host string, bound time.Duration) {
 // runtime-settable set), so this instead races RestartSec=5s directly: the
 // kill and a `systemctl stop` are sent back-to-back over one SSH connection,
 // well inside the 5s window. `systemctl stop` cancels any pending auto-
-// restart job regardless of unit state, which is what actually prevents the
-// solo-restart divergence risk documented in the package doc comment.
+// restart job regardless of unit state, which is what actually prevents an
+// unattended mid-test respawn.
 func haKillProcess(t *testing.T, node haNode) {
 	t.Helper()
 	_, err := haSSHRun(node.sshHost, "sudo -n systemctl kill --kill-who=main -s SIGKILL cfgms-controller.service; sudo -n systemctl stop cfgms-controller.service")
@@ -448,25 +482,23 @@ func haKillProcess(t *testing.T, node haNode) {
 }
 
 // haRestoreQuorum is the only safe way this suite brings a solo-downed node
-// back into a live quorum: stop the still-running peers first, discard every
-// node's persisted Raft WAL, bring the downed node back via bringUp, then
-// start the peers together.
+// back into a live quorum: stop the still-running peers first, bring the
+// downed node back via bringUp, then start the peers together.
 //
-// The stop-all/start-all discipline is because a node that rejoins while its
-// peers keep running can diverge instead of catching up cleanly.
-//
-// This helper used to also delete every node's persisted Raft WAL, because a
-// restarted node came back with an empty voter set ("newRaft <id> [peers: [],
-// term: N, ...]") and no election ever happened — GET /api/v1/raft/status
-// reported leader 0 forever. Reproduced deterministically on the real cfg-lab
-// cluster on 2026-08-20 (story #3096, runbook §6), twice, with terms diverging
-// between nodes.
-//
-// Issue #3479 fixed that at the source: the Raft ConfState is now persisted and
-// restored, with the configured peer list healing stores written before the fix.
-// A restart re-forms quorum on its own, so the wipe has been removed — it
-// destroyed the very log #3284 added, and would now mask a regression in the
-// restore path rather than working around a known defect.
+// This stop-all/start-all discipline dates from the Raft era, when a node
+// that rejoined while its peers kept running could diverge from their
+// persisted Raft log and panic a peer trying to reconcile with it
+// (reproduced live during #3130: "panic: tocommit(4) is out of range
+// [lastIndex(3)]", fixed at the ConfState-persistence layer by #3479).
+// Issue #3763 deleted Raft (and the WAL/ConfState it required) outright:
+// leadership is now the shared database lease (ADR-031 Decision 5), and
+// cluster membership is the shared node registry — neither is node-local
+// state a restarted node could diverge from, so the divergence risk this
+// discipline defended against no longer exists. It is kept anyway as the
+// conservative default: this suite has no live lab access to re-validate
+// that a simpler solo-restart is equally safe, and the stop-all/start-all
+// sequence remains a safe (if now more cautious than strictly necessary)
+// way to restore quorum.
 func haRestoreQuorum(t *testing.T, allNodes []haNode, downIdx int, bringUp func()) {
 	t.Helper()
 	var up []haNode
@@ -543,14 +575,14 @@ func haStartVMHost(t *testing.T, node haNode) {
 // ─── AC (REQUIRED): baseline leader agreement ──────────────────────────────
 
 // TestRealClusterLeaderAgreement (REQUIRED, #3094) — all 3 real nodes agree
-// on the same leader via GET /api/v1/raft/status under normal operation.
+// on the same leader via GET /api/v1/ha/leader under normal operation.
 func TestRealClusterLeaderAgreement(t *testing.T) {
 	nodes, client := haSetup(t)
 	ctx := context.Background()
 	urls := haURLs(nodes)
 
-	leader, elapsed := haWaitForAgreement(ctx, t, client, urls, 0, 30*time.Second)
-	t.Logf("all %d real nodes agree on leader node_id=%d (confirmed in %v)", len(urls), leader, elapsed)
+	leader, elapsed := haWaitForAgreement(ctx, t, client, urls, "", 30*time.Second)
+	t.Logf("all %d real nodes agree on leader node_id=%s (confirmed in %v)", len(urls), leader, elapsed)
 }
 
 // ─── AC (REQUIRED): process-kill failover ──────────────────────────────────
@@ -564,11 +596,11 @@ func TestRealClusterFailover_ProcessKilled(t *testing.T) {
 	ctx := context.Background()
 	urls := haURLs(nodes)
 
-	initialLeader, _ := haWaitForAgreement(ctx, t, client, urls, 0, 30*time.Second)
-	leaderIdx := haNodeIndexByRaftID(ctx, client, nodes, initialLeader)
-	require.GreaterOrEqual(t, leaderIdx, 0, "must resolve which node URL currently holds raft leader %d", initialLeader)
+	initialLeader, _ := haWaitForAgreement(ctx, t, client, urls, "", 30*time.Second)
+	leaderIdx := haNodeIndexByID(ctx, client, nodes, initialLeader)
+	require.GreaterOrEqual(t, leaderIdx, 0, "must resolve which node URL currently holds lease-backed leadership %q", initialLeader)
 	leaderNode := nodes[leaderIdx]
-	t.Logf("current leader: node_id=%d (%s / %s)", initialLeader, leaderNode.adminURL, leaderNode.sshHost)
+	t.Logf("current leader: node_id=%s (%s / %s)", initialLeader, leaderNode.adminURL, leaderNode.sshHost)
 
 	// Quorum-safety constraint: a healthy 3-way agreement (just confirmed above)
 	// with MinQuorum=2 (pkg/ha.DefaultConfig) means killing exactly ONE node
@@ -587,12 +619,12 @@ func TestRealClusterFailover_ProcessKilled(t *testing.T) {
 			_, err := haSSHRun(leaderNode.sshHost, "sudo -n systemctl start cfgms-controller.service")
 			assert.NoError(t, err, "restart killed leader %s during cleanup", leaderNode.sshHost)
 		})
-		finalLeader, elapsed := haWaitForAgreement(ctx, t, client, urls, 0, 90*time.Second)
-		t.Logf("post-test quorum restored: all 3 nodes agree on leader node_id=%d (%v after restart)", finalLeader, elapsed)
+		finalLeader, elapsed := haWaitForAgreement(ctx, t, client, urls, "", 90*time.Second)
+		t.Logf("post-test quorum restored: all 3 nodes agree on leader node_id=%s (%v after restart)", finalLeader, elapsed)
 	})
 
 	newLeader, elapsed := haWaitForAgreement(ctx, t, client, remaining, initialLeader, haFailoverBound)
-	t.Logf("PROCESS-KILL FAILOVER: remaining %d nodes converged on new leader node_id=%d in %v (bound %v)", len(remaining), newLeader, elapsed, haFailoverBound)
+	t.Logf("PROCESS-KILL FAILOVER: remaining %d nodes converged on new leader node_id=%s in %v (bound %v)", len(remaining), newLeader, elapsed, haFailoverBound)
 	assert.NotEqual(t, initialLeader, newLeader, "new leader must differ from the killed leader")
 
 	after := haFleetHealth(client, remaining)
@@ -613,11 +645,11 @@ func TestRealClusterFailover_HostKilled(t *testing.T) {
 	ctx := context.Background()
 	urls := haURLs(nodes)
 
-	initialLeader, _ := haWaitForAgreement(ctx, t, client, urls, 0, 30*time.Second)
-	leaderIdx := haNodeIndexByRaftID(ctx, client, nodes, initialLeader)
-	require.GreaterOrEqual(t, leaderIdx, 0, "must resolve which node URL currently holds raft leader %d", initialLeader)
+	initialLeader, _ := haWaitForAgreement(ctx, t, client, urls, "", 30*time.Second)
+	leaderIdx := haNodeIndexByID(ctx, client, nodes, initialLeader)
+	require.GreaterOrEqual(t, leaderIdx, 0, "must resolve which node URL currently holds lease-backed leadership %q", initialLeader)
 	leaderNode := nodes[leaderIdx]
-	t.Logf("current leader: node_id=%d (%s / VM %s on %s)", initialLeader, leaderNode.adminURL, leaderNode.vmName, leaderNode.hvHost)
+	t.Logf("current leader: node_id=%s (%s / VM %s on %s)", initialLeader, leaderNode.adminURL, leaderNode.vmName, leaderNode.hvHost)
 
 	remaining := haExcept(urls, leaderNode.adminURL)
 	require.Len(t, remaining, 2, "exactly 2 nodes must remain after excluding the leader")
@@ -634,12 +666,12 @@ func TestRealClusterFailover_HostKilled(t *testing.T) {
 			_, err := haSSHRun(leaderNode.sshHost, "sudo -n systemctl start cfgms-controller.service")
 			assert.NoError(t, err, "restart controller on %s during cleanup", leaderNode.sshHost)
 		})
-		finalLeader, elapsed := haWaitForAgreement(ctx, t, client, urls, 0, 90*time.Second)
-		t.Logf("post-test quorum restored: all 3 nodes agree on leader node_id=%d (%v after VM restart)", finalLeader, elapsed)
+		finalLeader, elapsed := haWaitForAgreement(ctx, t, client, urls, "", 90*time.Second)
+		t.Logf("post-test quorum restored: all 3 nodes agree on leader node_id=%s (%v after VM restart)", finalLeader, elapsed)
 	})
 
 	newLeader, elapsed := haWaitForAgreement(ctx, t, client, remaining, initialLeader, haFailoverBound)
-	t.Logf("HOST-KILL FAILOVER: remaining %d nodes converged on new leader node_id=%d in %v (bound %v)", len(remaining), newLeader, elapsed, haFailoverBound)
+	t.Logf("HOST-KILL FAILOVER: remaining %d nodes converged on new leader node_id=%s in %v (bound %v)", len(remaining), newLeader, elapsed, haFailoverBound)
 	assert.NotEqual(t, initialLeader, newLeader, "new leader must differ from the killed leader")
 
 	after := haFleetHealth(client, remaining)

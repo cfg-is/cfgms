@@ -344,12 +344,14 @@ func (fm *failoverManager) executeFailover(ctx context.Context, reason string, m
 	return nil
 }
 
-// electNewLeader defers to Raft consensus for leader election.
-// Raft is the sole authority for leader election; explicit promote/demote calls
-// have been removed. The Raft protocol (CheckQuorum, PreVote) handles step-down
-// and promotion automatically.
+// electNewLeader defers to the cluster leadership lease (ADR-031 Decision 5)
+// for leader election. The lease, not this manager, is the sole authority:
+// explicit promote/demote calls have been removed, and every ClusterMode node
+// contends for the lease independently — a node that loses the current holder
+// simply keeps trying TryAcquire until the lease expires and it (or another
+// node) wins it.
 func (fm *failoverManager) electNewLeader(ctx context.Context) error {
-	fm.logger.Info("Leader election deferred to Raft consensus — Raft is the sole election authority")
+	fm.logger.Info("Leader election deferred to the cluster leadership lease — the lease is the sole election authority")
 	return nil
 }
 

@@ -680,11 +680,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Initialize HA manager. The Raft WAL lives alongside other per-node durable
-	// state, matching the module-cache / workflow-runtime pattern.
+	// Initialize HA manager.
 	logger.Info("Initializing HA manager...")
-	raftLogDir := filepath.Join(resolveDNADataRoot(cfg), "raft-log")
-	haManager, err := initializeHAManager(cfg, logger, storageManager, certManager, raftLogDir)
+	haManager, err := initializeHAManager(cfg, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HA manager: %w", err)
 	}
@@ -2101,14 +2099,14 @@ func (s *Server) Start() error {
 		// Server.Start returned, that cancel fired and killed the manager's
 		// background work while the manager still reported itself started.
 		//
-		// The visible damage was cluster membership. publishNodeInfo waits for
-		// leader election and then replicates this node's metadata through the
-		// Raft log; it observed the cancelled context first and returned without
-		// proposing anything, on every node. ClusterState.Nodes stayed empty for
-		// the life of the cluster, so GET /api/v1/ha/cluster reported no members
-		// and no leader while Raft was electing and replicating normally — only
-		// GET /api/v1/ha/status looked correct, because IsLeader reads the raft
-		// state directly rather than through the replicated map.
+		// The visible damage was cluster membership: the node-info replication
+		// goroutine active at the time (since replaced by the node-registry
+		// self-registration loop, Issue #3763) observed the cancelled context
+		// first and returned without registering anything, on every node.
+		// GET /api/v1/ha/cluster reported no members while the cluster was
+		// otherwise healthy — only GET /api/v1/ha/status looked correct, because
+		// it reads leadership state directly rather than through the (empty)
+		// membership view.
 		//
 		// Start does not block on the network, so it needs no timeout of its
 		// own; shutdown is Server.Stop's job, which calls haManager.Stop.
@@ -2378,11 +2376,12 @@ func (s *Server) Start() error {
 		s.logger.Info("HTTP API server started")
 	}
 
-	// Observational only (Issue #3389 classification) — stays on IsRaftLeader(), not
-	// HasLeadership(): this is a startup log line, not an admission decision.
+	// IsRaftLeader() was deleted with the Raft transport it reported on (Issue
+	// #3763); HasLeadership() is now the only is_leader signal, lease-backed
+	// (ADR-031 Decision 5).
 	s.logger.Info("Controller server started (gRPC-over-QUIC transport mode)",
 		"ha_mode", s.haManager.GetDeploymentMode().String(),
-		"is_leader", s.haManager.IsRaftLeader()) //architecture:allow-raw-leader -- observational only: startup log records raw protocol state for diagnostics, not an admission decision
+		"is_leader", s.haManager.HasLeadership())
 
 	// Issue #1320: On startup, if this node holds lease-backed authority, replay any
 	// push operations that were interrupted before a previous leader could complete
@@ -2896,10 +2895,6 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 // from CFGMS_NODE_ID (env), never from YAML. Pre-loading env here populates
 // Node.ID first so the subsequent NewManager call does not fail Validate().
 // CFGMS_HA_MODE env overrides YAML (env > YAML precedence) via the re-run inside NewManager.
-// certManager is passed through to ha.NewManager and is required in ClusterMode for mTLS
-// peer transport; it may be nil when cluster mode is not in use.
-// raftLogDir is the directory for the per-node Raft WAL; pass empty in tests.
-//
 // In ClusterMode the manager's leadership authority and command fencing token come
 // from the database lease (ADR-031 Decision 5), so this function verifies the
 // storage tier supplies a lease store *whose substrate every node shares* before
@@ -2921,7 +2916,7 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 // authority at all (HasLeadership() stays false, leader-gated mutating endpoints
 // stay closed); this function logs that consequence at startup so it is visible to
 // the operator rather than discovered as unexplained 503s.
-func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager, certManager *cert.Manager, raftLogDir string) (*ha.Manager, error) {
+func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManager *interfaces.StorageManager) (*ha.Manager, error) {
 	haConfig := ha.DefaultConfig()
 
 	if cfg != nil && cfg.HA != nil && cfg.HA.Mode != "" {
@@ -2966,7 +2961,7 @@ func initializeHAManager(cfg *config.Config, logger logging.Logger, storageManag
 			"remedy", "use ha.mode cluster with storage.cluster.postgres_dsn for a deployment that must serve mutating traffic from more than one node")
 	}
 
-	haManager, err := ha.NewManager(haConfig, logger, storageManager, certManager, raftLogDir)
+	haManager, err := ha.NewManager(haConfig, logger, storageManager)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HA manager: %w", err)
 	}

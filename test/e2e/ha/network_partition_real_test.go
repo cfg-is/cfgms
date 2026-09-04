@@ -8,53 +8,50 @@
 // story #3095), against the genuine 3-node deployment story #3130
 // established.
 //
+// Rewritten for Issue #3763 (ADR-031 Decision 5): leadership authority is no
+// longer Raft's CheckQuorum protocol, so a partition can no longer be induced
+// by blocking the Raft peer transport port (:9443, deleted along with the
+// transport itself). Authority is now the shared database lease (pkg/lease):
+// every ClusterMode node periodically calls TryAcquire against the same
+// Postgres row (docs/testing/controller-ha-real-cluster-runbook.md §3 names
+// the lab's datasvc host and port, 5432). This suite now induces the
+// partition by blocking the isolated node's own access to that database
+// port — the substrate its lease-backed HasLeadership() depends on — rather
+// than to its peers. The property under test is unchanged (ADR-029
+// Decision 7's retained intent, carried into ADR-031 Decision 5): no two
+// nodes may simultaneously report HasLeadership() == true. What changed is
+// only the mechanism inducing the scenario and the surface polled
+// (GET /api/v1/ha/status's lease-backed is_leader field, replacing the
+// deleted GET /api/v1/raft/status).
+//
 // This file is deliberately self-contained (its own npNode/npSetup/
-// npGetRaftStatus/... helpers, `np`-prefixed) rather than reusing story
-// #3094's leader_election_real_test.go helpers: #3095's own Dependencies
-// section names only #3130, not #3094, and at the time this suite was
-// written #3094's PR had not yet merged to develop — this branch cannot see
-// that file at all. Two sibling files in the same package (`ha_e2e`) that
-// happen to merge in either order must not collide on identically-named
-// package-level declarations; the codebase's own hyperv e2e suite already
-// established this exact pattern for the same reason (cluster_cascade_test.go's
+// npGetHAStatus/... helpers, `np`-prefixed) rather than reusing this
+// package's leader_election_real_test.go helpers, matching that file's own
+// stated precedent (two sibling files in one package that intentionally do
+// not share package-level declarations — the codebase's hyperv e2e suite
+// established the same pattern for the same reason: cluster_cascade_test.go's
 // `cc`-prefixed helpers vs. promote_role_test.go's `pr`-prefixed helpers,
-// both living in `hyperv_e2e`). Once both HA suites are settled on develop, a
-// future cleanup could factor the genuinely-identical pieces (mTLS client
-// setup, raft/status polling) into a shared non-test helper file — out of
-// scope for this story.
+// both living in `hyperv_e2e`).
 //
 // Unlike test/integration/ha's Docker suite (TestNetworkPartition), which
 // simulates a partition by stopping/restarting a container — not a real
 // network-layer partition — this suite drives a genuine iptables rule on one
-// of the 3 real Debian VM hosts. The rule blocks only the internal Raft
-// consensus port (:9443, both directions) on the isolated node, per the
-// Implementation Notes: this creates a real 2-vs-1 split among the raft
-// peers while deliberately leaving the admin REST port (:9080) open, so this
-// suite's own mTLS polling can keep observing BOTH sides of the partition
-// throughout — exactly what TestRealClusterPartition_NoDualLeader needs to
-// assert "no instant exists where both report leadership". A single node's
-// rule is sufficient (matches the AC's own wording, "a real iptables rule on
-// ONE cfg-lab host"): the isolated node's own INPUT/OUTPUT chains block
-// consensus traffic in both directions, so the majority side's outbound
-// packets simply arrive and get dropped by the isolated node — no rule is
-// needed on the majority nodes.
+// of the 3 real Debian VM hosts. The rule blocks only the shared database
+// port (5432, both directions) on the isolated node, leaving the admin REST
+// port (:9080) and inter-node traffic open — this suite's own mTLS polling
+// keeps observing BOTH sides of the partition throughout, and the majority
+// nodes are never touched (matching the AC's own wording, "a real iptables
+// rule on ONE cfg-lab host": the isolated node's own INPUT/OUTPUT chains
+// block its database traffic in both directions, and nothing else needs a
+// rule).
 //
 // docs/architecture/controller-operating-model.md's "Clustered" section
-// documents the production mechanism this suite validates: "Split-brain
-// detection ... quorum-based resolution delegates leader step-down to Raft
-// (CheckQuorum) rather than calling explicit demote operations" — the
-// minority side is expected to step itself down via CheckQuorum, not via any
-// controller-level split-brain manager calling an explicit demotion.
-//
-// Note on Raft log persistence (ADR-028, docs/architecture/decisions/028-raft-log-persistence.md):
-// develop now supports an opt-in persistent bbolt WAL for the Raft log
-// (pkg/ha/raft_log_store.go), merged after story #3130 stood up the live
-// cluster this suite targets; the live cluster's deployed config predates
-// that change and still runs with memory-only Raft state. Not a concern
-// here: CheckQuorum step-down is a live-consensus property independent of
-// whether the log is persisted — persistence only affects *restart*
-// recovery, and this suite never restarts a process, only blocks/unblocks
-// network traffic.
+// documents the production mechanism this suite validates: leadership is the
+// shared database lease, bounded by pkg/lease.SafetyMargin
+// (ElectionTimeout's derived 0.8× lease duration, minus renewal
+// interval/latency margins) — the isolated node's cached local authority
+// lapses on its own monotonic clock once it can no longer renew, with no
+// live database read required to detect the loss (pkg/lease package doc).
 //
 // The suite is excluded from CI and `make test-complete` by the e2e build
 // tag, and skips cleanly when CFGMS_E2E_HA_CLUSTER_NODES is unset, following
@@ -104,8 +101,20 @@ const (
 	// INPUT/OUTPUT for exact rule matches.
 	npPartitionChain = "CFGMS_E2E_PARTITION"
 
-	npPartitionStepDownBound = 30 * time.Second
-	npPartitionObserveWindow = 45 * time.Second
+	// npDatabasePort is the lab's shared Postgres port (the lease substrate,
+	// pkg/lease) per docs/testing/controller-ha-real-cluster-runbook.md §3.
+	npDatabasePort = "5432"
+
+	// npPartitionStepDownBound and npPartitionObserveWindow are sized off the
+	// lease's derived SafetyMargin (pkg/lease.SafetyMargin: ElectionTimeout's
+	// 0.8× lease duration, minus renewal-interval/latency margins), not
+	// Raft's old CheckQuorum bound of (ElectionTimeout, 2×ElectionTimeout].
+	// At production defaults (pkg/ha.DefaultConfig: ElectionTimeout 10s) the
+	// isolated node's cached local authority lapses within ~8s of losing the
+	// ability to renew — these bounds add headroom for network/polling
+	// jitter rather than matching that figure exactly.
+	npPartitionStepDownBound = 20 * time.Second
+	npPartitionObserveWindow = 40 * time.Second
 	npPartitionPollInterval  = 500 * time.Millisecond
 )
 
@@ -208,75 +217,101 @@ func npGetenvDefault(key, def string) string {
 	return def
 }
 
-// ─── raft/status polling ────────────────────────────────────────────────────
+// ─── ha/status polling ──────────────────────────────────────────────────────
 
-type npRaftStatus struct {
-	NodeID   uint64 `json:"node_id"`
+// npHAStatus mirrors features/controller/api/handlers_ha.go's
+// HAStatusResponse — the lease-backed status surface (ADR-031 Decision 5)
+// that replaced the deleted Raft-protocol raftStatusResponse (Issue #3763).
+type npHAStatus struct {
+	NodeID   string `json:"node_id"`
 	IsLeader bool   `json:"is_leader"`
-	Leader   uint64 `json:"leader"`
-	Term     uint64 `json:"term"`
-	Nodes    int    `json:"nodes"`
 }
 
-func npGetRaftStatus(ctx context.Context, client *http.Client, baseURL string) (npRaftStatus, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/raft/status", nil)
+func npGetHAStatus(ctx context.Context, client *http.Client, baseURL string) (npHAStatus, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/ha/status", nil)
 	if err != nil {
-		return npRaftStatus{}, err
+		return npHAStatus{}, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return npRaftStatus{}, err
+		return npHAStatus{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return npRaftStatus{}, fmt.Errorf("raft/status %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
+		return npHAStatus{}, fmt.Errorf("ha/status %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
 	}
-	var st npRaftStatus
+	var st npHAStatus
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
-		return npRaftStatus{}, err
+		return npHAStatus{}, err
 	}
 	return st, nil
 }
 
-func npWaitForAgreement(ctx context.Context, t *testing.T, client *http.Client, urls []string, notLeader uint64, bound time.Duration) (uint64, time.Duration) {
+// npHALeader mirrors features/controller/api/handlers_ha.go's HALeaderResponse.
+type npHALeader struct {
+	NodeID string `json:"node_id"`
+}
+
+func npGetLeaderID(ctx context.Context, client *http.Client, baseURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/ha/leader", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("ha/leader %s: HTTP %d: %s", baseURL, resp.StatusCode, string(body))
+	}
+	var l npHALeader
+	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
+		return "", err
+	}
+	return l.NodeID, nil
+}
+
+func npWaitForAgreement(ctx context.Context, t *testing.T, client *http.Client, urls []string, notLeader string, bound time.Duration) (string, time.Duration) {
 	t.Helper()
 	start := time.Now()
 	deadline := start.Add(bound)
 	for time.Now().Before(deadline) {
-		leader := uint64(0)
+		leader := ""
 		agree := true
 		seen := 0
 		for _, u := range urls {
-			st, err := npGetRaftStatus(ctx, client, u)
+			id, err := npGetLeaderID(ctx, client, u)
 			if err != nil {
 				agree = false
 				continue
 			}
 			seen++
-			if st.Leader == 0 || st.Leader == notLeader {
+			if id == "" || id == notLeader {
 				agree = false
 				continue
 			}
-			if leader == 0 {
-				leader = st.Leader
-			} else if leader != st.Leader {
+			if leader == "" {
+				leader = id
+			} else if leader != id {
 				agree = false
 			}
 		}
-		if agree && seen == len(urls) && leader != 0 {
+		if agree && seen == len(urls) && leader != "" {
 			return leader, time.Since(start)
 		}
 		time.Sleep(2 * time.Second)
 	}
-	t.Fatalf("no leader agreement among %v within %v (excluding prior leader %d)", urls, bound, notLeader)
-	return 0, 0
+	t.Fatalf("no leader agreement among %v within %v (excluding prior leader %q)", urls, bound, notLeader)
+	return "", 0
 }
 
-func npNodeIndexByRaftID(ctx context.Context, client *http.Client, nodes []npNode, raftID uint64) int {
+func npNodeIndexByID(ctx context.Context, client *http.Client, nodes []npNode, id string) int {
 	for i, n := range nodes {
-		st, err := npGetRaftStatus(ctx, client, n.adminURL)
-		if err == nil && st.NodeID == raftID {
+		st, err := npGetHAStatus(ctx, client, n.adminURL)
+		if err == nil && st.NodeID == id {
 			return i
 		}
 	}
@@ -369,16 +404,20 @@ func npSSHRun(host, remoteCmd string) (string, error) {
 
 // ─── iptables partition control ─────────────────────────────────────────────
 
-// npApplyPartition blocks all Raft consensus traffic (port 9443, both
-// directions) on node via a dedicated iptables chain — a real firewall rule,
-// not a Docker network toggle. The admin REST port (9080) is deliberately
-// left open so this suite's own polling keeps observing the isolated node.
+// npApplyPartition blocks all traffic to the shared database port (5432,
+// both directions) on node via a dedicated iptables chain — a real firewall
+// rule, not a Docker network toggle. The admin REST port (9080) is
+// deliberately left open so this suite's own polling keeps observing the
+// isolated node. Blocking the database (the lease substrate, pkg/lease)
+// rather than a peer-to-peer port is the post-Raft equivalent of the
+// original Raft-transport-port block: it is the one dependency whose loss
+// makes this node unable to renew its claim to leadership.
 func npApplyPartition(t *testing.T, node npNode) {
 	t.Helper()
 	cmd := "sudo -n iptables -N " + npPartitionChain + " 2>/dev/null; " +
 		"sudo -n iptables -F " + npPartitionChain +
-		" && sudo -n iptables -A " + npPartitionChain + " -p tcp --dport 9443 -j DROP" +
-		" && sudo -n iptables -A " + npPartitionChain + " -p tcp --sport 9443 -j DROP" +
+		" && sudo -n iptables -A " + npPartitionChain + " -p tcp --dport " + npDatabasePort + " -j DROP" +
+		" && sudo -n iptables -A " + npPartitionChain + " -p tcp --sport " + npDatabasePort + " -j DROP" +
 		" && (sudo -n iptables -C INPUT -j " + npPartitionChain + " 2>/dev/null || sudo -n iptables -I INPUT -j " + npPartitionChain + ")" +
 		" && (sudo -n iptables -C OUTPUT -j " + npPartitionChain + " 2>/dev/null || sudo -n iptables -I OUTPUT -j " + npPartitionChain + ")"
 	_, err := npSSHRun(node.sshHost, cmd)
@@ -412,22 +451,22 @@ func npManualPartitionRecovery(node npNode) string {
 // ─── partition-window observation ───────────────────────────────────────────
 
 // npPartitionSetup resolves the cluster, confirms a healthy 3-way leader
-// agreement (the quorum-safety precondition — partitioning is only safe to
-// attempt from a confirmed-healthy baseline), and returns the current
-// leader's node index so callers can isolate it specifically. Using the
-// leader as the minority side exercises a REAL CheckQuorum step-down (AC's
-// "no longer leader" branch), the more meaningful case compared to
-// partitioning an already-following node ("was never leader").
+// agreement (the safety precondition — partitioning is only safe to attempt
+// from a confirmed-healthy baseline), and returns the current leader's node
+// index so callers can isolate it specifically. Using the leader as the
+// minority side exercises a REAL lease-expiry step-down (AC's "no longer
+// leader" branch), the more meaningful case compared to partitioning an
+// already-non-leader node ("was never leader").
 func npPartitionSetup(t *testing.T) (nodes []npNode, client *http.Client, urls []string, minorityIdx int) {
 	t.Helper()
 	nodes, client = npSetup(t)
 	ctx := context.Background()
 	urls = npURLs(nodes)
 
-	initialLeader, _ := npWaitForAgreement(ctx, t, client, urls, 0, 30*time.Second)
-	minorityIdx = npNodeIndexByRaftID(ctx, client, nodes, initialLeader)
-	require.GreaterOrEqual(t, minorityIdx, 0, "must resolve which node URL currently holds raft leader %d", initialLeader)
-	t.Logf("current leader (isolated as the minority side): node_id=%d (%s / %s)", initialLeader, nodes[minorityIdx].adminURL, nodes[minorityIdx].sshHost)
+	initialLeader, _ := npWaitForAgreement(ctx, t, client, urls, "", 30*time.Second)
+	minorityIdx = npNodeIndexByID(ctx, client, nodes, initialLeader)
+	require.GreaterOrEqual(t, minorityIdx, 0, "must resolve which node URL currently holds lease-backed leadership %q", initialLeader)
+	t.Logf("current leader (isolated as the minority side): node_id=%s (%s / %s)", initialLeader, nodes[minorityIdx].adminURL, nodes[minorityIdx].sshHost)
 	t.Logf("manual partition recovery if automated cleanup fails: %s", npManualPartitionRecovery(nodes[minorityIdx]))
 	return nodes, client, urls, minorityIdx
 }
@@ -444,11 +483,11 @@ func npBeginPartition(t *testing.T, node npNode) {
 // ─── AC (REQUIRED): minority steps down ─────────────────────────────────────
 
 // TestRealClusterPartition_MinorityStepsDown (REQUIRED, #3095) — a real
-// iptables rule isolates the current leader; the minority side's own
-// GET /api/v1/raft/status must stop (or never) report is_leader=true during
-// the partition window. Also confirms the Constraints requirement: the
-// majority side keeps serving the live steward fleet throughout, actively
-// polled rather than assumed.
+// iptables rule isolates the current leader from the shared database; the
+// minority side's own GET /api/v1/ha/status must stop (or never) report
+// is_leader=true during the partition window. Also confirms the Constraints
+// requirement: the majority side keeps serving the live steward fleet
+// throughout, actively polled rather than assumed.
 func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 	nodes, client, urls, minorityIdx := npPartitionSetup(t)
 	ctx := context.Background()
@@ -456,15 +495,15 @@ func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 	majorityURLs := npExcept(urls, minority.adminURL)
 	require.Len(t, majorityURLs, 2, "exactly 2 nodes must remain on the majority side")
 
-	t.Logf("partitioning %s (real iptables rule, port 9443 both directions)", minority.sshHost)
+	t.Logf("partitioning %s from the shared database (real iptables rule, port %s both directions)", minority.sshHost, npDatabasePort)
 	npBeginPartition(t, minority)
 
 	// Poll the minority side until it stops claiming leadership, bounded —
-	// this is the CheckQuorum step-down the AC exists to prove.
+	// this is the lease-expiry step-down the AC exists to prove.
 	steppedDown := false
 	deadline := time.Now().Add(npPartitionStepDownBound)
 	for time.Now().Before(deadline) {
-		st, err := npGetRaftStatus(ctx, client, minority.adminURL)
+		st, err := npGetHAStatus(ctx, client, minority.adminURL)
 		if err == nil && !st.IsLeader {
 			steppedDown = true
 			break
@@ -480,7 +519,7 @@ func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 		reclaimed := false
 		obsDeadline := time.Now().Add(remaining)
 		for time.Now().Before(obsDeadline) {
-			st, err := npGetRaftStatus(ctx, client, minority.adminURL)
+			st, err := npGetHAStatus(ctx, client, minority.adminURL)
 			if err == nil && st.IsLeader {
 				reclaimed = true
 				break
@@ -491,7 +530,7 @@ func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 			assert.NoError(t, fh.err, "majority side must remain reachable for fleet health during the partition")
 			time.Sleep(npPartitionPollInterval)
 		}
-		assert.False(t, reclaimed, "minority side %s reclaimed leadership while still partitioned", minority.sshHost)
+		assert.False(t, reclaimed, "minority side %s reclaimed leadership while still partitioned from the database", minority.sshHost)
 	}
 	t.Logf("MINORITY STEP-DOWN: %s stepped down and stayed down for the %v observation window", minority.sshHost, npPartitionObserveWindow)
 }
@@ -505,31 +544,22 @@ func TestRealClusterPartition_MinorityStepsDown(t *testing.T) {
 // less) every 500ms throughout the partition window, asserting no poll round
 // ever finds both sides simultaneously claiming leadership.
 //
-// Originally FAILED against the live cluster, reproducibly (2.0s and 5.5s
-// overlap windows on two pre-fix runs, 2026-08-15). The assertion is the
-// story's AC stated verbatim and was never weakened to close the gap: the
-// pre-fix failure was a true finding about the system, not about this test.
-// Vanilla `CheckQuorum` bounds the isolated leader's step-down at
-// (ElectionTimeout, 2xElectionTimeout] while the majority's randomized
-// election lands in [ElectionTimeout, 2xElectionTimeout) — unordered windows,
-// so the two `is_leader` flags could overlap for up to one ElectionTimeout.
-// Write-safety held throughout even during the pre-fix failure (the isolated
-// node could not commit without quorum ack); only the status flags
-// disagreed. Full root-cause analysis:
-// docs/testing/controller-ha-real-cluster-runbook.md section 5.
+// Originally written and validated against the Raft-backed mechanism
+// (2026-08-15 through 2026-08-26; see docs/testing/controller-ha-real-cluster-runbook.md
+// section 5 for that history). Rewritten for Issue #3763 (ADR-031 Decision
+// 5): leadership is now the shared database lease, so the partition target
+// changed from the Raft peer transport port to the database port, and the
+// polled surface changed from GET /api/v1/raft/status to
+// GET /api/v1/ha/status's is_leader field. The property under test — no
+// instant exists where both sides report leadership — and its underlying
+// guarantee (pkg/lease.SafetyMargin: the isolated node's cached local
+// authority is bounded by its own monotonic clock, independent of whether
+// the database itself is reachable) are unchanged.
 //
-// RESOLVED by story #3389 (epic #3386): lease-backed `HasLeadership()` was
-// separated from `IsRaftLeader()` and the status/admission surfaces this test
-// exercises were re-homed onto it. Re-run unmodified against a #3389 binary
-// rolling-deployed to all three real cfg-lab nodes (2026-08-25/26): 90 paired
-// poll rounds across 45s (500ms interval), 0 dual-leader instants — see the
-// runbook's "Resolved run" subsection (section 5) for the full measurement.
-//
-// This comment was reconciled 2026-08-26 to match that already-recorded
-// runbook result; the fix round that reconciled it had no live cfg-lab
-// access (agent container, DNS-allowlisted egress) and did not independently
-// re-execute this test. The PASS cited above is the runbook's recorded
-// evidence from the #3389 re-run, not a new run performed by this edit.
+// This rewrite has not been executed against live cfg-lab infrastructure
+// (agent container, no lab network access) — see the runbook's history
+// section for the last real measurement (Raft-backed mechanism) and update
+// it with a fresh run once this rewrite executes against the live cluster.
 func TestRealClusterPartition_NoDualLeader(t *testing.T) {
 	nodes, client, urls, minorityIdx := npPartitionSetup(t)
 	ctx := context.Background()
@@ -541,7 +571,7 @@ func TestRealClusterPartition_NoDualLeader(t *testing.T) {
 	majorityURLs := npExcept(urls, minority.adminURL)
 	require.Len(t, majorityURLs, 2, "exactly 2 nodes must remain on the majority side")
 
-	t.Logf("partitioning %s (real iptables rule, port 9443 both directions)", minority.sshHost)
+	t.Logf("partitioning %s from the shared database (real iptables rule, port %s both directions)", minority.sshHost, npDatabasePort)
 	npBeginPartition(t, minority)
 
 	violations := 0
@@ -549,14 +579,14 @@ func TestRealClusterPartition_NoDualLeader(t *testing.T) {
 	deadline := time.Now().Add(npPartitionObserveWindow)
 	for time.Now().Before(deadline) {
 		rounds++
-		minoritySt, minorityErr := npGetRaftStatus(ctx, client, minority.adminURL)
+		minoritySt, minorityErr := npGetHAStatus(ctx, client, minority.adminURL)
 		minorityIsLeader := minorityErr == nil && minoritySt.IsLeader
 
 		for _, u := range majorityURLs {
-			st, err := npGetRaftStatus(ctx, client, u)
+			st, err := npGetHAStatus(ctx, client, u)
 			if err == nil && st.IsLeader && minorityIsLeader {
 				violations++
-				t.Errorf("DUAL LEADER at round %d: minority %s (node_id=%d) AND majority %s (node_id=%d) both report is_leader=true",
+				t.Errorf("DUAL LEADER at round %d: minority %s (node_id=%s) AND majority %s (node_id=%s) both report is_leader=true",
 					rounds, minority.adminURL, minoritySt.NodeID, u, st.NodeID)
 			}
 		}
@@ -577,7 +607,7 @@ func TestRealClusterPartition_HealsToSingleLeader(t *testing.T) {
 	ctx := context.Background()
 	minority := nodes[minorityIdx]
 
-	t.Logf("partitioning %s (real iptables rule, port 9443 both directions)", minority.sshHost)
+	t.Logf("partitioning %s from the shared database (real iptables rule, port %s both directions)", minority.sshHost, npDatabasePort)
 	npApplyPartition(t, minority)
 	partitioned := true
 	t.Cleanup(func() {
@@ -594,6 +624,6 @@ func TestRealClusterPartition_HealsToSingleLeader(t *testing.T) {
 	npRemovePartition(minority)
 	partitioned = false
 
-	leader, elapsed := npWaitForAgreement(ctx, t, client, urls, 0, npFailoverBound)
-	t.Logf("HEALED: all 3 nodes reconverged on leader node_id=%d in %v (bound %v) after partition removal", leader, elapsed, npFailoverBound)
+	leader, elapsed := npWaitForAgreement(ctx, t, client, urls, "", npFailoverBound)
+	t.Logf("HEALED: all 3 nodes reconverged on leader node_id=%s in %v (bound %v) after partition removal", leader, elapsed, npFailoverBound)
 }

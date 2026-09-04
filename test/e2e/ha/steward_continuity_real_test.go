@@ -166,9 +166,9 @@ func TestRealClusterStewardContinuity_LeaderFailover(t *testing.T) {
 
 	// Baseline: the cluster must be healthy before we break it, and we need to
 	// know which node is leader so we can kill the right one.
-	leader, _ := haWaitForAgreement(ctx, t, client, urls, 0, 30*time.Second)
-	leaderIdx := haNodeIndexByRaftID(ctx, client, nodes, leader)
-	require.GreaterOrEqual(t, leaderIdx, 0, "elected leader %d must map to a known cfg-lab node", leader)
+	leader, _ := haWaitForAgreement(ctx, t, client, urls, "", 30*time.Second)
+	leaderIdx := haNodeIndexByID(ctx, client, nodes, leader)
+	require.GreaterOrEqual(t, leaderIdx, 0, "elected leader %s must map to a known cfg-lab node", leader)
 	leaderNode := nodes[leaderIdx]
 
 	// The scenario under test is "the steward's own node survives, the LEADER
@@ -186,14 +186,14 @@ func TestRealClusterStewardContinuity_LeaderFailover(t *testing.T) {
 	t.Logf("baseline: last_seen=%s status=%s", before.LastSeen.Format(time.RFC3339), before.Status)
 
 	// Kill the leader. Only ever one of three nodes — quorum (MinQuorum 2) holds.
-	t.Logf("killing leader %s (raft id %d)", leaderNode.sshHost, leader)
+	t.Logf("killing leader %s (node id %s)", leaderNode.sshHost, leader)
 	killedAt := time.Now()
 	haKillProcess(t, leaderNode)
 
 	survivors := haExcept(urls, leaderNode.adminURL)
 	newLeader, electionTime := haWaitForAgreement(ctx, t, client, survivors, leader, haFailoverBound)
 	require.NotEqual(t, leader, newLeader, "a NEW leader must be elected after the old one is killed")
-	t.Logf("re-elected: leader %d -> %d in %v", leader, newLeader, electionTime)
+	t.Logf("re-elected: leader %s -> %s in %v", leader, newLeader, electionTime)
 
 	// Continuity: a heartbeat that post-dates the kill must land on the
 	// steward's serving node. Comparing against killedAt (not against the

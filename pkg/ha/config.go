@@ -51,14 +51,6 @@ func DefaultConfig() *Config {
 			GracePeriod:         10 * time.Second,
 			MaxSessionMigration: 1000,
 		},
-		SplitBrain: &SplitBrainConfig{
-			Enabled:            true,
-			DetectionInterval:  15 * time.Second,
-			QuorumCheck:        true,
-			AutoResolve:        true,
-			QuorumInterval:     30 * time.Second,
-			ResolutionStrategy: "quorum-based",
-		},
 	}
 }
 
@@ -204,13 +196,6 @@ func (c *Config) LoadFromEnvironment() error {
 		}
 	}
 
-	// Load split-brain configuration
-	if splitBrainEnabled := os.Getenv("CFGMS_HA_SPLIT_BRAIN_ENABLED"); splitBrainEnabled != "" {
-		if enabled, err := strconv.ParseBool(splitBrainEnabled); err == nil {
-			c.SplitBrain.Enabled = enabled
-		}
-	}
-
 	return nil
 }
 
@@ -256,7 +241,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("derived lease duration (%v) must be less than ElectionTimeout (%v)", leaseDuration, c.Cluster.ElectionTimeout)
 		}
 		if leaseDuration <= c.Cluster.HeartbeatInterval {
-			return fmt.Errorf("derived lease duration (%v) must exceed HeartbeatInterval (%v) so a quorum ack can refresh it", leaseDuration, c.Cluster.HeartbeatInterval)
+			return fmt.Errorf("derived lease duration (%v) must exceed HeartbeatInterval (%v) so a renewal cycle can refresh it", leaseDuration, c.Cluster.HeartbeatInterval)
 		}
 	}
 
@@ -319,11 +304,10 @@ func (c *ClusterConfig) LeaseDuration() time.Duration {
 	return time.Duration(float64(c.ElectionTimeout) * 0.8)
 }
 
-// FastElectionConfig returns a ClusterConfig with test-scale election timings.
-// Use in place of DefaultConfig().Cluster in tests to prevent election storms
-// under CPU contention: elections converge in milliseconds, not seconds.
-// ElectionTick = ElectionTimeout / HeartbeatInterval = 200ms / 40ms = 5,
-// satisfying the ≥5 invariant enforced by NewRaftConsensus.
+// FastElectionConfig returns a ClusterConfig with test-scale timings. Use in
+// place of DefaultConfig().Cluster in tests so the derived lease duration
+// (LeaseDuration, 0.8 × ElectionTimeout) converges in milliseconds rather than
+// seconds, preventing timing flakiness under CI CPU contention.
 func FastElectionConfig() ClusterConfig {
 	return ClusterConfig{
 		ExpectedSize:      3,

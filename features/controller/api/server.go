@@ -821,15 +821,15 @@ func (s *Server) setupRouter() {
 		h.ServeHTTP(w, r)
 	}).Methods("POST")
 
-	// Raft messages are deliberately absent from the public product router.
-	// Cluster mode serves this handler on the separately configured private
-	// mTLS-only listener created by Start.
+	// The private mTLS-only internal listener (created by Start) still serves
+	// the internal controller-to-controller delivery gRPC service (Issue
+	// #3764). It carried the Raft message/status HTTP routes before Issue
+	// #3763 deleted the Raft transport those handlers delegated to; GET
+	// /api/v1/ha/status's lease-backed is_leader field is the surviving status
+	// surface (ADR-031 Decision 5).
 	s.internalRouter.Use(s.requestBodyLimitMiddleware)
 	s.internalRouter.Use(s.loggingMiddleware)
 	s.internalRouter.Use(s.contentTypeMiddleware)
-	s.internalRouter.HandleFunc("/raft/message", s.handleRaftMessage).Methods("POST")
-	// Raft status endpoint: requires HA read-status permission via API authentication
-	api.Handle("/raft/status", s.requirePermission("ha", "read-status")(http.HandlerFunc(s.handleRaftStatus))).Methods("GET")
 
 	// Terminal WebSocket relay is registered by routes_terminal.go (Issue #2761).
 	// The handler is wired via SetTerminalHandler after server construction.

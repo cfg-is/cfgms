@@ -747,11 +747,11 @@ func TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 
 // newNonAuthoritativeHAManager returns a real *ha.Manager — the production component the
 // leader gate consults — in the state a partitioned controller is in: ClusterMode, holding
-// no lease, so the real HasLeadership() implementation (Manager.HasLeadership →
-// RaftConsensus.HasLeadership, the 0.8 × ElectionTimeout lease bound of ADR-029) reports
+// no lease, so the real HasLeadership() implementation (backed by the shared database
+// lease, ADR-031 Decision 5, the 0.8 × ElectionTimeout lease bound of ADR-029) reports
 // false. The manager is constructed but never Started, so this node never acquires the
-// Raft leader state or a quorum ack and the lease is permanently unheld — the same
-// condition a leader that has lost quorum reaches once its lease ages out.
+// lease and it stays permanently unheld — the same condition a leader that has lost
+// quorum reaches once its lease ages out.
 func newNonAuthoritativeHAManager(t *testing.T) *ha.Manager {
 	t.Helper()
 
@@ -776,8 +776,7 @@ func newAuthoritativeHAManager(t *testing.T) *ha.Manager {
 
 	cfg := ha.DefaultConfig()
 	cfg.Mode = ha.SingleServerMode
-	// Empty raftLogDir: SingleServerMode starts no Raft node, so no WAL is needed.
-	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 	require.True(t, manager.HasLeadership(),

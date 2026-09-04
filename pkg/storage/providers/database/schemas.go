@@ -867,6 +867,28 @@ func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) err
 	return nil
 }
 
+// CreateNodeRegistryTable creates the cfgms_node_registry table backing the
+// shared controller-node registry (Issue #3763, ADR-031 Decision 5's
+// post-Raft membership mechanism): each ClusterMode node's advertised
+// identity, visible to every node. updated_at is the liveness timestamp
+// business.NodeRegistryStore.ListNodes evaluates against
+// business.NodeRegistryStaleAfter, always compared using the database
+// server's own now() so no caller clock enters the decision.
+func (s DatabaseSchemas) CreateNodeRegistryTable(ctx context.Context, db *sql.DB) error {
+	createTableQuery := `
+		CREATE TABLE IF NOT EXISTS cfgms_node_registry (
+			node_id    TEXT PRIMARY KEY,
+			address    TEXT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+		);
+	`
+	if _, err := db.ExecContext(ctx, createTableQuery); err != nil {
+		return fmt.Errorf("failed to create cfgms_node_registry table: %w", err)
+	}
+
+	return nil
+}
+
 // CreateCertRevocationsTable creates the cfgms_cert_revocations table backing
 // the cluster-visible CertRevocationStore (ADR-031 Decision 1, Issue #3852).
 func (s DatabaseSchemas) CreateCertRevocationsTable(ctx context.Context, db *sql.DB) error {
@@ -1042,6 +1064,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 	}
 
 	if err := s.CreateRoutingTable(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreateNodeRegistryTable(ctx, db); err != nil {
 		return err
 	}
 
@@ -1571,6 +1597,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS cfgms_leases;",
 		"DROP TABLE IF EXISTS cfgms_routing;",
+		"DROP TABLE IF EXISTS cfgms_node_registry;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
 		"DROP TABLE IF EXISTS rbac_roles;", // Has self-reference foreign key

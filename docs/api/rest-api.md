@@ -1280,13 +1280,6 @@ List of all cluster nodes and their state.
 **Authentication:** Required  
 **Required permission:** `ha:read-nodes`
 
-#### GET /api/v1/raft/status
-
-Raft consensus state for the local node (operational/debugging endpoint).
-
-**Authentication:** Required  
-**Required permission:** `ha:read-status`
-
 ### Compliance
 
 Compliance status is derived from real drift/convergence signal (DNA delta
@@ -2452,12 +2445,6 @@ List entities with active drift matching a filter.
 
 Tenant scoping: only drift records for entities in the caller's tenant subtree
 are returned.
-
-### Internal Endpoints (not for external use)
-
-#### POST /raft/message
-
-Internal Raft consensus message endpoint. mTLS peer CN verification is enforced inside the handler. Not accessible via the external API — intentionally omits API-key auth middleware.
 
 ## Internal Test Endpoint (not for external use)
 

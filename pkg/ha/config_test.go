@@ -10,19 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestFastElectionConfig_ElectionTickInvariant asserts that the values returned by
-// FastElectionConfig satisfy the ElectionTick ≥ 5 invariant enforced by
-// NewRaftConsensus (raft_consensus.go:111). A ratio below 5 causes NewRaftConsensus
-// to return an error, which would silently break every test that calls
-// newClusterModeHAManager.
-func TestFastElectionConfig_ElectionTickInvariant(t *testing.T) {
-	cfg := FastElectionConfig()
-	electionTick := int(cfg.ElectionTimeout / cfg.HeartbeatInterval)
-	assert.GreaterOrEqual(t, electionTick, 5,
-		"ElectionTimeout (%v) / HeartbeatInterval (%v) = ElectionTick %d must be ≥5",
-		cfg.ElectionTimeout, cfg.HeartbeatInterval, electionTick)
-}
-
 // TestClusterConfig_LeaseDuration_IsEightTenthsOfElectionTimeout verifies that
 // LeaseDuration() returns 0.8 × ElectionTimeout for both DefaultConfig and
 // FastElectionConfig, per ADR-029 Decision 1.

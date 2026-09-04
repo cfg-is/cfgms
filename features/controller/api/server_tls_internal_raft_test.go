@@ -39,7 +39,7 @@ func newHAManagerWithCAPEM(t *testing.T, caPEM []byte) *ha.Manager {
 	// Empty raftLogDir: these cases never start raft, so no WAL directory is
 	// needed. GetCACertPEM is the only manager surface internalRaftTLSConfig
 	// touches.
-	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil, nil, "")
+	manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil)
 	require.NoError(t, err)
 	return manager
 }

@@ -4,7 +4,6 @@ package ha
 
 import (
 	"context"
-	"net/http"
 	"time"
 )
 
@@ -117,12 +116,10 @@ type ClusterManager interface {
 	GetClusterNodes() ([]*NodeInfo, error)
 
 	// HasLeadership returns true when this node holds lease-backed authority to
-	// perform side-effecting operations (ADR-029 Decision 3). In SingleServerMode
-	// this is unconditionally true; in ClusterMode it requires both Raft leadership
-	// and a valid quorum-acknowledged lease (Decision 1). This is the admission
-	// primitive for every side-effecting path. IsRaftLeader() is intentionally not
-	// on this interface — it is reachable only through the concrete type, for
-	// observability and debugging surfaces.
+	// perform side-effecting operations (ADR-029 Decision 3, ADR-031 Decision 5).
+	// In SingleServerMode this is unconditionally true; in ClusterMode it is
+	// backed by the shared database lease (pkg/lease). This is the admission
+	// primitive for every side-effecting path.
 	HasLeadership() bool
 
 	// GetLeader returns the current cluster leader node
@@ -133,9 +130,6 @@ type ClusterManager interface {
 
 	// GetHealth returns the current health status
 	GetHealth() *HealthStatus
-
-	// GetRaftTransport returns the Raft HTTP transport (commercial only, returns nil in OSS)
-	GetRaftTransport() RaftTransport
 
 	// GetCACertPEM returns the CA certificate PEM bytes used to verify HA peer TLS.
 	// Returns nil when CACertPath is unconfigured or the file cannot be read.
@@ -172,29 +166,4 @@ type FailoverEvent struct {
 	SessionsMigrated int                    `json:"sessions_migrated"`
 	Status           string                 `json:"status"`
 	Details          map[string]interface{} `json:"details,omitempty"`
-}
-
-// SplitBrainHandler handles split-brain detection events
-type SplitBrainHandler interface {
-	OnSplitBrainDetected(status *SplitBrainStatus) error
-	OnSplitBrainResolved(status *SplitBrainStatus) error
-}
-
-// SplitBrainStatus represents the status of split-brain detection
-type SplitBrainStatus struct {
-	Detected     bool                   `json:"detected"`
-	Timestamp    time.Time              `json:"timestamp"`
-	PartitionIDs []string               `json:"partition_ids,omitempty"`
-	Resolution   string                 `json:"resolution,omitempty"`
-	Details      map[string]interface{} `json:"details,omitempty"`
-}
-
-// RaftTransport handles HTTP transport for Raft messages
-// This is only used in commercial builds with clustering
-type RaftTransport interface {
-	// HandleMessage handles incoming Raft messages
-	HandleMessage(w http.ResponseWriter, r *http.Request)
-
-	// HandleStatus returns Raft cluster status
-	HandleStatus(w http.ResponseWriter, r *http.Request)
 }

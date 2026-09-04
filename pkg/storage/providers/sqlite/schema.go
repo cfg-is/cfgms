@@ -866,6 +866,17 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_routing_node_id ON cfgms_routing(node_id)`,
 
+		// Shared controller-node registry (Issue #3763, ADR-031 Decision 5's
+		// post-Raft membership mechanism): each ClusterMode node's advertised
+		// identity. updated_at is the liveness timestamp
+		// business.NodeRegistryStore.ListNodes evaluates against
+		// business.NodeRegistryStaleAfter.
+		`CREATE TABLE IF NOT EXISTS cfgms_node_registry (
+			node_id    TEXT PRIMARY KEY,
+			address    TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+
 		// Per-tenant assurance-policy overrides (ADR-021, Issue #2845).
 		// Each row holds one per-permission override. Absent rows mean global defaults apply.
 		`CREATE TABLE IF NOT EXISTS assurance_policy_overrides (
