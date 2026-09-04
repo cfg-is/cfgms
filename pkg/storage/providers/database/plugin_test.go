@@ -5,7 +5,9 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -44,7 +46,25 @@ func getTestConfig() map[string]interface{} {
 		"username": "cfgms_test",
 		"password": password,
 		"sslmode":  "disable",
+		// The database session store refuses to start without an HMAC key, by
+		// design — a session token signed with a predictable key is forgeable. The
+		// key is generated per run rather than written here as a constant: a
+		// checked-in key is a hardcoded secret regardless of it being "only a test",
+		// and the store cannot tell the difference. This omission was invisible
+		// until Issue #3872 first ran this package against a real Postgres.
+		"session_hmac_key": newTestSessionHMACKey(),
 	}
+}
+
+// newTestSessionHMACKey returns a fresh 32-byte random key, hex-encoded. It panics
+// rather than returning an error: a test config that silently degrades to a weak or
+// empty key would let the session store's own guard pass for the wrong reason.
+func newTestSessionHMACKey() string {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("generating test session HMAC key: %v", err))
+	}
+	return hex.EncodeToString(key)
 }
 
 // getTestDB returns a test database connection or skips if not available
