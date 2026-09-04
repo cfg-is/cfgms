@@ -616,6 +616,55 @@ func TestModule_Configure_MissingPassSecretKey_WinRM(t *testing.T) {
 	assert.ErrorIs(t, err, errPassSecretKeyRequired)
 }
 
+// TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure verifies the
+// exported host-boundary seam (WithHostCommandTransport): the pinned transport
+// is the one the module actually issues its PowerShell through, and Configure —
+// which runs on every convergence pass and would otherwise select a PS-host or
+// WinRM transport — wires the rest of the module without replacing it. Without
+// the survival half, a caller outside this package could not drive the real
+// module through the real executor at all: the executor calls Configure before
+// every Get/Set.
+func TestWithHostCommandTransport_PinIsUsedAndSurvivesConfigure(t *testing.T) {
+	transport := &testWinRMTransport{output: `{"found":false}`}
+	mod := New(&fakeDetector{result: true}, WithHostCommandTransport(transport))
+	m, ok := mod.(*hypervModule)
+	require.True(t, ok)
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+
+	// No winrm_* keys and no transport key: the unpinned path would take the
+	// ps-host branch and, where no PS host exists, fall through to WinRM and
+	// fail with errHostRequired.
+	require.NoError(t, m.Configure(mapConfigState{"tenant_id": "ops"}),
+		"a pinned host transport must make Configure's transport selection a no-op")
+	assert.Same(t, transport, m.transport, "Configure must not replace a pinned transport")
+	assert.Equal(t, "ops", m.tenantID, "Configure must still wire the rest of the module")
+
+	state, err := m.Get(context.Background(), "vm:stw-01")
+	require.NoError(t, err)
+	assert.Equal(t, "absent", state.AsMap()["state"],
+		"the pinned transport's scripted host answer must be what the module reports")
+
+	transport.mu.Lock()
+	calls := len(transport.calls)
+	transport.mu.Unlock()
+	assert.Equal(t, 1, calls, "the module must issue its host commands through the pinned transport")
+}
+
+// TestWithHostCommandTransport_NilLeavesSelectionInPlace verifies the option is
+// inert when handed nil, so a caller cannot accidentally disarm Configure's
+// normal transport selection.
+func TestWithHostCommandTransport_NilLeavesSelectionInPlace(t *testing.T) {
+	mod := New(&fakeDetector{result: true}, WithHostCommandTransport(nil))
+	m, ok := mod.(*hypervModule)
+	require.True(t, ok)
+	require.NoError(t, m.SetSecretStore(newInlineStore()))
+	assert.False(t, m.transportPinned)
+
+	err := m.Configure(mapConfigState{"transport": "winrm", "winrm_user_secret": "u", "winrm_pass_secret": "p"})
+	assert.ErrorIs(t, err, errHostRequired,
+		"a nil transport must leave the normal Configure-driven selection (and its validation) in place")
+}
+
 // TestModule_Configure_RejectsUnknownTransport verifies the explicit
 // allowlist on the "transport" config key.
 func TestModule_Configure_RejectsUnknownTransport(t *testing.T) {

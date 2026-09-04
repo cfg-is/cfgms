@@ -95,6 +95,12 @@ type hypervModule struct {
 	transport winrmTransport
 	executor  hypervExecutor
 
+	// transportPinned records that the host-execution boundary was supplied by
+	// the caller (WithHostCommandTransport) rather than selected by Configure.
+	// A pinned transport is owned by the caller for the module's lifetime, so
+	// Configure wires everything else but never replaces it.
+	transportPinned bool
+
 	// detector gates every Get and Set — the module refuses operations when the
 	// host is not a Hyper-V host. detMu protects the 5-minute result cache.
 	detector  HypervDetector
@@ -270,6 +276,39 @@ func WithCSVProvisionStore(s ProvisionStore) HypervOption {
 	return func(m *hypervModule) {
 		if s != nil {
 			m.csvProvisionStore = s
+		}
+	}
+}
+
+// HostCommandTransport is the module's host-execution boundary: every Hyper-V
+// operation the module performs is a PowerShell invocation issued through this
+// single interface (the production implementations are the local PS host
+// subprocess and the WinRM client, both selected by Configure).
+//
+// It is exported so a caller OUTSIDE this package can drive the real module —
+// its real existence gating, its real seed-phase retry-vs-exhausted decision —
+// against a scripted host instead of a live Hyper-V machine. Cross-package
+// integration tests need that: without it, the only way to reach the module's
+// decision logic from another package is to re-implement it, which would then
+// silently drift from the real thing.
+type HostCommandTransport interface {
+	// ExecutePS runs psCommand on the host. User-supplied values travel in
+	// psArgs (transmitted as separate PowerShell -ArgumentList entries), never
+	// interpolated into psCommand — the injection-safety contract every
+	// production implementation upholds.
+	ExecutePS(ctx context.Context, psCommand string, psArgs map[string]string) (string, error)
+}
+
+// WithHostCommandTransport pins the module's host-execution boundary to t.
+// Configure then wires the rest of the module normally but never replaces the
+// transport, so a caller that owns the host boundary keeps it for the module's
+// lifetime (Configure runs on every convergence pass). A nil transport is
+// ignored, leaving the normal Configure-driven selection in place.
+func WithHostCommandTransport(t HostCommandTransport) HypervOption {
+	return func(m *hypervModule) {
+		if t != nil {
+			m.transport = t
+			m.transportPinned = true
 		}
 	}
 }
@@ -453,6 +492,14 @@ func (m *hypervModule) Configure(config modules.ConfigState) error {
 		stewardID = m.tenantID + "/hyperv"
 	}
 	m.stewardID = stewardID
+
+	// A caller-pinned host boundary (WithHostCommandTransport) is never replaced
+	// — same reasoning as the established-ps-host reuse below: the transport is a
+	// live resource whose lifetime the caller owns, and Configure runs on every
+	// convergence pass.
+	if m.transportPinned {
+		return nil
+	}
 
 	transportChoice, _ := configMap["transport"].(string)
 	if transportChoice == "" {
