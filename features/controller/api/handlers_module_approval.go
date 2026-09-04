@@ -66,20 +66,41 @@ func (s *Server) handleListModuleApprovals(w http.ResponseWriter, r *http.Reques
 	s.writeSuccessResponse(w, moduleApprovalListResponse{Pending: pending})
 }
 
+// clusterVisibleApprovalReporter is implemented by module bundle reviewers that
+// can say whether the approval status they decide is shared across controller
+// nodes. A reviewer that does not implement it is treated as node-local.
+type clusterVisibleApprovalReporter interface {
+	ApprovalStatusIsClusterVisible() bool
+}
+
 // moduleDecisionNodeIsAuthoritative reports whether this node may serve a module
-// bundle approve/reject decision (Issue #3761 residual review — ADR-031 Decision
-// 1's "the shared database is the serialization point" premise does not hold
-// here). Approval status lives in ModuleCache, a per-process local-filesystem
-// directory: any-node service would let a concurrent approve overwrite an
-// operator's rejection, and would leave a bundle rejected on one node still
-// approvable, stageable and distributable from a peer, since every staging path
-// gates on the *local* status. This is the trust decision authorizing
-// publisher-signed binaries to run on endpoints, so the gate is retained until
-// approval status moves to the shared durable store behind a conditional update
-// (follow-up under epic #3751). SingleServerMode (s.haManager nil, or a
-// non-clustered Manager) is unconditionally authoritative, so single-controller
-// installs are unaffected.
+// bundle approve/reject decision.
+//
+// Any-node service requires that approval status be cluster-visible and
+// CAS-protected (business.ModuleApprovalStore, Issue #3886, ADR-031 Decision 1):
+// with that store wired, a concurrent approve/reject from two nodes converges on
+// exactly one winner and the outcome binds every node. Whether the store is
+// wired is a deployment-time property, not a compile-time one — it is wired only
+// for ha.mode: cluster, and only when the storage provider supplies one — so the
+// gate keys on the store being present rather than on the story that introduced
+// it. Without it, approval status is a per-process local-filesystem directory:
+// a concurrent approve would overwrite an operator's rejection, and a bundle
+// rejected on one node would stay approvable, stageable and distributable from a
+// peer, since every staging path gates on the *local* status. This is the trust
+// decision authorizing publisher-signed binaries to run on endpoints, so that
+// case keeps the lease-backed leadership gate (Issue #3761 residual review),
+// which fails closed on both nodes of a blue-green pair (pkg/ha.Manager
+// .HasLeadership). SingleServerMode (s.haManager nil, or a non-clustered
+// Manager) is unconditionally authoritative, so single-controller installs are
+// unaffected either way.
 func (s *Server) moduleDecisionNodeIsAuthoritative() bool {
+	s.mu.RLock()
+	reviewer := s.moduleBundleReviewer
+	s.mu.RUnlock()
+
+	if reporter, ok := reviewer.(clusterVisibleApprovalReporter); ok && reporter.ApprovalStatusIsClusterVisible() {
+		return true
+	}
 	if s.haManager == nil {
 		return true
 	}

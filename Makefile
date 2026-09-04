@@ -615,6 +615,16 @@ security-precommit:
 
 # Central Provider Architecture Compliance Check
 # Prevents duplicate implementations of cross-cutting concerns
+#
+# The custom-cache rule matches on declaration text, so it cannot distinguish a
+# duplicate of pkg/cache from a differently-shaped store whose name contains
+# "Cache". A declaration that is genuinely not a pkg/cache-style in-memory TTL
+# cache is exempted by annotating that line with a written reason:
+#
+#	//architecture:allow-custom-cache -- <reason>
+#
+# Same convention as //architecture:allow-raw-leader (pkg/ha/architecture_test.go).
+# Annotate the specific declaration; do not add path exclusions to this target.
 .PHONY: check-architecture
 check-architecture:
 	@echo "🏗️  Checking Central Provider Compliance..."
@@ -681,18 +691,27 @@ check-architecture:
 	if [ -n "$$files" ]; then \
 		feature_files=$$(echo "$$files" | grep "^features/" || true); \
 		if [ -n "$$feature_files" ]; then \
-			if echo "$$feature_files" | xargs grep -l "type.*Cache.*struct" 2>/dev/null; then \
+			cache_types=$$(echo "$$feature_files" | xargs grep -n "type.*Cache.*struct" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$cache_types" ]; then \
 				echo "  ❌ Found custom Cache type in features/ - should use pkg/cache.Cache"; \
+				echo "$$cache_types" | sed 's/^/     /'; \
 				echo "     pkg/cache provides general-purpose caching with TTL and eviction"; \
+				echo "     If the type is genuinely not a pkg/cache-style in-memory TTL cache,"; \
+				echo "     annotate the declaration line with a written reason:"; \
+				echo "     //architecture:allow-custom-cache -- <reason>"; \
 				violations=$$((violations + 1)); \
 			fi; \
-			if echo "$$feature_files" | xargs grep -l "type.*L1.*struct\|type.*L2.*struct" 2>/dev/null; then \
+			tier_types=$$(echo "$$feature_files" | xargs grep -n "type.*L1.*struct\|type.*L2.*struct" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$tier_types" ]; then \
 				echo "  ❌ Found custom L1/L2 cache implementation - should use pkg/cache.Cache"; \
+				echo "$$tier_types" | sed 's/^/     /'; \
 				echo "     Multi-tier caching should be implemented in pkg/cache if needed"; \
 				violations=$$((violations + 1)); \
 			fi; \
-			if echo "$$feature_files" | xargs grep -l "func.*NewCache\|func.*NewL[12]Cache" 2>/dev/null; then \
+			cache_ctors=$$(echo "$$feature_files" | xargs grep -n "func.*NewCache\|func.*NewL[12]Cache" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$cache_ctors" ]; then \
 				echo "  ❌ Found custom cache constructor - should use pkg/cache.NewCache()"; \
+				echo "$$cache_ctors" | sed 's/^/     /'; \
 				violations=$$((violations + 1)); \
 			fi; \
 		fi; \

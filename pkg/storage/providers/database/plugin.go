@@ -57,6 +57,7 @@ var (
 	_ interfaces.RoutingStoreCreator        = (*DatabaseProvider)(nil)
 	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
+	_ interfaces.ModuleApprovalStoreCreator = (*DatabaseProvider)(nil)
 )
 
 // Name returns the provider name
@@ -435,6 +436,21 @@ func (p *DatabaseProvider) CreateSigningCursorStore(config map[string]interface{
 	store, err := NewDatabaseSigningCursorStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database signing cursor store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateModuleApprovalStore creates a PostgreSQL-backed ModuleApprovalStore
+// (ADR-031 Decision 1, Issue #3886: module bundle approval status must be
+// cluster-visible and CAS-protected). Implements interfaces.ModuleApprovalStoreCreator.
+func (p *DatabaseProvider) CreateModuleApprovalStore(config map[string]interface{}) (business.ModuleApprovalStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseModuleApprovalStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database module approval store: %w", err)
 	}
 	return store, nil
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gorilla/mux"
@@ -21,6 +22,7 @@ import (
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/session"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // ---- Test helpers -----------------------------------------------------------
@@ -404,24 +406,29 @@ func TestHandleRejectModuleBundle_NilReviewerReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-// TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode covers the
-// retained-gate carve-out documented on moduleDecisionNodeIsAuthoritative
-// (Issue #3761 residual review): unlike every other handler this story
-// ungates, module bundle approve/reject stay behind the lease-backed
-// leadership check because ModuleCache's approval status is a per-process
-// local-filesystem directory, not the shared database. Against a real,
-// deliberately non-authoritative *ha.Manager (ClusterMode, no lease ever
-// acquired) each handler must still return 503 and leave the bundle
-// untouched.
-func TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode(t *testing.T) {
+// TestModuleBundleApprovalHandlers_SucceedsOnNonAuthoritativeNode is the
+// [REQUIRED TEST] for Issue #3886 (ADR-031 Decision 1): handleApproveModuleBundle
+// and handleRejectModuleBundle used to return 503 and leave the bundle untouched
+// when the serving node held no lease-backed leadership — the retained-gate
+// carve-out from Issue #3761's residual review, because ModuleCache's approval
+// status was a per-process local-filesystem directory. With approval status
+// backed by a cluster-visible, CAS-protected store (business.ModuleApprovalStore)
+// any node accepts these decisions, and a concurrent approve/reject race from two
+// nodes sharing one store converges on exactly one winner instead of diverging.
+//
+// Every subtest here wires that store, because it is what makes any-node service
+// safe. The deployment that does not have it keeps the leadership gate — see
+// TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNodeWithoutSharedStore.
+func TestModuleBundleApprovalHandlers_SucceedsOnNonAuthoritativeNode(t *testing.T) {
 	newNonAuthoritativeServer := func(t *testing.T) (*Server, *cache.ModuleCache) {
 		t.Helper()
 		server, mc, _ := setupModuleApprovalServer(t)
 		server.haManager = newNonAuthoritativeHAManager(t)
+		mc.SetApprovalStore(pkgtesting.SetupTestModuleApprovalStore())
 		return server, mc
 	}
 
-	t.Run("approve is blocked and does not invoke the reviewer", func(t *testing.T) {
+	t.Run("approve succeeds and the reviewer runs", func(t *testing.T) {
 		server, mc := newNonAuthoritativeServer(t)
 		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 		addressParam := formatModuleAddress(addr)
@@ -432,16 +439,16 @@ func TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode(t *testing.T
 		handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
 		handler.ServeHTTP(rec, req)
 
-		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"a non-authoritative node must not decide module bundle approval")
+		require.Equal(t, http.StatusOK, rec.Code,
+			"approval must succeed regardless of leadership: %s", rec.Body.String())
 
 		status, err := mc.GetApprovalStatus(addr)
 		require.NoError(t, err)
-		assert.Equal(t, cache.ApprovalStatusPending, status,
-			"moduleBundleReviewer.Approve must not run on a non-authoritative node")
+		assert.Equal(t, cache.ApprovalStatusApproved, status,
+			"moduleBundleReviewer.Approve must run on a non-authoritative node")
 	})
 
-	t.Run("reject is blocked and does not invoke the reviewer", func(t *testing.T) {
+	t.Run("reject succeeds and the reviewer runs", func(t *testing.T) {
 		server, mc := newNonAuthoritativeServer(t)
 		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
 		addressParam := formatModuleAddress(addr)
@@ -452,13 +459,130 @@ func TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNode(t *testing.T
 		handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
 		handler.ServeHTTP(rec, req)
 
+		require.Equal(t, http.StatusOK, rec.Code,
+			"rejection must succeed regardless of leadership: %s", rec.Body.String())
+
+		status, err := mc.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		assert.Equal(t, cache.ApprovalStatusRejected, status,
+			"moduleBundleReviewer.RejectPending must run on a non-authoritative node")
+	})
+
+	t.Run("concurrent approve and reject from two non-authoritative simulated nodes sharing one store converges", func(t *testing.T) {
+		sharedStore := pkgtesting.SetupTestModuleApprovalStore()
+
+		serverA, mcA, _ := setupModuleApprovalServer(t)
+		serverA.haManager = newNonAuthoritativeHAManager(t)
+		mcA.SetApprovalStore(sharedStore)
+
+		serverB, mcB, _ := setupModuleApprovalServer(t)
+		serverB.haManager = newNonAuthoritativeHAManager(t)
+		mcB.SetApprovalStore(sharedStore)
+
+		// Both simulated nodes need the bundle content locally; the deterministic
+		// content hash means both calls address the same shared-store record.
+		addr := makePendingBundle(t, mcA, "cfgms", "hyperv", "0.2.1")
+		require.Equal(t, addr, makePendingBundle(t, mcB, "cfgms", "hyperv", "0.2.1"))
+		addressParam := formatModuleAddress(addr)
+
+		approveReq := makeApproveRequest(t, serverA, addressParam, moduleTestStrongPrincipal())
+		rejectReq := makeRejectRequest(t, serverB, addressParam, moduleTestStrongPrincipal())
+		approveRec := httptest.NewRecorder()
+		rejectRec := httptest.NewRecorder()
+
+		approveHandler := serverA.requirePermission("module", "approve")(http.HandlerFunc(serverA.handleApproveModuleBundle))
+		rejectHandler := serverB.requirePermission("module", "reject")(http.HandlerFunc(serverB.handleRejectModuleBundle))
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			approveHandler.ServeHTTP(approveRec, approveReq)
+		}()
+		go func() {
+			defer wg.Done()
+			rejectHandler.ServeHTTP(rejectRec, rejectReq)
+		}()
+		wg.Wait()
+
+		codes := []int{approveRec.Code, rejectRec.Code}
+		successes, conflicts := 0, 0
+		for _, code := range codes {
+			switch code {
+			case http.StatusOK:
+				successes++
+			case http.StatusConflict:
+				conflicts++
+			}
+		}
+		assert.Equal(t, 1, successes, "exactly one of the concurrent approve/reject decisions must win: approve=%d reject=%d", approveRec.Code, rejectRec.Code)
+		assert.Equal(t, 1, conflicts, "the losing decision must observe 409 Conflict, not silently overwrite the winner: approve=%d reject=%d", approveRec.Code, rejectRec.Code)
+
+		statusA, err := mcA.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		statusB, err := mcB.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		assert.Equal(t, statusA, statusB, "both simulated nodes must observe the same winning status through the shared store")
+	})
+}
+
+// TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNodeWithoutSharedStore
+// pins the other half of the gate. Whether approval status is cluster-visible is
+// a deployment-time property: the shared store is wired only for ha.mode:
+// cluster, and only when the storage provider supplies one. ha.mode: blue-green
+// is a dual-instance deployment whose storage tier is node-local, so no store is
+// wired and both the blue and the green node would otherwise accept decisions
+// against their own approval.yaml files — a bundle rejected on one still
+// approvable, stageable and distributable from the other. Without a shared store
+// the handlers must therefore keep the lease-backed leadership gate, which
+// answers false on both nodes of a blue-green pair (pkg/ha.Manager.HasLeadership)
+// and so fails closed.
+func TestModuleBundleApprovalHandlers_BlockedOnNonAuthoritativeNodeWithoutSharedStore(t *testing.T) {
+	newUnwiredServer := func(t *testing.T) (*Server, *cache.ModuleCache) {
+		t.Helper()
+		server, mc, _ := setupModuleApprovalServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+		require.False(t, mc.HasSharedApprovalStore(),
+			"sanity: this case is the deployment with no cluster-visible approval store")
+		return server, mc
+	}
+
+	t.Run("approve is blocked and does not invoke the reviewer", func(t *testing.T) {
+		server, mc := newUnwiredServer(t)
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+
+		req := makeApproveRequest(t, server, formatModuleAddress(addr), moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
+		handler.ServeHTTP(rec, req)
+
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
-			"a non-authoritative node must not decide module bundle rejection")
+			"with node-local approval status, a non-authoritative node must not decide module bundle approval")
 
 		status, err := mc.GetApprovalStatus(addr)
 		require.NoError(t, err)
 		assert.Equal(t, cache.ApprovalStatusPending, status,
-			"moduleBundleReviewer.RejectPending must not run on a non-authoritative node")
+			"moduleBundleReviewer.Approve must not run on a non-authoritative node without a shared store")
+	})
+
+	t.Run("reject is blocked and does not invoke the reviewer", func(t *testing.T) {
+		server, mc := newUnwiredServer(t)
+		addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+
+		req := makeRejectRequest(t, server, formatModuleAddress(addr), moduleTestStrongPrincipal())
+		rec := httptest.NewRecorder()
+
+		handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
+		handler.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+			"with node-local approval status, a non-authoritative node must not decide module bundle rejection")
+
+		status, err := mc.GetApprovalStatus(addr)
+		require.NoError(t, err)
+		assert.Equal(t, cache.ApprovalStatusPending, status,
+			"moduleBundleReviewer.RejectPending must not run on a non-authoritative node without a shared store")
 	})
 }
 

@@ -12,6 +12,7 @@
 package cache
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 var (
@@ -43,8 +45,10 @@ const (
 	ApprovalStatusRejected ApprovalStatus = "rejected"
 )
 
-// CacheEntry is a catalog record returned by List.
-type CacheEntry struct {
+// CacheEntry is a catalog record returned by List. It is a plain value type
+// describing one stored bundle — it holds no cached data and implements no
+// caching behavior, so pkg/cache does not apply.
+type CacheEntry struct { //architecture:allow-custom-cache -- value type describing one stored bundle, not a cache implementation
 	Addr   bundle.ContentAddress
 	Status ApprovalStatus
 }
@@ -56,9 +60,25 @@ type approvalRecord struct {
 
 // ModuleCache is a content-addressed filesystem cache for module bundles.
 // All public methods are safe for concurrent use.
-type ModuleCache struct {
+//
+// This is not a pkg/cache.Cache and must not be reimplemented on top of one:
+// pkg/cache is an in-memory, TTL-and-eviction keyed cache, whereas this type is
+// a durable on-disk store addressed by (publisher, name, version, content hash).
+// Entries are the signed bundles authorizing publisher binaries to run on
+// managed endpoints (ADR-006), so they must survive process restart and must
+// never be evicted on a TTL or size bound — properties pkg/cache does not and
+// should not provide. Approval status is the one field that is pluggable, via
+// business.ModuleApprovalStore below.
+type ModuleCache struct { //architecture:allow-custom-cache -- durable content-addressed on-disk bundle store, not an in-memory TTL cache; entries must never be evicted
 	mu      sync.RWMutex
 	rootDir string
+	// store is the optional cluster-visible, CAS-protected approval-status
+	// backend (Issue #3886, ADR-031 Decision 1). nil (the default) keeps
+	// approval status in the local approval.yaml file, which is correct for
+	// single-node deployments; SetApprovalStore wires a database-backed store
+	// for clustered deployments. Bundle content (manifest/binaries/signatures)
+	// stays local either way — only approval status is shared.
+	store business.ModuleApprovalStore
 }
 
 // New creates a ModuleCache rooted at rootDir, creating it if needed.
@@ -67,6 +87,24 @@ func New(rootDir string) (*ModuleCache, error) {
 		return nil, fmt.Errorf("create module cache root: %w", err)
 	}
 	return &ModuleCache{rootDir: rootDir}, nil
+}
+
+// SetApprovalStore wires a cluster-visible, CAS-protected ModuleApprovalStore
+// backend so approval-status reads/writes become cluster-visible (Issue #3886).
+// Call after New() but before serving traffic; nil (the default) keeps the
+// existing local-filesystem approval.yaml behavior for single-node deployments.
+func (c *ModuleCache) SetApprovalStore(s business.ModuleApprovalStore) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.store = s
+}
+
+// approvalKey derives the opaque, unique key business.ModuleApprovalStore uses to
+// identify addr. Publisher/name/version are validated elsewhere to never contain
+// "/", so this key is unambiguous despite ContentHash's base64 alphabet also
+// containing "/".
+func approvalKey(addr bundle.ContentAddress) string {
+	return addr.Publisher + "/" + addr.Name + "/" + addr.Version + "/" + addr.ContentHash
 }
 
 // bundleDir returns the filesystem path for the given content address.
@@ -116,6 +154,14 @@ func hashToDir(hash string) string {
 // Idempotent: if b.ContentAddress() already exists in the cache (same content hash),
 // Put returns nil without re-writing any files.
 //
+// Put is ingestion, not a decision: it seeds the approval status as pending only
+// when the bundle has no status yet, and never overwrites an existing one. With
+// a cluster-visible store wired (SetApprovalStore) the status is shared while
+// bundle content stays node-local, so the same bundle is ingested again on every
+// node that resolves it — an unconditional "seed as pending" write there would
+// erase a rejection recorded on a peer node and let the bundle be auto-approved
+// afresh (Issue #3886).
+//
 // Returns ErrContentAddressConflict if the same (publisher, name, version) tuple already
 // exists under a different content hash — this indicates tampering or a hash collision.
 func (c *ModuleCache) Put(b *bundle.Bundle) error {
@@ -128,9 +174,12 @@ func (c *ModuleCache) Put(b *bundle.Bundle) error {
 		return err
 	}
 
-	// Idempotent: exact content address already stored.
+	// Idempotent: exact content address already stored. Still ensure an approval
+	// record exists — content can be present locally while the shared store has
+	// no record for it (content cached before the store was wired).
 	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); err == nil {
-		return nil
+		_, statusErr := c.seedApprovalStatusLocked(dir, addr, ApprovalStatusPending)
+		return statusErr
 	}
 
 	// Conflict check: a different hash exists for the same (publisher/name/version).
@@ -177,16 +226,8 @@ func (c *ModuleCache) Put(b *bundle.Bundle) error {
 		return fmt.Errorf("write content hash: %w", err)
 	}
 
-	rec := approvalRecord{Status: ApprovalStatusPending}
-	recBytes, err := yaml.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("marshal approval record: %w", err)
-	}
-	if err := writeFileAtomic(filepath.Join(dir, "approval.yaml"), recBytes, 0640); err != nil {
-		return fmt.Errorf("write approval record: %w", err)
-	}
-
-	return nil
+	_, statusErr := c.seedApprovalStatusLocked(dir, addr, ApprovalStatusPending)
+	return statusErr
 }
 
 // Get retrieves a bundle from the cache by content address.
@@ -245,7 +286,10 @@ func (c *ModuleCache) Get(addr bundle.ContentAddress) (*bundle.Bundle, error) {
 	}, nil
 }
 
-// SetApprovalStatus updates the approval state for a cached bundle.
+// SetApprovalStatus overrides the approval state for a cached bundle,
+// disregarding whatever state it is in. It is an administrative/seeding
+// primitive — the approve/reject decision path is CompareAndSetApprovalStatus,
+// and ingestion is Put, neither of which can discard another node's decision.
 // Returns ErrBundleNotFound if no bundle exists at the given address.
 func (c *ModuleCache) SetApprovalStatus(addr bundle.ContentAddress, status ApprovalStatus) error {
 	c.mu.Lock()
@@ -259,12 +303,121 @@ func (c *ModuleCache) SetApprovalStatus(addr bundle.ContentAddress, status Appro
 		return ErrBundleNotFound
 	}
 
-	rec := approvalRecord{Status: status}
-	recBytes, err := yaml.Marshal(rec)
+	if c.store != nil {
+		return c.overrideApprovalStatusInStore(addr, status)
+	}
+	return writeApprovalRecord(dir, status)
+}
+
+// overrideApprovalStatusInStore forces status onto addr's shared-store record,
+// composed from the store's insert-if-absent and compare-and-set primitives:
+// the interface deliberately exposes no unconditional write, so that no code
+// path can overwrite a decision by accident. Retries a bounded number of times
+// because a concurrent decision can land between the read and the write; a
+// caller that keeps losing gets an error rather than a silent no-op.
+// Assumes c.mu is held for writing.
+func (c *ModuleCache) overrideApprovalStatusInStore(addr bundle.ContentAddress, status ApprovalStatus) error {
+	ctx := context.Background()
+	key := approvalKey(addr)
+	target := business.ModuleApprovalStatus(status)
+
+	current, err := c.store.PutApprovalStatusIfAbsent(ctx, key, target)
+	if err != nil {
+		return fmt.Errorf("set approval status: %w", err)
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		if current == target {
+			return nil
+		}
+		ok, casErr := c.store.CompareAndSetApprovalStatus(ctx, key, current, target)
+		if casErr != nil {
+			return fmt.Errorf("set approval status: %w", casErr)
+		}
+		if ok {
+			return nil
+		}
+		observed, found, getErr := c.store.GetApprovalStatus(ctx, key)
+		if getErr != nil {
+			return fmt.Errorf("set approval status: %w", getErr)
+		}
+		if !found {
+			return ErrBundleNotFound
+		}
+		current = observed
+	}
+
+	return fmt.Errorf("set approval status: approval status for this bundle is being changed concurrently")
+}
+
+// seedApprovalStatusLocked records status as addr's approval status only if it
+// has none yet, and returns the status in force afterwards. dir must be addr's
+// already-validated bundleDir and c.mu must be held for writing.
+//
+// This is the only write ingestion performs, so ingesting a bundle a second time
+// — on this node or, through a shared store, on any peer — reports the standing
+// decision instead of resetting it (Issue #3886).
+func (c *ModuleCache) seedApprovalStatusLocked(dir string, addr bundle.ContentAddress, status ApprovalStatus) (ApprovalStatus, error) {
+	if c.store != nil {
+		effective, err := c.store.PutApprovalStatusIfAbsent(context.Background(), approvalKey(addr), business.ModuleApprovalStatus(status))
+		if err != nil {
+			return "", fmt.Errorf("record initial approval status: %w", err)
+		}
+		return ApprovalStatus(effective), nil
+	}
+
+	existing, err := readApprovalRecord(dir)
+	switch {
+	case err == nil:
+		return existing, nil
+	case !errors.Is(err, os.ErrNotExist):
+		return "", err
+	}
+
+	if err := writeApprovalRecord(dir, status); err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
+// readApprovalRecord reads the node-local approval.yaml under dir. The
+// os.ErrNotExist from the underlying read is returned unwrapped-in-kind so
+// callers can branch on errors.Is(err, os.ErrNotExist).
+func readApprovalRecord(dir string) (ApprovalStatus, error) {
+	// #nosec G304 -- dir is a validated bundleDir and approval.yaml is a fixed
+	// filename beneath the private cache directory.
+	recBytes, err := os.ReadFile(filepath.Join(dir, "approval.yaml"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		return "", fmt.Errorf("read approval record: %w", err)
+	}
+	var rec approvalRecord
+	if err := yaml.Unmarshal(recBytes, &rec); err != nil {
+		return "", fmt.Errorf("unmarshal approval record: %w", err)
+	}
+	return rec.Status, nil
+}
+
+// writeApprovalRecord writes the node-local approval.yaml under dir.
+func writeApprovalRecord(dir string, status ApprovalStatus) error {
+	recBytes, err := yaml.Marshal(approvalRecord{Status: status})
 	if err != nil {
 		return fmt.Errorf("marshal approval record: %w", err)
 	}
 	return writeFileAtomic(filepath.Join(dir, "approval.yaml"), recBytes, 0640)
+}
+
+// HasSharedApprovalStore reports whether approval status is backed by the
+// cluster-visible, CAS-protected store rather than this node's local
+// approval.yaml files. Callers that ungate a decision on "every node sees the
+// same status" must check this: without a store wired, an approve/reject
+// decision is node-local and any-node service would diverge (Issue #3886).
+func (c *ModuleCache) HasSharedApprovalStore() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.store != nil
 }
 
 // GetApprovalStatus returns the current approval state for a cached bundle.
@@ -278,21 +431,84 @@ func (c *ModuleCache) GetApprovalStatus(addr bundle.ContentAddress) (ApprovalSta
 		return "", err
 	}
 
-	// #nosec G304 -- bundleDir validates the content address and approval.yaml
-	// is a fixed filename beneath the private cache directory.
-	recBytes, err := os.ReadFile(filepath.Join(dir, "approval.yaml"))
+	if c.store != nil {
+		status, found, err := c.store.GetApprovalStatus(context.Background(), approvalKey(addr))
+		if err != nil {
+			return "", fmt.Errorf("get approval status: %w", err)
+		}
+		if !found {
+			return "", ErrBundleNotFound
+		}
+		return ApprovalStatus(status), nil
+	}
+
+	status, err := readApprovalRecord(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", ErrBundleNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("read approval record: %w", err)
+		return "", err
+	}
+	return status, nil
+}
+
+// CompareAndSetApprovalStatus atomically transitions the approval status for
+// addr from expectedCurrent to newStatus. Returns ok=false with a nil error if
+// the current status is not expectedCurrent, so callers (ApprovalWorkflow) can
+// distinguish "someone else already decided" from an infrastructure failure.
+// Returns ErrBundleNotFound if no bundle exists at addr.
+//
+// In clustered mode (a store wired via SetApprovalStore) the compare-and-write
+// is atomic across every controller node sharing the store, closing the
+// approve/reject race a per-process mutex cannot close (Issue #3886). In
+// single-node mode the in-process mutex below provides the same guarantee,
+// since there is only one node to race against.
+func (c *ModuleCache) CompareAndSetApprovalStatus(addr bundle.ContentAddress, expectedCurrent, newStatus ApprovalStatus) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	dir, err := c.bundleDir(addr)
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "manifest.yaml")); errors.Is(err, os.ErrNotExist) {
+		return false, ErrBundleNotFound
 	}
 
+	if c.store != nil {
+		ok, err := c.store.CompareAndSetApprovalStatus(context.Background(), approvalKey(addr), business.ModuleApprovalStatus(expectedCurrent), business.ModuleApprovalStatus(newStatus))
+		if err != nil {
+			return false, fmt.Errorf("compare-and-set approval status: %w", err)
+		}
+		return ok, nil
+	}
+
+	// #nosec G304 -- bundleDir validates the content address and approval.yaml
+	// is a fixed filename beneath the private cache directory.
+	recBytes, err := os.ReadFile(filepath.Join(dir, "approval.yaml"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, ErrBundleNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read approval record: %w", err)
+	}
 	var rec approvalRecord
 	if err := yaml.Unmarshal(recBytes, &rec); err != nil {
-		return "", fmt.Errorf("unmarshal approval record: %w", err)
+		return false, fmt.Errorf("unmarshal approval record: %w", err)
 	}
-	return rec.Status, nil
+	if rec.Status != expectedCurrent {
+		return false, nil
+	}
+
+	newRec := approvalRecord{Status: newStatus}
+	newRecBytes, err := yaml.Marshal(newRec)
+	if err != nil {
+		return false, fmt.Errorf("marshal approval record: %w", err)
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "approval.yaml"), newRecBytes, 0640); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // List returns all entries in the cache with their current approval status.
@@ -362,12 +578,22 @@ func (c *ModuleCache) List() ([]CacheEntry, error) {
 						ContentHash: originalHash,
 					}
 					status := ApprovalStatusPending
-					// #nosec G304 -- hashDir is assembled exclusively from nested
-					// ReadDir entries beneath c.rootDir; filename is fixed.
-					if recBytes, readErr := os.ReadFile(filepath.Join(hashDir, "approval.yaml")); readErr == nil {
-						var rec approvalRecord
-						if yaml.Unmarshal(recBytes, &rec) == nil {
-							status = rec.Status
+					if c.store != nil {
+						// Clustered mode: the store is authoritative — a decision
+						// made on another node would leave the local approval.yaml
+						// stale (Issue #3886). Fall back to pending if the store
+						// has no record yet (a Put/SetApprovalStatus race window).
+						if storeStatus, found, err := c.store.GetApprovalStatus(context.Background(), approvalKey(addr)); err == nil && found {
+							status = ApprovalStatus(storeStatus)
+						}
+					} else {
+						// #nosec G304 -- hashDir is assembled exclusively from nested
+						// ReadDir entries beneath c.rootDir; filename is fixed.
+						if recBytes, readErr := os.ReadFile(filepath.Join(hashDir, "approval.yaml")); readErr == nil {
+							var rec approvalRecord
+							if yaml.Unmarshal(recBytes, &rec) == nil {
+								status = rec.Status
+							}
 						}
 					}
 					entries = append(entries, CacheEntry{Addr: addr, Status: status})

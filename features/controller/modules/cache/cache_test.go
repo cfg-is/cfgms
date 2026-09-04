@@ -4,6 +4,7 @@ package cache_test
 
 import (
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	modules "github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 func makeTestBundle(publisher, name, version, hash string) *bundle.Bundle {
@@ -242,6 +244,127 @@ func TestModuleCache_List_ShowsApprovedStatus(t *testing.T) {
 	assert.Equal(t, cache.ApprovalStatusApproved, entries[0].Status)
 }
 
+// TestModuleCache_CompareAndSetApprovalStatus_LocalMode verifies the local
+// (no store wired) CAS path succeeds on a match and fails on a mismatch,
+// without touching the stored status.
+func TestModuleCache_CompareAndSetApprovalStatus_LocalMode(t *testing.T) {
+	c := makeTestCache(t)
+	b := makeTestBundle("cfgms", "hyperv", "0.2.1", "abc123hash")
+	require.NoError(t, c.Put(b))
+	addr := b.ContentAddress()
+
+	ok, err := c.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusApproved)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusApproved, status)
+
+	// A second CAS against the now-stale "pending" expectation must be refused.
+	ok, err = c.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusRejected)
+	require.NoError(t, err)
+	assert.False(t, ok, "a CAS against a stale expected status must not overwrite the current one")
+
+	status, err = c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusApproved, status, "the mismatched CAS must leave the stored status untouched")
+}
+
+// TestModuleCache_CompareAndSetApprovalStatus_NotFound returns ErrBundleNotFound
+// for a missing bundle.
+func TestModuleCache_CompareAndSetApprovalStatus_NotFound(t *testing.T) {
+	c := makeTestCache(t)
+	addr := bundle.ContentAddress{Publisher: "cfgms", Name: "missing", Version: "1.0.0", ContentHash: "nohash"}
+	_, err := c.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusApproved)
+	assert.ErrorIs(t, err, cache.ErrBundleNotFound)
+}
+
+// TestModuleCache_SetApprovalStore_DelegatesReadsAndWrites verifies that once a
+// ModuleApprovalStore is wired via SetApprovalStore, Get/Set/CompareAndSet all
+// delegate to it instead of the local approval.yaml file, and List() reflects
+// the store's status.
+func TestModuleCache_SetApprovalStore_DelegatesReadsAndWrites(t *testing.T) {
+	c := makeTestCache(t)
+	store := pkgtesting.SetupTestModuleApprovalStore()
+	c.SetApprovalStore(store)
+
+	b := makeTestBundle("cfgms", "hyperv", "0.2.1", "abc123hash")
+	require.NoError(t, c.Put(b))
+	addr := b.ContentAddress()
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status, "Put must seed the wired store, not just the local file")
+
+	require.NoError(t, c.SetApprovalStatus(addr, cache.ApprovalStatusApproved))
+	status, err = c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusApproved, status)
+
+	entries, err := c.List()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, cache.ApprovalStatusApproved, entries[0].Status, "List must reflect the wired store's status, not a stale local file")
+}
+
+// TestModuleCache_SharedApprovalStore_ConcurrentApproveRejectConverges simulates
+// two controller nodes (two independent ModuleCache instances, each with its own
+// local bundle-content directory) sharing one ModuleApprovalStore, racing an
+// approve against a reject for the same bundle. Exactly one must win — this is
+// the split-brain race Issue #3886 exists to close. Run with -race.
+func TestModuleCache_SharedApprovalStore_ConcurrentApproveRejectConverges(t *testing.T) {
+	sharedStore := pkgtesting.SetupTestModuleApprovalStore()
+
+	nodeA := makeTestCache(t)
+	nodeA.SetApprovalStore(sharedStore)
+	nodeB := makeTestCache(t)
+	nodeB.SetApprovalStore(sharedStore)
+
+	b := makeTestBundle("cfgms", "hyperv", "0.2.1", "shared-hash")
+	// Both nodes need the bundle content locally (out of scope for this story,
+	// but required for the local ErrBundleNotFound existence check to pass on
+	// each node) — Put is deterministic, so both calls produce identical content.
+	require.NoError(t, nodeA.Put(b))
+	require.NoError(t, nodeB.Put(b))
+	addr := b.ContentAddress()
+
+	type casResult struct {
+		ok  bool
+		err error
+	}
+	var wg sync.WaitGroup
+	results := make(chan casResult, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ok, err := nodeA.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusApproved)
+		results <- casResult{ok, err}
+	}()
+	go func() {
+		defer wg.Done()
+		ok, err := nodeB.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusRejected)
+		results <- casResult{ok, err}
+	}()
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for r := range results {
+		require.NoError(t, r.err)
+		if r.ok {
+			successes++
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one of the concurrent approve/reject decisions must win across the two simulated nodes")
+
+	statusA, err := nodeA.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	statusB, err := nodeB.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, statusA, statusB, "both nodes must observe the same winning status through the shared store")
+}
+
 // TestModuleCache_PutManifestContentPreserved verifies manifest YAML roundtrip preserves fields.
 func TestModuleCache_PutManifestContentPreserved(t *testing.T) {
 	c := makeTestCache(t)
@@ -268,4 +391,77 @@ func TestModuleCache_PutManifestContentPreserved(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Hyper-V module", got.Manifest.Description)
 	assert.Equal(t, hash, got.ContentHash)
+}
+
+// TestModuleCache_PutDoesNotResetDecisionInSharedStore pins ingestion's
+// insert-if-absent contract at the cache level. Bundle content stays node-local
+// while approval status is shared, so the same bundle is Put on every node that
+// resolves it — and the store is authoritative for all of them. An unconditional
+// "seed as pending" write on the second node would therefore erase the rejection
+// the first node's operator recorded, on every node at once.
+func TestModuleCache_PutDoesNotResetDecisionInSharedStore(t *testing.T) {
+	sharedStore := pkgtesting.SetupTestModuleApprovalStore()
+
+	nodeA := makeTestCache(t)
+	nodeA.SetApprovalStore(sharedStore)
+	nodeB := makeTestCache(t)
+	nodeB.SetApprovalStore(sharedStore)
+
+	b := makeTestBundle("cfgms", "hyperv", "0.2.1", "no-clobber-hash")
+	require.NoError(t, nodeA.Put(b))
+	addr := b.ContentAddress()
+
+	ok, err := nodeA.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusRejected)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Node B ingests the same bundle for the first time: its local cache has no
+	// copy of the content, but the decision is already made.
+	require.NoError(t, nodeB.Put(b))
+
+	statusB, err := nodeB.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, statusB,
+		"ingestion on a second node must not reset the shared status to pending")
+
+	statusA, err := nodeA.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, statusA,
+		"the rejecting node must keep enforcing its decision after a peer re-ingests the bundle")
+
+	// A rejected bundle must also stay undecidable: the pending → approved
+	// transition an auto-approval would make has nothing to act on.
+	ok, err = nodeB.CompareAndSetApprovalStatus(addr, cache.ApprovalStatusPending, cache.ApprovalStatusApproved)
+	require.NoError(t, err)
+	assert.False(t, ok, "a rejected bundle must not be approvable from a peer node without a fresh decision")
+}
+
+// TestModuleCache_PutDoesNotResetLocalDecision is the single-node form: a
+// rejected bundle re-ingested by a later cfg push keeps its status.
+func TestModuleCache_PutDoesNotResetLocalDecision(t *testing.T) {
+	c := makeTestCache(t)
+
+	b := makeTestBundle("cfgms", "hyperv", "0.2.1", "no-clobber-local-hash")
+	require.NoError(t, c.Put(b))
+	addr := b.ContentAddress()
+	require.NoError(t, c.SetApprovalStatus(addr, cache.ApprovalStatusRejected))
+
+	require.NoError(t, c.Put(b))
+
+	status, err := c.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusRejected, status,
+		"re-ingesting cached content must not reset its approval status")
+}
+
+// TestModuleCache_HasSharedApprovalStore reports which backend approval status
+// lives in. The REST approve/reject handlers key their leadership gate on it, so
+// a wrong answer either blocks decisions on a healthy cluster or lets every node
+// decide against its own node-local files.
+func TestModuleCache_HasSharedApprovalStore(t *testing.T) {
+	c := makeTestCache(t)
+	assert.False(t, c.HasSharedApprovalStore(), "a cache with no store wired is node-local")
+
+	c.SetApprovalStore(pkgtesting.SetupTestModuleApprovalStore())
+	assert.True(t, c.HasSharedApprovalStore(), "a wired cache reports cluster-visible status")
 }

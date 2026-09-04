@@ -276,5 +276,34 @@ the prerequisite the founder chose (option B, 2026-09-02) to unblock #3761;
 the `HasLeadership()` gates named above are still in place and remain #3761's
 job to remove.
 
+**Module bundle approval (Amended, Issue #3886)** — the #3761 Tech Lead ruling
+(draft `PVTI_lADOCrV4cc4BX5ezzg5S1ds`) retained a `HasLeadership()` gate on
+`handleApproveModuleBundle`/`handleRejectModuleBundle` as a documented exception
+to Decision 1: module bundle approval status lived in `ModuleCache`, a
+per-process local-filesystem directory, so any-node service would have let a
+concurrent approve on one controller node overwrite an operator's rejection on
+another. That gap is now closed the same way as the pkg/cert amendment above:
+`pkg/storage/interfaces/business.ModuleApprovalStore` adds a status-based
+compare-and-set primitive, a Postgres-backed implementation
+(`pkg/storage/providers/database`) is selected when the controller runs
+clustered, and `ApprovalWorkflow.Approve`/`RejectPending` call
+`CompareAndSetApprovalStatus` instead of a separate Get-then-Set pair — closing
+the same TOCTOU window the store makes visible. Ingestion
+(`ApprovalWorkflow.EvaluateAndStore`, reached on every node that resolves the
+bundle) can only insert a status where none exists, never overwrite one, so a
+later cfg push cannot reset a decision an operator already made.
+
+The gate is lifted exactly where Decision 1's premise now holds: the handlers
+serve on any node when the shared store is actually wired
+(`ModuleCache.HasSharedApprovalStore()`), and keep the `HasLeadership()` gate
+otherwise. That is not a hedge — whether the store is wired is a deployment-time
+property. It is wired for `ha.mode: cluster` when the storage provider supplies
+one; `ha.mode: blue-green` deploys a node-local storage tier and gets no store,
+which is why `HasLeadership()` answers false on both of its nodes (fail-closed,
+ADR-029 Decision 4). Keying the gate on the store rather than on this story means
+a clustered controller whose provider yields no store degrades to single-writer
+approvals — logged as a warning at startup — instead of silently letting both
+nodes decide against their own local files.
+
 The decisions/README.md index gains ADR-031's row; status columns for ADR-028/029
 update per above when this ADR is Accepted.

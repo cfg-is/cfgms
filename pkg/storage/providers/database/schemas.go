@@ -924,6 +924,22 @@ func (s DatabaseSchemas) CreateSigningCursorTable(ctx context.Context, db *sql.D
 	return nil
 }
 
+// CreateModuleApprovalsTable creates the cfgms_module_approvals table backing the
+// cluster-visible, CAS-protected ModuleApprovalStore (ADR-031 Decision 1, Issue
+// #3886). address is the opaque publisher/name/version/content-hash key
+// features/controller/modules/cache derives from a bundle.ContentAddress.
+func (s DatabaseSchemas) CreateModuleApprovalsTable(ctx context.Context, db *sql.DB) error {
+	ddl := `
+		CREATE TABLE IF NOT EXISTS cfgms_module_approvals (
+			address TEXT NOT NULL PRIMARY KEY,
+			status  TEXT NOT NULL
+		);`
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("failed to create cfgms_module_approvals table: %w", err)
+	}
+	return nil
+}
+
 // CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
 func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
@@ -1624,6 +1640,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS refresh_nonces;",
 		"DROP TABLE IF EXISTS cfgms_cert_revocations;",
 		"DROP TABLE IF EXISTS cfgms_signing_cursor;",
+		"DROP TABLE IF EXISTS cfgms_module_approvals;",
 	}
 
 	for _, query := range dropQueries {
