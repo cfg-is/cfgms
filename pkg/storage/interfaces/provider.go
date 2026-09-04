@@ -1013,6 +1013,7 @@ func (sm *StorageManager) Close() error {
 		sm.caseStore,
 		sm.nonceStore,
 		sm.leaseStore,
+		sm.routingStore,
 	}
 	var firstErr error
 	for _, s := range slots {
