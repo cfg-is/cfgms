@@ -780,7 +780,19 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 
 	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
-	_, connectErr := refreshAndConnect(context.Background(), storedID, ks, dir, "tok",
+	//
+	// Today the connect returns in single-digit milliseconds, before any dial:
+	// the bundle carries no server trust material the client can build a TLS
+	// config from, so the gRPC control-plane provider rejects the config
+	// ("client mode requires 'tls_config'"). That is incidental to what this
+	// test asserts. Should the connect path ever get as far as dialing, it would
+	// not return at all on a context.Background() call — the initial dial retries
+	// with backoff until its context is done rather than failing after one
+	// attempt (Issue #3849), and controller.server.URL has nothing listening on
+	// the QUIC side. Bound the context so this test can never become a CI hang.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, connectErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
 		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.Error(t, connectErr, "no real transport is listening, so the reconnect must fail")
 	assert.NotContains(t, connectErr.Error(), "no usable steward private key",
@@ -829,9 +841,17 @@ func TestRefreshAndConnect_SubmitsCSROverFreshKeypair(t *testing.T) {
 
 	// Two refreshes: the transport reconnect fails both times (nothing is
 	// listening), but the CSR submission happens before that.
+	//
+	// Bounded rather than context.Background() for the reason given in
+	// TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity: the reconnect
+	// fails fast today for a reason incidental to this test, and the initial
+	// dial it would otherwise reach retries until its context is done (Issue
+	// #3849).
 	for i := 0; i < 2; i++ {
-		_, refreshErr := refreshAndConnect(context.Background(), storedID, ks, dir, "tok",
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
 			controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+		cancel()
 		require.Error(t, refreshErr, "no real transport is listening, so the reconnect must fail")
 	}
 
