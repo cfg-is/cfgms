@@ -153,6 +153,15 @@ type SigningCursorStoreCreator interface {
 	CreateSigningCursorStore(config map[string]interface{}) (certinterfaces.SigningCursorStore, error)
 }
 
+// ModuleApprovalStoreCreator is an optional StorageProvider extension for
+// backends that support cluster-visible, CAS-protected module bundle approval
+// storage (ADR-031 Decision 1, Issue #3886). Backends that do not implement this
+// interface leave the store nil; ModuleCache falls back to its node-local
+// file-backed implementation.
+type ModuleApprovalStoreCreator interface {
+	CreateModuleApprovalStore(config map[string]interface{}) (business.ModuleApprovalStore, error)
+}
+
 // StorageProvider defines the interface that all storage backends must implement.
 // Providers now return sub-package types from pkg/storage/interfaces/{business,config}.
 type StorageProvider interface {
@@ -742,6 +751,7 @@ type StorageManager struct {
 	routingStore             business.RoutingStore             // ADR-031 Decision 3, Issue #3764: shared steward-routing table
 	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
 	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
+	moduleApprovalStore      business.ModuleApprovalStore      // Issue #3886, ADR-031: cluster-visible, CAS-protected module approval status
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -980,6 +990,19 @@ func (sm *StorageManager) GetSigningCursorStore() certinterfaces.SigningCursorSt
 // SetSigningCursorStore wires the signing cursor store after construction.
 func (sm *StorageManager) SetSigningCursorStore(s certinterfaces.SigningCursorStore) {
 	sm.signingCursorStore = s
+}
+
+// GetModuleApprovalStore returns the cluster-visible, CAS-protected module bundle
+// approval store (ADR-031 Decision 1, Issue #3886). Returns nil when the running
+// provider does not implement ModuleApprovalStoreCreator; callers fall back to
+// ModuleCache's node-local file-backed approval.yaml implementation.
+func (sm *StorageManager) GetModuleApprovalStore() business.ModuleApprovalStore {
+	return sm.moduleApprovalStore
+}
+
+// SetModuleApprovalStore wires the module approval store after construction.
+func (sm *StorageManager) SetModuleApprovalStore(s business.ModuleApprovalStore) {
+	sm.moduleApprovalStore = s
 }
 
 // GetCapabilities returns the provider's capabilities.
@@ -1347,6 +1370,19 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if signingCursorStore != nil {
 			sm.SetSigningCursorStore(signingCursorStore)
+		}
+	}
+	// Wire module approval store if the provider implements ModuleApprovalStoreCreator
+	// (ADR-031 Decision 1, Issue #3886: module bundle approval status must be
+	// cluster-visible and CAS-protected so a concurrent approve/reject race from
+	// different controller nodes converges on exactly one winner).
+	if masc, ok := provider.(ModuleApprovalStoreCreator); ok {
+		moduleApprovalStore, err := masc.CreateModuleApprovalStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create module approval store: %w", err)
+		}
+		if moduleApprovalStore != nil {
+			sm.SetModuleApprovalStore(moduleApprovalStore)
 		}
 	}
 	return sm, nil

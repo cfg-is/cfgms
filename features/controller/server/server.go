@@ -1726,6 +1726,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Warn("Failed to initialize controller module cache; workflow modules will be unavailable",
 			"error", moduleCacheErr, "dir", moduleCacheDir)
 	}
+	if moduleCache != nil {
+		wireClusterModuleApprovalStore(moduleCache, cfg, storageManager, logger)
+	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)
 	workflowHandler, triggerMgr := initializeWorkflowHandler(storageManager, moduleCache, workflowModuleRuntime, logger, httpServer.GetSecretStore(), configService)
@@ -1944,6 +1947,38 @@ func (r *noOpModuleRegistry) GetModuleDependencies(_ context.Context, _ string) 
 
 func (r *noOpModuleRegistry) IsModuleCompatible(_ context.Context, _, _ string) (bool, error) {
 	return true, nil
+}
+
+// wireClusterModuleApprovalStore wires a cluster-visible, CAS-protected
+// business.ModuleApprovalStore into moduleCache when the controller runs
+// clustered (pkg/ha.Config.IsClusterMode()), overriding the local-filesystem
+// approval.yaml default with the shared substrate (ADR-031 Decision 1, Issue
+// #3886). storageManager may be nil, and GetModuleApprovalStore may return nil
+// (the running storage provider does not implement ModuleApprovalStoreCreator)
+// — either case leaves moduleCache on its file-backed default, which is not a
+// silent security downgrade: ModuleCache.HasSharedApprovalStore() then reports
+// false and the REST approve/reject handlers keep their lease-backed leadership
+// gate (api.Server.moduleDecisionNodeIsAuthoritative), so decisions stay
+// single-writer instead of being served by every node against node-local files.
+// It is still a degraded cluster, so it is logged as a warning naming the
+// consequence. A single-node deployment (IsClusterMode() false) is never touched
+// here.
+func wireClusterModuleApprovalStore(moduleCache *modulecache.ModuleCache, cfg *config.Config, storageManager *interfaces.StorageManager, logger logging.Logger) {
+	if !cfg.HA.IsClusterMode() {
+		return
+	}
+	var store business.ModuleApprovalStore
+	if storageManager != nil {
+		store = storageManager.GetModuleApprovalStore()
+	}
+	if store == nil {
+		logger.Warn("Clustered controller has no cluster-visible module approval store; "+
+			"module bundle approval status stays node-local and approve/reject remains restricted to the leadership-holding node",
+			"ha_mode", cfg.HA.Mode)
+		return
+	}
+	moduleCache.SetApprovalStore(store)
+	logger.Info("Module bundle approval status wired to cluster-visible, CAS-protected store (Issue #3886)")
 }
 
 // initializeRollbackManager creates and wires the rollback manager.
