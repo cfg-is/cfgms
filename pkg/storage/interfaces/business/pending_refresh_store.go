@@ -40,6 +40,13 @@ type PendingRefreshEntry struct {
 	// SourceIP is the remote address of the refreshing steward at challenge time.
 	SourceIP string
 
+	// CSRPEM is the PEM-encoded CERTIFICATE REQUEST the steward submitted with its
+	// /refresh/complete call (Issue #3781). The controller never generates a keypair
+	// for this credential; when the refresh is queued for manual or auto-accept
+	// processing rather than signed immediately, this is the CSR that gets signed
+	// once the request is approved.
+	CSRPEM string
+
 	// ProvenanceMatchedFields is the number of provenance signal fields that matched
 	// the last recorded provenance snapshot (LastProvenanceJSON in StewardRecord).
 	ProvenanceMatchedFields int

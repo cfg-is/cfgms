@@ -302,6 +302,34 @@ func backfillCfgmsPendingRegistrationColumns(ctx context.Context, db *sql.DB) er
 	return nil
 }
 
+// backfillPendingRefreshCSR adds the csr_pem column (Issue #3781) to a
+// pre-existing pending_refresh_requests table that was created before the
+// registration-refresh flow submitted a steward-generated CSR. Fresh databases
+// (table absent) are skipped. Column-existence is checked via PRAGMA before the
+// ALTER TABLE so the pass is fully idempotent.
+func backfillPendingRefreshCSR(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "pending_refresh_requests")
+	if err != nil {
+		return fmt.Errorf("sqlite: pending_refresh_requests back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	present, err := columnExists(ctx, db, "pending_refresh_requests", "csr_pem")
+	if err != nil {
+		return fmt.Errorf("sqlite: pending_refresh_requests back-fill column probe failed (csr_pem): %w", err)
+	}
+	if present {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		`ALTER TABLE pending_refresh_requests ADD COLUMN csr_pem TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return fmt.Errorf("sqlite: pending_refresh_requests back-fill failed: %w", err)
+	}
+	return nil
+}
+
 // backfillTenantLifecycle adds the ADR-027 Decision 2 suspension provenance
 // columns to a pre-existing tenants table that was created without them (migration
 // 008). Fresh databases (table absent) are skipped. Column-existence is checked
@@ -406,6 +434,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := backfillCommandDeliveryColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := backfillPendingRefreshCSR(ctx, db); err != nil {
 		return err
 	}
 
@@ -794,6 +825,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			provenance_matched_fields INTEGER NOT NULL DEFAULT 0,
 			provenance_total_fields   INTEGER NOT NULL DEFAULT 0,
 			claim_bundle             BLOB NOT NULL DEFAULT '',
+			csr_pem                  TEXT NOT NULL DEFAULT '',
 			status                   TEXT NOT NULL DEFAULT 'pending',
 			created_at               TEXT NOT NULL,
 			expires_at               TEXT NOT NULL,

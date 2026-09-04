@@ -83,8 +83,8 @@ func (s *DatabasePendingRefreshStore) AddPendingRefresh(ctx context.Context, ent
 		INSERT INTO pending_refresh_requests
 			(pending_id, device_id, tenant_id, source_ip,
 			 provenance_matched_fields, provenance_total_fields,
-			 claim_bundle, status, created_at, expires_at, resolved_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			 claim_bundle, csr_pem, status, created_at, expires_at, resolved_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		entry.PendingID,
 		entry.DeviceID,
 		entry.TenantID,
@@ -92,6 +92,7 @@ func (s *DatabasePendingRefreshStore) AddPendingRefresh(ctx context.Context, ent
 		entry.ProvenanceMatchedFields,
 		entry.ProvenanceTotalFields,
 		claimBundle,
+		entry.CSRPEM,
 		status,
 		createdAt,
 		entry.ExpiresAt,
@@ -112,7 +113,7 @@ func (s *DatabasePendingRefreshStore) GetPendingRefreshByID(ctx context.Context,
 	row := s.db.QueryRowContext(ctx, `
 		SELECT pending_id, device_id, tenant_id, source_ip,
 		       provenance_matched_fields, provenance_total_fields,
-		       claim_bundle, status, created_at, expires_at, resolved_at
+		       claim_bundle, csr_pem, status, created_at, expires_at, resolved_at
 		FROM pending_refresh_requests WHERE pending_id = $1`, pendingID)
 	return scanPendingRefreshDBRow(row)
 }
@@ -161,13 +162,13 @@ func (s *DatabasePendingRefreshStore) ListPendingRefresh(ctx context.Context, te
 		query = `
 			SELECT pending_id, device_id, tenant_id, source_ip,
 			       provenance_matched_fields, provenance_total_fields,
-			       claim_bundle, status, created_at, expires_at, resolved_at
+			       claim_bundle, csr_pem, status, created_at, expires_at, resolved_at
 			FROM pending_refresh_requests ORDER BY created_at ASC`
 	} else {
 		query = `
 			SELECT pending_id, device_id, tenant_id, source_ip,
 			       provenance_matched_fields, provenance_total_fields,
-			       claim_bundle, status, created_at, expires_at, resolved_at
+			       claim_bundle, csr_pem, status, created_at, expires_at, resolved_at
 			FROM pending_refresh_requests WHERE tenant_id = $1 ORDER BY created_at ASC`
 		args = []interface{}{tenantID}
 	}
@@ -234,7 +235,7 @@ func scanPendingRefreshDBRow(row *sql.Row) (*business.PendingRefreshEntry, error
 	err := row.Scan(
 		&e.PendingID, &e.DeviceID, &e.TenantID, &e.SourceIP,
 		&e.ProvenanceMatchedFields, &e.ProvenanceTotalFields,
-		&claimBundle, &e.Status, &e.CreatedAt, &e.ExpiresAt, &resolvedAt,
+		&claimBundle, &e.CSRPEM, &e.Status, &e.CreatedAt, &e.ExpiresAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrPendingRefreshNotFound
@@ -257,7 +258,7 @@ func scanPendingRefreshDBRows(rows *sql.Rows) (*business.PendingRefreshEntry, er
 	if err := rows.Scan(
 		&e.PendingID, &e.DeviceID, &e.TenantID, &e.SourceIP,
 		&e.ProvenanceMatchedFields, &e.ProvenanceTotalFields,
-		&claimBundle, &e.Status, &e.CreatedAt, &e.ExpiresAt, &resolvedAt,
+		&claimBundle, &e.CSRPEM, &e.Status, &e.CreatedAt, &e.ExpiresAt, &resolvedAt,
 	); err != nil {
 		return nil, err
 	}

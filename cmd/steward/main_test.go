@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -559,12 +560,204 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
 
+// refreshTestController is a fake controller for the registration-refresh
+// endpoints, backed by a real pkg/cert CA: /refresh/complete parses the CSR the
+// steward submits and signs its public key into a genuine client certificate,
+// exactly as the controller's buildRefreshClaimResponse does (Issue #3781). No
+// private key is ever generated or returned for that credential — the response
+// type has no field for one.
+type refreshTestController struct {
+	server  *httptest.Server
+	certMgr *cert.Manager
+	caPEM   string
+
+	mu   sync.Mutex
+	csrs []*x509.CertificateRequest // every CSR received, in submission order
+}
+
+// newRefreshTestController starts the fake controller. Its URL is available as
+// controller.server.URL once this returns.
+func newRefreshTestController(t *testing.T) *refreshTestController {
+	t.Helper()
+
+	certMgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Refresh Test CA",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+	caPEM, err := certMgr.GetCACertificate()
+	require.NoError(t, err)
+
+	c := &refreshTestController{certMgr: certMgr, caPEM: string(caPEM)}
+	c.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/refresh/challenge"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"nonce":"dGVzdA","server_ts":1,"expires_in":60}`))
+		case strings.HasSuffix(r.URL.Path, "/refresh/complete"):
+			c.handleComplete(w, r)
+		default:
+			http.Error(w, "unexpected path", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(c.server.Close)
+	return c
+}
+
+// handleComplete verifies the submitted CSR and signs it, mirroring the real
+// controller's gate order for the CSR checks.
+func (c *refreshTestController) handleComplete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CSRPEM string `json:"csr_pem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request body", http.StatusBadRequest)
+		return
+	}
+	if body.CSRPEM == "" {
+		http.Error(w, "csr_pem is required", http.StatusBadRequest)
+		return
+	}
+	if strings.Contains(body.CSRPEM, "PRIVATE KEY") {
+		http.Error(w, "private key material is not accepted", http.StatusBadRequest)
+		return
+	}
+	block, _ := pem.Decode([]byte(body.CSRPEM))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		http.Error(w, "csr_pem is not a CERTIFICATE REQUEST", http.StatusBadRequest)
+		return
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		http.Error(w, "invalid certificate signing request", http.StatusBadRequest)
+		return
+	}
+	if err := csr.CheckSignature(); err != nil {
+		http.Error(w, "certificate signing request signature is invalid", http.StatusBadRequest)
+		return
+	}
+
+	clientCert, err := c.certMgr.SignClientCertificateRequest(csr.PublicKey, &cert.ClientCertConfig{
+		CommonName:   csr.Subject.CommonName,
+		Organization: "CFGMS Stewards",
+		ClientID:     csr.Subject.CommonName,
+		ValidityDays: 30,
+	})
+	if err != nil {
+		http.Error(w, "failed to sign client certificate", http.StatusInternalServerError)
+		return
+	}
+
+	c.mu.Lock()
+	c.csrs = append(c.csrs, csr)
+	c.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":            "approved",
+		"client_cert":       string(clientCert.CertificatePEM),
+		"ca_cert":           c.caPEM,
+		"issuer_chain":      string(clientCert.IssuerChainPEM),
+		"transport_address": c.server.URL,
+	})
+}
+
+// receivedCSRs returns the CSRs submitted so far.
+func (c *refreshTestController) receivedCSRs() []*x509.CertificateRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]*x509.CertificateRequest(nil), c.csrs...)
+}
+
+// TestCompleteRefreshWithFreshKeypair_PairsLocalKeyWithIssuedCert verifies the
+// credential half of the refresh (Issue #3781): the returned private key PEM is
+// the key behind the CSR that was submitted, it never crossed the wire, and it
+// forms a usable TLS pair with the certificate the controller signed. A
+// scan/plumbing slip that returned any other key would fail tls.X509KeyPair.
+func TestCompleteRefreshWithFreshKeypair_PairsLocalKeyWithIssuedCert(t *testing.T) {
+	controller := newRefreshTestController(t)
+
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controller.server.URL, 30*time.Second, logging.NewNoopLogger()))
+	require.NoError(t, err)
+
+	const deviceID = "device-refresh-keypair"
+	resp, keyPEM, err := completeRefreshWithFreshKeypair(
+		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotEmpty(t, resp.ClientCert, "controller must return the certificate it signed over the submitted CSR")
+
+	// The submitted CSR names the device and carries a self-signature the
+	// controller verified — proof the caller held the matching private key.
+	csrs := controller.receivedCSRs()
+	require.Len(t, csrs, 1, "exactly one CSR must be submitted per refresh")
+	assert.Equal(t, deviceID, csrs[0].Subject.CommonName, "the CSR must be issued for the steward's device ID")
+
+	// The returned key is the CSR's private key: same public half, and it pairs
+	// with the issued certificate in a real TLS keypair load.
+	block, _ := pem.Decode([]byte(keyPEM))
+	require.NotNil(t, block, "returned key must be PEM encoded")
+	assert.Equal(t, "PRIVATE KEY", block.Type)
+	parsedKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	require.NoError(t, err)
+	ecKey, ok := parsedKey.(*ecdsa.PrivateKey)
+	require.True(t, ok, "the renewed key must be an ECDSA key")
+	csrPub, ok := csrs[0].PublicKey.(*ecdsa.PublicKey)
+	require.True(t, ok)
+	assert.True(t, ecKey.PublicKey.Equal(csrPub),
+		"the returned private key must be the one behind the submitted CSR")
+
+	_, err = tls.X509KeyPair([]byte(resp.ClientCert), []byte(keyPEM))
+	require.NoError(t, err,
+		"the controller-issued certificate and the locally held key must form a usable TLS pair")
+
+	// A second refresh must generate a different keypair — the renewed credential
+	// is never a re-use of a previous one.
+	resp2, keyPEM2, err := completeRefreshWithFreshKeypair(
+		context.Background(), httpClient, deviceID, "tenant-1", "dGVzdA", 1, []byte("pop-signature"))
+	require.NoError(t, err)
+	assert.NotEqual(t, keyPEM, keyPEM2, "each refresh must generate a fresh keypair")
+	_, err = tls.X509KeyPair([]byte(resp2.ClientCert), []byte(keyPEM))
+	assert.Error(t, err, "the previous refresh's key must not pair with the newly issued certificate")
+	_, err = tls.X509KeyPair([]byte(resp2.ClientCert), []byte(keyPEM2))
+	require.NoError(t, err)
+}
+
+// TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey verifies that a
+// queued (HTTP 202) refresh returns ErrRefreshPending unwrapped and yields no key
+// — a caller must not treat a queued refresh as an issued credential.
+func TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(srv.URL, 30*time.Second, logging.NewNoopLogger()))
+	require.NoError(t, err)
+
+	resp, keyPEM, err := completeRefreshWithFreshKeypair(
+		context.Background(), httpClient, "device-pending", "tenant-1", "dGVzdA", 1, []byte("pop"))
+	require.ErrorIs(t, err, registration.ErrRefreshPending)
+	assert.Nil(t, resp)
+	assert.Empty(t, keyPEM, "a queued refresh must not hand back a key for a certificate that was never issued")
+}
+
 // TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity verifies that when the
 // controller returns HTTP 200 for /refresh/complete, the persisted identity file
 // carries DeviceID and IdentityKeyPub from the key store — i.e. that
 // enrichApprovedWithDeviceIdentity is called before connectWithApprovedRegistration.
 // The transport connection itself will fail (no real controller), but saveIdentity
 // is called before the transport attempt, so the file is a reliable signal.
+//
+// The controller here signs the steward-submitted CSR with a real CA (Issue
+// #3781), so the run also proves refreshAndConnect submits a CSR built over a
+// freshly generated key rather than reading a key off the wire.
 func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	dir := t.TempDir()
 
@@ -575,42 +768,35 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	expectedDeviceID := ks.DeviceID()
 	require.NotEmpty(t, expectedDeviceID)
 
-	var srvURL string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/refresh/challenge"):
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"nonce":"dGVzdA","server_ts":1,"expires_in":60}`))
-		case strings.HasSuffix(r.URL.Path, "/refresh/complete"):
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			resp := map[string]string{
-				"client_cert":       "fake-cert",
-				"client_key":        "fake-key",
-				"ca_cert":           "fake-ca",
-				"server_cert":       "fake-server",
-				"transport_address": srvURL,
-			}
-			_ = json.NewEncoder(w).Encode(resp)
-		default:
-			http.Error(w, "unexpected path", http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	srvURL = srv.URL
+	controller := newRefreshTestController(t)
 
 	storedID := &StewardIdentity{
 		StewardID:        "steward-refresh-test",
 		TenantID:         "tenant-1",
-		TransportAddress: srv.URL,
+		TransportAddress: controller.server.URL,
 		CACertPEM:        "fake-ca",
 		ServerCertPEM:    "fake-server",
 	}
 
 	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
-	_, _ = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	//
+	// Today the connect returns in single-digit milliseconds, before any dial:
+	// the bundle carries no server trust material the client can build a TLS
+	// config from, so the gRPC control-plane provider rejects the config
+	// ("client mode requires 'tls_config'"). That is incidental to what this
+	// test asserts. Should the connect path ever get as far as dialing, it would
+	// not return at all on a context.Background() call — the initial dial retries
+	// with backoff until its context is done rather than failing after one
+	// attempt (Issue #3849), and controller.server.URL has nothing listening on
+	// the QUIC side. Bound the context so this test can never become a CI hang.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, connectErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
+		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	require.Error(t, connectErr, "no real transport is listening, so the reconnect must fail")
+	assert.NotContains(t, connectErr.Error(), "no usable steward private key",
+		"the bundle handed to connectWithApprovedRegistration must carry the locally generated key")
 
 	// The identity file saved by connectWithApprovedRegistration must carry the
 	// DeviceID and IdentityKeyPub from the key store.  An empty DeviceID here
@@ -623,6 +809,69 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 		"DeviceID must be populated in persisted identity after successful refresh")
 	assert.NotEmpty(t, savedID.IdentityKeyPub,
 		"IdentityKeyPub must be populated in persisted identity after successful refresh")
+	assert.Equal(t, controller.caPEM, savedID.CACertPEM,
+		"the CA delivered with the refreshed certificate must be persisted")
+}
+
+// TestRefreshAndConnect_SubmitsCSROverFreshKeypair verifies the integration point
+// added by Issue #3781: refreshAndConnect itself builds the /refresh/complete CSR
+// over a keypair it generates locally, names the device in it, and generates a
+// distinct keypair on every refresh. The CSR's public key must not be the
+// steward's Ed25519 device-identity key — that key proves identity and is never
+// the mTLS credential.
+func TestRefreshAndConnect_SubmitsCSROverFreshKeypair(t *testing.T) {
+	dir := t.TempDir()
+
+	ks, err := identity.NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+	deviceID := ks.DeviceID()
+	require.NotEmpty(t, deviceID)
+
+	controller := newRefreshTestController(t)
+
+	storedID := &StewardIdentity{
+		StewardID:        "steward-refresh-csr",
+		TenantID:         "tenant-1",
+		TransportAddress: controller.server.URL,
+		CACertPEM:        "fake-ca",
+		ServerCertPEM:    "fake-server",
+	}
+
+	// Two refreshes: the transport reconnect fails both times (nothing is
+	// listening), but the CSR submission happens before that.
+	//
+	// Bounded rather than context.Background() for the reason given in
+	// TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity: the reconnect
+	// fails fast today for a reason incidental to this test, and the initial
+	// dial it would otherwise reach retries until its context is done (Issue
+	// #3849).
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
+			controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+		cancel()
+		require.Error(t, refreshErr, "no real transport is listening, so the reconnect must fail")
+	}
+
+	csrs := controller.receivedCSRs()
+	require.Len(t, csrs, 2, "each refreshAndConnect call must submit exactly one CSR")
+
+	pubs := make([]*ecdsa.PublicKey, 0, len(csrs))
+	for i, csr := range csrs {
+		assert.Equal(t, deviceID, csr.Subject.CommonName, "CSR %d must name the steward's device ID", i)
+		require.NoError(t, csr.CheckSignature(),
+			"CSR %d must be self-signed by the key the steward generated for it", i)
+		// The device-identity key is Ed25519 and proves identity only; the renewed
+		// mTLS credential is a separate, freshly generated ECDSA P-256 keypair.
+		pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+		require.True(t, ok, "CSR %d must carry a freshly generated ECDSA key, not the Ed25519 device-identity key", i)
+		assert.Equal(t, elliptic.P256(), pub.Curve, "CSR %d must carry a P-256 key", i)
+		pubs = append(pubs, pub)
+	}
+	assert.False(t, pubs[0].Equal(pubs[1]),
+		"each refresh must generate a distinct keypair, never reuse the previous credential's")
 }
 
 // TestPollForApproval_BackoffIntervalGrows verifies that the poll interval doubles

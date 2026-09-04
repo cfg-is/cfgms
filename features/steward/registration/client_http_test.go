@@ -561,7 +561,7 @@ func TestRefreshChallenge_403_ReturnsErrRefreshRejected(t *testing.T) {
 // TestRefreshComplete_200_ReturnsCerts verifies that HTTP 200 with cert fields is decoded.
 func TestRefreshComplete_200_ReturnsCerts(t *testing.T) {
 	const deviceID = "aabbccdd"
-	body := `{"client_cert":"CERT","client_key":"KEY","ca_cert":"CA","server_cert":"SRV","transport_address":"ctrl:4433"}`
+	body := `{"client_cert":"CERT","ca_cert":"CA","server_cert":"SRV","transport_address":"ctrl:4433"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, "/api/v1/stewards/"+deviceID+"/refresh/complete", r.URL.Path)
@@ -574,11 +574,10 @@ func TestRefreshComplete_200_ReturnsCerts(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"))
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce123", 1234567890, []byte("signature"), "test-csr-pem")
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.Equal(t, "CERT", resp.ClientCert)
-	assert.Equal(t, "KEY", resp.ClientKey)
 	assert.Equal(t, "CA", resp.CACert)
 	assert.Equal(t, "ctrl:4433", resp.TransportAddress)
 }
@@ -593,7 +592,7 @@ func TestRefreshComplete_202_ReturnsErrRefreshPending(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem")
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshPending)
 }
@@ -608,9 +607,102 @@ func TestRefreshComplete_403_ReturnsErrRefreshRejected(t *testing.T) {
 	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
 	require.NoError(t, err)
 
-	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"))
+	resp, err := cl.RefreshComplete(context.Background(), "device-id", "", "nonce", 0, []byte("sig"), "test-csr-pem")
 	assert.Nil(t, resp)
 	require.ErrorIs(t, err, ErrRefreshRejected)
+}
+
+// TestRefreshCompleteRequest_CSRPEMFieldName pins the csr_pem wire field name on the
+// RefreshComplete request body (Issue #3781): a rename would silently break the
+// controller's decode.
+func TestRefreshCompleteRequest_CSRPEMFieldName(t *testing.T) {
+	const deviceID = "aabbccdd"
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	_, err = cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), "csr-pem-data")
+	require.ErrorIs(t, err, ErrRefreshRejected)
+	assert.Equal(t, "csr-pem-data", gotBody["csr_pem"])
+}
+
+// TestRefreshCompleteResponse_JSONFieldNames pins the wire shape of
+// RefreshCompleteResponse (Issue #3781): client_key must never be part of it.
+func TestRefreshCompleteResponse_JSONFieldNames(t *testing.T) {
+	resp := RefreshCompleteResponse{ClientCert: "cert-pem", CACert: "ca-pem"}
+
+	data, err := json.Marshal(resp)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	assert.Contains(t, raw, "client_cert", "wire field client_cert must not be renamed")
+	assert.Contains(t, raw, "ca_cert", "wire field ca_cert must not be renamed")
+	assert.NotContains(t, raw, "client_key", "client_key must never be part of the refresh wire response (Issue #3781)")
+}
+
+// TestRefreshComplete_PrivateKeyNeverInResponseBody proves the steward's renewed
+// tls.Certificate private key never appears in any HTTP response body — not just
+// that no client_key JSON key exists, but that the raw private key bytes
+// themselves are never present anywhere in what the controller actually sent
+// (Issue #3781 AC). The controller under test here is a real pkg/cert CA signing
+// the exact CSR the real HTTPClient submits, mirroring the registration-side
+// TestRegister_PrivateKeyNeverInResponseBody.
+func TestRefreshComplete_PrivateKeyNeverInResponseBody(t *testing.T) {
+	issuer := newIssuingCA(t)
+	const deviceID = "aabbccdd"
+
+	renewedKey, err := GenerateStewardKeypair()
+	require.NoError(t, err)
+	csrPEM, err := BuildRegistrationCSR(renewedKey, "steward-abc")
+	require.NoError(t, err)
+
+	var rawResponseBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			CSRPEM string `json:"csr_pem"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		body, err := json.Marshal(RefreshCompleteResponse{
+			ClientCert: issuer.signCSR(t, req.CSRPEM, "steward-abc"),
+			CACert:     issuer.caPEM,
+		})
+		require.NoError(t, err)
+		rawResponseBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	cl, err := NewHTTPClient(&HTTPConfig{ControllerURL: srv.URL, Logger: logging.NewLogger("debug")})
+	require.NoError(t, err)
+
+	resp, err := cl.RefreshComplete(context.Background(), deviceID, "tenant-x", "nonce", 0, []byte("sig"), csrPEM)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	renewedKeyPEM, err := EncodeECDSAPrivateKeyPEM(renewedKey)
+	require.NoError(t, err)
+	_, err = tls.X509KeyPair([]byte(resp.ClientCert), []byte(renewedKeyPEM))
+	require.NoError(t, err, "controller-issued cert and locally generated renewed key must form a usable pair")
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(renewedKey)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, rawResponseBody, "the raw wire response body must have been captured")
+	assert.False(t, bytes.Contains(rawResponseBody, keyDER),
+		"the raw private key material must never appear as a byte sequence anywhere in the response body")
+	assert.NotContains(t, string(rawResponseBody), "PRIVATE KEY",
+		"the wire response must never contain a PEM-encoded private key block")
+	assert.NotContains(t, string(rawResponseBody), "client_key",
+		"the wire response must never carry a client_key field")
 }
 
 // newIntermediateBackedEnrollmentCertSet builds a real CFGMS root CA, signs a

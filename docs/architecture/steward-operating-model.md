@@ -862,7 +862,11 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
    - HTTP 410 Gone: steward already collected the cert (duplicate poll) — stop polling.
    - `{"status":"denied"}` or `{"status":"expired"}` (HTTP 200): registration was rejected — steward exits or re-registers.
    The cert is signed on first approved poll (sign-on-claim); the controller never generates or sees a private key for this credential.
-   Registration-refresh responses (`RefreshCompleteResponse`) carry the same `client_cert`/`ca_cert`/`issuer_chain` shape for the same reason.
+   Registration-refresh follows the same CSR-based shape (Issue #3781): the steward
+   generates a **fresh** local keypair for the renewed credential and submits its
+   public half as `csr_pem` alongside the refresh proof-of-possession signature;
+   `RefreshCompleteResponse` carries the same `client_cert`/`ca_cert`/`issuer_chain`
+   shape as registration, with no `client_key` field, for the same reason.
 6. On approval: steward imports the issued cert into its local `cert.Manager` (stored under the platform cert dir) for use in TLS handshakes, records the node ID, and establishes a gRPC-over-QUIC transport connection.
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.

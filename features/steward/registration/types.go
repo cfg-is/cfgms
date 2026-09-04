@@ -24,9 +24,13 @@ type RefreshChallengeResponse struct {
 
 // RefreshCompleteResponse is the response body from POST /api/v1/stewards/{device_id}/refresh/complete
 // on HTTP 200 (cert issued immediately). HTTP 202 returns ErrRefreshPending; HTTP 403 returns ErrRefreshRejected.
+//
+// No client_key field exists on this response (Issue #3781: the controller never
+// generates or sees a private key for this credential). The caller generates its
+// own fresh keypair, submits its public half as a CSR via RefreshComplete's csrPEM
+// parameter, and pairs the response's ClientCert with the locally held private key.
 type RefreshCompleteResponse struct {
 	ClientCert       string `json:"client_cert"`
-	ClientKey        string `json:"client_key"`
 	CACert           string `json:"ca_cert"`
 	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`

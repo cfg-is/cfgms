@@ -1112,6 +1112,165 @@ func TestBackfillCommandDeliveryColumns_IndexFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "delivery index back-fill failed", "error must identify the index stage")
 }
 
+// legacyPendingRefreshRequestsSchema is the pending_refresh_requests DDL as
+// shipped by Issue #2093, before Issue #3781 added csr_pem. Used to simulate a
+// controller or steward database that carried the refresh queue before the
+// steward started submitting its own CSR with /refresh/complete.
+const legacyPendingRefreshRequestsSchema = `CREATE TABLE IF NOT EXISTS pending_refresh_requests (
+	pending_id               TEXT PRIMARY KEY,
+	device_id                TEXT NOT NULL,
+	tenant_id                TEXT NOT NULL,
+	source_ip                TEXT NOT NULL DEFAULT '',
+	provenance_matched_fields INTEGER NOT NULL DEFAULT 0,
+	provenance_total_fields   INTEGER NOT NULL DEFAULT 0,
+	claim_bundle             BLOB NOT NULL DEFAULT '',
+	status                   TEXT NOT NULL DEFAULT 'pending',
+	created_at               TEXT NOT NULL,
+	expires_at               TEXT NOT NULL,
+	resolved_at              TEXT
+)`
+
+// TestBackfillPendingRefreshCSR_LegacyTable verifies that initializeSchema adds
+// csr_pem to a pre-existing pending_refresh_requests table created before Issue
+// #3781. CREATE TABLE IF NOT EXISTS cannot add a column, so without the
+// back-fill every upgrading deployment would fail its next AddPendingRefresh
+// with "table pending_refresh_requests has no column named csr_pem".
+func TestBackfillPendingRefreshCSR_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyPendingRefreshRequestsSchema)
+	require.NoError(t, err, "seed legacy pending_refresh_requests schema")
+
+	// A pre-#3781 row must survive the migration and take the column default.
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO pending_refresh_requests
+			(pending_id, device_id, tenant_id, created_at, expires_at)
+		VALUES ('pr-legacy', 'dev-legacy', 'tenant-legacy', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')`)
+	require.NoError(t, err, "seed legacy row")
+
+	require.False(t, hasColumn(t, db, "pending_refresh_requests", "csr_pem"),
+		"pre-condition: csr_pem absent before back-fill")
+
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	assert.True(t, hasColumn(t, db, "pending_refresh_requests", "csr_pem"),
+		"csr_pem present after back-fill")
+
+	// The migrated table must actually be usable by the store that reads and
+	// writes the column — a column that exists but is NOT NULL without a default
+	// would still break the live path for legacy rows and new inserts alike.
+	store := &SQLitePendingRefreshStore{db: db}
+	legacy, err := store.GetPendingRefreshByID(ctx, "pr-legacy")
+	require.NoError(t, err, "legacy row must remain readable through the back-filled column")
+	assert.Empty(t, legacy.CSRPEM, "legacy row must default to an empty csr_pem")
+
+	const csr = "-----BEGIN CERTIFICATE REQUEST-----\nrefresh-legacy\n-----END CERTIFICATE REQUEST-----\n"
+	entry := testRefreshEntry("pr-migrated", "dev-migrated", "tenant-legacy")
+	entry.CSRPEM = csr
+	require.NoError(t, store.AddPendingRefresh(ctx, entry), "back-filled table must accept a full entry")
+
+	got, err := store.GetPendingRefreshByID(ctx, "pr-migrated")
+	require.NoError(t, err)
+	assert.Equal(t, csr, got.CSRPEM, "csr_pem must round-trip through the back-filled column")
+}
+
+// TestBackfillPendingRefreshCSR_Idempotent verifies that a second initializeSchema
+// pass over an already-migrated table succeeds (the PRAGMA column probe suppresses
+// the duplicate ALTER) and that rows written between the two passes survive. The
+// back-fill runs on every database open, so a non-idempotent pass would break
+// every restart.
+func TestBackfillPendingRefreshCSR_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyPendingRefreshRequestsSchema)
+	require.NoError(t, err, "seed legacy pending_refresh_requests schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	store := &SQLitePendingRefreshStore{db: db}
+	const csr = "-----BEGIN CERTIFICATE REQUEST-----\nsurvive\n-----END CERTIFICATE REQUEST-----\n"
+	entry := testRefreshEntry("pr-survive", "dev-survive", "tenant-idem")
+	entry.CSRPEM = csr
+	require.NoError(t, store.AddPendingRefresh(ctx, entry))
+
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	assert.True(t, hasColumn(t, db, "pending_refresh_requests", "csr_pem"),
+		"csr_pem still present after second pass")
+
+	got, err := store.GetPendingRefreshByID(ctx, "pr-survive")
+	require.NoError(t, err, "row must survive the idempotent second pass")
+	assert.Equal(t, csr, got.CSRPEM, "back-filled value must survive second initializeSchema")
+}
+
+// TestBackfillPendingRefreshCSR_FreshDB verifies that a fresh database carries
+// csr_pem from CREATE TABLE, so the back-fill is a no-op on new deployments.
+func TestBackfillPendingRefreshCSR_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	assert.True(t, hasColumn(t, db, "pending_refresh_requests", "csr_pem"),
+		"csr_pem present on fresh DB")
+}
+
+// TestBackfillPendingRefreshCSR_TableAbsent verifies the table-absent
+// short-circuit: a database that has never carried pending_refresh_requests must
+// be left untouched rather than erroring on the PRAGMA/ALTER.
+func TestBackfillPendingRefreshCSR_TableAbsent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, backfillPendingRefreshCSR(ctx, db),
+		"absent table must be a no-op, not an error")
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pending_refresh_requests'`).Scan(&count))
+	assert.Equal(t, 0, count, "back-fill must not create the table itself")
+}
+
+// TestBackfillPendingRefreshCSR_ProbeFailure verifies that a tableExists failure
+// propagates instead of silently reporting success — the back-fill runs on every
+// database open, so a swallowed probe error would let the controller start
+// against an un-migrated table.
+func TestBackfillPendingRefreshCSR_ProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillPendingRefreshCSR(ctx, db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillPendingRefreshCSR_AlterFailure verifies that an ALTER TABLE failure
+// propagates rather than leaving a half-migrated table behind a successful
+// startup.
+func TestBackfillPendingRefreshCSR_AlterFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-pending-refresh.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyPendingRefreshRequestsSchema)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillPendingRefreshCSR(ctx, roDB)
+	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "back-fill failed", "error must identify the back-fill stage")
+}
+
 // legacySingleDeviceClaimSchema is the registration_token_claims DDL as first
 // shipped: one claim row per token, for the token's whole lifetime.
 const legacySingleDeviceClaimSchema = `CREATE TABLE IF NOT EXISTS registration_token_claims (

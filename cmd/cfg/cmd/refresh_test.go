@@ -84,7 +84,6 @@ func TestApproveRefresh_Success(t *testing.T) {
 		Status:     "approved",
 		PendingID:  pendingID,
 		ClientCert: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
-		ClientKey:  "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
 		CACert:     "-----BEGIN CERTIFICATE-----\nca\n-----END CERTIFICATE-----\n",
 	}
 
