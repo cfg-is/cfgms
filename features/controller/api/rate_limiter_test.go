@@ -3,6 +3,9 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +13,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // trackedKeys is a test-only inspection helper (white-box, same package).
@@ -265,70 +272,201 @@ func TestSourceRateLimiter_ConcurrentDistinctKeysCountedIndependently(t *testing
 	}
 }
 
-// TestSourceRateLimiter_SplitsBudgetAcrossClusterNodes is the [REQUIRED TEST] for
-// Issue #3761: when divisor reports more than one node can serve the limited route,
-// the effective per-key limit must be the configured limit divided by that count,
-// not the configured limit itself — otherwise any-node service grants node-count
-// times the operator-configured budget.
-func TestSourceRateLimiter_SplitsBudgetAcrossClusterNodes(t *testing.T) {
-	rl := newSourceRateLimiter(10, time.Minute)
-	rl.divisor = func() int { return 5 }
+// fakeRateCounterStore is a minimal in-memory business.RateCounterStore for tests
+// that need to observe or control shared-counter behavior without a real database.
+type fakeRateCounterStore struct {
+	mu      sync.Mutex
+	counts  map[string]int
+	err     error
+	calls   int
+	lastKey string
+}
+
+func (f *fakeRateCounterStore) Increment(_ context.Context, key string, window time.Duration) (int, time.Duration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastKey = key
+	if f.err != nil {
+		return 0, 0, f.err
+	}
+	if f.counts == nil {
+		f.counts = make(map[string]int)
+	}
+	f.counts[key]++
+	return f.counts[key], window, nil
+}
+
+func (f *fakeRateCounterStore) Peek(_ context.Context, key string, window time.Duration) (int, time.Duration, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return 0, 0, false, f.err
+	}
+	count, ok := f.counts[key]
+	if !ok {
+		return 0, 0, false, nil
+	}
+	return count, window, true, nil
+}
+
+func (f *fakeRateCounterStore) Close() error { return nil }
+
+// TestSourceRateLimiter_UseSharedCounterNamespacesKeys proves that once
+// useSharedCounter has been called, allow consults the shared backend — namespaced
+// under routeName — instead of the in-memory map, and the configured limit is
+// enforced directly against the shared count (no divisor, Issue #3896).
+func TestSourceRateLimiter_UseSharedCounterNamespacesKeys(t *testing.T) {
+	rl := newSourceRateLimiter(2, time.Minute)
+	backend := &fakeRateCounterStore{}
+	rl.useSharedCounter("test-route", backend)
 
 	for i := 0; i < 2; i++ {
 		ok, _ := rl.allow("k1")
 		if !ok {
-			t.Fatalf("request %d: expected allow within the divided budget (10/5=2), got denied", i)
+			t.Fatalf("request %d: expected allow within the shared budget", i)
 		}
 	}
-	if ok, _ := rl.allow("k1"); ok {
-		t.Fatal("expected the 3rd request to be denied once the divided budget (2) is exhausted")
+	ok, retryAfter := rl.allow("k1")
+	if ok {
+		t.Fatal("expected the 3rd request to be denied once the shared budget is exhausted")
+	}
+	if retryAfter <= 0 {
+		t.Fatal("expected a positive retry-after on denial")
+	}
+	if backend.calls != 3 {
+		t.Fatalf("expected exactly 3 calls into the shared backend, got %d", backend.calls)
+	}
+	if backend.lastKey != "test-route:k1" {
+		t.Fatalf("expected the shared backend key to be namespaced by routeName, got %q", backend.lastKey)
+	}
+	if got := rl.trackedKeys(); got != 0 {
+		t.Fatalf("expected the in-memory map to stay empty while a shared backend is active, got %d tracked keys", got)
 	}
 }
 
-// TestSourceRateLimiter_SingleNodeKeepsFullBudget is the [REQUIRED TEST] for Issue
-// #3761: a nil divisor (the pre-#3761 construction, still used by any limiter that
-// never opts in) and a divisor reporting 1 node must both preserve the full
-// configured limit — dividing must never kick in for a single serving node.
-func TestSourceRateLimiter_SingleNodeKeepsFullBudget(t *testing.T) {
-	t.Run("nil divisor", func(t *testing.T) {
-		rl := newSourceRateLimiter(3, time.Minute)
-		for i := 0; i < 3; i++ {
-			if ok, _ := rl.allow("k1"); !ok {
-				t.Fatalf("request %d: expected allow with no divisor configured", i)
-			}
-		}
-		if ok, _ := rl.allow("k1"); ok {
-			t.Fatal("expected the 4th request to be denied")
-		}
-	})
+// TestSourceRateLimiter_SharedCounterFailsOpenOnStoreError proves a counter-store
+// error does not turn the shared-counter path into an outright lockout: the shared
+// counter is defense-in-depth, not the primary auth gate, so an outage in it must
+// not block every legitimate caller of a clustered route.
+func TestSourceRateLimiter_SharedCounterFailsOpenOnStoreError(t *testing.T) {
+	rl := newSourceRateLimiter(1, time.Minute)
+	backend := &fakeRateCounterStore{err: errors.New("database unavailable")}
+	rl.useSharedCounter("test-route", backend)
 
-	t.Run("divisor reports one node", func(t *testing.T) {
-		rl := newSourceRateLimiter(3, time.Minute)
-		rl.divisor = func() int { return 1 }
-		for i := 0; i < 3; i++ {
-			if ok, _ := rl.allow("k2"); !ok {
-				t.Fatalf("request %d: expected allow at the full configured budget", i)
-			}
+	for i := 0; i < 5; i++ {
+		ok, _ := rl.allow("k1")
+		if !ok {
+			t.Fatalf("request %d: expected allow (fail-open) while the shared counter store errors", i)
 		}
-		if ok, _ := rl.allow("k2"); ok {
-			t.Fatal("expected the 4th request to be denied")
-		}
-	})
+	}
 }
 
-// TestSourceRateLimiter_BudgetNeverDividesToZero is the [REQUIRED TEST] for Issue
-// #3761: a divisor larger than the configured limit must floor the effective limit
-// at one call per window, never at zero — a zero effective limit would lock every
-// caller out of the route entirely regardless of key.
-func TestSourceRateLimiter_BudgetNeverDividesToZero(t *testing.T) {
-	rl := newSourceRateLimiter(3, time.Minute)
-	rl.divisor = func() int { return 100 }
+// TestSourceRateLimiter_SharedCounterFailsClosedAtStoreCapacity proves the shared
+// path keeps the in-memory path's maxTrackedKeys guarantee: when the store declines
+// to begin tracking a key because it is at its tracked-key cap, the request is denied
+// rather than allowed. Failing open there would give every fresh source address an
+// untracked, unlimited budget — the flood the cap exists to bound.
+func TestSourceRateLimiter_SharedCounterFailsClosedAtStoreCapacity(t *testing.T) {
+	rl := newSourceRateLimiter(5, time.Minute)
+	backend := &fakeRateCounterStore{
+		err: fmt.Errorf("rate counter table is at its cap: %w", business.ErrRateCounterCapacityExhausted),
+	}
+	rl.useSharedCounter("test-route", backend)
 
-	ok, _ := rl.allow("k1")
-	if !ok {
-		t.Fatal("expected exactly one call to be allowed even when limit/divisor rounds to zero")
+	ok, retryAfter := rl.allow("flood-key")
+	if ok {
+		t.Fatal("expected a denial once the shared counter store reports its tracked-key capacity exhausted")
 	}
-	if ok, _ := rl.allow("k1"); ok {
-		t.Fatal("expected the 2nd request to be denied once the floored budget (1) is exhausted")
+	if retryAfter < time.Second {
+		t.Fatalf("expected a retry-after of at least a second on a capacity denial, got %s", retryAfter)
 	}
+}
+
+// TestSourceRateLimiter_ClusterModeUsesSharedCounter is the [REQUIRED TEST] for
+// Issue #3896: Server.SetRateCounterStore must wire every per-source limiter onto
+// the shared counter backend when haManager reports ha.ClusterMode, replacing
+// clusterBudgetDivisor's even-distribution approximation with a real shared count.
+func TestSourceRateLimiter_ClusterModeUsesSharedCounter(t *testing.T) {
+	s := &Server{
+		haManager:                     newNonAuthoritativeHAManager(t),
+		enrolmentTokenMintLimiter:     newSourceRateLimiter(10, time.Minute),
+		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
+	}
+	store := &fakeRateCounterStore{}
+	s.SetRateCounterStore(store)
+
+	if s.enrolmentTokenMintLimiter.sharedCounter == nil {
+		t.Fatal("expected enrolmentTokenMintLimiter to be wired to the shared counter store in ClusterMode")
+	}
+	if s.credentialRequestLodgeLimiter.sharedCounter == nil {
+		t.Fatal("expected credentialRequestLodgeLimiter to be wired to the shared counter store in ClusterMode")
+	}
+	if s.enrolmentTokenMintLimiter.routeName == "" {
+		t.Fatal("expected the shared-counter route name to be set, so distinct limiters never collide in the shared table")
+	}
+	if s.enrolmentTokenMintLimiter.routeName == s.credentialRequestLodgeLimiter.routeName {
+		t.Fatal("expected distinct limiters to receive distinct route names")
+	}
+}
+
+// TestSourceRateLimiter_SingleNodeUsesInMemoryDefault is the [REQUIRED TEST] for
+// Issue #3896: SetRateCounterStore must be a no-op — leaving every limiter on its
+// in-memory default — for every deployment shape where at most one process serves
+// mutating traffic (nil haManager, SingleServerMode, BlueGreenMode), unchanged from
+// pre-story behavior (mirrors the deployment-shape coverage
+// TestClusterBudgetDivisor_ReflectsDeploymentShape gave clusterBudgetDivisor before
+// this story deleted it).
+func TestSourceRateLimiter_SingleNodeUsesInMemoryDefault(t *testing.T) {
+	newTestServer := func(haManager *ha.Manager) *Server {
+		return &Server{
+			haManager:                 haManager,
+			enrolmentTokenMintLimiter: newSourceRateLimiter(10, time.Minute),
+		}
+	}
+
+	t.Run("nil haManager", func(t *testing.T) {
+		s := newTestServer(nil)
+		s.SetRateCounterStore(&fakeRateCounterStore{})
+		if s.enrolmentTokenMintLimiter.sharedCounter != nil {
+			t.Fatal("expected the limiter to stay on its in-memory default with no haManager configured")
+		}
+	})
+
+	t.Run("SingleServerMode", func(t *testing.T) {
+		s := newTestServer(newAuthoritativeHAManager(t))
+		s.SetRateCounterStore(&fakeRateCounterStore{})
+		if s.enrolmentTokenMintLimiter.sharedCounter != nil {
+			t.Fatal("expected the limiter to stay on its in-memory default in SingleServerMode")
+		}
+	})
+
+	t.Run("BlueGreenMode", func(t *testing.T) {
+		cfg := ha.DefaultConfig()
+		cfg.Mode = ha.BlueGreenMode
+		cfg.Node.ID = "test-bluegreen-node"
+		manager, err := ha.NewManager(cfg, logging.NewNoopLogger(), nil)
+		if err != nil {
+			t.Fatalf("ha.NewManager: %v", err)
+		}
+		t.Cleanup(func() {
+			if stopErr := manager.Stop(context.Background()); stopErr != nil {
+				t.Errorf("manager.Stop: %v", stopErr)
+			}
+		})
+
+		s := newTestServer(manager)
+		s.SetRateCounterStore(&fakeRateCounterStore{})
+		if s.enrolmentTokenMintLimiter.sharedCounter != nil {
+			t.Fatal("expected the limiter to stay on its in-memory default in BlueGreenMode — the standby instance is a cutover target, not a concurrently-serving peer")
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		s := newTestServer(newNonAuthoritativeHAManager(t))
+		s.SetRateCounterStore(nil)
+		if s.enrolmentTokenMintLimiter.sharedCounter != nil {
+			t.Fatal("expected the limiter to stay on its in-memory default when store is nil, even in ClusterMode")
+		}
+	})
 }

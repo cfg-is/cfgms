@@ -1526,6 +1526,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cs := storageManager.GetCaseStore(); cs != nil {
 		httpServer.SetCasesStore(cs)
 	}
+	// Issue #3896, ADR-031 Decision 1: wire the cluster-visible, fixed-window
+	// rate-counter store into the per-source rate limiters and the
+	// operator-payload sign-ceremony throttle, replacing clusterBudgetDivisor's
+	// even-distribution approximation with the fleet-wide count. Nil when the
+	// running storage provider does not implement RateCounterStoreCreator;
+	// SetRateCounterStore itself also no-ops unless haManager reports
+	// ClusterMode, so single-node and blue-green deployments are unaffected
+	// either way.
+	if rcs := storageManager.GetRateCounterStore(); rcs != nil {
+		httpServer.SetRateCounterStore(rcs)
+	}
 	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
 	httpServer.SetTenantStore(storageManager.GetTenantStore())
 	if as := storageManager.GetAuditStore(); as != nil {

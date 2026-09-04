@@ -131,6 +131,34 @@ func tryNewDatabaseAlertStore(t *testing.T) business.AlertStore {
 	return st
 }
 
+// tryNewDatabaseRateCounterStore returns a real PostgreSQL-backed
+// business.RateCounterStore obtained through DatabaseProvider.CreateRateCounterStore
+// — the exact constructor a cluster-mode controller calls via
+// CreateClusterStorageManager (Issue #3896) — or nil when the test database is not
+// reachable. It never skips: callers keep running against the providers that are
+// available. The concrete database import is confined to this allowlisted
+// */providers_test.go path (see scripts/check-providers.sh).
+func tryNewDatabaseRateCounterStore(t *testing.T) business.RateCounterStore {
+	t.Helper()
+	dsn := testDatabaseDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil
+	}
+	if pingErr := db.Ping(); pingErr != nil {
+		_ = db.Close()
+		return nil
+	}
+	_ = db.Close()
+
+	provider := &database.DatabaseProvider{}
+	st, err := provider.CreateRateCounterStore(map[string]interface{}{"dsn": dsn})
+	require.NoError(t, err, "DatabaseProvider.CreateRateCounterStore must return a working store against a reachable test database, never ErrNotSupported")
+	require.NotNil(t, st, "DatabaseProvider.CreateRateCounterStore must return a non-nil store")
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
+
 // tryNewDatabasePendingRegistrationStore returns a real PostgreSQL-backed
 // PendingRegistrationStore obtained through DatabaseProvider.CreatePendingRegistrationStore
 // — the exact constructor a cluster-mode controller calls via CreateClusterStorageManager

@@ -3,11 +3,15 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"time"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // sourceRateLimiterDefaultMaxTrackedKeys bounds the limiter's own memory. Once this
@@ -23,6 +27,16 @@ type sourceRateLimiterRecord struct {
 	count       int
 }
 
+// clusterRateCounterBackend is the pluggable, cluster-visible counter
+// sourceRateLimiter.allow consults instead of its own in-memory map once
+// useSharedCounter has been called (Issue #3896, ADR-031 follow-up to Issue
+// #3761's clusterBudgetDivisor even-distribution approximation). Satisfied by
+// business.RateCounterStore; declared locally, narrowed to the one method this
+// limiter needs, so tests can substitute a fake without a real database.
+type clusterRateCounterBackend interface {
+	Increment(ctx context.Context, key string, window time.Duration) (count int, retryAfter time.Duration, err error)
+}
+
 // sourceRateLimiter is a reusable per-key, fixed-window rate limiter for controller
 // API endpoints (Issue #3714). Handlers key it on the trusted-proxy-aware source
 // address returned by extractSourceIP — never on the raw remote address — so a
@@ -31,39 +45,30 @@ type sourceRateLimiterRecord struct {
 //
 // It is safe for concurrent use. Stale keys are evicted opportunistically, and a
 // hard cap on tracked keys is enforced as a backstop, so a flood of distinct source
-// addresses cannot grow its memory without bound.
+// addresses cannot grow its memory without bound. The same two guarantees hold on
+// the shared-counter path: business.RateCounterStore requires its implementations
+// to reclaim elapsed windows and to cap tracked keys, and allowShared fails closed
+// on business.ErrRateCounterCapacityExhausted exactly as the in-memory path denies
+// a new key at maxTrackedKeys.
 type sourceRateLimiter struct {
 	limit          int
 	window         time.Duration
 	maxTrackedKeys int
 	now            func() time.Time
 
-	// divisor, if set, scales limit down to a fleet-wide budget when more than one
-	// cluster node can serve the limited route (Issue #3761; see
-	// Server.clusterBudgetDivisor's doc comment). nil means limit is applied as
-	// configured — the pre-#3761, single-server-equivalent behavior.
-	divisor func() int
+	// routeName namespaces this limiter's keys within sharedCounter's table, so
+	// multiple sourceRateLimiter instances sharing one cluster-visible store never
+	// collide on the same source address. Only consulted when sharedCounter is set.
+	routeName string
+
+	// sharedCounter, if set (via useSharedCounter), makes this limiter's count
+	// cluster-visible through a database-backed clusterRateCounterBackend instead
+	// of the per-process in-memory map below (Issue #3896). nil — the default —
+	// means the in-memory, single-node-equivalent behavior.
+	sharedCounter clusterRateCounterBackend
 
 	mu      sync.Mutex
 	entries map[string]*sourceRateLimiterRecord
-}
-
-// effectiveLimit returns limit divided by divisor() when divisor is set, floored at
-// one call so a large cluster can never divide a route's budget down to zero and
-// lock it out entirely.
-func (l *sourceRateLimiter) effectiveLimit() int {
-	if l.divisor == nil {
-		return l.limit
-	}
-	d := l.divisor()
-	if d < 1 {
-		d = 1
-	}
-	eff := l.limit / d
-	if eff < 1 {
-		eff = 1
-	}
-	return eff
 }
 
 // newSourceRateLimiter returns a limiter that allows up to limit calls per key
@@ -78,6 +83,15 @@ func newSourceRateLimiter(limit int, window time.Duration) *sourceRateLimiter {
 	}
 }
 
+// useSharedCounter switches this limiter from its default in-memory backend to
+// a cluster-visible counter (Issue #3896), namespacing every key under
+// routeName so distinct sourceRateLimiter instances sharing one backend's table
+// never collide on the same source address.
+func (l *sourceRateLimiter) useSharedCounter(routeName string, backend clusterRateCounterBackend) {
+	l.routeName = routeName
+	l.sharedCounter = backend
+}
+
 // allow reports whether a call keyed by key may proceed under the configured rate,
 // incrementing the counter on success. When the limit has been exceeded it returns
 // false along with the duration the caller should wait before retrying.
@@ -85,6 +99,10 @@ func newSourceRateLimiter(limit int, window time.Duration) *sourceRateLimiter {
 // This is the direct call form, for handlers that need to rate-limit only part of
 // their work rather than an entire route.
 func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
+	if l.sharedCounter != nil {
+		return l.allowShared(key)
+	}
+
 	now := l.now()
 
 	l.mu.Lock()
@@ -108,7 +126,7 @@ func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
 	}
 	rec.lastSeen = now
 
-	if rec.count >= l.effectiveLimit() {
+	if rec.count >= l.limit {
 		retryAfter := rec.windowStart.Add(l.window).Sub(now)
 		if retryAfter < time.Second {
 			retryAfter = time.Second
@@ -116,6 +134,43 @@ func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
 		return false, retryAfter
 	}
 	rec.count++
+	return true, 0
+}
+
+// allowShared consults sharedCounter instead of the in-memory map. The
+// increment always happens, even on a call that will be denied — the count
+// only ever grows within its window regardless of outcome, matching the
+// in-memory path's own "count first, then compare" accounting once corrected
+// for order. On a counter-store error this fails open (allows the call): the
+// shared counter is a defense-in-depth budget, not the primary auth gate this
+// route sits behind, and an outage in it must not become an availability
+// outage for every legitimate caller of a clustered route.
+//
+// The one error that denies instead is ErrRateCounterCapacityExhausted: it is
+// not an outage but the store's tracked-key backstop reporting that it refused
+// to begin tracking this key. Failing open there would hand an untracked,
+// unlimited budget to every fresh source address — the very flood the backstop
+// exists to bound — so this mirrors the in-memory path's maxTrackedKeys denial.
+func (l *sourceRateLimiter) allowShared(key string) (bool, time.Duration) {
+	count, retryAfter, err := l.sharedCounter.Increment(context.Background(), l.routeName+":"+key, l.window)
+	if err != nil {
+		if errors.Is(err, business.ErrRateCounterCapacityExhausted) {
+			if retryAfter <= 0 {
+				retryAfter = l.window
+			}
+			if retryAfter < time.Second {
+				retryAfter = time.Second
+			}
+			return false, retryAfter
+		}
+		return true, 0
+	}
+	if count > l.limit {
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return false, retryAfter
+	}
 	return true, 0
 }
 

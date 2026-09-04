@@ -90,7 +90,7 @@ type Server struct {
 	systemMonitor                   *monitoring.SystemMonitor
 	healthCollector                 *health.Collector
 	haManager                       *ha.Manager
-	clusterBudgetDivisorCache       clusterBudgetDivisorCache                // Issue #3761: caches clusterBudgetDivisor()'s live cluster-membership query for clusterBudgetDivisorCacheTTL
+	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
@@ -375,16 +375,6 @@ func New(
 		// by a peer node during a ring soak; tests shrink this for determinism.
 		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
 	}
-
-	// Issue #3761: divide each per-source rate limiter's configured budget across
-	// live cluster nodes (see Server.clusterBudgetDivisor) so any-node service does
-	// not multiply the operator-configured, single-server-equivalent budget by the
-	// number of nodes an attacker's requests can spread across.
-	server.enrolmentTokenMintLimiter.divisor = server.clusterBudgetDivisor
-	server.credentialRequestLodgeLimiter.divisor = server.clusterBudgetDivisor
-	server.credentialRequestCollectLimiter.divisor = server.clusterBudgetDivisor
-	server.cliLoginLodgeLimiter.divisor = server.clusterBudgetDivisor
-	server.cliLoginCollectLimiter.divisor = server.clusterBudgetDivisor
 
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
@@ -1729,6 +1719,37 @@ func (s *Server) SetTenantCrossingStore(store business.TenantCrossingStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tenantCrossingStore = store
+}
+
+// SetRateCounterStore wires a cluster-visible, database-backed
+// business.RateCounterStore into the per-source rate limiters and the
+// operator-payload sign-ceremony throttle (Issue #3896, ADR-031 follow-up to
+// Issue #3761's clusterBudgetDivisor even-distribution approximation),
+// replacing the per-process in-memory counters those consult by default with a
+// shared, fleet-wide count.
+//
+// No-op unless s.haManager reports ha.ClusterMode — SingleServerMode and
+// BlueGreenMode deployments keep every consumer on its in-memory default
+// unconditionally, even when store is non-nil, matching the deployment-shape
+// gate clusterBudgetDivisor applied for those shapes. store may also be nil
+// (the running storage provider does not implement RateCounterStoreCreator);
+// either case leaves every consumer on its in-memory backend.
+func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
+	if store == nil || s.haManager == nil || s.haManager.GetDeploymentMode() != ha.ClusterMode {
+		return
+	}
+	s.rateCounterStore = store
+	for routeName, limiter := range map[string]*sourceRateLimiter{
+		"enrolment-token-mint":       s.enrolmentTokenMintLimiter,
+		"credential-request-lodge":   s.credentialRequestLodgeLimiter,
+		"credential-request-collect": s.credentialRequestCollectLimiter,
+		"cli-login-lodge":            s.cliLoginLodgeLimiter,
+		"cli-login-collect":          s.cliLoginCollectLimiter,
+	} {
+		if limiter != nil {
+			limiter.useSharedCounter(routeName, store)
+		}
+	}
 }
 
 // SetPoPVerifier replaces the proof-of-possession verifier.

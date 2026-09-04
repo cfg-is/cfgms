@@ -44,6 +44,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -73,6 +74,18 @@ const operatorPayloadSignNonceBytes = 32
 // downstream execution consumer (S8) to submit. Independent of webAuthnSessionTTL, which
 // bounds the pending *ceremony* (begin→finish) instead.
 const operatorPayloadSignExpiryTTL = 5 * time.Minute
+
+// operatorPayloadSignThrottleKeyPrefix namespaces recordSignFailure/checkSignThrottle's
+// keys within s.rateCounterStore's shared table (Issue #3896), so this throttle's
+// "session:<id>"/"ip:<addr>" keys never collide with an unrelated counter sharing
+// the same store.
+const operatorPayloadSignThrottleKeyPrefix = "operator-payload-sign:"
+
+// operatorPayloadSignThrottleWindow is the fixed window the shared counter tracks
+// failures within when s.rateCounterStore is set (Issue #3896). Sized to comfortably
+// exceed elevateBackoff's longest cooldown tier (10 minutes) so a determined attacker
+// cannot outlast the window mid-schedule and reset back to an unthrottled count.
+const operatorPayloadSignThrottleWindow = 15 * time.Minute
 
 // operatorPayloadSignSession holds state for an in-progress payload-signing ceremony.
 // Stored in s.operatorPayloadSignSessions keyed by web session ID. Single-use: deleted via
@@ -528,7 +541,40 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 // checkSignThrottle returns (true, retryAfter) when key is currently throttled, or
 // (false, 0) when the call may proceed. Thread-safe. Mirrors checkElevateThrottle but reads
 // s.operatorPayloadSignThrottle so the two ceremonies' failure counters never collide.
+//
+// When s.rateCounterStore is set (ClusterMode, Issue #3896), the failure count is read
+// from the shared, cluster-visible counter instead: the fleet-wide count is checked
+// directly, without clusterBudgetDivisor's per-process-count-scaled-by-node-count
+// approximation. Peek's window-remaining is used to cap the reported retry-after —
+// elevateBackoff's schedule gives the tier's cooldown length but not the timestamp of
+// the specific failure that most recently advanced it, so a caller is never told to
+// wait longer than the shared record can possibly still apply.
+//
+// The shared counter can only ever add a block, never remove one: whenever it does not
+// itself block — no open window, a count below the first backoff tier, or a Peek error —
+// this falls through to the in-memory s.operatorPayloadSignThrottle path below rather
+// than returning not-blocked. That fall-through is what makes recordSignFailure's own
+// fallback enforceable: every failure it records in memory (because Increment errored, or
+// because the store declined the key at its capacity backstop) is recorded precisely when
+// the shared counter cannot see it, so reading only the shared counter would drop those
+// failures and disable the throttle outright for the duration of an outage. A store
+// outage alone still never blocks anyone — an outage writes no in-memory records for
+// sessions that have not failed — so this remains defense-in-depth against brute force
+// rather than a fleet-wide lockout of the ceremony.
 func (s *Server) checkSignThrottle(key string) (blocked bool, retryAfter time.Duration) {
+	if s.rateCounterStore != nil {
+		count, windowRemaining, found, err := s.rateCounterStore.Peek(
+			context.Background(), operatorPayloadSignThrottleKeyPrefix+key, operatorPayloadSignThrottleWindow)
+		if err == nil && found {
+			if delay := elevateBackoff(count); delay > 0 {
+				if windowRemaining < delay {
+					return true, windowRemaining
+				}
+				return true, delay
+			}
+		}
+	}
+
 	raw, ok := s.operatorPayloadSignThrottle.Load(key)
 	if !ok {
 		return false, 0
@@ -545,25 +591,33 @@ func (s *Server) checkSignThrottle(key string) (blocked bool, retryAfter time.Du
 	return false, 0
 }
 
-// recordSignFailure increments the failure counter for key and sets the next-allowed
-// timestamp via elevateBackoff. Mirrors recordElevateFailure but reads
-// s.operatorPayloadSignThrottle.
+// recordSignFailure increments the failure counter for key. Mirrors recordElevateFailure
+// but reads s.operatorPayloadSignThrottle.
 //
-// The failure count consulted against the backoff schedule is scaled by
-// clusterBudgetDivisor (Issue #3761): this throttle's counter lives in per-process
-// memory, so in ClusterMode an attacker's failed attempts can spread across nodes
-// and each node's own count would undercount the fleet-wide total. Scaling the
-// count up before consulting elevateBackoff makes the configured schedule apply to
-// the fleet as a whole rather than to whichever single node happened to observe the
-// failure — the same approximation clusterBudgetDivisor's doc comment describes for
-// the source rate limiters.
+// When s.rateCounterStore is set (ClusterMode, Issue #3896), the failure is recorded
+// against the shared, cluster-visible counter, so an attacker spreading failed attempts
+// across controller nodes accumulates one fleet-wide count instead of one undercounted
+// tally per node — the durable replacement for clusterBudgetDivisor's
+// even-distribution approximation (Issue #3761), which an adversary deliberately
+// targeting one node could defeat. A counter-store error — including the store
+// declining a new key at its tracked-key capacity backstop — falls back to the
+// in-memory path below rather than silently dropping the failure; checkSignThrottle
+// reads that path whenever the shared counter does not itself block, so a record
+// written here is always enforced.
 func (s *Server) recordSignFailure(key string) {
+	if s.rateCounterStore != nil {
+		if _, _, err := s.rateCounterStore.Increment(
+			context.Background(), operatorPayloadSignThrottleKeyPrefix+key, operatorPayloadSignThrottleWindow); err == nil {
+			return
+		}
+	}
+
 	raw, _ := s.operatorPayloadSignThrottle.LoadOrStore(key, &elevateThrottleRecord{})
 	rec := raw.(*elevateThrottleRecord)
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
-	delay := elevateBackoff(rec.fails * s.clusterBudgetDivisor())
+	delay := elevateBackoff(rec.fails)
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)
 	}

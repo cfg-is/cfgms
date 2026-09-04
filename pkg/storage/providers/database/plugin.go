@@ -58,6 +58,7 @@ var (
 	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.ModuleApprovalStoreCreator = (*DatabaseProvider)(nil)
+	_ interfaces.RateCounterStoreCreator    = (*DatabaseProvider)(nil)
 )
 
 // Name returns the provider name
@@ -451,6 +452,21 @@ func (p *DatabaseProvider) CreateModuleApprovalStore(config map[string]interface
 	store, err := NewDatabaseModuleApprovalStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database module approval store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateRateCounterStore creates a PostgreSQL-backed RateCounterStore (Issue
+// #3896, ADR-031 Decision 1: abuse-budget counters must be cluster-visible).
+// Implements interfaces.RateCounterStoreCreator.
+func (p *DatabaseProvider) CreateRateCounterStore(config map[string]interface{}) (business.RateCounterStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseRateCounterStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database rate counter store: %w", err)
 	}
 	return store, nil
 }
