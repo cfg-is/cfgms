@@ -4,10 +4,8 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -129,12 +127,16 @@ type postRunCommandRequest struct {
 // submission, and the steward re-verifies on delivery (verifyOperatorCert,
 // features/steward/commands/execute_script.go). An admin transport bundle authenticates
 // mTLS; it does not authorize signing an operator payload.
-func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) error {
+// It returns the operator signing certificate's serial number on success — the
+// signing-credential identifier the Issue #3698 audit trail records — so callers
+// never need to re-parse sig.PublicKey just to learn which credential authorized
+// the dispatch.
+func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string, targets []string, nonce string, expiresAt time.Time, sig *execCommandSignature) (string, error) {
 	if sig == nil || sig.Algorithm == "" || sig.Value == "" || sig.PublicKey == "" {
-		return fmt.Errorf("ad-hoc execution requires an operator signature")
+		return "", fmt.Errorf("ad-hoc execution requires an operator signature")
 	}
 	if s.certManager == nil {
-		return fmt.Errorf("ad-hoc execution requires loaded controller signing roots")
+		return "", fmt.Errorf("ad-hoc execution requires loaded controller signing roots")
 	}
 
 	envelope := operatorpayload.Envelope{
@@ -146,7 +148,7 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	}
 	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
 	if err != nil {
-		return fmt.Errorf("invalid operator envelope: %w", err)
+		return "", fmt.Errorf("invalid operator envelope: %w", err)
 	}
 
 	scriptSig := &scriptmodule.ScriptSignature{
@@ -160,42 +162,42 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 		scriptmodule.ShellType(shell),
 		scriptmodule.ModuleSigningConfig{TrustMode: scriptmodule.TrustModeAnyValid},
 	); err != nil {
-		return fmt.Errorf("invalid operator signature: %w", err)
+		return "", fmt.Errorf("invalid operator signature: %w", err)
 	}
 
 	caPEM, err := s.certManager.GetCACertificate()
 	if err != nil {
-		return fmt.Errorf("controller signing roots unavailable: %w", err)
+		return "", fmt.Errorf("controller signing roots unavailable: %w", err)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
-		return fmt.Errorf("controller signing roots are invalid")
+		return "", fmt.Errorf("controller signing roots are invalid")
 	}
 	block, _ := pem.Decode([]byte(sig.PublicKey))
 	if block == nil {
-		return fmt.Errorf("operator signing certificate is not valid PEM")
+		return "", fmt.Errorf("operator signing certificate is not valid PEM")
 	}
 	operatorCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("operator signing certificate is invalid: %w", err)
+		return "", fmt.Errorf("operator signing certificate is invalid: %w", err)
 	}
 	if _, err := operatorCert.Verify(x509.VerifyOptions{
 		Roots:     roots,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
-		return fmt.Errorf("operator signing certificate is not trusted by the controller CA: %w", err)
+		return "", fmt.Errorf("operator signing certificate is not trusted by the controller CA: %w", err)
 	}
 	if !cert.HasPayloadSigningMarker(operatorCert) {
-		return fmt.Errorf("operator signing certificate is not a payload-signing certificate")
+		return "", fmt.Errorf("operator signing certificate is not a payload-signing certificate")
 	}
 	revoked, err := s.certManager.IsRevoked(operatorCert.SerialNumber.String())
 	if err != nil {
-		return fmt.Errorf("failed to check operator signing certificate revocation status: %w", err)
+		return "", fmt.Errorf("failed to check operator signing certificate revocation status: %w", err)
 	}
 	if revoked {
-		return fmt.Errorf("operator signing certificate is revoked")
+		return "", fmt.Errorf("operator signing certificate is revoked")
 	}
-	return nil
+	return operatorCert.SerialNumber.String(), nil
 }
 
 // authRunAccess authenticates a request to the ad-hoc run API and returns the
@@ -369,8 +371,24 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "expires_at must be RFC3339", "INVALID_EXPIRES_AT")
 		return
 	}
-	if err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature); err != nil {
+	credentialID, err := s.validatePublicBetaCommandSignature(inlineContent, req.Shell, req.Targets, req.Nonce, expiresAt, req.Signature)
+	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+		return
+	}
+
+	// Blast-radius bound (Issue #3698): a hard reject at admission, checked against the
+	// operator-signed, already-resolved Targets list — after signature verification (so a
+	// malformed or forged request is never what trips this check) and before dispatch. A
+	// good signature does not exempt an oversized target set: the bound is a compensating
+	// control for a compromised-controller UI-trust gap, not a defense against forgery.
+	if maxTargets := s.resolveMaxTargetsForTenant(r.Context(), tenantID); len(req.Targets) > maxTargets {
+		s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
+			credentialID, req.Targets, "", business.AuditResultDenied,
+			fmt.Sprintf("resolved target count %d exceeds tenant bound of %d", len(req.Targets), maxTargets))
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("resolved target count %d exceeds the maximum of %d targets allowed for this tenant", len(req.Targets), maxTargets),
+			"BLAST_RADIUS_EXCEEDED")
 		return
 	}
 
@@ -448,25 +466,10 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Audit dispatch for single-steward exec (id: target). command_hash and
-	// output_hash are computed here; exit_code and output are not yet available.
-	// selector.Parse places the id: value in filter.IDs; emit when exactly one ID
-	// is targeted (multi-ID comma-OR runs are not audited here, only per-job).
-	auditDeviceID := filter.DeviceID
-	if auditDeviceID == "" && len(filter.IDs) == 1 {
-		auditDeviceID = filter.IDs[0]
-	}
-	if auditDeviceID != "" {
-		commandHash := sha256.Sum256(inlineContent)
-		sigID := ""
-		if req.Signature != nil {
-			sigBytes, _ := base64.StdEncoding.DecodeString(req.Signature.Value)
-			h := sha256.Sum256(sigBytes)
-			sigID = hex.EncodeToString(h[:])
-		}
-		s.emitExecCommandAudit(r.Context(), tenantID, principal.ID, auditDeviceID,
-			hex.EncodeToString(commandHash[:]), sigID, runID)
-	}
+	// Audit every accepted dispatch (Issue #3698) — literal payload text, the full
+	// operator-signed target list, the signing credential id, and the caller identity.
+	s.emitOperatorPayloadDispatchAudit(r.Context(), tenantID, principal.ID, string(inlineContent),
+		credentialID, req.Targets, runID, business.AuditResultSuccess, "")
 
 	s.writeSuccessResponse(w, map[string]string{"run_id": runID})
 }
@@ -712,10 +715,74 @@ func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principal
 	return false // steward not found — allow, synthesis yields zero jobs
 }
 
-// emitExecCommandAudit records the dispatch of a single-steward exec command.
-// It is a no-op when auditManager is nil. commandHash and signatureID are hex
-// SHA-256 digests; the raw command string and output are never stored.
-func (s *Server) emitExecCommandAudit(ctx context.Context, tenantID, adminCN, stewardID, commandHash, signatureID, runID string) {
+// defaultMaxOperatorPayloadTargets is the blast-radius bound applied when no tenant
+// along the root-to-leaf path (including the root) has configured a narrower
+// override (Issue #3698). It is a flat count, never a percentage-of-fleet — a
+// percentage grows exactly as the fleet gets more dangerous — and it is the
+// deliberately chosen enforced primitive for the epic, not a placeholder for a
+// future percentage-based or more elaborate policy engine.
+const defaultMaxOperatorPayloadTargets = 1000
+
+// resolveMaxTargetsForTenant resolves the per-tenant maximum-target-count bound for
+// operator payload dispatch (Issue #3698), walking the tenant path root-to-leaf via
+// the identical override-walk pattern as resolveAssuranceRequirement (middleware.go)
+// and resolveAssuranceRequirementForPath (handlers_assurance_policy.go): a parent
+// tenant's MaxTargets is the default, and a tenant closer to the caller's leaf
+// narrows it by setting its own. When blastRadiusPolicyStore or tenantStore is nil,
+// or tenantID is empty, it returns defaultMaxOperatorPayloadTargets unchanged —
+// preserving safe behavior for bare Server instances built without these stores.
+//
+// GetTenantPath or GetPolicy errors are logged at Warn and fall back to the default:
+// consistent with resolveAssuranceRequirement, a storage hiccup must never turn into
+// an unbounded blast radius (fail-open past the default) or a fleet-wide dispatch
+// outage (treating the error as "reject everything") — falling back to the
+// conservative default is safe in both directions.
+func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string) int {
+	if s.blastRadiusPolicyStore == nil || s.tenantStore == nil || tenantID == "" {
+		return defaultMaxOperatorPayloadTargets
+	}
+
+	path, err := s.tenantStore.GetTenantPath(ctx, tenantID)
+	if err != nil {
+		s.logger.Warn("resolveMaxTargetsForTenant: failed to get tenant path; using default bound",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()),
+		)
+		return defaultMaxOperatorPayloadTargets
+	}
+
+	result := defaultMaxOperatorPayloadTargets
+	for _, t := range path {
+		policy, err := s.blastRadiusPolicyStore.GetPolicy(ctx, t)
+		if err != nil {
+			s.logger.Warn("resolveMaxTargetsForTenant: failed to get blast-radius policy; using default bound",
+				"tenant_id", logging.SanitizeLogValue(t),
+				"error", logging.SanitizeLogValue(err.Error()),
+			)
+			return defaultMaxOperatorPayloadTargets
+		}
+		if policy.MaxTargets != nil {
+			result = *policy.MaxTargets
+		}
+	}
+	return result
+}
+
+// emitOperatorPayloadDispatchAudit records an operator payload dispatch attempt —
+// accepted or rejected, either credential path — via audit.NewEventBuilder, mirroring
+// emitOsqueryAudit's field shape (handlers_osquery.go). It is a no-op when auditManager
+// is nil.
+//
+// Unlike the exec-audit code this replaces (which stored only a command hash),
+// payloadText is recorded literally: Issue #3698 makes the blast-radius bound and this
+// audit trail the compensating controls for the epic's accepted UI-trust residual risk
+// (a compromised controller could show an operator one payload and sign another), so
+// the trail must be able to reconstruct exactly what was dispatched, not just its
+// digest. Every steward reference in targets is already a cfg-declared resource id
+// (steward ID), never a live hostname. Target entries beyond the first 10 are counted
+// but not individually recorded, to keep audit record size bounded — the same cap
+// emitOsqueryAudit applies.
+func (s *Server) emitOperatorPayloadDispatchAudit(ctx context.Context, tenantID, callerID, payloadText, credentialID string, targets []string, runID string, result business.AuditResult, rejectionReason string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -724,19 +791,54 @@ func (s *Server) emitExecCommandAudit(ctx context.Context, tenantID, adminCN, st
 	if auditTenantID == "" {
 		auditTenantID = audit.SystemTenantID
 	}
+
+	severity := business.AuditSeverityHigh
+	if result != business.AuditResultSuccess {
+		severity = business.AuditSeverityCritical
+	}
+
+	// AuditEntry.ResourceID is a required, non-empty field (Manager.validateEntry) — but
+	// the WebAuthn path's begin-time blast-radius rejection has no credential yet (the
+	// operator has not authenticated an assertion), so credentialID can legitimately be
+	// "". Recording that absence must not silently drop the whole audit event: the
+	// resource identifier falls back to a sentinel, while the actual (possibly empty)
+	// credential id is always recorded verbatim in the "credential_id" detail — the field
+	// the AC requires.
+	resourceID := credentialID
+	if resourceID == "" {
+		resourceID = "unresolved"
+	}
+
 	b := audit.NewEventBuilder().
 		Tenant(auditTenantID).
 		Type(business.AuditEventSystemAccess).
-		Action("steward.exec.dispatched").
-		User(adminCN, business.AuditUserTypeHuman).
-		Resource("steward", stewardID, "").
-		Result(business.AuditResultSuccess).
-		Severity(business.AuditSeverityHigh).
-		Detail("command_hash", commandHash).
-		Detail("signature_id", signatureID).
+		Action("operator_payload.dispatch").
+		User(callerID, business.AuditUserTypeHuman).
+		Resource("operator_credential", logging.SanitizeLogValue(resourceID), "").
+		Result(result).
+		Severity(severity).
+		Detail("payload", payloadText).
+		Detail("credential_id", logging.SanitizeLogValue(credentialID)).
+		Detail("target_count", fmt.Sprintf("%d", len(targets))).
 		Detail("run_id", runID)
+	if rejectionReason != "" {
+		b = b.Detail("rejection_reason", rejectionReason)
+	}
+
+	for i, target := range targets {
+		if i >= 10 {
+			// Cap per-target detail entries to avoid unbounded audit record size.
+			b = b.Detail("targets_truncated", "true")
+			break
+		}
+		b = b.Detail(fmt.Sprintf("target_%d", i), logging.SanitizeLogValue(target))
+	}
+
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit exec command audit event", "error", err, "run_id", runID)
+		s.logger.Warn("Failed to emit operator payload dispatch audit event",
+			"error", logging.SanitizeLogValue(err.Error()),
+			"run_id", logging.SanitizeLogValue(runID),
+		)
 	}
 }
 

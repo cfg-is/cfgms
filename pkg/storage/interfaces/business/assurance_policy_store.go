@@ -51,3 +51,40 @@ type AssurancePolicyStore interface {
 	// the tenant (full-replace semantics).
 	SetPolicy(ctx context.Context, policy *AssurancePolicy) error
 }
+
+// BlastRadiusPolicy is the per-tenant maximum-target-count override for operator
+// payload dispatch (Issue #3698, epic #3571). It is a sibling to AssurancePolicy
+// rather than an extra field on it — the two are resolved by the identical
+// root-to-leaf override walk (see resolveMaxTargetsForTenant,
+// features/controller/api/handlers_runs.go, which copies the walk shape of
+// resolveAssuranceRequirement/resolveAssuranceRequirementForPath), but AssurancePolicy's
+// per-permission Overrides list has no natural slot for a single per-tenant scalar,
+// and the two existing AssurancePolicyStore providers (database, sqlite) persist
+// Overrides as one row per permission — bolting a scalar onto that shape would mean
+// a schema change to unrelated assurance-policy code for a concept it doesn't own.
+type BlastRadiusPolicy struct {
+	// TenantID identifies the tenant this override applies to.
+	TenantID string
+
+	// MaxTargets, when non-nil, bounds the number of resolved dispatch targets a
+	// caller in this tenant may address in a single operator payload. nil means
+	// "no override at this tenant" — an ancestor's value, or the resolver's global
+	// default if no tenant in the path has one, applies instead.
+	MaxTargets *int
+}
+
+// BlastRadiusPolicyStore defines the storage interface for per-tenant blast-radius
+// overrides (Issue #3698). A conforming implementation is read via the same
+// root-to-leaf override walk as AssurancePolicyStore — a parent tenant's MaxTargets
+// is the default, and a child tenant's own value narrows it — rather than a new
+// resolution algorithm.
+type BlastRadiusPolicyStore interface {
+	// GetPolicy returns the blast-radius override for the given tenant. When no
+	// record exists, it returns {TenantID: tenantID, MaxTargets: nil} without
+	// error — "no override" and "no data" are equivalent here.
+	GetPolicy(ctx context.Context, tenantID string) (*BlastRadiusPolicy, error)
+
+	// SetPolicy replaces the tenant's MaxTargets override. A nil policy or empty
+	// TenantID returns an error. MaxTargets == nil clears the override.
+	SetPolicy(ctx context.Context, policy *BlastRadiusPolicy) error
+}

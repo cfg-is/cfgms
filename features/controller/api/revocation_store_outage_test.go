@@ -300,21 +300,21 @@ func TestValidateCommandSignature_RevocationCheckFailure_FailsClosed(t *testing.
 	sig, nonce, expiresAt := envelopeSignatureFields(t, fields)
 
 	// Control: the signature validates while the revocation store is healthy.
-	require.NoError(t,
-		server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig),
+	_, err := server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	require.NoError(t, err,
 		"sanity: a well-formed operator signature must validate while the store is healthy")
 
 	revStore.arm()
 
-	err := server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	_, err = server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
 	require.Error(t, err,
 		"an unreadable revocation store must fail the signature check closed, not authorise the command")
 	assert.ErrorIs(t, err, errRevocationStoreOutage,
 		"the failure must be the revocation-store error, not an unrelated validation failure")
 
 	revStore.disarm()
-	assert.NoError(t,
-		server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig),
+	_, err = server.validatePublicBetaCommandSignature(content, "bash", targets, nonce, expiresAt, sig)
+	assert.NoError(t, err,
 		"the same signature must validate again once the revocation store recovers")
 }
 
