@@ -246,7 +246,11 @@ Requires an active session or admin bundle for the API connection (--bundle or
 CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
 'cfg credential request-signing-cert' first if none exists.
 
-The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
+The --shell flag is required. Allowed values: bash, sh (Unix); powershell, pwsh,
+cmd (Windows); pwsh is also valid on Unix (PowerShell Core is cross-platform).
+"powershell" targets Windows PowerShell 5.1 (powershell.exe) and requires no
+PowerShell Core install. There is no automatic fallback between shells — pick
+the one installed on the target host.
 
 Output is capped at 64 KB per steward in the CLI display. If the output for a
 steward exceeds the cap a truncation warning is printed to stderr.
@@ -771,7 +775,7 @@ func init() {
 	stewardRunCommandCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardRunCommandCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardRunCommandCmd.Flags().StringVar(&stewardRunTarget, "target", "", "Fleet selector (e.g. os:linux, group:prod)")
-	stewardRunCommandCmd.Flags().StringVar(&stewardRunShell, "shell", "", "Shell to use (e.g. bash, sh, powershell)")
+	stewardRunCommandCmd.Flags().StringVar(&stewardRunShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardRunCommandCmd.Flags().StringArrayVar(&stewardRunParams, "param", nil, "Parameter key=value (repeatable)")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunWait, "wait", false, "Block until all jobs reach terminal state")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
@@ -784,7 +788,7 @@ func init() {
 	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
 	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
-	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, pwsh)")
+	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", 30*time.Second, "Maximum time to wait for job completion")
 	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
 

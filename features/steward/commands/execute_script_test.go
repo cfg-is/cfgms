@@ -210,6 +210,119 @@ func lastN(s string, n int) string {
 	return s[len(s)-n:]
 }
 
+// ---------------------------------------------------------------------------
+// Issue #2773 — cfg steward exec shell taxonomy on Windows.
+//
+// The taxonomy itself (ShellPowerShell / ShellCmd accepted by both the
+// controller's allowedShells map and the steward executor) was already unified
+// by Issue #1995 (PR #1996, merged before #2773 was filed): see
+// features/modules/stdlib/script/executor_windows_command_test.go and
+// TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock (dispatcher_test.go),
+// which already pins the exact "unsupported shell on Windows: pwsh" failure text
+// from #2773's evidence surfacing as job stderr rather than a silent
+// exit_code=0 + empty output. These two tests close the remaining gap: an
+// explicit, real (non-mocked) execution through the handler for each of the two
+// literal AC1/AC2 commands, run on an actual Windows host.
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_WindowsPowerShell51_ExplicitShell is the literal AC1
+// regression test for Issue #2773: `--shell powershell` (Windows PowerShell 5.1,
+// powershell.exe) must execute and return real output, independent of whether
+// PowerShell Core (pwsh) is also installed on the host — the executor's
+// ShellPowerShell case always invokes powershell.exe, never pwsh.exe.
+func TestExecuteScriptHandler_WindowsPowerShell51_ExplicitShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell 5.1 shell selection is Windows-only")
+	}
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	params := signedInlineEnvelopeParams(t, []byte("Write-Output 'OK'"), "powershell", "steward-test")
+	params["execution_id"] = "esc-ac1-powershell-001"
+	sc := testSignedCommandWithParams("esc-ac1-powershell-001", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	failEvt := firstEventOfType(getEvents(), cpTypes.EventCommandFailed)
+	require.Nil(t, failEvt, "powershell execution must not fail: %+v", failEvt)
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+	exitCode, ok := evt.Details["exit_code"].(int)
+	require.True(t, ok, "exit_code must be an int")
+	assert.Equal(t, 0, exitCode, "powershell script must exit 0")
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string")
+	assert.Contains(t, stdout, "OK", "powershell 5.1 (powershell.exe) must produce the expected output")
+}
+
+// TestExecuteScriptHandler_WindowsCmd_ExplicitShell is the literal AC2 regression
+// test for Issue #2773: `--shell cmd` must execute and return real output.
+func TestExecuteScriptHandler_WindowsCmd_ExplicitShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("cmd shell selection is Windows-only")
+	}
+
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	params := signedInlineEnvelopeParams(t, []byte("echo OK"), "cmd", "steward-test")
+	params["execution_id"] = "esc-ac2-cmd-001"
+	sc := testSignedCommandWithParams("esc-ac2-cmd-001", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	failEvt := firstEventOfType(getEvents(), cpTypes.EventCommandFailed)
+	require.Nil(t, failEvt, "cmd execution must not fail: %+v", failEvt)
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.NotNil(t, evt, "expected EventScriptCompleted event")
+	exitCode, ok := evt.Details["exit_code"].(int)
+	require.True(t, ok, "exit_code must be an int")
+	assert.Equal(t, 0, exitCode, "cmd script must exit 0")
+	stdout, ok := evt.Details["stdout"].(string)
+	require.True(t, ok, "stdout field must be present and a string")
+	assert.Contains(t, stdout, "OK", "cmd.exe must produce the expected output")
+}
+
+// TestExecuteScriptHandler_UnsupportedShell_SurfacesClearError is the steward-side
+// half of Issue #2773 AC3/AC4: a shell the executor does not recognize must fail
+// with a clear, descriptive error on EventCommandFailed — never a silent
+// exit_code=0 + empty output masquerading as success. The controller-side half
+// (the error text surviving as job stderr for the CLI) is already pinned by
+// TestDispatcher_CommandFailedMarksRunFailedAndReleasesLock in dispatcher_test.go.
+func TestExecuteScriptHandler_UnsupportedShell_SurfacesClearError(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	params := signedInlineEnvelopeParams(t, []byte("echo hi"), "nushell", "steward-test")
+	params["execution_id"] = "esc-ac3-badshell-001"
+	sc := testSignedCommandWithParams("esc-ac3-badshell-001", cpTypes.CommandExecuteScript, params)
+
+	require.NoError(t, h.HandleCommand(context.Background(), sc))
+	h.Wait()
+
+	completedEvt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.Nil(t, completedEvt, "an unsupported shell must never report a completed run")
+
+	failEvt := firstEventOfType(getEvents(), cpTypes.EventCommandFailed)
+	require.NotNil(t, failEvt, "an unsupported shell must produce EventCommandFailed")
+	errMsg, ok := failEvt.Details["error"].(string)
+	require.True(t, ok, "error field must be present and a string")
+	assert.NotEmpty(t, errMsg, "the failure error must not be silently empty")
+	assert.Contains(t, errMsg, "unsupported shell",
+		"the failure must name the taxonomy problem explicitly, not fail opaquely")
+}
+
 // TestResolveRelayUID_SystemContext verifies that a system-context script
 // resolves to the steward process UID, making the relay socket chown a no-op.
 func TestResolveRelayUID_SystemContext(t *testing.T) {
