@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -144,17 +146,87 @@ func ReservePrivateListenerAddress(t *testing.T) string {
 	return address
 }
 
+// Ports are drawn from [reservedPortMin, reservedPortMax], a band that sits
+// below the ephemeral range on every platform CFGMS builds for — Linux starts
+// its default range at 32768, macOS and Windows at 49152. Nothing in that band
+// is handed out by a `:0` bind, which is what makes the reservation hold.
+const (
+	reservedPortMin = 20000
+	reservedPortMax = 32767
+	reserveAttempts = 64
+)
+
+var (
+	reservedPortsMu sync.Mutex
+	reservedPorts   = map[int]struct{}{}
+)
+
 // ReserveLoopbackAddress is ReservePrivateListenerAddress for harness code that
 // builds a controller outside a *testing.T — the e2e framework constructs its
 // controller config in a plain function.
+//
+// There is an unavoidable gap between releasing a port here and the server
+// binding it, so the reservation has to make a collision in that gap
+// vanishingly unlikely rather than merely unlikely. The original implementation
+// bound "127.0.0.1:0", read the address and closed the listener, which handed
+// back a port from the OS ephemeral range — precisely the range the OS draws
+// from when any other process on the host binds :0. Under `make test`, where
+// every package's test binary runs concurrently, that lost the race often
+// enough to fail a merge-queue run:
+//
+//	bind private metrics listener: listen tcp 127.0.0.1:34941:
+//	bind: address already in use
+//
+// Two changes close it. The port is drawn from a band below the ephemeral range
+// (see the constants above), so no concurrent :0 bind can take it; and ports
+// handed out by this process are remembered, so two tests in the same binary
+// never receive the same one. Each candidate is still probed with a real bind,
+// so a port held by an unrelated long-lived process is skipped rather than
+// returned.
+//
+// The residual risk is two *separate* test binaries independently drawing the
+// same port from a ~12k-wide band inside the same gap. That is not zero, but it
+// is several orders of magnitude below the ephemeral-range collision it
+// replaces.
 func ReserveLoopbackAddress() (string, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	for attempt := 0; attempt < reserveAttempts; attempt++ {
+		port, err := candidatePort()
+		if err != nil {
+			return "", err
+		}
+
+		reservedPortsMu.Lock()
+		if _, taken := reservedPorts[port]; taken {
+			reservedPortsMu.Unlock()
+			continue
+		}
+		reservedPorts[port] = struct{}{}
+		reservedPortsMu.Unlock()
+
+		address := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			// Held by something outside this process — leave it marked so this
+			// process does not probe it again, and try another.
+			continue
+		}
+		if err := listener.Close(); err != nil {
+			return "", fmt.Errorf("release loopback port: %w", err)
+		}
+		return address, nil
+	}
+	return "", fmt.Errorf("reserve loopback port: no free port in [%d, %d] after %d attempts",
+		reservedPortMin, reservedPortMax, reserveAttempts)
+}
+
+// candidatePort returns a uniformly random port in the reserved band. It draws
+// from crypto/rand so parallel test binaries starting in the same instant do not
+// share a seed and walk the same sequence.
+func candidatePort() (int, error) {
+	span := int64(reservedPortMax - reservedPortMin + 1)
+	n, err := rand.Int(rand.Reader, big.NewInt(span))
 	if err != nil {
-		return "", fmt.Errorf("reserve loopback port: %w", err)
+		return 0, fmt.Errorf("reserve loopback port: %w", err)
 	}
-	address := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		return "", fmt.Errorf("release loopback port: %w", err)
-	}
-	return address, nil
+	return reservedPortMin + int(n.Int64()), nil
 }
