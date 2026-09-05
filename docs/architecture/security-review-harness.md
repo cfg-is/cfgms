@@ -25,6 +25,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `lanes/anthropic.py` | The Anthropic finder lane (Issue #3907) — see [Anthropic finder lane](#anthropic-finder-lane) below |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output |
+| `security-review.sh` | The operator-facing `launch`/`status`/`resume` CLI (Issue #3910) — see [Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below. Lives in `.claude/scripts/`, one level up from this directory, alongside `agent-dispatch.sh` |
 
 This directory's name contains a hyphen, so it is never imported with a plain
 `import security-review` statement. A module that needs a sibling imports it the way
@@ -752,3 +753,97 @@ Only this single file is bind-mounted into the container (at
 from a checkout — `__file__` resolves to a path with no siblings at all. It falls back to
 importing them from `/workspace/.claude/scripts/security-review`, since the *whole* repository
 is separately bind-mounted read-only at `/workspace` regardless of mode.
+
+## Sweep orchestration CLI (launch/status/resume)
+
+`.claude/scripts/security-review.sh` (Issue #3910) is the harness's single operator-facing entry
+point — the command a human runs to operate the whole harness end to end, tying the manifest
+(#3902), the planner (#3906), the three finder lanes (#3907/#3908/#3909), and the consolidator
+(#3904) into one workflow. It is a thin CLI: it adds no classification, schema, or credential
+logic of its own, only calling each dependency's existing entry point in sequence.
+
+```
+security-review.sh launch <ref>        # start a new sweep
+security-review.sh resume <sweep-id>   # continue an interrupted or parked sweep
+security-review.sh status <sweep-id>   # coverage only, never re-runs anything
+```
+
+**`launch <ref>`.** Creates the sweep tree (`manifest.py::create_sweep`), then runs
+`planner.py`'s `prepare()` → `launch()` → (`docker wait` on the plan-mode container) →
+`finalize()`, then dispatches all three finder lanes via `agent-dispatch.sh launch-investigator
+--mode <lane-id> --cred-name <NAME> --lane-entrypoint <lane script>` — one container per lane,
+same fire-and-forget `docker run -d` semantics `planner.launch()` uses for the plan-mode
+container. Once every dispatched container has exited (`docker wait`), it runs
+`consolidate.py` and prints the path to `report/consolidated.md`.
+
+**Each lane's dispatch is independent (AC6).** The three `launch-investigator` calls are made in
+a loop; a lane that fails to dispatch at all (credential unavailable, a stale container name
+collision) is logged and skipped — it never stops the loop from dispatching the remaining lanes,
+and never prevents the consolidator from running afterward against whatever the other lanes
+produced. A lane whose container exits having `parked`, `refused`, or `failed` some or all of its
+steps is not a dispatch failure at all from this script's point of view — the container still
+exited normally, `docker wait` still returns, and the consolidator still renders that lane's real
+coverage in the table (see [Consolidation and the coverage table](#consolidation-and-the-coverage-table)).
+
+**`resume <sweep-id>`.** Requires the sweep to already exist (`manifest.json` present) — unlike
+`launch`, it never creates a sweep tree. Re-invokes the planner only if `plan/` is not already
+populated with at least one `step-NNN.json` (a plain `plan/step-*.json` glob check) — if it is,
+planner re-dispatch is skipped entirely as a no-op, logged to stderr, rather than asking the
+model to regenerate a plan that already exists. It then re-dispatches all three lanes exactly as
+`launch` does. No lane-specific resume logic lives here: dispatching a lane's container again
+*is* how it resumes, because that container's own entry point calls `resume.py::missing_steps()`
+against its lane directory before doing any work (#3901's resume scanner, used inside
+#3907/#3908/#3909) — a step already `complete` is never re-sent, and its `.findings.json` is
+never touched. [REQUIRED TEST] `security_review_cli.test.sh` proves this at the CLI level: it
+kills a launch mid-run (removing one step's result from every lane's directory, simulating an
+interrupted sweep) and asserts that `resume` leaves every already-complete step's file
+byte-for-byte and mtime unchanged while resolving exactly the missing ones (AC5).
+
+**`status <sweep-id>`.** Read-only. Resolves the sweep's directory and calls `consolidate.py`'s
+own `load_sweep()` and `build_coverage_table()` directly — the same computation
+`consolidate.py`'s CLI uses to build the coverage table half of `consolidated.md` — rather than
+re-deriving it, and prints it as plain text. It never dispatches a container, never calls the
+planner, and never writes `report/consolidated.json` or `.md`; a sweep's report on disk (if any)
+is left exactly as it was.
+
+**Exit-code contract.** `launch` and `resume` exit non-zero, before creating or touching anything,
+if the sweep base directory cannot be resolved (`basedir.py::resolve_base_dir()`'s fail-closed
+guard — an in-repo path, an unwritable directory, or an undetectable repository root) — the same
+principle #3901 established at the base-dir layer, applied here at the top-level command a human
+actually runs. Every other failure inside `launch`/`resume` (a planner prepare/launch/finalize
+failure, a single lane's dispatch failure) is logged to stderr and treated as non-fatal to the
+overall command: the remaining work still runs, and the consolidator still produces a report that
+visibly reflects whatever happened, rather than the whole command aborting on a partial failure
+that a rerun would recover from anyway. The one exception is the consolidator itself failing to
+run at all (only possible if the repository root cannot be determined) — `launch`/`resume` exit
+non-zero in that case rather than reporting success for a sweep that produced no report.
+
+**Container lifecycle is short-lived and per-invocation, not one long-running process per
+lane.** Each `launch`/`resume` call dispatches a lane's container for one pass over its
+currently-missing steps; the container exits — whether it completed everything currently
+possible or hit `parked`/`refused` on the remainder — and a later `resume` call re-dispatches a
+fresh container. This is load-bearing for #3903's credential-cleanup design: "parking is defined
+as ending the container" holds structurally under this lifecycle, so the per-invocation
+credential file `_investigator_cred_cleanup_watcher` removes on every container exit is never
+left mounted into a still-running container across a park interval spanning days. #3903 depends
+on this story for that lifecycle guarantee rather than re-implementing park-detection logic for a
+state (a long-lived, still-parked container) that cannot occur here.
+
+**No new GitHub or CI surface.** This command adds no GitHub Actions workflow and no repository
+secret — it is a host-only tool, matching the epic's locked "runtime: existing agent container
+system" decision, invoked interactively today and by a future scheduling wrapper later (a
+separate, explicitly out-of-scope follow-up) — never by CI.
+
+**Testing.** `.claude/scripts/tests/security_review_cli.test.sh` follows
+`investigator_launch.test.sh`'s own precedent for testing code that calls `agent-dispatch.sh
+launch-investigator`: a stub `docker` binary renders the real, unmodified `launch-investigator`
+call (real argument parsing, real mount construction) and then, in place of a real container,
+synchronously performs the simulated container's job against the actual host paths parsed out of
+its own `docker run` argv — writing `plan/step-NNN.json` for plan mode, or a findings/status
+envelope per outstanding step for lane mode, honoring whatever steps are already resolved exactly
+as a real lane container would via `resume.py`. `docker wait` is a no-op since the work already
+happened synchronously. A stub `secret-tool` satisfies the OS-keychain lookup
+`_investigator_prepare_cred_dir` performs for each `--cred-name`. This exercises the CLI's real
+orchestration logic — sequencing, per-lane independence, the resume no-op check, exit codes —
+against the real `manifest.py`/`planner.py`/`consolidate.py`/`agent-dispatch.sh` entry points,
+without a real docker daemon, real credentials, or real network access.
