@@ -940,6 +940,50 @@ func (s DatabaseSchemas) CreateModuleApprovalsTable(ctx context.Context, db *sql
 	return nil
 }
 
+// CreateRateCountersTable creates the cfgms_rate_counters table backing the
+// cluster-visible RateCounterStore (ADR-031 Decision 1, Issue #3896). key is
+// the caller-namespaced counter identity (e.g. "<route>:<source-address>" for
+// the per-source rate limiters, "sign:session:<id>"/"sign:ip:<addr>" for the
+// operator-payload sign-ceremony throttle); window_start marks when the
+// current fixed window for that key began.
+//
+// expires_at records window_start plus that key's own window — the instant the
+// row is dead — because the window length belongs to the caller, not to the
+// table, so a sweep cannot infer it from window_start alone. It exists to make
+// reclamation possible: overwrite-in-place only ever reclaims a key that
+// recurs, and the keys here include the source address of unauthenticated
+// routes, where an attacker rotating addresses never repeats one. Rows are
+// therefore pruned by DatabaseRateCounterStore.PruneExpired against the
+// expires_at index. This table is sized for churn, not audit retention, unlike
+// cfgms_cert_revocations.
+func (s DatabaseSchemas) CreateRateCountersTable(ctx context.Context, db *sql.DB) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_rate_counters (
+			key          TEXT NOT NULL PRIMARY KEY,
+			window_start TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+			count        INTEGER NOT NULL
+		);`,
+		// Bring a table created before expires_at existed up to the current
+		// shape. Every row in it is an ephemeral counter, so pre-existing rows
+		// are marked already-expired rather than migrated: the next sweep
+		// prunes them and the next Increment for those keys opens a fresh
+		// window, which is what an unknown-window row is worth.
+		`ALTER TABLE cfgms_rate_counters ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;`,
+		`UPDATE cfgms_rate_counters SET expires_at = window_start WHERE expires_at IS NULL;`,
+		`ALTER TABLE cfgms_rate_counters ALTER COLUMN expires_at SET NOT NULL;`,
+		// Prune sweeps are a range scan on expires_at; without this index each
+		// sweep is a sequential scan of the whole table.
+		`CREATE INDEX IF NOT EXISTS idx_cfgms_rate_counters_expires_at ON cfgms_rate_counters (expires_at);`,
+	}
+	for _, stmt := range statements {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_rate_counters table: %w", err)
+		}
+	}
+	return nil
+}
+
 // CreateIPTrustRangesTable creates the cfgms_ip_trust_ranges table for tenant-scoped IP trust.
 func (s DatabaseSchemas) CreateIPTrustRangesTable(ctx context.Context, db *sql.DB) error {
 	createTableQuery := `
@@ -1641,6 +1685,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_cert_revocations;",
 		"DROP TABLE IF EXISTS cfgms_signing_cursor;",
 		"DROP TABLE IF EXISTS cfgms_module_approvals;",
+		"DROP TABLE IF EXISTS cfgms_rate_counters;",
 	}
 
 	for _, query := range dropQueries {

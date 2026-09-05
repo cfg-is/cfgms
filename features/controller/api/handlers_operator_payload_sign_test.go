@@ -47,6 +47,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // setupOperatorPayloadSignServer returns a test Server with WebAuthn configured, a
@@ -474,6 +475,155 @@ func TestOperatorPayloadSignFinish_Throttled_429(t *testing.T) {
 	rec := doSignFinish(t, server, principal, sessID, nil)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, "THROTTLED", errCode(t, rec.Body.Bytes()))
+}
+
+// TestOperatorPayloadSignThrottle_ClusterModeUsesSharedCounter replaces the deleted
+// TestOperatorPayloadSignThrottle_ScalesWithClusterSize (formerly in
+// cluster_budget_test.go, Issue #3761): recordSignFailure/checkSignThrottle must
+// consult s.rateCounterStore directly when it is set, instead of scaling an
+// in-memory failure count by the deleted clusterBudgetDivisor (Issue #3896).
+func TestOperatorPayloadSignThrottle_ClusterModeUsesSharedCounter(t *testing.T) {
+	store := pkgtesting.SetupTestRateCounterStore()
+	s := &Server{rateCounterStore: store}
+
+	s.recordSignFailure("session:x")
+	s.recordSignFailure("session:x")
+	blocked, _ := s.checkSignThrottle("session:x")
+	assert.False(t, blocked, "elevateBackoff(2) == 0 — two failures must not yet throttle")
+
+	s.recordSignFailure("session:x")
+	blocked, retryAfter := s.checkSignThrottle("session:x")
+	assert.True(t, blocked, "elevateBackoff(3) > 0 — a third failure must throttle")
+	assert.Greater(t, retryAfter, time.Duration(0))
+
+	_, inMemoryUsed := s.operatorPayloadSignThrottle.Load("session:x")
+	assert.False(t, inMemoryUsed, "expected every recordSignFailure call to go to the shared counter store, never the in-memory fallback, while one is wired")
+}
+
+// TestOperatorPayloadSignThrottle_SingleNodeUsesInMemoryDefault pins the
+// pre-#3896 in-memory behavior for a Server with no shared counter store wired —
+// the single-node/BlueGreenMode construction path.
+func TestOperatorPayloadSignThrottle_SingleNodeUsesInMemoryDefault(t *testing.T) {
+	s := &Server{}
+	s.recordSignFailure("session:y")
+	blocked, _ := s.checkSignThrottle("session:y")
+	assert.False(t, blocked, "a single failure must not throttle a single-node server")
+
+	_, inMemoryUsed := s.operatorPayloadSignThrottle.Load("session:y")
+	assert.True(t, inMemoryUsed, "expected the in-memory fallback to be used with no shared counter store wired")
+}
+
+// TestOperatorPayloadSignThrottle_StoreOutageDoesNotBlockUntouchedSession proves a
+// counter-store error does not lock out the ceremony fleet-wide: this throttle is
+// defense-in-depth against brute force, not the WebAuthn verification step itself.
+// A session that has not failed is never blocked merely because the store is down —
+// while a session that has failed still is, per
+// TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback below.
+func TestOperatorPayloadSignThrottle_StoreOutageDoesNotBlockUntouchedSession(t *testing.T) {
+	store := newUnavailableRateCounterStore(t)
+	s := &Server{rateCounterStore: store}
+
+	blocked, _ := s.checkSignThrottle("session:untouched")
+	assert.False(t, blocked, "expected a session with no recorded failures not to be blocked by a counter-store outage alone")
+
+	s.recordSignFailure("session:z") // Increment errors; falls back to in-memory
+	blocked, _ = s.checkSignThrottle("session:z")
+	assert.False(t, blocked, "expected a single failure to stay below the first backoff tier")
+}
+
+// TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback proves the
+// throttle is degraded, not disabled, while the shared counter store is failing:
+// recordSignFailure's in-memory fallback records must be read back by
+// checkSignThrottle. Reading only the shared counter would drop every failure an
+// outage produced and permit unlimited failed WebAuthn assertions against the
+// payload-signing ceremony for its duration.
+func TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback(t *testing.T) {
+	store := newUnavailableRateCounterStore(t)
+	s := &Server{rateCounterStore: store}
+
+	for i := 0; i < 3; i++ {
+		s.recordSignFailure("session:outage")
+	}
+
+	blocked, retryAfter := s.checkSignThrottle("session:outage")
+	assert.True(t, blocked, "elevateBackoff(3) > 0 — failures recorded in memory during a store outage must still throttle")
+	assert.Greater(t, retryAfter, time.Duration(0), "a blocked caller must be told how long to wait")
+}
+
+// TestOperatorPayloadSignThrottle_CapacityExhaustionEnforcesFallback proves the same
+// for the store's tracked-key backstop: when Increment declines a new key because the
+// shared table is at its row cap, the failure is recorded in memory and enforced, so
+// filling the shared table cannot be used to switch this throttle off.
+func TestOperatorPayloadSignThrottle_CapacityExhaustionEnforcesFallback(t *testing.T) {
+	// A real store filled to its tracked-key cap by an unrelated key: the
+	// throttle's own key is then the brand-new one the store must decline with
+	// business.ErrRateCounterCapacityExhausted.
+	store := pkgtesting.SetupTestRateCounterStoreWithMaxKeys(1)
+	_, _, err := store.Increment(context.Background(), "occupant", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err, "seeding the store's only tracked-key slot")
+	s := &Server{rateCounterStore: store}
+
+	for i := 0; i < 3; i++ {
+		s.recordSignFailure("session:capacity")
+	}
+
+	blocked, retryAfter := s.checkSignThrottle("session:capacity")
+	assert.True(t, blocked, "failures recorded in memory after a capacity-exhausted Increment must still throttle")
+	assert.Greater(t, retryAfter, time.Duration(0))
+}
+
+// TestOperatorPayloadSignThrottle_SharedCounterBlockSurvivesLocalGap proves the shared
+// counter still blocks on its own — the in-memory fall-through only ever adds a block,
+// it never replaces the cluster-visible count with a per-node one.
+func TestOperatorPayloadSignThrottle_SharedCounterBlockSurvivesLocalGap(t *testing.T) {
+	store := pkgtesting.SetupTestRateCounterStore()
+	s := &Server{rateCounterStore: store}
+
+	for i := 0; i < 3; i++ {
+		s.recordSignFailure("session:shared-only")
+	}
+
+	_, inMemoryUsed := s.operatorPayloadSignThrottle.Load("session:shared-only")
+	require.False(t, inMemoryUsed, "precondition: a healthy store records nothing in memory")
+
+	blocked, _ := s.checkSignThrottle("session:shared-only")
+	assert.True(t, blocked, "the shared count alone must block, with no in-memory record present")
+}
+
+// TestOperatorPayloadSignThrottle_ClusterModeNamespacesKeys proves the shared
+// counter key is prefixed so this throttle's records never collide with an
+// unrelated counter (e.g. a sourceRateLimiter route) sharing the same store.
+func TestOperatorPayloadSignThrottle_ClusterModeNamespacesKeys(t *testing.T) {
+	store := pkgtesting.SetupTestRateCounterStore()
+	s := &Server{rateCounterStore: store}
+
+	s.recordSignFailure("session:x")
+
+	ctx := context.Background()
+	count, _, found, err := store.Peek(ctx, operatorPayloadSignThrottleKeyPrefix+"session:x", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err)
+	require.True(t, found, "the failure must be recorded under the prefixed key")
+	assert.Equal(t, 1, count)
+
+	_, _, foundBare, err := store.Peek(ctx, "session:x", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err)
+	assert.False(t, foundBare,
+		"an unprefixed key would collide with any sourceRateLimiter route sharing this store")
+}
+
+// newUnavailableRateCounterStore returns a real business.RateCounterStore that has
+// been closed, so every operation fails the way a clustered controller's counter
+// store fails during a database outage (pool exhaustion, statement timeout,
+// failover). Closing a real store — rather than injecting a canned error into a
+// stand-in — keeps these outage tests on the same implementation the healthy-path
+// tests use.
+func newUnavailableRateCounterStore(t *testing.T) business.RateCounterStore {
+	t.Helper()
+	store := pkgtesting.SetupTestRateCounterStore()
+	require.NoError(t, store.Close())
+	_, _, err := store.Increment(context.Background(), "probe", operatorPayloadSignThrottleWindow)
+	require.Error(t, err, "a closed store must report every operation as failed — otherwise this is not an outage")
+	return store
 }
 
 // TestOperatorPayloadSignFinish_ReplayedSession is the [REQUIRED TEST]: a finish call

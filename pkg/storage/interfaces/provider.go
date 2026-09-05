@@ -173,6 +173,17 @@ type ModuleApprovalStoreCreator interface {
 	CreateModuleApprovalStore(config map[string]interface{}) (business.ModuleApprovalStore, error)
 }
 
+// RateCounterStoreCreator is an optional StorageProvider extension for
+// backends that support cluster-visible, fixed-window abuse-budget counter
+// storage (ADR-031 Decision 1, Issue #3896: the durable follow-up to Issue
+// #3761's clusterBudgetDivisor approximation). Backends that do not implement
+// this interface leave the store nil; the per-source rate limiters and the
+// operator-payload sign-ceremony throttle fall back to their node-local
+// in-memory counters.
+type RateCounterStoreCreator interface {
+	CreateRateCounterStore(config map[string]interface{}) (business.RateCounterStore, error)
+}
+
 // StorageProvider defines the interface that all storage backends must implement.
 // Providers now return sub-package types from pkg/storage/interfaces/{business,config}.
 type StorageProvider interface {
@@ -777,6 +788,7 @@ type StorageManager struct {
 	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
 	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
 	moduleApprovalStore      business.ModuleApprovalStore      // Issue #3886, ADR-031: cluster-visible, CAS-protected module approval status
+	rateCounterStore         business.RateCounterStore         // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counters
 }
 
 // GetProviderName returns the name of the storage provider.
@@ -1044,6 +1056,19 @@ func (sm *StorageManager) SetModuleApprovalStore(s business.ModuleApprovalStore)
 	sm.moduleApprovalStore = s
 }
 
+// GetRateCounterStore returns the cluster-visible, fixed-window abuse-budget
+// counter store (ADR-031 Decision 1, Issue #3896). Returns nil when the
+// running provider does not implement RateCounterStoreCreator; callers fall
+// back to their node-local in-memory counters.
+func (sm *StorageManager) GetRateCounterStore() business.RateCounterStore {
+	return sm.rateCounterStore
+}
+
+// SetRateCounterStore wires the rate counter store after construction.
+func (sm *StorageManager) SetRateCounterStore(s business.RateCounterStore) {
+	sm.rateCounterStore = s
+}
+
 // GetCapabilities returns the provider's capabilities.
 // Returns a zero-value ProviderCapabilities when the manager has no backing provider
 // (e.g. a composite manager created with NewStorageManagerFromStores).
@@ -1102,6 +1127,7 @@ func (sm *StorageManager) Close() error {
 		sm.moduleApprovalStore,
 		sm.certRevocationStore,
 		sm.signingCursorStore,
+		sm.rateCounterStore,
 	}
 	var firstErr error
 	for _, s := range slots {
@@ -1441,6 +1467,19 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if moduleApprovalStore != nil {
 			sm.SetModuleApprovalStore(moduleApprovalStore)
+		}
+	}
+	// Wire rate counter store if the provider implements RateCounterStoreCreator
+	// (ADR-031 Decision 1, Issue #3896: abuse-budget counters must be
+	// cluster-visible so any-node service enforces the configured budget against
+	// the fleet-wide count rather than the clusterBudgetDivisor approximation).
+	if rcsc, ok := provider.(RateCounterStoreCreator); ok {
+		rateCounterStore, err := rcsc.CreateRateCounterStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create rate counter store: %w", err)
+		}
+		if rateCounterStore != nil {
+			sm.SetRateCounterStore(rateCounterStore)
 		}
 	}
 	return sm, nil

@@ -90,6 +90,73 @@ and composite `StorageManager`. It imports the sub-packages above and exposes:
 | `CreateAllStoresFromConfig` | Deprecated — single-provider composition; retained for backward compatibility |
 | `CreateXxxStoreFromConfig` | Per-type factory helpers returning sub-package types |
 
+## Optional `StorageProvider` Extensions (`*StoreCreator`)
+
+A handful of stores are not part of the core `StorageProvider` interface
+because only clustered deployments need them. Each is its own tiny interface
+— `CreateXxxStore(config map[string]interface{}) (XxxStore, error)` — that a
+provider implements optionally; `CreateClusterStorageManager` wires one in via
+a type assertion (`if xsc, ok := provider.(XxxStoreCreator); ok { ... }`) and
+leaves the corresponding `StorageManager` getter nil when the assertion fails
+or the store itself comes back nil. Callers must always nil-check before use
+and fall back to a node-local default:
+
+| Extension | Store | Falls back to (single-node / unsupported provider) |
+|-----------|-------|------------------------------------------------------|
+| `CertRevocationStoreCreator` | `certinterfaces.RevocationStore` | `pkg/cert`'s node-local file-backed revocation list (ADR-031 Decision 1, Issue #3852) |
+| `SigningCursorStoreCreator` | `certinterfaces.SigningCursorStore` | `pkg/cert`'s node-local file-backed signing cursor (ADR-031 Decision 1, Issue #3852) |
+| `ModuleApprovalStoreCreator` | `business.ModuleApprovalStore` | `ModuleCache`'s node-local file-backed `approval.yaml` (ADR-031 Decision 1, Issue #3886) |
+| `RateCounterStoreCreator` | `business.RateCounterStore` | the per-source rate limiters' and the operator-payload sign throttle's node-local in-memory counters (ADR-031 Decision 1, Issue #3896) |
+
+`RateCounterStoreCreator` backs cluster-visible, fixed-window abuse-budget
+counters — the durable replacement for Issue #3761's `clusterBudgetDivisor`,
+which approximated a shared counter by dividing the configured limit across
+live cluster nodes and could be defeated by an adversary deliberately
+targeting one node. `business.RateCounterStore` exposes two methods:
+
+- `Increment(ctx, key, window) (count, retryAfter, err)` — atomically records
+  one attempt and returns the resulting count, starting a fresh window
+  whenever the previous one has fully elapsed. Used by the per-source rate
+  limiters' check-and-increment call.
+- `Peek(ctx, key, window) (count, retryAfter, found, err)` — reads the current
+  count without recording an attempt. Used by the operator-payload
+  sign-ceremony throttle, which must check whether a key is already
+  throttled *before* an attempt occurs.
+
+The window passed to both methods should match the caller's own configured
+budget window (all five `sourceRateLimiter` instances wired in
+`features/controller/api/server.go` use one minute) rather than an
+independently chosen TTL, so the counter store's row lifetime tracks the
+budget it enforces. Callers key by `"<namespace>:<identity>"` (e.g.
+`"<route-name>:<source-address>"`) so multiple counters sharing one store's
+table never collide.
+
+Because the keys are attacker-chosen — the source address of unauthenticated
+routes among them — an implementation must bound its own growth the way the
+in-memory limiter it replaces does, on both axes:
+
+- **Reclaim elapsed windows.** Overwriting a row in place only reclaims a key
+  that recurs, and an attacker rotating source addresses never repeats one.
+  `DatabaseRateCounterStore` records each row's `expires_at` and sweeps them
+  (`PruneExpired`, driven opportunistically from `Increment`).
+- **Cap the keys tracked at once.** Past the cap, `Increment` declines a
+  brand-new key with an error wrapping `business.ErrRateCounterCapacityExhausted`
+  while continuing to serve keys already tracked. Callers **fail closed** on that
+  error — `sourceRateLimiter.allowShared` denies the request, mirroring the
+  in-memory `maxTrackedKeys` backstop, and does not substitute a fresh node-local
+  bucket, since a rotating source address is what filled the store.
+
+An ordinary store error (pool exhaustion, statement timeout, failover) is an
+outage rather than an abuse signal, so callers **degrade to their node-local
+counter** instead — `sourceRateLimiter.allowShared` falls through to its
+in-memory fixed-window path and `recordSignFailure` to its in-memory throttle
+record, both logging the reversion once per window. Neither allows the call
+unmetered: these counters are the only abuse control on unauthenticated routes
+(enrolment-token mint, credential-request and cli-login lodge/collect), and
+flooding those routes is itself what exhausts a shared database pool, so an
+"allow on error" would be attacker-reachable and self-reinforcing. Degrading
+keeps a real, if per-node, budget in force while keeping the route available.
+
 ## Provider Inventory
 
 | Provider | Package | Implements | Status |

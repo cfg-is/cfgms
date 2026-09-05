@@ -1531,6 +1531,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	if cs := storageManager.GetCaseStore(); cs != nil {
 		httpServer.SetCasesStore(cs)
 	}
+	wireClusterRateCounterStore(httpServer, storageManager)
 	// TenantStore is core and always present; wire unconditionally for the assurance resolver.
 	httpServer.SetTenantStore(storageManager.GetTenantStore())
 	if as := storageManager.GetAuditStore(); as != nil {
@@ -2936,6 +2937,34 @@ func validatePublicBetaControllerRoots(manager *cert.Manager, now time.Time) err
 		return fmt.Errorf("controller CA contains no valid certificate roots")
 	}
 	return nil
+}
+
+// wireClusterRateCounterStore hands the composed StorageManager's cluster-visible,
+// fixed-window rate-counter store to the API server, which uses it for the
+// per-source rate limiters and the operator-payload sign-ceremony throttle (Issue
+// #3896, ADR-031 Decision 1). This is what replaces Issue #3761's
+// clusterBudgetDivisor: with the store wired, a configured budget is enforced
+// against the fleet-wide count instead of against a per-process count scaled by the
+// live node count, which an adversary targeting a single node could defeat.
+//
+// It returns the store it handed over, or nil when it wired nothing — the return is
+// what makes this composition-root decision observable to a test, since the API
+// server's own SetRateCounterStore additionally declines the store outside
+// ha.ClusterMode.
+//
+// Nothing is wired when the running storage provider implements no
+// RateCounterStoreCreator (GetRateCounterStore returns nil), leaving every consumer
+// on its node-local in-memory counter — the single-node behaviour, unchanged.
+func wireClusterRateCounterStore(httpServer *api.Server, storageManager *interfaces.StorageManager) business.RateCounterStore {
+	if httpServer == nil || storageManager == nil {
+		return nil
+	}
+	rcs := storageManager.GetRateCounterStore()
+	if rcs == nil {
+		return nil
+	}
+	httpServer.SetRateCounterStore(rcs)
+	return rcs
 }
 
 // initializeHAManager initializes the HA manager, transferring the deployment
