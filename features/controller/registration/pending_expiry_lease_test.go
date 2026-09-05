@@ -82,7 +82,7 @@ func TestPendingExpiryJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	select {
 	case <-store.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(leaseCycleWaitBudget(t)):
 		t.Fatal("node-a's cycle never started")
 	}
 
@@ -93,7 +93,7 @@ func TestPendingExpiryJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	select {
 	case ranA := <-doneA:
 		assert.True(t, ranA)
-	case <-time.After(2 * time.Second):
+	case <-time.After(leaseCycleWaitBudget(t)):
 		t.Fatal("node-a's cycle never completed")
 	}
 }
