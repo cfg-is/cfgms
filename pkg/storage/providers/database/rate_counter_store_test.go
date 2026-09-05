@@ -378,3 +378,40 @@ func TestDatabaseRateCounterStore_ConcurrentIncrementsNeverLoseAnAttempt(t *test
 		assert.Equal(t, 1, seen[count], "count %d must have been observed exactly once", count)
 	}
 }
+
+// TestClampRetryAfter_BoundsToWindow pins the [0, window] contract on the
+// remaining-window duration Increment and Peek return.
+//
+// The upper bound is the one that matters and the one that was missing: a
+// PostgreSQL timestamptz stores microseconds while a Go time.Time carries
+// nanoseconds, so writing now into window_start rounds it to the nearest
+// microsecond and the value read back can land up to 500ns after now. The
+// resulting window - now.Sub(windowStart) is then slightly more than a full
+// window. CI observed 1m0.000000096s against a 1m window and evicted the PR
+// from the merge queue. Callers surface this value as Retry-After, whose
+// contract is at most one window, so it is clamped at the source.
+func TestClampRetryAfter_BoundsToWindow(t *testing.T) {
+	const window = time.Minute
+
+	tests := []struct {
+		name string
+		in   time.Duration
+		want time.Duration
+	}{
+		{"negative window already elapsed", -5 * time.Second, 0},
+		{"zero", 0, 0},
+		{"inside the window", 30 * time.Second, 30 * time.Second},
+		{"exactly one window", window, window},
+		{"timestamptz rounding overshoot", window + 96*time.Nanosecond, window},
+		{"half-microsecond overshoot ceiling", window + 500*time.Nanosecond, window},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := clampRetryAfter(tt.in, window)
+			assert.Equal(t, tt.want, got)
+			assert.GreaterOrEqual(t, got, time.Duration(0), "retryAfter must never be negative")
+			assert.LessOrEqual(t, got, window, "retryAfter must never exceed one window")
+		})
+	}
+}

@@ -152,6 +152,28 @@ func (s *DatabaseRateCounterStore) Close() error {
 	return nil
 }
 
+// clampRetryAfter bounds a computed remaining-window duration to [0, window].
+//
+// The lower bound covers a window that elapsed between the read and the
+// arithmetic. The upper bound covers clock-domain skew: window_start is a
+// PostgreSQL timestamptz, which stores microseconds, while now is a Go
+// time.Time carrying nanoseconds. Writing now into window_start rounds it to
+// the nearest microsecond, so the value read back can be up to 500ns *later*
+// than now. now.Sub(windowStart) is then negative and the subtraction yields
+// slightly more than a full window — observed as a 96ns overshoot in CI
+// (Issue #3896). Callers surface this as Retry-After, whose contract is at
+// most one window, so the excess is clamped here rather than left to leak into
+// a response header.
+func clampRetryAfter(retryAfter, window time.Duration) time.Duration {
+	if retryAfter < 0 {
+		return 0
+	}
+	if retryAfter > window {
+		return window
+	}
+	return retryAfter
+}
+
 // Increment implements business.RateCounterStore.Increment. The CASE
 // expressions inside the UPDATE reset count, window_start and expires_at
 // together exactly when the existing row's window has fully elapsed
@@ -210,10 +232,7 @@ func (s *DatabaseRateCounterStore) Increment(ctx context.Context, key string, wi
 		return 0, 0, fmt.Errorf("database: failed to increment rate counter: %w", err)
 	}
 
-	retryAfter := window - now.Sub(windowStart)
-	if retryAfter < 0 {
-		retryAfter = 0
-	}
+	retryAfter := clampRetryAfter(window-now.Sub(windowStart), window)
 	return count, retryAfter, nil
 }
 
@@ -243,10 +262,7 @@ func (s *DatabaseRateCounterStore) Peek(ctx context.Context, key string, window 
 		return 0, 0, false, nil
 	}
 
-	retryAfter := window - now.Sub(windowStart)
-	if retryAfter < 0 {
-		retryAfter = 0
-	}
+	retryAfter := clampRetryAfter(window-now.Sub(windowStart), window)
 	return count, retryAfter, true, nil
 }
 
