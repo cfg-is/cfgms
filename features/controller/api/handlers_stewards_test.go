@@ -2575,6 +2575,20 @@ func TestHandleMoveSteward_HappyPath(t *testing.T) {
 // overwriting the tenant column. Two *Server instances share one durable
 // StewardStore, modeling two cluster nodes behind the same database. Run under
 // -race.
+//
+// The two goroutines are not guaranteed to overlap. When the second request
+// happens to read the first one's committed write, no compare-and-swap is
+// contended: both moves are legitimately sequential and both correctly return
+// 200. That is not a defect, but asserting exactly one 409 on a single
+// unsynchronised attempt failed the test whenever it happened — observed in the
+// merge queue, where it evicted an unrelated PR whose own changes touch neither
+// this file nor handleMoveSteward.
+//
+// Each attempt therefore releases both goroutines from a shared barrier so they
+// enter the read-validate-write sequence together, and retries with a fresh
+// steward when they serialize anyway. A genuinely broken compare-and-swap never
+// yields a 409 in any attempt and still fails the test deterministically — the
+// retry filters scheduling, not regressions.
 func TestMoveSteward_ConcurrentMovesToDifferentDestinationsCAS(t *testing.T) {
 	nodeA, st, _ := setupMoveStewardServer(t)
 	nodeB := setupTestServer(t)
@@ -2588,46 +2602,74 @@ func TestMoveSteward_ConcurrentMovesToDifferentDestinationsCAS(t *testing.T) {
 		}
 	}
 
-	// Registered only on nodeA's live registry — nodeB models a peer that has
-	// never seen this steward connect, exactly as any-node routing allows a move
-	// request to land on a node the steward has no live session on.
-	require.NoError(t, nodeA.controllerService.RegisterSteward("s-race", "source-tenant", "addr", "registered"))
-	seedSteward(t, st, &business.StewardRecord{ID: "s-race", TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+	// Bounded: a contended attempt is the expected case, and a working
+	// compare-and-swap cannot serialize indefinitely. A broken one exhausts every
+	// attempt and fails below with the observed codes.
+	const maxAttempts = 50
+	var lastCodes []int
+	var lastBodyA, lastBodyB string
 
-	var wg sync.WaitGroup
-	var recA, recB *httptest.ResponseRecorder
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		recA = postMoveSteward(nodeA, "s-race", "dest-tenant-a")
-	}()
-	go func() {
-		defer wg.Done()
-		recB = postMoveSteward(nodeB, "s-race", "dest-tenant-b")
-	}()
-	wg.Wait()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		stewardID := fmt.Sprintf("s-race-%d", attempt)
 
-	codes := []int{recA.Code, recB.Code}
-	successes, conflicts := 0, 0
-	for _, code := range codes {
-		switch code {
-		case http.StatusOK:
-			successes++
-		case http.StatusConflict:
-			conflicts++
+		// Registered only on nodeA's live registry — nodeB models a peer that has
+		// never seen this steward connect, exactly as any-node routing allows a
+		// move request to land on a node the steward has no live session on.
+		require.NoError(t, nodeA.controllerService.RegisterSteward(stewardID, "source-tenant", "addr", "registered"))
+		seedSteward(t, st, &business.StewardRecord{ID: stewardID, TenantID: "source-tenant", Status: business.StewardStatusRegistered})
+
+		release := make(chan struct{})
+		var wg sync.WaitGroup
+		var recA, recB *httptest.ResponseRecorder
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-release
+			recA = postMoveSteward(nodeA, stewardID, "dest-tenant-a")
+		}()
+		go func() {
+			defer wg.Done()
+			<-release
+			recB = postMoveSteward(nodeB, stewardID, "dest-tenant-b")
+		}()
+		close(release)
+		wg.Wait()
+
+		codes := []int{recA.Code, recB.Code}
+		successes, conflicts := 0, 0
+		for _, code := range codes {
+			switch code {
+			case http.StatusOK:
+				successes++
+			case http.StatusConflict:
+				conflicts++
+			}
 		}
-	}
-	assert.Equal(t, 1, successes, "exactly one concurrent move must succeed: %v (A: %s, B: %s)",
-		codes, recA.Body.String(), recB.Body.String())
-	assert.Equal(t, 1, conflicts, "exactly one concurrent move must lose the compare-and-swap (409): %v", codes)
+		lastCodes = codes
+		lastBodyA, lastBodyB = recA.Body.String(), recB.Body.String()
 
-	final, err := st.GetSteward(context.Background(), "s-race")
-	require.NoError(t, err)
-	if recA.Code == http.StatusOK {
-		assert.Equal(t, "dest-tenant-a", final.TenantID, "final tenant must match only the winner's destination")
-	} else {
-		assert.Equal(t, "dest-tenant-b", final.TenantID, "final tenant must match only the winner's destination")
+		if successes == 2 {
+			// The requests serialized: the second read the first's committed write,
+			// so the compare-and-swap was never contended. Retry.
+			continue
+		}
+
+		require.Equal(t, 1, successes, "exactly one contended move must succeed: %v (A: %s, B: %s)",
+			codes, lastBodyA, lastBodyB)
+		require.Equal(t, 1, conflicts, "exactly one contended move must lose the compare-and-swap (409): %v", codes)
+
+		final, err := st.GetSteward(context.Background(), stewardID)
+		require.NoError(t, err)
+		if recA.Code == http.StatusOK {
+			assert.Equal(t, "dest-tenant-a", final.TenantID, "final tenant must match only the winner's destination")
+		} else {
+			assert.Equal(t, "dest-tenant-b", final.TenantID, "final tenant must match only the winner's destination")
+		}
+		return
 	}
+
+	t.Fatalf("no contended move in %d attempts — every pair returned %v; a compare-and-swap that never yields a 409 is the Issue #3895 regression (last bodies A: %s, B: %s)",
+		maxAttempts, lastCodes, lastBodyA, lastBodyB)
 }
 
 // TestHandleMoveSteward_InMemoryRegistryUpdated verifies that after a move, the live

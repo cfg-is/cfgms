@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,7 +32,7 @@ func ProvisionSecretsEnv(prefix string) (cleanup func(), err error) {
 	}
 	cleanup = func() { _ = os.RemoveAll(base) }
 
-	keyPath, err := writeSecretsKeyFile(base)
+	keyPath, err := resolveSecretsKeyFile(base)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -60,13 +61,50 @@ func SetupSecretsEnvForTest(t *testing.T) {
 	t.Helper()
 
 	base := t.TempDir()
-	keyPath, err := writeSecretsKeyFile(base)
+	keyPath, err := resolveSecretsKeyFile(base)
 	if err != nil {
 		t.Fatalf("SetupSecretsEnvForTest: %v", err)
 	}
 	t.Setenv("CFGMS_SECRETS_KEY_FILE", keyPath)
 	t.Setenv("CFGMS_SECRETS_REPO_PATH", filepath.Join(base, "secrets"))
 	t.Setenv("CFGMS_ALLOW_EPHEMERAL_SECRETS", "true")
+}
+
+// resolveSecretsKeyFile returns the master key file the SOPS secret store should
+// use: an already-provisioned CFGMS_SECRETS_KEY_FILE when the environment names
+// a readable one, otherwise a fresh key written under base.
+//
+// Honouring an ambient key matters because the master key is process-scoped
+// while some secret DATA is not. Tests that exercise the `database` storage
+// provider share one PostgreSQL instance across every test binary in a run, and
+// the audit chain persists its HMAC key there under a fixed name
+// (`audit/hmac-key`, pkg/audit.WithSecretsStore). Minting a fresh random key per
+// process meant the first binary to run wrote that row encrypted under its own
+// key and every later binary failed to read it with
+//
+//	load audit HMAC key: failed to decrypt secret:
+//	secret ciphertext authentication failed
+//
+// Which binaries failed depended on package scheduling, so the whole-repo `go
+// test ./...` that `make test` runs failed while the same packages passed when
+// run alone. `make test-integration-setup` exports CFGMS_SECRETS_KEY_FILE via
+// .env.test precisely so one key spans the run; the integration suites already
+// guard the mirror-image hazard by refusing to rotate that key out from under a
+// running suite (test/integration/controller/docker_helper.go). This closes the
+// unit-test half.
+//
+// Secret DATA paths stay per-test — only the key is shared, exactly as a single
+// controller process holds one master key in production. A test that needs an
+// isolated key still overrides CFGMS_SECRETS_KEY_FILE with t.Setenv, and when
+// no ambient key exists the previous fresh-key-per-invocation behaviour is
+// unchanged.
+func resolveSecretsKeyFile(base string) (string, error) {
+	if existing := strings.TrimSpace(os.Getenv("CFGMS_SECRETS_KEY_FILE")); existing != "" {
+		if info, err := os.Stat(existing); err == nil && !info.IsDir() && info.Size() > 0 {
+			return existing, nil
+		}
+	}
+	return writeSecretsKeyFile(base)
 }
 
 // writeSecretsKeyFile generates a fresh 256-bit key per invocation — never a

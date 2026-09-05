@@ -5,7 +5,10 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +19,25 @@ import (
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// uniqueAlertID returns an alert ID unique to this test invocation.
+//
+// The `database` provider these tests run against is backed by the shared
+// Docker test PostgreSQL, whose rows outlive the test binary. A fixed alert ID
+// therefore holds only against a freshly created database: the second run reads
+// back the state the first run wrote and fails on "alert should not be silenced
+// yet" against a row this same test silenced earlier, or on "unknown alertID
+// should return nil state" against a row it acknowledged. The flatfile provider
+// hid this because its root is a per-test t.TempDir(). Randomising the ID per
+// invocation restores the clean-slate precondition both tests assume without
+// requiring the database be wiped between runs.
+func uniqueAlertID(t *testing.T, prefix, provider string) string {
+	t.Helper()
+	var suffix [8]byte
+	_, err := rand.Read(suffix[:])
+	require.NoError(t, err, "generate unique alert id suffix")
+	return fmt.Sprintf("%s-%s-%s", prefix, provider, hex.EncodeToString(suffix[:]))
+}
 
 // newAlertServer creates a minimal test server with an alert store wired.
 // store must be non-nil. Uses the existing test registration server infrastructure.
@@ -49,7 +71,7 @@ func TestHandleAlertRoundTrip(t *testing.T) {
 			server := newAlertServer(t, store)
 			ctx := context.Background()
 
-			alertID := "test-alert-" + name
+			alertID := uniqueAlertID(t, "test-alert", name)
 			tenantID := "" // admin requests have no tenant scope
 
 			// Step 1: acknowledge the alert.
@@ -98,7 +120,7 @@ func TestHandleAlertUnknownID(t *testing.T) {
 			server := newAlertServer(t, store)
 			ctx := context.Background()
 
-			alertID := "brand-new-alert-" + name
+			alertID := uniqueAlertID(t, "brand-new-alert", name)
 			tenantID := ""
 
 			// Verify the alert state does not exist yet.
