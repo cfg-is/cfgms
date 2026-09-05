@@ -126,18 +126,35 @@ func (s *DatabasePendingRegistrationStore) UpdateStatus(ctx context.Context, pen
 			WHERE pending_id = $3 AND status = 'approved'`,
 			status, time.Now().UTC(), pendingID,
 		)
-	case business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusDenied:
+	case business.PendingRegistrationStatusApproved:
 		// Issue #3895: guard with AND status = 'pending', mirroring the claimed
-		// transition's guard above. Without this, an approve/deny landing on an
+		// transition's guard above. Without this, an approve landing on an
 		// any-node request after the entry was already claimed (or already
 		// approved/denied by a concurrent request) would flip it back to
-		// approved/denied — reopening the claim window handleRegistrationStatus's
-		// own "AND status = 'approved'" guard exists to close, and enabling a
-		// second certificate issuance for one registration.
+		// approved — reopening the claim window handleRegistrationStatus's own
+		// "AND status = 'approved'" guard exists to close, and enabling a second
+		// certificate issuance for one registration.
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE cfgms_pending_registrations
 			SET status = $1
 			WHERE pending_id = $2 AND status = 'pending'`,
+			status, pendingID,
+		)
+	case business.PendingRegistrationStatusDenied:
+		// Deny is guarded on 'pending' OR 'approved', not on 'pending' alone.
+		// approved → denied is the only mechanism that stops certificate
+		// issuance for a registration an operator approved by mistake or later
+		// judged hostile: an approved-but-unclaimed entry stays claimable until
+		// ExpiresAt, so refusing this transition would leave the operator with
+		// no way to revoke the approval before the steward claims its cert.
+		// 'claimed', 'denied' and 'expired' remain excluded — those are terminal
+		// (see pendingRegistrationTerminalStatuses in pkg/migrate/storage), and
+		// denying a claimed entry would falsely suggest an issued cert had been
+		// withdrawn.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = $1
+			WHERE pending_id = $2 AND status IN ('pending', 'approved')`,
 			status, pendingID,
 		)
 	default:

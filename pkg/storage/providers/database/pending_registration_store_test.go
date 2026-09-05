@@ -452,9 +452,10 @@ func TestDatabasePendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEnt
 
 // TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReresolved
 // covers the other half of the Issue #3895 guard on Postgres: once an entry has left
-// "pending", a second approve/deny — the shape produced by two admin requests landing
+// "pending", a second approve — the shape produced by two admin requests landing
 // on different controller nodes — loses the guard rather than overwriting the first
-// decision.
+// decision. approved → denied is the deliberate exception and is covered by
+// TestDatabasePendingRegistrationStore_UpdateStatus_ApprovedCanBeDenied.
 func TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReresolved(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
@@ -462,8 +463,6 @@ func TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeRere
 	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-approved", "tenant-db-guard")))
 	require.NoError(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusApproved))
 
-	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusDenied),
-		business.ErrPendingRegistrationNotFound, "a deny must not overwrite an existing approval")
 	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-approved", business.PendingRegistrationStatusApproved),
 		business.ErrPendingRegistrationNotFound, "a duplicate approve must lose the guard")
 
@@ -476,10 +475,40 @@ func TestDatabasePendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeRere
 
 	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-denied", business.PendingRegistrationStatusApproved),
 		business.ErrPendingRegistrationNotFound, "an approve must not resurrect a denied registration")
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-denied", business.PendingRegistrationStatusDenied),
+		business.ErrPendingRegistrationNotFound, "a duplicate deny must lose the guard")
 
 	got, err = store.GetPendingByID(ctx, "pr-db-denied")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+}
+
+// TestDatabasePendingRegistrationStore_UpdateStatus_ApprovedCanBeDenied pins, on the
+// real-Postgres backend, the security control the Issue #3895 guard must not break:
+// an approved entry stays claimable until ExpiresAt, so deny is the operator's only
+// means of stopping certificate issuance for an approval made in error or later
+// judged hostile.
+func TestDatabasePendingRegistrationStore_UpdateStatus_ApprovedCanBeDenied(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testDBPendingEntry("pr-db-revoke", "tenant-db-guard")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-revoke", business.PendingRegistrationStatusApproved))
+
+	require.NoError(t, store.UpdateStatus(ctx, "pr-db-revoke", business.PendingRegistrationStatusDenied),
+		"an operator must be able to revoke an approval before the steward claims it")
+
+	got, err := store.GetPendingByID(ctx, "pr-db-revoke")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-db-revoke", business.PendingRegistrationStatusClaimed),
+		business.ErrPendingRegistrationNotFound, "a denied registration must never be claimable")
+
+	got, err = store.GetPendingByID(ctx, "pr-db-revoke")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+	assert.Nil(t, got.ClaimedAt, "a denied registration must never record a claim")
 }
 
 // TestDatabasePendingRegistrationStore_UpdateStatus_ConcurrentApproveHasOneWinner

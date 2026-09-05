@@ -1253,6 +1253,36 @@ func TestApproveRegistration_CannotReopenClaimedEntry(t *testing.T) {
 		assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed")
 	})
 
+	t.Run("handleDenyRegistration revokes an approved-but-unclaimed entry", func(t *testing.T) {
+		// The Issue #3895 guard must not cost the operator the ability to revoke
+		// an approval before the steward claims it. An approved entry stays
+		// claimable until ExpiresAt, so deny is the only control that stops
+		// certificate issuance for an approval made in error or later judged
+		// hostile.
+		server, ts, pendingStore := newRegistrationApprovalServer(t)
+		defer ts.Close()
+
+		const pendingID = "pending-approved-deny"
+		addPendingEntry(t, pendingStore, pendingID, "steward-approved-deny", "default", "10.0.0.6")
+		require.NoError(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusApproved))
+
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/"+pendingID+"/deny", nil)
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, "denying an approved-but-unclaimed entry must succeed: %s", rec.Body.String())
+
+		got, err := pendingStore.GetPendingByID(context.Background(), pendingID)
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status, "the approval must be revoked")
+		assert.Nil(t, got.ClaimedAt, "a revoked registration must never record a claim")
+
+		// The revocation must actually close the claim window: the steward's
+		// status poll can no longer transition the entry to claimed.
+		assert.ErrorIs(t, pendingStore.UpdateStatus(context.Background(), pendingID, business.PendingRegistrationStatusClaimed),
+			business.ErrPendingRegistrationNotFound, "a denied registration must not be claimable")
+	})
+
 	t.Run("handleApproveAllRegistrations", func(t *testing.T) {
 		server, ts, pendingStore := newBulkApprovalServer(t)
 		defer ts.Close()

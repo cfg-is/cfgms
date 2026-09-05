@@ -150,11 +150,11 @@ func TestPendingRegistrationStore_UpdateStatus_NotFound(t *testing.T) {
 }
 
 // TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry is the
-// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer: an
-// approve (or deny) transition guarded with "AND status = 'pending'" must not
-// flip an already-claimed entry back to approved/denied, reopening the claim
-// window handleRegistrationStatus's own "AND status = 'approved'" guard exists
-// to close.
+// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer:
+// neither the approve guard ("AND status = 'pending'") nor the deny guard
+// ("AND status IN ('pending','approved')") may flip an already-claimed entry
+// back to approved/denied, reopening the claim window handleRegistrationStatus's
+// own "AND status = 'approved'" guard exists to close.
 func TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry(t *testing.T) {
 	store := newTestPendingRegistrationStore(t)
 	ctx := context.Background()
@@ -172,6 +172,64 @@ func TestPendingRegistrationStore_UpdateStatus_CannotReapproveClaimedEntry(t *te
 	got, err := store.GetPendingByID(ctx, "pr-claimed")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusClaimed, got.Status, "status must remain claimed, never reopened")
+}
+
+// TestPendingRegistrationStore_UpdateStatus_ApprovedCanBeDenied pins the
+// security control the Issue #3895 guard must not break: an approved entry
+// stays claimable until ExpiresAt, so deny is the operator's only means of
+// stopping certificate issuance for an approval made in error or later judged
+// hostile. A second approve of the same entry still loses its guard.
+func TestPendingRegistrationStore_UpdateStatus_ApprovedCanBeDenied(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-revoke", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-revoke", business.PendingRegistrationStatusApproved))
+
+	require.NoError(t, store.UpdateStatus(ctx, "pr-revoke", business.PendingRegistrationStatusDenied),
+		"an operator must be able to revoke an approval before the steward claims it")
+
+	got, err := store.GetPendingByID(ctx, "pr-revoke")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+
+	// Denied is terminal: neither a re-approve nor the claim transition may
+	// resurrect the entry.
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-revoke", business.PendingRegistrationStatusApproved),
+		business.ErrPendingRegistrationNotFound, "an approve must not resurrect a denied registration")
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-revoke", business.PendingRegistrationStatusClaimed),
+		business.ErrPendingRegistrationNotFound, "a denied registration must never be claimable")
+
+	got, err = store.GetPendingByID(ctx, "pr-revoke")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusDenied, got.Status)
+	assert.Nil(t, got.ClaimedAt, "a denied registration must never record a claim")
+}
+
+// TestPendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReapproved
+// covers the half of the Issue #3895 guard that is unchanged by the
+// approved → denied fix: a duplicate approve — the shape produced by two admin
+// requests landing on different controller nodes — loses the guard rather than
+// overwriting the first decision.
+func TestPendingRegistrationStore_UpdateStatus_ResolvedEntryCannotBeReapproved(t *testing.T) {
+	store := newTestPendingRegistrationStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-dup-appr", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-dup-appr", business.PendingRegistrationStatusApproved))
+
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-dup-appr", business.PendingRegistrationStatusApproved),
+		business.ErrPendingRegistrationNotFound, "a duplicate approve must lose the guard")
+
+	got, err := store.GetPendingByID(ctx, "pr-dup-appr")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusApproved, got.Status)
+
+	require.NoError(t, store.AddPending(ctx, testPendingEntry("pr-dup-deny", "tenant-1")))
+	require.NoError(t, store.UpdateStatus(ctx, "pr-dup-deny", business.PendingRegistrationStatusDenied))
+
+	assert.ErrorIs(t, store.UpdateStatus(ctx, "pr-dup-deny", business.PendingRegistrationStatusDenied),
+		business.ErrPendingRegistrationNotFound, "a duplicate deny must lose the guard")
 }
 
 func TestPendingRegistrationStore_ListPending_AllTenants(t *testing.T) {

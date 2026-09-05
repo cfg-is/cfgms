@@ -179,6 +179,13 @@ func TestStorageMigrator_PendingRegistrationStatusResync(t *testing.T) {
 		{"pending destination advances to denied", business.PendingRegistrationStatusDenied, business.PendingRegistrationStatusPending, business.PendingRegistrationStatusDenied},
 		{"pending destination advances to expired", business.PendingRegistrationStatusExpired, business.PendingRegistrationStatusPending, business.PendingRegistrationStatusExpired},
 		{"approved destination advances to claimed", business.PendingRegistrationStatusClaimed, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusClaimed},
+		// approved → denied is forward progress, not a regression: an approved
+		// entry stays claimable until ExpiresAt, so a source snapshot recording
+		// the operator's later deny must carry across. Guarding the store's deny
+		// transition on 'pending' alone would abort the migration here and leave
+		// the destination approved, resurrecting a denied registration.
+		{"approved destination advances to denied", business.PendingRegistrationStatusDenied, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusDenied},
+		{"approved destination advances to expired", business.PendingRegistrationStatusExpired, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusExpired},
 		{"matching status is left alone", business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusApproved, business.PendingRegistrationStatusApproved},
 	}
 
