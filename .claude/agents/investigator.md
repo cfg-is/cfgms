@@ -23,6 +23,15 @@ in, before you ever act:
   directory in finder mode). You cannot see, read, or write any other lane's directory, and
   you cannot see the sweep's `manifest.json` at all — none of that is mounted into your
   container.
+- Network egress is **default-deny**. `init-firewall.sh` runs before your session starts
+  (invoked directly by `.devcontainer/scripts/investigator-entrypoint.sh`): the `OUTPUT`
+  chain policy is `DROP`, only HTTPS to a name that resolves is allowed, `/etc/resolv.conf`
+  is pinned to a local dnsmasq holding a domain allowlist, and every other resolver is
+  blocked. Anything not on that allowlist is unreachable — there is no outbound channel for
+  the credentials this container carries. `curl` and `wget` are additionally in the
+  `--disallowedTools` list; that list is a convenience refusal, the firewall is the control.
+  If a command you need fails to resolve a host, that is the allowlist working as intended,
+  not a fault to route around — report it in your output file.
 
 Because of this, your **only legitimate output is a findings or plan file written to your own
 mounted output directory.** There is no closing action that involves GitHub, the project queue,

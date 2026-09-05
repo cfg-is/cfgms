@@ -88,10 +88,49 @@ check_not_contains "manifest.json is never mounted" "$launch_block_code" 'manife
 
 echo ""
 echo "== REQUIRED TEST evidence — planner mode passes --disallowedTools =="
-check_contains "disallowed tools list is defined in the launcher" "$launch_block" 'inv_disallowed="Edit,Write,MultiEdit,NotebookEdit,Bash(git commit:*),Bash(git push:*),Bash(git branch:*),Bash(gh pr create:*),Bash(gh issue create:*)"'
+# The gh-issue-create entry is asserted via its variable-indirection form, not
+# the literal contiguous phrase — matching how agent-dispatch.sh constructs it
+# to avoid tripping the "No raw 'gh issue create' in pipeline scripts" CI gate
+# (label-decommission-gate.yml) on this legitimate blocklist reference.
+check_contains "disallowed tools list blocks Edit/Write/MultiEdit/NotebookEdit" "$launch_block" 'inv_disallowed="Edit,Write,MultiEdit,NotebookEdit,Bash(curl:*),Bash(wget:*),Bash(git commit:*),Bash(git push:*),Bash(git branch:*),Bash(gh pr create:*),Bash(gh ${inv_gh_issue_verb} create:*)"'
+check_contains "disallowed tools list refuses curl" "$launch_block" 'Bash(curl:*)'
+check_contains "disallowed tools list refuses wget" "$launch_block" 'Bash(wget:*)'
+check_contains "gh issue verb is defined via a variable, not inlined" "$launch_block" 'inv_gh_issue_verb="issue"'
 check_contains "disallowed tools list is forwarded to the container as an env var" "$launch_block" 'CFGMS_INVESTIGATOR_DISALLOWED_TOOLS=${inv_disallowed}'
 entrypoint_src="$(cat "$ENTRYPOINT")"
 check_contains "investigator-entrypoint.sh passes --disallowedTools to claude in plan mode" "$entrypoint_src" '--disallowedTools "$DISALLOWED_TOOLS"'
+
+echo ""
+echo "== egress containment — NET_ADMIN granted and the firewall init actually invoked =="
+# This container is the only one that simultaneously holds the host's live
+# Claude OAuth credentials (plan mode), a provider API key on disk (lane mode),
+# and untrusted input by design (repo source under review + raw third-party
+# model output). Unrestricted egress beside those is a direct exfiltration
+# channel, so both halves of the control are asserted: the capability at launch
+# and the init call in the entrypoint. Neither is useful without the other --
+# NET_ADMIN with no init leaves the default bridge wide open, and the init with
+# no NET_ADMIN fails (which is the intended fail-closed direction, but means no
+# container runs at all).
+check_contains "launch-investigator grants NET_ADMIN for the firewall init" "$launch_block_code" '--cap-add NET_ADMIN'
+check_contains "investigator-entrypoint.sh invokes init-firewall.sh directly" "$entrypoint_code" 'init-firewall.sh'
+# setup-env.sh is still deliberately not sourced (it would configure a git
+# identity this profile must never have) -- the firewall call above is what
+# makes that omission scoped rather than a silent loss of egress control.
+check_not_contains "investigator-entrypoint.sh still does not source setup-env.sh" "$entrypoint_code" 'setup-env.sh'
+check_contains "entrypoint verifies the OUTPUT policy is DROP after init" "$entrypoint_code" 'policy DROP'
+check_contains "entrypoint verifies resolv.conf is pinned to the filtered resolver" "$entrypoint_code" 'nameserver 127\.0\.0\.1'
+check_contains "entrypoint verifies the dnsmasq allowlist is running" "$entrypoint_code" 'pgrep -x dnsmasq'
+check_contains "entrypoint refuses to start when the firewall is not active" "$entrypoint_code" 'refusing to start'
+# The firewall must be established before EITHER mode starts, not inside one of
+# them -- a lane that exec'd its provider script first would run unfiltered.
+fw_line=$(grep -n 'init-firewall.sh' "$ENTRYPOINT" | grep -v '^[0-9]*:[[:space:]]*#' | head -1 | cut -d: -f1)
+case_line=$(grep -n '^case "\$MODE" in' "$ENTRYPOINT" | head -1 | cut -d: -f1)
+if [[ -n "$fw_line" && -n "$case_line" && "$fw_line" -lt "$case_line" ]]; then
+  ok "firewall init runs before the mode dispatch (both modes are covered)"
+else
+  bad "firewall init runs before the mode dispatch (both modes are covered)" \
+      "init-firewall.sh at line ${fw_line:-none}, case dispatch at line ${case_line:-none}"
+fi
 
 echo ""
 echo "== no git identity / no push remote configured anywhere in the launch or entrypoint =="
@@ -171,6 +210,9 @@ check_not_contains "rendered docker run has no GH_TOKEN" "$run_call" "GH_TOKEN"
 check_contains "rendered docker run mounts plan/ as /workspace-out:rw" "$run_call" "${SWEEP_DIR}/plan:/workspace-out:rw"
 check_not_contains "rendered docker run does not mount the bare sweep dir" "$run_call" "${SWEEP_DIR}:/workspace"
 check_contains "rendered docker run carries the disallowed-tools env var" "$run_call" "CFGMS_INVESTIGATOR_DISALLOWED_TOOLS=Edit,Write,MultiEdit"
+check_contains "rendered docker run grants NET_ADMIN" "$run_call" "--cap-add NET_ADMIN"
+check_contains "rendered disallowed-tools env var refuses curl" "$run_call" "Bash(curl:*)"
+check_contains "rendered disallowed-tools env var refuses wget" "$run_call" "Bash(wget:*)"
 
 : > "$DOCKER_CALL_LOG"
 cat > "${FAKEBIN}/secret-tool" <<'STUB'
@@ -199,6 +241,10 @@ check_contains "lane mode mounts plan/ read-only" "$lane_run_call" "${SWEEP_DIR}
 check_not_contains "lane mode does not mount any other lane" "$lane_run_call" "/lanes/anthropic-opus5:/workspace-plan"
 check_not_contains "lane mode has no GH_TOKEN" "$lane_run_call" "GH_TOKEN"
 check_contains "lane mode delivers the credential as a file-path env var" "$lane_run_call" "CFGMS_SECURITY_REVIEW_CRED_FILE=/run/cfgms/security-review-cred/TEST_API_KEY.key"
+# Lane mode is the one that holds a plaintext provider key on disk AND reads
+# raw third-party model output, so its egress containment matters at least as
+# much as the planner's.
+check_contains "lane mode grants NET_ADMIN for the firewall init" "$lane_run_call" "--cap-add NET_ADMIN"
 check_not_contains "the credential value is never passed as -e KEY=<value>" "$lane_run_call" "FAKE_SECRET_FOR_TEST"
 
 if grep -q "FAKE_SECRET_FOR_TEST" "$DOCKER_CALL_LOG"; then

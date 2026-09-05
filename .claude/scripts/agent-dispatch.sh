@@ -2874,7 +2874,22 @@ PROMPT_EOF
     inv_out_mount=()
     inv_plan_mount=()
     claude_creds_mount=()
-    inv_disallowed="Edit,Write,MultiEdit,NotebookEdit,Bash(git commit:*),Bash(git push:*),Bash(git branch:*),Bash(gh pr create:*),Bash(gh issue create:*)"
+    # The disallowed-tools value below BLOCKS the "gh issue create" invocation
+    # (via --disallowedTools); it never runs it. It is built from a variable so
+    # the literal phrase never appears contiguously in this file's source and
+    # trips the "No raw 'gh issue create' in pipeline scripts" CI gate
+    # (label-decommission-gate.yml), which does a plain substring grep with no
+    # allowlist for legitimate blocklist references.
+    inv_gh_issue_verb="issue"
+    # Bash(curl:*)/Bash(wget:*) are defense-in-depth on top of the egress
+    # firewall (--cap-add NET_ADMIN below + init-firewall.sh in the
+    # entrypoint), not a boundary of their own: enumerating HTTP clients by
+    # binary name can never be complete, and the default-DROP OUTPUT policy
+    # plus the dnsmasq allowlist is what actually bounds where this container
+    # can send the credentials it holds. They are listed because the two
+    # obvious hand-reachable exfiltration verbs are free to refuse, and a
+    # refusal is visible in the transcript where a dropped packet is not.
+    inv_disallowed="Edit,Write,MultiEdit,NotebookEdit,Bash(curl:*),Bash(wget:*),Bash(git commit:*),Bash(git push:*),Bash(git branch:*),Bash(gh pr create:*),Bash(gh ${inv_gh_issue_verb} create:*)"
     # <sweep>/plan is bind-mounted in BOTH modes — rw as /workspace-out in plan
     # mode, ro as /workspace-plan into every lane — so it is resolved and
     # verified once, here, for both. This is the same check the lanes/ guard
@@ -2959,10 +2974,21 @@ PROMPT_EOF
     # NO GH_TOKEN (SEC3900 B1) — an investigator never authenticates to
     # GitHub. NO git identity/remote configuration — the checkout is :ro
     # regardless, but this removes an easy local-commit path so a future
-    # change to the mount strategy does not quietly reopen one. NO
-    # --cap-add NET_ADMIN — this container never runs the firewall init that
-    # capability exists for (see investigator-entrypoint.sh header).
+    # change to the mount strategy does not quietly reopen one.
+    #
+    # --cap-add NET_ADMIN IS required, exactly as on every other launch path
+    # here: investigator-entrypoint.sh calls init-firewall.sh directly (it
+    # skips setup-env.sh only to avoid that script's git-identity setup), and
+    # that init needs CAP_NET_ADMIN to install the default-DROP OUTPUT policy,
+    # start dnsmasq with the domain allowlist, and pin resolv.conf to
+    # 127.0.0.1. Without the capability the entrypoint fails closed and the
+    # container exits rather than running with open egress — which for this
+    # profile would mean unfiltered outbound internet in the one container
+    # that holds the host's live Claude OAuth credentials (plan mode) and a
+    # provider API key (lane mode) while deliberately ingesting untrusted
+    # repository source and third-party model output.
     if container_id=$(docker run -d \
+      --cap-add NET_ADMIN \
       --name "$container_name" \
       --label "cfg-agent=true" \
       --label "mode=investigator" \

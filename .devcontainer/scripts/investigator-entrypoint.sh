@@ -23,9 +23,49 @@
 # and deliberately does not source setup-env.sh, which would otherwise
 # configure a git identity (`git config --global user.name/user.email`) this
 # profile must never have, and rewrite files under /workspace in place.
+#
+# Skipping setup-env.sh drops exactly one thing this profile still needs: it is
+# the only caller of init-firewall.sh, so the egress firewall every other agent
+# container runs behind would be lost as a side effect of avoiding the git
+# identity. This script therefore calls init-firewall.sh directly, below,
+# before either mode starts — a scoped decision rather than collateral. That
+# matters more here than for any other agent profile, because this container
+# simultaneously holds the host's live Claude OAuth credentials (plan mode), a
+# third-party provider API key (lane mode), and — by design — ingests untrusted
+# content: repository source under review and raw third-party model responses.
+# Unrestricted egress next to those would be a direct exfiltration channel for
+# a prompt injection.
 set -euo pipefail
 
 MODE="${1:?investigator-entrypoint.sh requires a mode argument: plan or a lane id}"
+
+# --- Egress firewall (default-deny + DNS allowlist) ---
+# Same call setup-env.sh makes, with the same idempotent guard, and nothing
+# else from that script. init-firewall.sh needs CAP_NET_ADMIN, which the
+# launcher grants with --cap-add NET_ADMIN.
+#
+# Fail closed: if the firewall cannot be established this container must not
+# run at all. `set -e` already aborts on a non-zero init-firewall.sh, and the
+# post-condition below additionally rejects a partially-applied firewall (rules
+# loaded but dnsmasq down, or resolv.conf still pointing at an unfiltered
+# upstream), which would leave the DNS allowlist unenforced while iptables
+# still permits all outbound 443.
+if ! sudo iptables -L OUTPUT -n 2>/dev/null | grep -q "policy DROP"; then
+    init-firewall.sh
+fi
+
+if ! sudo iptables -L OUTPUT -n 2>/dev/null | grep -q "policy DROP"; then
+    echo "ERROR: egress firewall not active (OUTPUT policy is not DROP); refusing to start"
+    exit 1
+fi
+if ! grep -q '^nameserver 127\.0\.0\.1$' /etc/resolv.conf; then
+    echo "ERROR: resolv.conf is not pinned to the filtered resolver; refusing to start"
+    exit 1
+fi
+if ! pgrep -x dnsmasq >/dev/null 2>&1; then
+    echo "ERROR: dnsmasq domain allowlist is not running; refusing to start"
+    exit 1
+fi
 
 # Minimal onboarding config so `claude` doesn't prompt in plan mode. Lane mode
 # never invokes `claude` but writing this unconditionally keeps the script
