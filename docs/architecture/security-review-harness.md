@@ -21,6 +21,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `atomic_write.py` | `write_json_atomic` — temp file + `os.replace`, never a partial file visible at the final path |
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory |
+| `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
 
 This directory's name contains a hyphen, so it is never imported with a plain
 `import security-review` statement. A module that needs a sibling imports it the way
@@ -206,3 +207,59 @@ JSON line via `json.dumps` — embedded newlines and control characters inside s
 escaped, so a payload crafted to look like a second log line stays inside its field instead of
 becoming one. `resume.py` uses this when it logs a schema-invalid `.findings.json` for human
 diagnosis.
+
+## Consolidation and the coverage table
+
+`consolidate.py::consolidate(sweep_dir, repo_root)` (#3904) is the last step of a sweep: a pure
+read-existing-files-and-render pass over whatever `lanes/<lane>/step-*.findings.json` and
+`step-*.status.json` files currently exist, in any state of completeness. It never calls a
+provider API and never dispatches a container, so it is safe to run — and to test — against
+fixture data before any lane (S6/S7/S8) exists. It produces two files under
+`<sweep_dir>/report/`:
+
+- `consolidated.json` — machine-readable, de-duplicated findings.
+- `consolidated.md` — the coverage table followed by the findings, what the PO reads.
+
+**De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
+never a line number. Every occurrence across every lane's `step-*.findings.json` sharing this key
+collapses into one consolidated entry; the entry's `lanes` field lists exactly the lanes that
+independently reported it, and `occurrences` keeps each lane's own `severity`/`confidence`/
+`title`/`evidence`/`suggested_fix` rather than discarding the disagreement.
+
+**Agreement is measured against completed steps, not configured lanes.** A consolidated
+finding's `agreement` field is `{"reported": N, "eligible": M}`, where `M` is the number of
+lanes that actually completed the step(s) the finding came from — not the number of lanes in
+the sweep. A lane that never ran that step (parked, failed, or not yet dispatched) contributes
+neither a "reported" nor a "did not find it" signal, so it must not inflate the denominator:
+counting it as silent agreement is exactly the false-confidence failure mode SEC3900's
+refusal-handling section exists to prevent, just relocated to the consolidator.
+
+**The coverage table** in `consolidated.md` has one row per lane discovered under `lanes/`, with
+`complete`/`parked`/`refused`/`failed` counts (rendered as `N/M` against the total steps
+discovered across the whole sweep) derived from every lane's status/findings files. A sweep with
+zero lane output (no lane directories, or lane directories with no step files yet) renders as
+`0/0` for every state, not an error — an incomplete sweep is visibly incomplete on the first
+screen of the report rather than only inferable by counting files. This module trusts the
+`state` field in each envelope as already correctly classified by the lane that wrote it; it
+does not re-derive refusal/parked/failed from raw provider fields itself.
+
+**Schema-invalid files are excluded, not crashed on.** Every file is validated through
+`schema.py`'s actual `validate_finding`/`validate_step_envelope` — never a hand-typed
+"does this look valid" check that could drift from the real schema. A file that fails
+validation contributes no findings and is counted as `failed` in the coverage table for that
+lane/step, exactly as visible as a normal `failed` step.
+
+**Path-traversal validation (SEC3900 A1).** A finding's `file` field is model-generated text.
+Before it is used for anything, it is checked for membership in the real repository tree at the
+finding's own `commit_sha` (`git ls-tree -r --name-only <commit_sha>`, resolved once per
+distinct `commit_sha` and cached). A `file` value that is absolute, `../`-shaped, or simply
+absent from that tree is excluded from both output files and logged via `schema.py::log_event`
+for human follow-up. `file` is never joined onto a filesystem path or opened — the only
+operation performed against it is a set-membership check — so a malicious value cannot cause a
+path operation outside the sweep tree.
+
+**Markdown rendering never trusts model text as structure.** `title`/`evidence` render as
+literal content: embedded newlines are escaped to `\n` and `|` is escaped to `\|` before
+insertion, so a forged Markdown heading or table-row sequence embedded in a finding cannot
+become a real heading or an extra table row — it stays inline text inside the cell/line it was
+written into.
