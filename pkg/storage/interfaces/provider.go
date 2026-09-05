@@ -1117,12 +1117,17 @@ func (sm *StorageManager) Close() error {
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
+		sm.blastRadiusPolicyStore,
 		sm.tenantCrossingStore,
 		sm.caseStore,
 		sm.nonceStore,
 		sm.leaseStore,
 		sm.routingStore,
 		sm.nodeRegistryStore,
+		sm.moduleApprovalStore,
+		sm.certRevocationStore,
+		sm.signingCursorStore,
+		sm.rateCounterStore,
 	}
 	var firstErr error
 	for _, s := range slots {

@@ -32,8 +32,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +47,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
 // setupOperatorPayloadSignServer returns a test Server with WebAuthn configured, a
@@ -484,7 +483,7 @@ func TestOperatorPayloadSignFinish_Throttled_429(t *testing.T) {
 // consult s.rateCounterStore directly when it is set, instead of scaling an
 // in-memory failure count by the deleted clusterBudgetDivisor (Issue #3896).
 func TestOperatorPayloadSignThrottle_ClusterModeUsesSharedCounter(t *testing.T) {
-	store := &fakeRateCounterStore{}
+	store := pkgtesting.SetupTestRateCounterStore()
 	s := &Server{rateCounterStore: store}
 
 	s.recordSignFailure("session:x")
@@ -514,12 +513,14 @@ func TestOperatorPayloadSignThrottle_SingleNodeUsesInMemoryDefault(t *testing.T)
 	assert.True(t, inMemoryUsed, "expected the in-memory fallback to be used with no shared counter store wired")
 }
 
-// TestOperatorPayloadSignThrottle_SharedCounterFailsOpenOnStoreError proves a
+// TestOperatorPayloadSignThrottle_StoreOutageDoesNotBlockUntouchedSession proves a
 // counter-store error does not lock out the ceremony fleet-wide: this throttle is
 // defense-in-depth against brute force, not the WebAuthn verification step itself.
-// A session that has not failed is never blocked merely because the store is down.
-func TestOperatorPayloadSignThrottle_SharedCounterFailsOpenOnStoreError(t *testing.T) {
-	store := &fakeRateCounterStore{err: errors.New("database unavailable")}
+// A session that has not failed is never blocked merely because the store is down —
+// while a session that has failed still is, per
+// TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback below.
+func TestOperatorPayloadSignThrottle_StoreOutageDoesNotBlockUntouchedSession(t *testing.T) {
+	store := newUnavailableRateCounterStore(t)
 	s := &Server{rateCounterStore: store}
 
 	blocked, _ := s.checkSignThrottle("session:untouched")
@@ -537,7 +538,7 @@ func TestOperatorPayloadSignThrottle_SharedCounterFailsOpenOnStoreError(t *testi
 // outage produced and permit unlimited failed WebAuthn assertions against the
 // payload-signing ceremony for its duration.
 func TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback(t *testing.T) {
-	store := &fakeRateCounterStore{err: errors.New("database unavailable")}
+	store := newUnavailableRateCounterStore(t)
 	s := &Server{rateCounterStore: store}
 
 	for i := 0; i < 3; i++ {
@@ -554,7 +555,12 @@ func TestOperatorPayloadSignThrottle_StoreOutageEnforcesInMemoryFallback(t *test
 // shared table is at its row cap, the failure is recorded in memory and enforced, so
 // filling the shared table cannot be used to switch this throttle off.
 func TestOperatorPayloadSignThrottle_CapacityExhaustionEnforcesFallback(t *testing.T) {
-	store := &fakeRateCounterStore{err: fmt.Errorf("table full: %w", business.ErrRateCounterCapacityExhausted)}
+	// A real store filled to its tracked-key cap by an unrelated key: the
+	// throttle's own key is then the brand-new one the store must decline with
+	// business.ErrRateCounterCapacityExhausted.
+	store := pkgtesting.SetupTestRateCounterStoreWithMaxKeys(1)
+	_, _, err := store.Increment(context.Background(), "occupant", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err, "seeding the store's only tracked-key slot")
 	s := &Server{rateCounterStore: store}
 
 	for i := 0; i < 3; i++ {
@@ -570,7 +576,7 @@ func TestOperatorPayloadSignThrottle_CapacityExhaustionEnforcesFallback(t *testi
 // counter still blocks on its own — the in-memory fall-through only ever adds a block,
 // it never replaces the cluster-visible count with a per-node one.
 func TestOperatorPayloadSignThrottle_SharedCounterBlockSurvivesLocalGap(t *testing.T) {
-	store := &fakeRateCounterStore{}
+	store := pkgtesting.SetupTestRateCounterStore()
 	s := &Server{rateCounterStore: store}
 
 	for i := 0; i < 3; i++ {
@@ -588,11 +594,36 @@ func TestOperatorPayloadSignThrottle_SharedCounterBlockSurvivesLocalGap(t *testi
 // counter key is prefixed so this throttle's records never collide with an
 // unrelated counter (e.g. a sourceRateLimiter route) sharing the same store.
 func TestOperatorPayloadSignThrottle_ClusterModeNamespacesKeys(t *testing.T) {
-	store := &fakeRateCounterStore{}
+	store := pkgtesting.SetupTestRateCounterStore()
 	s := &Server{rateCounterStore: store}
 
 	s.recordSignFailure("session:x")
-	assert.Equal(t, operatorPayloadSignThrottleKeyPrefix+"session:x", store.lastKey)
+
+	ctx := context.Background()
+	count, _, found, err := store.Peek(ctx, operatorPayloadSignThrottleKeyPrefix+"session:x", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err)
+	require.True(t, found, "the failure must be recorded under the prefixed key")
+	assert.Equal(t, 1, count)
+
+	_, _, foundBare, err := store.Peek(ctx, "session:x", operatorPayloadSignThrottleWindow)
+	require.NoError(t, err)
+	assert.False(t, foundBare,
+		"an unprefixed key would collide with any sourceRateLimiter route sharing this store")
+}
+
+// newUnavailableRateCounterStore returns a real business.RateCounterStore that has
+// been closed, so every operation fails the way a clustered controller's counter
+// store fails during a database outage (pool exhaustion, statement timeout,
+// failover). Closing a real store — rather than injecting a canned error into a
+// stand-in — keeps these outage tests on the same implementation the healthy-path
+// tests use.
+func newUnavailableRateCounterStore(t *testing.T) business.RateCounterStore {
+	t.Helper()
+	store := pkgtesting.SetupTestRateCounterStore()
+	require.NoError(t, store.Close())
+	_, _, err := store.Increment(context.Background(), "probe", operatorPayloadSignThrottleWindow)
+	require.Error(t, err, "a closed store must report every operation as failed — otherwise this is not an outage")
+	return store
 }
 
 // TestOperatorPayloadSignFinish_ReplayedSession is the [REQUIRED TEST]: a finish call

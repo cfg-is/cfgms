@@ -1738,7 +1738,9 @@ func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
 	if store == nil || s.haManager == nil || s.haManager.GetDeploymentMode() != ha.ClusterMode {
 		return
 	}
+	s.mu.Lock()
 	s.rateCounterStore = store
+	s.mu.Unlock()
 	for routeName, limiter := range map[string]*sourceRateLimiter{
 		"enrolment-token-mint":       s.enrolmentTokenMintLimiter,
 		"credential-request-lodge":   s.credentialRequestLodgeLimiter,
@@ -1747,9 +1749,21 @@ func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
 		"cli-login-collect":          s.cliLoginCollectLimiter,
 	} {
 		if limiter != nil {
-			limiter.useSharedCounter(routeName, store)
+			limiter.useSharedCounter(routeName, store, s.logger)
 		}
 	}
+}
+
+// RateCounterStore returns the wired cluster-visible rate counter store, or nil
+// when this deployment shape left every consumer on its in-memory default.
+// Exposed so the controller startup wiring can be regression-tested (Issue
+// #3896, same rationale as NonceStore above): the api-package tests call
+// SetRateCounterStore directly and therefore cannot catch a composition root
+// that never calls the setter.
+func (s *Server) RateCounterStore() business.RateCounterStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rateCounterStore
 }
 
 // SetPoPVerifier replaces the proof-of-possession verifier.

@@ -143,8 +143,19 @@ in-memory limiter it replaces does, on both axes:
   brand-new key with an error wrapping `business.ErrRateCounterCapacityExhausted`
   while continuing to serve keys already tracked. Callers **fail closed** on that
   error — `sourceRateLimiter.allowShared` denies the request, mirroring the
-  in-memory `maxTrackedKeys` backstop — even though they fail *open* on ordinary
-  store errors, which are outages rather than an abuse signal.
+  in-memory `maxTrackedKeys` backstop, and does not substitute a fresh node-local
+  bucket, since a rotating source address is what filled the store.
+
+An ordinary store error (pool exhaustion, statement timeout, failover) is an
+outage rather than an abuse signal, so callers **degrade to their node-local
+counter** instead — `sourceRateLimiter.allowShared` falls through to its
+in-memory fixed-window path and `recordSignFailure` to its in-memory throttle
+record, both logging the reversion once per window. Neither allows the call
+unmetered: these counters are the only abuse control on unauthenticated routes
+(enrolment-token mint, credential-request and cli-login lodge/collect), and
+flooding those routes is itself what exhausts a shared database pool, so an
+"allow on error" would be attacker-reachable and self-reinforcing. Degrading
+keeps a real, if per-node, budget in force while keeping the route available.
 
 ## Provider Inventory
 

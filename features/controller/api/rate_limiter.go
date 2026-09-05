@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -49,7 +50,9 @@ type clusterRateCounterBackend interface {
 // the shared-counter path: business.RateCounterStore requires its implementations
 // to reclaim elapsed windows and to cap tracked keys, and allowShared fails closed
 // on business.ErrRateCounterCapacityExhausted exactly as the in-memory path denies
-// a new key at maxTrackedKeys.
+// a new key at maxTrackedKeys. The in-memory map, its eviction sweep and its cap
+// stay live even while a shared counter is wired: allowShared falls back to them
+// whenever the shared store errors, so these routes are never left unmetered.
 type sourceRateLimiter struct {
 	limit          int
 	window         time.Duration
@@ -67,8 +70,19 @@ type sourceRateLimiter struct {
 	// means the in-memory, single-node-equivalent behavior.
 	sharedCounter clusterRateCounterBackend
 
+	// logger records shared-counter outages (never nil once useSharedCounter has
+	// run: a nil argument is replaced with a no-op logger). A silent fallback to
+	// the node-local budget would leave an operator with no signal that the
+	// fleet-wide count has stopped being enforced.
+	logger logging.Logger
+
 	mu      sync.Mutex
 	entries map[string]*sourceRateLimiterRecord
+
+	// lastSharedErrLogAt rate-limits the outage warning to one per window, so a
+	// flood against a route whose counter store is down cannot itself become a
+	// log flood. Guarded by mu.
+	lastSharedErrLogAt time.Time
 }
 
 // newSourceRateLimiter returns a limiter that allows up to limit calls per key
@@ -86,10 +100,16 @@ func newSourceRateLimiter(limit int, window time.Duration) *sourceRateLimiter {
 // useSharedCounter switches this limiter from its default in-memory backend to
 // a cluster-visible counter (Issue #3896), namespacing every key under
 // routeName so distinct sourceRateLimiter instances sharing one backend's table
-// never collide on the same source address.
-func (l *sourceRateLimiter) useSharedCounter(routeName string, backend clusterRateCounterBackend) {
+// never collide on the same source address. logger receives the outage warning
+// allowShared emits when it falls back to the in-memory budget; a nil logger is
+// replaced with a no-op one so the fallback path never needs a nil check.
+func (l *sourceRateLimiter) useSharedCounter(routeName string, backend clusterRateCounterBackend, logger logging.Logger) {
+	if logger == nil {
+		logger = logging.NewNoopLogger()
+	}
 	l.routeName = routeName
 	l.sharedCounter = backend
+	l.logger = logger
 }
 
 // allow reports whether a call keyed by key may proceed under the configured rate,
@@ -102,7 +122,16 @@ func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
 	if l.sharedCounter != nil {
 		return l.allowShared(key)
 	}
+	return l.allowInMemory(key)
+}
 
+// allowInMemory is the per-process, fixed-window path: the limiter's default
+// backend, and the fallback allowShared uses when the cluster-visible counter
+// store is unreachable. Its budget is this node's alone, so in a cluster it
+// under-counts an attacker spread across nodes — but under-counting is strictly
+// better than the no counting at all that returning "allowed" on a store error
+// would produce on these unauthenticated routes.
+func (l *sourceRateLimiter) allowInMemory(key string) (bool, time.Duration) {
 	now := l.now()
 
 	l.mu.Lock()
@@ -141,16 +170,29 @@ func (l *sourceRateLimiter) allow(key string) (bool, time.Duration) {
 // increment always happens, even on a call that will be denied — the count
 // only ever grows within its window regardless of outcome, matching the
 // in-memory path's own "count first, then compare" accounting once corrected
-// for order. On a counter-store error this fails open (allows the call): the
-// shared counter is a defense-in-depth budget, not the primary auth gate this
-// route sits behind, and an outage in it must not become an availability
-// outage for every legitimate caller of a clustered route.
+// for order.
 //
-// The one error that denies instead is ErrRateCounterCapacityExhausted: it is
+// A counter-store error degrades to the node-local budget rather than allowing
+// the call. These limiters guard unauthenticated routes — enrolment-token mint,
+// credential-request lodge/collect, cli-login lodge/collect — where this
+// counter is the only abuse control, so an "allow on error" would let a
+// transient database fault (pool exhaustion, statement timeout, failover)
+// silently switch fleet-wide brute-force and enumeration limits off. Worse, it
+// would be self-reinforcing: flooding these very routes is what exhausts the
+// shared pool. Falling through to allowInMemory keeps a real, if node-local,
+// budget in force — the pre-#3896 behavior — and keeps the route available to
+// legitimate callers, so the outage never becomes an availability outage
+// either. The failure is logged (once per window, sanitized) rather than
+// discarded: a fleet-wide budget that has quietly reverted to per-node counting
+// is an operational event. recordSignFailure applies the same fallback to the
+// same store.
+//
+// The one error that denies outright is ErrRateCounterCapacityExhausted: it is
 // not an outage but the store's tracked-key backstop reporting that it refused
-// to begin tracking this key. Failing open there would hand an untracked,
-// unlimited budget to every fresh source address — the very flood the backstop
-// exists to bound — so this mirrors the in-memory path's maxTrackedKeys denial.
+// to begin tracking this key. Falling back to the in-memory map there would
+// hand a fresh, node-local budget to every rotating source address at the exact
+// moment the shared store is saturated by that rotation, so this mirrors the
+// in-memory path's own maxTrackedKeys denial instead.
 func (l *sourceRateLimiter) allowShared(key string) (bool, time.Duration) {
 	count, retryAfter, err := l.sharedCounter.Increment(context.Background(), l.routeName+":"+key, l.window)
 	if err != nil {
@@ -163,7 +205,8 @@ func (l *sourceRateLimiter) allowShared(key string) (bool, time.Duration) {
 			}
 			return false, retryAfter
 		}
-		return true, 0
+		l.logSharedCounterFailure(err)
+		return l.allowInMemory(key)
 	}
 	if count > l.limit {
 		if retryAfter < time.Second {
@@ -172,6 +215,32 @@ func (l *sourceRateLimiter) allowShared(key string) (bool, time.Duration) {
 		return false, retryAfter
 	}
 	return true, 0
+}
+
+// logSharedCounterFailure warns that this limiter has fallen back to its
+// node-local budget, at most once per window so a flood against a route whose
+// counter store is down cannot turn every request into a log line. The error is
+// sanitized: it carries the store's message, which can quote caller-influenced
+// input back out (CLAUDE.md's log-injection rule). The key is never logged.
+func (l *sourceRateLimiter) logSharedCounterFailure(err error) {
+	if l.logger == nil {
+		// Only reachable if sharedCounter was assigned without going through
+		// useSharedCounter; the fallback itself must still happen.
+		return
+	}
+	now := l.now()
+
+	l.mu.Lock()
+	if !l.lastSharedErrLogAt.IsZero() && now.Sub(l.lastSharedErrLogAt) < l.window {
+		l.mu.Unlock()
+		return
+	}
+	l.lastSharedErrLogAt = now
+	l.mu.Unlock()
+
+	l.logger.Warn("Cluster-visible rate counter unavailable; enforcing this node's in-memory budget instead",
+		"route", logging.SanitizeLogValue(l.routeName),
+		"error", logging.SanitizeLogValue(err.Error()))
 }
 
 // evictStaleLocked removes entries whose window has fully elapsed since they were
