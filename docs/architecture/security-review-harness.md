@@ -196,6 +196,26 @@ There is no working-directory fallback and no `./` default. This is the actual c
 `.gitignore` entry is belt-and-braces only, since a root-anchored entry would not catch a
 sweep tree written to an unexpected in-repo path.
 
+## Egress allowlist (OpenAI + Ollama Cloud)
+
+The OpenAI and Ollama Cloud finder lanes (Stories S7/S8) need outbound access to their
+provider APIs from inside the agent container. `.devcontainer/dnsmasq-allowlist.conf` adds
+two entries at the tightest label each provider's own documentation supports:
+
+| Destination | Entry | Why this label |
+|---|---|---|
+| OpenAI | `server=/api.openai.com/9.9.9.9` | API traffic is served from a dedicated subdomain, distinct from the marketing site — the apex `openai.com` is not needed. |
+| Ollama Cloud | `server=/ollama.com/9.9.9.9` | Ollama's cloud API (both the native `/api` and OpenAI-compatible `/v1` paths) is served from the bare apex — there is no dedicated API subdomain to narrow to, so the apex is already the tightest label available. |
+
+**Consequence:** repository source content (the finder lane's review payload) and
+vulnerability-finding content (the model's response) both transit these two destinations once
+S7/S8 land. This is an accepted consequence of the epic's locked "all three lanes in v1"
+decision (#3900) — written down here so a future reader auditing egress does not have to
+re-derive why these entries exist.
+
+This story (#3905) adds the allowlist entries only. It does not implement either lane's API
+client, credential handling, or dispatch wiring — that is S7/S8.
+
 ## Log injection
 
 Findings and step envelopes carry model-generated text (`title`, `evidence`, `stop_reason_raw`)
