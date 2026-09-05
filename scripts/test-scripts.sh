@@ -939,15 +939,16 @@ test_refresh_pins_discovery() {
 
 # Coverage suite for the security review harness core (Issue #3901): schema
 # validation, the atomic writer, the resume scanner, and fail-closed base-dir
-# resolution. Each module under .claude/scripts/security-review/ ships its own
-# <module>_test.py, hand-rolled to the discover_pins_test.py convention above
-# (stdlib only, exit 0 on all-pass). Every downstream harness story (lane
-# adapters, consolidator, orchestrator) depends on these primitives, so a gap
-# here is silent everywhere that imports them — the same "unenforced until
-# something runs it" failure mode test_claude_pipeline_suites closed for the
-# .claude/scripts/tests/ suites.
+# resolution -- plus each finder lane adapter under lanes/ (Issue #3907 and
+# successors). Each module under .claude/scripts/security-review/ (and its
+# lanes/ subdirectory) ships its own <module>_test.py, hand-rolled to the
+# discover_pins_test.py convention above (stdlib only, exit 0 on all-pass).
+# Every downstream harness story (lane adapters, consolidator, orchestrator)
+# depends on these primitives, so a gap here is silent everywhere that
+# imports them — the same "unenforced until something runs it" failure mode
+# test_claude_pipeline_suites closed for the .claude/scripts/tests/ suites.
 test_security_review_harness() {
-    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir)..."
+    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir/lanes)..."
 
     local harness_dir=".claude/scripts/security-review"
     if [[ ! -d "$harness_dir" ]]; then
@@ -956,7 +957,7 @@ test_security_review_harness() {
     fi
 
     local suite base out_file rc found=0
-    for suite in "$harness_dir"/*_test.py; do
+    for suite in "$harness_dir"/*_test.py "$harness_dir"/lanes/*_test.py; do
         [[ -f "$suite" ]] || continue
         found=$((found + 1))
         base="$(basename "$suite")"
