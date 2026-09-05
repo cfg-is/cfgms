@@ -100,6 +100,13 @@ func SetupSecretsEnvForTest(t *testing.T) {
 // unchanged.
 func resolveSecretsKeyFile(base string) (string, error) {
 	if existing := strings.TrimSpace(os.Getenv("CFGMS_SECRETS_KEY_FILE")); existing != "" {
+		// #nosec G703 -- reading this environment value is the whole point of the
+		// function: CFGMS_SECRETS_KEY_FILE is the production contract for naming the
+		// master key file (features/controller/api/server.go rejects startup without
+		// it), and the test harness sets it deliberately via .env.test. The value is
+		// supplied by the process launching the test run, not by any request or
+		// stored data, and nothing here reads or writes the named file — os.Stat only
+		// decides whether to reuse the path or mint a fresh key beside base.
 		if info, err := os.Stat(existing); err == nil && !info.IsDir() && info.Size() > 0 {
 			return existing, nil
 		}
