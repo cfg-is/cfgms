@@ -217,6 +217,56 @@ re-derive why these entries exist.
 This story (#3905) adds the allowlist entries only. It does not implement either lane's API
 client, credential handling, or dispatch wiring — that is S7/S8.
 
+## Investigator launch primitive
+
+`.claude/scripts/agent-dispatch.sh launch-investigator` (Issue #3903) is the sole way any
+lab-side code runs against this harness's sweep tree. It launches a headless container that is
+technically — not just behaviorally — prevented from writing to the repository, branching,
+committing, pushing, or opening a PR or issue. The full contract, mount boundary, and
+credential-delivery mechanics are documented at the files themselves rather than restated here:
+
+| Concern | Where it's implemented |
+|---|---|
+| Launch subcommand, mount boundary (`:ro` workspace, per-lane/plan writable output only), `--disallowedTools`, `--cap-add NET_ADMIN`, session/ledger wiring | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm and the `_investigator_*` helpers immediately above it) |
+| In-container mode dispatch (`plan` execs `claude -p`; a lane id execs that lane's own script) and the egress-firewall init that precedes both | `.devcontainer/scripts/investigator-entrypoint.sh` |
+| Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist.conf` |
+| The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
+| Host-side OS-keychain credential lookup (retrieval only — never sources an env file, never exports a secret) | `scripts/load-security-review-credentials.sh` |
+| Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh`, `.claude/scripts/tests/investigator_credentials.test.sh` |
+
+This story assumes a sweep directory already exists (story S2/#3902 owns creating that tree) and
+fails closed if it does not — it never creates the sweep tree itself.
+
+### Egress containment
+
+The investigator container runs behind the same default-deny egress firewall as every other
+agent container, and it is the profile that needs it most: it is the only one that at the same
+time holds the host's live Claude OAuth credentials (plan mode, bind-mounted from
+`~/.claude/.credentials.json`), holds a third-party provider API key on disk at
+`/run/cfgms/security-review-cred/<name>.key` (lane mode), and *by design* ingests untrusted
+content — repository source under review, plus raw third-party model responses in finder lanes.
+Open egress beside those three facts is a direct exfiltration channel for a prompt injection, so
+the firewall is a load-bearing control here rather than a background default.
+
+Two halves make it work, and both must stay:
+
+- `agent-dispatch.sh launch-investigator` passes `--cap-add NET_ADMIN`.
+- `investigator-entrypoint.sh` calls `init-firewall.sh` directly. It does **not** source
+  `setup-env.sh` — the usual caller — because that script also configures a git identity this
+  profile must never have. The firewall call is therefore made explicitly and independently of
+  the git-identity setup, so that skipping `setup-env.sh` cannot silently drop it again.
+
+The entrypoint fails closed: it verifies after init that the `OUTPUT` policy is `DROP`, that
+`/etc/resolv.conf` points at `127.0.0.1`, and that dnsmasq is running, and exits non-zero
+without starting either mode if any of the three is not true. A missing `NET_ADMIN` capability
+surfaces as a container that exits immediately, not as one that runs with open egress.
+
+**Adding a lane means adding its provider domain** to `.devcontainer/dnsmasq-allowlist.conf`.
+The allowlist covers `anthropic.com` today; a lane pointed at any other provider gets `NXDOMAIN`
+until its domain is listed there. That is deliberate — the egress set is enumerated per provider
+rather than opened wholesale — and is a step in each lane story (#3906–#3908), not something the
+lane can work around at runtime.
+
 ## Log injection
 
 Findings and step envelopes carry model-generated text (`title`, `evidence`, `stop_reason_raw`)
