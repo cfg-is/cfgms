@@ -29,7 +29,7 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: '1.27.0'
+  GO_VERSION: '1.27.1'
   REGISTRY: ghcr.io
   IMAGE_PREFIX: cfg-is/cfgms
   TRIVY_VERSION: 'v0.74.0'

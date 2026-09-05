@@ -251,7 +251,13 @@ func verifyAssertionClientData(clientDataJSON []byte, wantChallenge string, rpOr
 	if clientData.Challenge != wantChallenge {
 		return fmt.Errorf("webauthn assertion challenge does not match the signed envelope")
 	}
-	if err := clientData.Verify(wantChallenge, protocol.AssertCeremony, rpOrigins, nil,
+	// v0.18.0 inserted rpOpaqueOrigins between rpOrigins and rpTopOrigins. It widens
+	// the set the ceremony origin is matched against, by plain string comparison
+	// rather than origin-equality semantics. Passed nil deliberately: this verifier
+	// exists to check the controller independently and already refuses cross-origin
+	// assertions outright, so it has no reason to accept a wider origin set than the
+	// one it was given. rpTopOrigins stays nil as before.
+	if err := clientData.Verify(wantChallenge, protocol.AssertCeremony, rpOrigins, nil, nil,
 		protocol.TopOriginImplicitVerificationMode, false); err != nil {
 		return fmt.Errorf("webauthn clientDataJSON verification failed: %w", err)
 	}
