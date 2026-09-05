@@ -64,6 +64,15 @@ type RoutingStore interface {
 	// no-op.
 	RemoveConnection(ctx context.Context, stewardID, nodeID string) error
 
+	// CountByNode returns the number of non-stale routing records currently
+	// attributed to nodeID — i.e. how many steward sessions nodeID holds, as
+	// observed cluster-wide rather than from any one node's own in-process
+	// connection registry (Issue #3895). A record whose liveness timestamp is
+	// older than RoutingStaleAfter is not counted, mirroring LookupNode's
+	// staleness rule: a crashed node's stale records must not make it look
+	// like sessions are still draining.
+	CountByNode(ctx context.Context, nodeID string) (int, error)
+
 	// Close releases resources held by the store.
 	Close() error
 }

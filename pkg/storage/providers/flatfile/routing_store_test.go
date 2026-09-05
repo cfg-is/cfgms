@@ -103,3 +103,44 @@ func TestFlatFileRoutingStore_RecordConnection_RejectsEmptyIDs(t *testing.T) {
 	require.Error(t, store.RecordConnection(ctx, "", "node-a"))
 	require.Error(t, store.RecordConnection(ctx, "steward-1", ""))
 }
+
+func TestFlatFileRoutingStore_CountByNode(t *testing.T) {
+	store := newTestFlatFileRoutingStore(t)
+	ctx := context.Background()
+
+	count, err := store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "an unknown node must count zero")
+
+	require.NoError(t, store.RecordConnection(ctx, "steward-1", "node-a"))
+	require.NoError(t, store.RecordConnection(ctx, "steward-2", "node-a"))
+	require.NoError(t, store.RecordConnection(ctx, "steward-3", "node-b"))
+
+	count, err = store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	count, err = store.CountByNode(ctx, "node-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestFlatFileRoutingStore_CountByNode_ExcludesStaleRecords(t *testing.T) {
+	store := newTestFlatFileRoutingStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.RecordConnection(ctx, "steward-1", "node-a"))
+
+	store.mu.Lock()
+	entries, err := store.load()
+	require.NoError(t, err)
+	entry := entries["steward-1"]
+	entry.UpdatedAt = time.Now().Add(-business.RoutingStaleAfter - time.Minute)
+	entries["steward-1"] = entry
+	require.NoError(t, store.save(entries))
+	store.mu.Unlock()
+
+	count, err := store.CountByNode(ctx, "node-a")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "a stale routing record must not be counted as a live session")
+}

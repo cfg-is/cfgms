@@ -181,6 +181,14 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
+		// Issue #3895: GetPendingByID above already confirmed the entry exists, so
+		// a guard-loss error here means a concurrent request (claim, or another
+		// approve/deny) already transitioned it away from "pending" — a conflict,
+		// not a fresh not-found.
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration was modified concurrently; reload and retry", http.StatusConflict)
+			return
+		}
 		s.logger.Error("Failed to approve pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to approve registration", http.StatusInternalServerError)
 		return
@@ -230,6 +238,14 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusDenied); err != nil {
+		// Issue #3895: GetPendingByID above already confirmed the entry exists, so
+		// a guard-loss error here means a concurrent request (claim, or another
+		// approve/deny) already transitioned it away from "pending" — a conflict,
+		// not a fresh not-found.
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration was modified concurrently; reload and retry", http.StatusConflict)
+			return
+		}
 		s.logger.Error("Failed to deny pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to deny registration", http.StatusInternalServerError)
 		return

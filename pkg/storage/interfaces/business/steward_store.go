@@ -186,9 +186,17 @@ type StewardStore interface {
 	// Returns ErrStewardNotFound if no record exists.
 	SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error
 
-	// UpdateStewardTenant moves a steward to a different tenant.
-	// Returns ErrStewardNotFound if no record exists for stewardID.
-	UpdateStewardTenant(ctx context.Context, stewardID, newTenantID string) error
+	// UpdateStewardTenant moves a steward to a different tenant, guarded by a
+	// compare-and-swap on the steward's current tenant (Issue #3895): the write
+	// only applies if the record's tenant_id still equals expectedTenantID at
+	// the instant it is applied. Returns ErrStewardNotFound if no record exists
+	// for stewardID, OR if a concurrent writer already moved it away from
+	// expectedTenantID — both report the same sentinel, mirroring the
+	// PendingRegistrationStore guard pattern in pending_registration_store.go.
+	// Callers that already resolved existence via their own GetSteward should
+	// treat a post-existence-check ErrStewardNotFound as a lost race, not a
+	// fresh not-found.
+	UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error
 
 	// DeregisterSteward marks the steward as deregistered. Records are retained
 	// for audit history; use ListStewardsByStatus to exclude them from active views.

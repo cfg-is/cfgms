@@ -298,7 +298,7 @@ func TestSQLiteStewardStore_UpdateStewardTenant(t *testing.T) {
 	rec.TenantID = "tenant-src"
 	require.NoError(t, store.RegisterSteward(ctx, rec))
 
-	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move", "tenant-dst"))
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move", "tenant-src", "tenant-dst"))
 
 	got, err := store.GetSteward(ctx, "s-move")
 	require.NoError(t, err)
@@ -309,8 +309,35 @@ func TestSQLiteStewardStore_UpdateStewardTenant(t *testing.T) {
 
 func TestSQLiteStewardStore_UpdateStewardTenant_NotFound(t *testing.T) {
 	store := newTestStewardStore(t)
-	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-dst")
+	err := store.UpdateStewardTenant(context.Background(), "nonexistent", "tenant-src", "tenant-dst")
 	assert.ErrorIs(t, err, business.ErrStewardNotFound)
+}
+
+// TestSQLiteStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses is the
+// [REQUIRED TEST] regression coverage for Issue #3895 at the storage layer: a
+// CAS write whose expectedTenantID no longer matches the record's current
+// tenant (a concurrent writer already moved it) must lose cleanly
+// (ErrStewardNotFound) without applying, mirroring the not-found/conflict
+// ambiguity persistAccountCAS and PendingRegistrationStore.UpdateStatus share.
+func TestSQLiteStewardStore_UpdateStewardTenant_StaleExpectedTenantLoses(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+
+	rec := testStewardRec("s-move-cas")
+	rec.TenantID = "tenant-src"
+	require.NoError(t, store.RegisterSteward(ctx, rec))
+
+	// Winner moves tenant-src -> tenant-dst-a.
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-move-cas", "tenant-src", "tenant-dst-a"))
+
+	// Loser still holds the stale "tenant-src" snapshot read before the winner's
+	// write landed, and tries to move to a different destination.
+	err := store.UpdateStewardTenant(ctx, "s-move-cas", "tenant-src", "tenant-dst-b")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound, "a stale expectedTenantID CAS must lose cleanly")
+
+	got, err := store.GetSteward(ctx, "s-move-cas")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-dst-a", got.TenantID, "the winner's destination must survive; the loser's must never apply")
 }
 
 func TestSQLiteStewardStore_SetStewardHidden(t *testing.T) {
@@ -440,7 +467,7 @@ func TestSQLiteStewardStore_BackfillTenantID(t *testing.T) {
 	assert.Equal(t, "", got.TenantID, "backfilled row must have empty tenant_id default")
 
 	// Update the tenant and verify round-trip.
-	require.NoError(t, store.UpdateStewardTenant(ctx, "s-old", "post-migration-tenant"))
+	require.NoError(t, store.UpdateStewardTenant(ctx, "s-old", "", "post-migration-tenant"))
 	got2, err := store.GetSteward(ctx, "s-old")
 	require.NoError(t, err)
 	assert.Equal(t, "post-migration-tenant", got2.TenantID)

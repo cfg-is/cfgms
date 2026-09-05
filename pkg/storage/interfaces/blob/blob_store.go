@@ -41,7 +41,25 @@ type BlobStore interface {
 	// PutBlob stores a blob from the given reader with the associated metadata.
 	// The meta.ContentType defaults to "application/octet-stream" if empty.
 	// Returns ErrBlobTenantRequired if key.TenantID is empty.
+	// This is an unconditional overwrite: two concurrent PutBlob calls for the
+	// same key can both succeed, with the second silently clobbering the
+	// first — callers that need "only if this key does not already exist"
+	// semantics must use PutBlobIfAbsent instead (Issue #3895).
 	PutBlob(ctx context.Context, key BlobKey, r io.Reader, meta BlobMeta) error
+
+	// PutBlobIfAbsent stores a blob only if no blob currently exists for key,
+	// atomically with respect to concurrent PutBlob/PutBlobIfAbsent calls for
+	// the same key (Issue #3895). Returns ErrBlobAlreadyExists — without
+	// writing anything — if a blob already exists for key at the instant the
+	// provider evaluates the condition. Same ContentType default and
+	// ErrBlobTenantRequired behavior as PutBlob.
+	//
+	// This exists because GetBlob-then-PutBlob is a TOCTOU race: two
+	// concurrent callers can both observe "not found" and both proceed to
+	// PutBlob, each reporting success while one silently overwrites the
+	// other. PutBlobIfAbsent pushes the existence check into the same atomic
+	// operation as the write, so exactly one caller can win for a given key.
+	PutBlobIfAbsent(ctx context.Context, key BlobKey, r io.Reader, meta BlobMeta) error
 
 	// GetBlob retrieves a blob and its metadata as a streaming reader.
 	// The caller must close the returned reader when done.
@@ -110,6 +128,7 @@ var (
 	ErrBlobNotFound         = &BlobError{Code: "BLOB_NOT_FOUND", Message: "blob not found"}
 	ErrBlobTenantRequired   = &BlobError{Code: "BLOB_TENANT_REQUIRED", Message: "tenant ID is required"}
 	ErrBlobChecksumMismatch = &BlobError{Code: "BLOB_CHECKSUM_MISMATCH", Message: "checksum verification failed"}
+	ErrBlobAlreadyExists    = &BlobError{Code: "BLOB_ALREADY_EXISTS", Message: "blob already exists"}
 )
 
 // BlobProvider is the factory interface for BlobStore backends.

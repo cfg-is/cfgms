@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
@@ -245,6 +247,85 @@ func (s *S3BlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r io.Reader
 	})
 	if err != nil {
 		return fmt.Errorf("blob s3 put: failed to upload metadata sidecar: %w", err)
+	}
+
+	return nil
+}
+
+// PutBlobIfAbsent stores a blob only if no blob currently exists for key,
+// atomic with respect to concurrent PutBlob/PutBlobIfAbsent calls for the same
+// key (Issue #3895). The metadata sidecar's PutObject with IfNoneMatch: "*" is
+// the atomicity point: S3 rejects that write with HTTP 412 if the key already
+// exists, so exactly one concurrent caller wins for a given key. The blob
+// object is only uploaded after this caller wins the sidecar write — a losing
+// caller never touches the blob object at all.
+//
+// A failure uploading the blob object after winning the sidecar write is
+// cleaned up best-effort (the sidecar is deleted) so a transient failure does
+// not permanently block future publishes; if that cleanup itself fails, the
+// sidecar is left in place and the key behaves like the filesystem provider's
+// documented crash window — recoverable via PutBlob (the handler's force=true
+// path).
+func (s *S3BlobStore) PutBlobIfAbsent(ctx context.Context, key blob.BlobKey, r io.Reader, meta blob.BlobMeta) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = defaultContentType
+	}
+
+	h := sha256.New()
+	tee := io.TeeReader(r, h)
+	blobData, err := io.ReadAll(tee)
+	if err != nil {
+		return fmt.Errorf("blob s3 put-if-absent: failed to read blob data: %w", err)
+	}
+
+	checksum := hex.EncodeToString(h.Sum(nil))
+	size := int64(len(blobData))
+
+	sidecar := s3BlobMetaSidecar{
+		ContentType: contentType,
+		Size:        size,
+		Checksum:    checksum,
+		CreatedAt:   time.Now().UTC(),
+		Labels:      meta.Labels,
+	}
+	metaJSON, err := json.Marshal(sidecar)
+	if err != nil {
+		return fmt.Errorf("blob s3 put-if-absent: failed to marshal metadata: %w", err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(s.metaObjectKey(key)),
+		Body:          bytes.NewReader(metaJSON),
+		ContentType:   aws.String("application/json"),
+		ContentLength: aws.Int64(int64(len(metaJSON))),
+		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		if isS3PreconditionFailed(err) {
+			return blob.ErrBlobAlreadyExists
+		}
+		return fmt.Errorf("blob s3 put-if-absent: failed to create metadata sidecar: %w", err)
+	}
+
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(s.objectKey(key)),
+		Body:          bytes.NewReader(blobData),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(s.metaObjectKey(key)),
+		})
+		return fmt.Errorf("blob s3 put-if-absent: failed to upload blob: %w", err)
 	}
 
 	return nil
@@ -497,6 +578,19 @@ func isS3NotFound(err error) bool {
 	}
 	var notFound *s3types.NotFound
 	return errors.As(err, &notFound)
+}
+
+// isS3PreconditionFailed reports whether an S3 error represents a failed
+// conditional-write precondition (HTTP 412) — the response an IfNoneMatch: "*"
+// PutObject receives when the key already exists. S3 does not model this as a
+// typed error struct the way NoSuchKey/NotFound are modeled; it surfaces as a
+// generic smithy HTTP response error, so the check is by status code.
+func isS3PreconditionFailed(err error) bool {
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.HTTPStatusCode() == http.StatusPreconditionFailed
+	}
+	return false
 }
 
 // s3ChecksumVerifyingReader computes SHA-256 during reads and returns

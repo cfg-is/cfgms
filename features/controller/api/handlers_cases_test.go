@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -665,6 +666,88 @@ func TestHandleUpdateCase_NonexistentReturns404(t *testing.T) {
 	srv.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestUpdateCase_ConcurrentUpdateLosesCleanly is the [REQUIRED TEST] for Issue
+// #3895: handleUpdateCase's GetCase-then-UpdateCase was a blind overwrite with no
+// version check — two concurrent updates could both read the same starting state
+// and the second write to land would silently clobber the first. The fix routes
+// the write through CaseStore.UpdateCaseCAS, keyed on the version read alongside
+// GetCase, so of two concurrent updates racing the same case, exactly one wins
+// and the other loses cleanly (409) rather than being silently overwritten. Two
+// *Server instances share one durable CaseStore, modeling two cluster nodes
+// behind the same database. Run under -race.
+func TestUpdateCase_ConcurrentUpdateLosesCleanly(t *testing.T) {
+	nodeA := setupCasesTestServer(t)
+	cs := nodeA.CasesStore()
+	nodeB := setupTestServer(t)
+	nodeB.SetCasesStore(cs)
+
+	c := seedCase(t, cs, "test-tenant")
+	apiKeyA := newCasesTestKey(t, nodeA, "test-tenant")
+	apiKeyB := newCasesTestKey(t, nodeB, "test-tenant")
+
+	bodyA := map[string]interface{}{
+		"status": "closed",
+		"ticket": map[string]interface{}{
+			"title": map[string]interface{}{"value": "closed by node A", "source": "operator"},
+		},
+	}
+	bodyB := map[string]interface{}{
+		"status": "open",
+		"ticket": map[string]interface{}{
+			"title": map[string]interface{}{"value": "reopened by node B", "source": "operator"},
+		},
+	}
+	bytesA, err := json.Marshal(bodyA)
+	require.NoError(t, err)
+	bytesB, err := json.Marshal(bodyB)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	var recA, recB *httptest.ResponseRecorder
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesA))
+		req.Header.Set("X-API-Key", apiKeyA)
+		req.Header.Set("Content-Type", "application/json")
+		recA = httptest.NewRecorder()
+		nodeA.router.ServeHTTP(recA, req)
+	}()
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesB))
+		req.Header.Set("X-API-Key", apiKeyB)
+		req.Header.Set("Content-Type", "application/json")
+		recB = httptest.NewRecorder()
+		nodeB.router.ServeHTTP(recB, req)
+	}()
+	wg.Wait()
+
+	codes := []int{recA.Code, recB.Code}
+	successes, conflicts := 0, 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			successes++
+		case http.StatusConflict:
+			conflicts++
+		}
+	}
+	assert.Equal(t, 1, successes, "exactly one concurrent update must succeed: %v (A: %s, B: %s)",
+		codes, recA.Body.String(), recB.Body.String())
+	assert.Equal(t, 1, conflicts, "exactly one concurrent update must lose the compare-and-swap (409): %v", codes)
+
+	final, err := cs.GetCase(context.Background(), c.ID)
+	require.NoError(t, err)
+	if recA.Code == http.StatusOK {
+		assert.Equal(t, business.CaseStatusClosed, final.Status, "final state must match only the winner's write")
+		assert.Equal(t, "closed by node A", final.Ticket.Title.Value)
+	} else {
+		assert.Equal(t, business.CaseStatusOpen, final.Status, "final state must match only the winner's write")
+		assert.Equal(t, "reopened by node B", final.Ticket.Title.Value)
+	}
 }
 
 // ── PIN helpers ─────────────────────────────────────────────────────────────

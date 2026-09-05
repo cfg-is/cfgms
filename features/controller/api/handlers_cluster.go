@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/cluster"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // defaultDecommissionTimeout is the maximum time Decommission waits for
@@ -97,6 +99,40 @@ type clusterNodeDecommissionResponse struct {
 	State  string `json:"state"`
 }
 
+// nodeScopedSessionCounter adapts a business.RoutingStore to
+// cluster.SessionCounter, scoped to a single target node ID (Issue #3895).
+//
+// Under any-node routing (ADR-031 Decision 1), a decommission request for
+// node B can land on node A. registry.Registry.Count() only ever reports the
+// process it lives in — node A's own local connections — so using it
+// directly bases the drain-wait on the wrong node's sessions. RoutingStore is
+// the durable, cluster-wide table Issue #3764 introduced to answer exactly
+// "how many steward sessions does node X hold," so this adapter closes over
+// the decommission target's nodeID and asks the shared store instead.
+//
+// On a read error, Count returns 1 (non-zero) rather than 0: waitForSessionDrain
+// treats 0 as "drained, stop waiting immediately," and a store outage must not
+// be misread as an empty node. This fails safe by falling back to the existing
+// poll-until-timeout behavior — Decommission still force-completes after
+// defaultDecommissionTimeout, same as an honestly non-zero count.
+type nodeScopedSessionCounter struct {
+	ctx          context.Context
+	routingStore business.RoutingStore
+	nodeID       string
+	logger       logging.Logger
+}
+
+func (c *nodeScopedSessionCounter) Count() int {
+	n, err := c.routingStore.CountByNode(c.ctx, c.nodeID)
+	if err != nil {
+		c.logger.Error("failed to count target node sessions for decommission drain-wait",
+			"node_id", logging.SanitizeLogValue(c.nodeID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return 1
+	}
+	return n
+}
+
 // handleClusterNodeDecommission handles POST /api/v1/cluster/nodes/{id}/decommission.
 //
 // Authorization is enforced at the router level via requirePermission("cluster", "decommission-node"),
@@ -130,7 +166,27 @@ func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if err := cluster.Decommission(r.Context(), nodeID, s.membershipStore, s.registry, s.logger, defaultDecommissionTimeout); err != nil {
+	// Issue #3895: prefer the cluster-wide routing store, scoped to the actual
+	// target node, over the local registry — which only ever reports sessions
+	// on whichever node happens to receive this request. Fall back to the
+	// local registry when no routing store is configured (single-node/test
+	// deployments), preserving prior behavior there.
+	var counter cluster.SessionCounter = s.registry
+	if s.routingStore != nil {
+		counter = &nodeScopedSessionCounter{
+			ctx:          r.Context(),
+			routingStore: s.routingStore,
+			nodeID:       nodeID,
+			logger:       s.logger,
+		}
+	}
+
+	timeout := s.decommissionTimeout
+	if timeout <= 0 {
+		timeout = defaultDecommissionTimeout
+	}
+
+	if err := cluster.Decommission(r.Context(), nodeID, s.membershipStore, counter, s.logger, timeout); err != nil {
 		switch {
 		case errors.Is(err, cluster.ErrNodeNotFound):
 			s.respondError(w, http.StatusNotFound, "node not found")

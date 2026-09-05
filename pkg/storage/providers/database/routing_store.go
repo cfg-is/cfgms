@@ -99,6 +99,24 @@ func (s *DatabaseRoutingStore) RemoveConnection(ctx context.Context, stewardID, 
 	return nil
 }
 
+// CountByNode implements business.RoutingStore.CountByNode. Staleness is
+// evaluated in the same query as LookupNode, against the database server's
+// own now(), so a crashed node's abandoned records are not counted as live
+// sessions.
+func (s *DatabaseRoutingStore) CountByNode(ctx context.Context, nodeID string) (int, error) {
+	const query = `
+		SELECT COUNT(*)
+		FROM cfgms_routing
+		WHERE node_id = $1
+		  AND updated_at >= now() - ($2::double precision * interval '1 second')
+	`
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, nodeID, business.RoutingStaleAfter.Seconds()).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed to count routing connections for %q: %w", nodeID, err)
+	}
+	return count, nil
+}
+
 // Close is a no-op: the underlying connection pool is owned and closed by
 // DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseRoutingStore) Close() error {

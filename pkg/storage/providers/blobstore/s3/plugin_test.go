@@ -5,13 +5,17 @@ package s3provider
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -57,9 +61,25 @@ func (m *inMemoryS3) PutObject(ctx context.Context, params *s3.PutObjectInput, o
 	}
 
 	k := m.objectKey(*params.Bucket, *params.Key)
+
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Honor IfNoneMatch: "*" — the conditional-write precondition
+	// PutBlobIfAbsent relies on. Real S3 rejects the write with HTTP 412 when
+	// the key already exists; this fake mirrors that via a smithyhttp
+	// ResponseError so isS3PreconditionFailed's status-code check exercises
+	// the same path a real S3 response would take.
+	if params.IfNoneMatch != nil && *params.IfNoneMatch == "*" {
+		if _, exists := m.objects[k]; exists {
+			return nil, &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusPreconditionFailed}},
+				Err:      errors.New("PreconditionFailed: At least one of the pre-conditions you specified did not hold"),
+			}
+		}
+	}
+
 	m.objects[k] = &inMemoryObject{body: body, contentType: contentType, metadata: meta}
-	m.mu.Unlock()
 
 	return &s3.PutObjectOutput{}, nil
 }
@@ -565,4 +585,103 @@ func TestS3BlobStore_ListBlobs_SidecarError(t *testing.T) {
 	// ListBlobs should propagate the sidecar parse error (not silently skip).
 	_, err := store.ListBlobs(ctx, blob.BlobKey{TenantID: "tenant-a"})
 	assert.Error(t, err, "ListBlobs should return error when sidecar cannot be parsed")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_FirstCallWins verifies the happy path: an
+// absent key accepts the write and the blob is retrievable afterward.
+func TestS3BlobStore_PutBlobIfAbsent_FirstCallWins(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("first.bin")
+
+	require.NoError(t, store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("winner")), blob.BlobMeta{}))
+
+	rc, meta, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("winner"), got)
+	assert.NotEmpty(t, meta.Checksum)
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_RejectsExistingKey verifies a second call for
+// the same key is rejected with ErrBlobAlreadyExists and does not overwrite the
+// first caller's data.
+func TestS3BlobStore_PutBlobIfAbsent_RejectsExistingKey(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("taken.bin")
+
+	require.NoError(t, store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("first")), blob.BlobMeta{}))
+
+	err := store.PutBlobIfAbsent(ctx, key, bytes.NewReader([]byte("second")), blob.BlobMeta{})
+	require.ErrorIs(t, err, blob.ErrBlobAlreadyExists)
+
+	rc, _, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("first"), got, "the losing call must not overwrite the winner's data")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins is the
+// [REQUIRED TEST] regression coverage for Issue #3895's TOCTOU fix at the
+// storage layer: N concurrent PutBlobIfAbsent calls for the same key must
+// produce exactly one success and every other call must fail with
+// ErrBlobAlreadyExists — never two silent successes overwriting each other.
+// Run with -race.
+func TestS3BlobStore_PutBlobIfAbsent_ConcurrentPublishesExactlyOneWins(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	ctx := context.Background()
+	key := testS3Key("race.bin")
+
+	const attempts = 8
+	results := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			content := []byte(fmt.Sprintf("attempt-%d", i))
+			results <- store.PutBlobIfAbsent(ctx, key, bytes.NewReader(content), blob.BlobMeta{})
+		}(i)
+	}
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, blob.ErrBlobAlreadyExists):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	assert.Equal(t, 1, successes, "exactly one concurrent PutBlobIfAbsent must succeed")
+	assert.Equal(t, attempts-1, conflicts, "every other call must be rejected with ErrBlobAlreadyExists")
+
+	rc, _, err := store.GetBlob(ctx, key)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	got, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(got, []byte("attempt-")), "stored content must be exactly one full attempt's data, not a mix")
+}
+
+// TestS3BlobStore_PutBlobIfAbsent_TenantRequired verifies the same validation
+// contract as PutBlob.
+func TestS3BlobStore_PutBlobIfAbsent_TenantRequired(t *testing.T) {
+	client := newInMemoryS3()
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+	err := store.PutBlobIfAbsent(context.Background(), blob.BlobKey{Namespace: "ns", Name: "n"}, bytes.NewReader([]byte("x")), blob.BlobMeta{})
+	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
 }

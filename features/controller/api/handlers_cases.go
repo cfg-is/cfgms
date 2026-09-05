@@ -330,13 +330,24 @@ func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
 	existing.Ticket = ticketFromInput(req.Ticket)
 	existing.UpdatedAt = time.Now().UTC()
 
-	if err := s.casesStore.UpdateCase(r.Context(), existing); err != nil {
+	// Issue #3895: CAS on the version read alongside GetCase above, mirroring
+	// persistAccountCAS. Two concurrent updates racing this handler both read
+	// the same starting version; the first write to land advances it, and the
+	// second's CAS then loses (ok=false, no error) rather than silently
+	// overwriting the first caller's change.
+	newVersion, ok, err := s.casesStore.UpdateCaseCAS(r.Context(), existing, existing.Version)
+	if err != nil {
 		s.logger.Error("handleUpdateCase: store failed",
 			"case_id", logging.SanitizeLogValue(id),
 			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to update case", http.StatusInternalServerError)
 		return
 	}
+	if !ok {
+		http.Error(w, "case was modified concurrently; reload and retry", http.StatusConflict)
+		return
+	}
+	existing.Version = newVersion
 
 	s.writeResponse(w, http.StatusOK, caseToResponse(existing))
 }

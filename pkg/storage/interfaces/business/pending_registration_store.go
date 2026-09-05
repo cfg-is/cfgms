@@ -110,6 +110,24 @@ type PendingRegistrationStore interface {
 	// UpdateStatus updates the status of the entry identified by pendingID.
 	// When status is "claimed", the implementation also persists claimed_at = now().
 	// Returns ErrPendingRegistrationNotFound if no record exists for the ID.
+	//
+	// The approve, deny and claim transitions are compare-and-swap against the
+	// entry's current status (Issue #3895), so that two requests landing on
+	// different controller nodes cannot both win. Implementations must apply
+	// exactly these preconditions, and return ErrPendingRegistrationNotFound —
+	// the conflict sentinel — when one is not met:
+	//
+	//	approved: current status is "pending"
+	//	claimed:  current status is "approved"
+	//	denied:   current status is "pending" OR "approved"
+	//
+	// Deny accepts "approved" deliberately: an approved entry stays claimable
+	// until ExpiresAt, so approved → denied is the only control that stops
+	// certificate issuance for a registration approved in error or later judged
+	// hostile. "claimed", "denied" and "expired" are terminal — no transition
+	// leaves them, since doing so would re-arm a claim, resurrect an
+	// operator-denied registration, or revive an entry past its quarantine
+	// deadline.
 	UpdateStatus(ctx context.Context, pendingID, status string) error
 
 	// ListPending returns entries whose status is "pending", ordered by registered_at ascending.

@@ -1315,3 +1315,182 @@ func TestMigrate_LegacySingleDeviceRegistrationClaimKey(t *testing.T) {
 		`SELECT COUNT(*) FROM registration_token_claims WHERE token = 'tok'`).Scan(&claims))
 	assert.Equal(t, 2, claims, "migrated claims must survive a later startup")
 }
+
+// legacyCasesSchema is the cases DDL as shipped by Issue #3602, before Issue
+// #3895 added the version column that UpdateCaseCAS compares and swaps on. Used
+// to simulate a controller database created before optimistic concurrency was
+// introduced on the case aggregate.
+const legacyCasesSchema = `CREATE TABLE IF NOT EXISTS cases (
+	id           TEXT PRIMARY KEY,
+	tenant_id    TEXT NOT NULL,
+	status       TEXT NOT NULL DEFAULT 'open',
+	ticket_json  TEXT NOT NULL DEFAULT '{}',
+	created_at   TEXT NOT NULL,
+	updated_at   TEXT NOT NULL
+)`
+
+// seedLegacyCaseRow inserts a pre-#3895-shaped row into a legacy cases table (no
+// version column), so tests can prove what the migration does to records that
+// already exist on an upgrading deployment.
+func seedLegacyCaseRow(t *testing.T, db *sql.DB, id, tenantID string) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO cases (id, tenant_id, status, ticket_json, created_at, updated_at)
+		VALUES (?, ?, 'open', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, tenantID)
+	require.NoError(t, err, "seed legacy case row %s", id)
+}
+
+// TestBackfillCaseColumns_LegacyTable verifies that initializeSchema adds the
+// version column to a pre-existing cases table created before Issue #3895.
+// CREATE TABLE IF NOT EXISTS cannot add a column, so without the back-fill every
+// upgrading deployment would fail its next case read with "no such column:
+// version" and could never perform a compare-and-swap update.
+func TestBackfillCaseColumns_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCasesSchema)
+	require.NoError(t, err, "seed legacy cases schema")
+	seedLegacyCaseRow(t, db, "case-legacy", "tenant-legacy")
+
+	require.False(t, hasColumn(t, db, "cases", "version"),
+		"pre-condition: version absent before back-fill")
+
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	assert.True(t, hasColumn(t, db, "cases", "version"), "version present after back-fill")
+
+	// The migrated table must be usable by the live case paths: a column that
+	// exists under the wrong name or affinity would still break every read.
+	store := &SQLiteCaseStore{db: db}
+	got, err := store.GetCase(ctx, "case-legacy")
+	require.NoError(t, err, "back-filled table must be readable by the store")
+
+	// A pre-existing row must land on version 1 — the same value CreateCase
+	// assigns to a new case — so a legacy case and a fresh one are indistinguishable
+	// to the CAS path. A 0 default would make the very first CAS write jump the
+	// version sequence.
+	assert.Equal(t, 1, got.Version, "pre-existing rows must default to version 1")
+
+	// The CAS write itself must work against the migrated row, and a stale
+	// expected version must still lose.
+	got.Status = business.CaseStatusClosed
+	newVersion, ok, err := store.UpdateCaseCAS(ctx, got, got.Version)
+	require.NoError(t, err, "back-filled table must accept a CAS update")
+	require.True(t, ok, "CAS against the legacy row's current version must win")
+	assert.Equal(t, 2, newVersion, "a winning CAS must advance the version")
+
+	_, ok, err = store.UpdateCaseCAS(ctx, got, 1)
+	require.NoError(t, err)
+	assert.False(t, ok, "a stale expected version must lose against the back-filled column")
+
+	reread, err := store.GetCase(ctx, "case-legacy")
+	require.NoError(t, err)
+	assert.Equal(t, 2, reread.Version, "the persisted version must reflect the winning CAS")
+	assert.Equal(t, business.CaseStatusClosed, reread.Status, "the winning CAS payload must persist")
+
+	// New records must also insert cleanly against the migrated table.
+	require.NoError(t, store.CreateCase(ctx, makeCase("case-after-migration", "tenant-legacy")),
+		"back-filled table must accept a newly created case")
+}
+
+// TestBackfillCaseColumns_Idempotent verifies that a second initializeSchema
+// pass over an already-migrated cases table succeeds (the PRAGMA column probe
+// suppresses the duplicate ALTER) and that versions written between the two
+// passes survive. The back-fill runs on every database open, so a non-idempotent
+// pass would break every controller restart.
+func TestBackfillCaseColumns_Idempotent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyCasesSchema)
+	require.NoError(t, err, "seed legacy cases schema")
+	require.NoError(t, initializeSchema(ctx, db), "first initializeSchema call")
+
+	store := &SQLiteCaseStore{db: db}
+	c := makeCase("case-survive", "tenant-idem")
+	require.NoError(t, store.CreateCase(ctx, c))
+	newVersion, ok, err := store.UpdateCaseCAS(ctx, c, c.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, 2, newVersion)
+
+	require.NoError(t, initializeSchema(ctx, db), "second initializeSchema call (idempotency check)")
+
+	assert.True(t, hasColumn(t, db, "cases", "version"), "version still present after second pass")
+
+	got, err := store.GetCase(ctx, "case-survive")
+	require.NoError(t, err, "row must survive second initializeSchema")
+	assert.Equal(t, 2, got.Version, "the CAS version must survive second initializeSchema")
+}
+
+// TestBackfillCaseColumns_FreshDB verifies that a fresh database carries the
+// version column from CREATE TABLE, so the back-fill is a no-op on new
+// deployments.
+func TestBackfillCaseColumns_FreshDB(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, initializeSchema(ctx, db), "fresh DB initialization")
+
+	assert.True(t, hasColumn(t, db, "cases", "version"), "version present on fresh DB")
+	require.NoError(t, backfillCaseColumns(ctx, db), "back-fill is a no-op on a fresh DB")
+}
+
+// TestBackfillCaseColumns_TableAbsent verifies the table-absent short-circuit: a
+// database that has never carried the cases table must be left untouched rather
+// than erroring on the PRAGMA/ALTER or creating the table as a side effect.
+// This is the branch every other test in the suite already exercises implicitly,
+// asserted here directly.
+func TestBackfillCaseColumns_TableAbsent(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	require.NoError(t, backfillCaseColumns(ctx, db),
+		"absent table must be a no-op, not an error")
+
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='cases'`).Scan(&count))
+	assert.Equal(t, 0, count, "back-fill must not create the table itself")
+}
+
+// TestBackfillCaseColumns_ProbeFailure verifies that a tableExists failure
+// propagates instead of silently reporting success — the back-fill runs on every
+// database open, so a swallowed probe error would let the controller start
+// against an un-migrated cases table and fail every case read at runtime.
+func TestBackfillCaseColumns_ProbeFailure(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := openDB(":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	err = backfillCaseColumns(ctx, db)
+	require.Error(t, err, "closed DB must return an error")
+	assert.Contains(t, err.Error(), "cases back-fill probe failed", "error must identify the probe stage")
+}
+
+// TestBackfillCaseColumns_AlterFailure verifies that an ALTER TABLE failure
+// propagates rather than leaving an un-migrated table behind a successful
+// startup.
+func TestBackfillCaseColumns_AlterFailure(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "readonly-cases.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyCasesSchema)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	roDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = roDB.Close() })
+	require.NoError(t, roDB.Ping())
+
+	err = backfillCaseColumns(ctx, roDB)
+	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
+	assert.Contains(t, err.Error(), "cases back-fill failed", "error must identify the back-fill stage")
+}

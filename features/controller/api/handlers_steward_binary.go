@@ -176,27 +176,7 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	}
 
 	key := stewardBinaryBlobKey(tenantID, version, platform, arch)
-
-	// Enforce 409 Conflict on duplicate unless ?force=true.
-	if r.URL.Query().Get("force") != "true" {
-		existing, _, lookupErr := s.blobStore.GetBlob(r.Context(), key)
-		if lookupErr == nil {
-			_ = existing.Close()
-			s.writeErrorResponse(w, http.StatusConflict,
-				"Steward binary already exists for this version/platform/arch; use --force to overwrite",
-				"DUPLICATE_BINARY")
-			return
-		}
-		if !errors.Is(lookupErr, blob.ErrBlobNotFound) {
-			s.logger.Error("Failed to check for existing steward binary",
-				"error", lookupErr,
-				"version", logging.SanitizeLogValue(version),
-				"platform", logging.SanitizeLogValue(platform),
-				"arch", logging.SanitizeLogValue(arch))
-			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to check for existing binary", "CHECK_ERROR")
-			return
-		}
-	}
+	force := r.URL.Query().Get("force") == "true"
 
 	// Compute signature digest (SHA-256 of raw signature bytes) for the manifest.
 	sigHashBytes := sha256.Sum256(sigBytes)
@@ -226,9 +206,26 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 		Labels:      labels,
 	}
 
-	if putErr := s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta); putErr != nil {
+	// Issue #3895: force=true keeps the unconditional overwrite; the default path
+	// uses PutBlobIfAbsent so the not-found check and the write are one atomic
+	// operation at the storage layer. Two concurrent publishes without force can
+	// no longer both pass a GetBlob pre-check and both PutBlob — the provider's
+	// conditional-create primitive lets exactly one caller win.
+	var putErr error
+	if force {
+		putErr = s.blobStore.PutBlob(r.Context(), key, bytes.NewReader(body), meta)
+	} else {
+		putErr = s.blobStore.PutBlobIfAbsent(r.Context(), key, bytes.NewReader(body), meta)
+	}
+	if putErr != nil {
+		if errors.Is(putErr, blob.ErrBlobAlreadyExists) {
+			s.writeErrorResponse(w, http.StatusConflict,
+				"Steward binary already exists for this version/platform/arch; use --force to overwrite",
+				"DUPLICATE_BINARY")
+			return
+		}
 		s.logger.Error("Failed to store steward binary",
-			"error", putErr,
+			"error", logging.SanitizeLogValue(putErr.Error()),
 			"version", logging.SanitizeLogValue(version),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))

@@ -1766,9 +1766,13 @@ func (s DatabaseSchemas) CreateCaseTables(ctx context.Context, db *sql.DB) error
 			tenant_id   TEXT NOT NULL,
 			status      TEXT NOT NULL DEFAULT 'open',
 			ticket_json TEXT NOT NULL DEFAULT '{}',
+			version     BIGINT NOT NULL DEFAULT 1,
 			created_at  TIMESTAMPTZ NOT NULL,
 			updated_at  TIMESTAMPTZ NOT NULL
 		);`,
+		// Issue #3895: version column for UpdateCaseCAS. ADD COLUMN IF NOT EXISTS
+		// covers deployments whose cases table predates this column.
+		`ALTER TABLE cases ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 1;`,
 		`CREATE INDEX IF NOT EXISTS idx_cases_tenant_id ON cases(tenant_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_cases_status    ON cases(status);`,
 

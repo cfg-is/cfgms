@@ -809,6 +809,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// GET /api/v1/stewards/{id}). Without this wiring the API server has no
 	// registry and always reports stewards as disconnected (Issue #1572).
 	var connRegistry registry.Registry
+	// routingStore is hoisted the same way as connRegistry: created inside the
+	// transport-enabled block below, but also needed by the HTTP API server
+	// wiring further down for the decommission drain-wait's cross-node session
+	// count (Issue #3895).
+	var routingStore business.RoutingStore
 	// admissionQueues holds the per-tenant ingest admission gates (Issue #3759).
 	// Created once here so the CP provider (Register/ControlChannel) takes the
 	// server-verified-key queue now and Start() takes the wire-keyed queue for
@@ -872,7 +877,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// into the connect hook chain unconditionally — routingTableConnectHook is
 		// a no-op when routingStore is nil (no provider support / non-cluster
 		// deployment), so this never changes connect behavior outside cluster mode.
-		routingStore := storageManager.GetRoutingStore()
+		routingStore = storageManager.GetRoutingStore()
 		routingHook := &routingTableConnectHook{routingStore: routingStore, logger: logger}
 		if haManager != nil {
 			routingHook.localNodeID = haManager.GetLocalNode().ID
@@ -1576,6 +1581,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// GET /api/v1/stewards/{id} reports the live connection_state (Issue #1572).
 	if connRegistry != nil {
 		httpServer.SetRegistry(connRegistry)
+	}
+
+	// Issue #3895: wire the shared steward-routing table into the API server so
+	// the cluster decommission drain-wait can resolve the actual target node's
+	// session count under any-node routing, instead of whichever node happens
+	// to receive the decommission request. A nil routingStore (no provider
+	// support / non-cluster deployment) leaves the handler on its existing
+	// local-registry fallback.
+	if routingStore != nil {
+		httpServer.SetRoutingStore(routingStore)
 	}
 
 	// Wire the internal controller-to-controller delivery RPC service (ADR-031

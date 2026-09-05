@@ -487,3 +487,174 @@ func TestHandleClusterNodeDecommission_AdminDrainingNode_Returns200(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, cluster.StateDecommissioned, got.State)
 }
+
+// TestClusterNodeDecommission_UsesTargetNodeSessionCount is the [REQUIRED TEST]
+// for Issue #3895: handleClusterNodeDecommission's drain-wait must resolve the
+// *target* node's session count, not whichever node happens to receive the
+// decommission request. Two *Server instances share one durable membership
+// store and one durable routing store (modeling two cluster nodes behind the
+// same database). node-a carries a nonzero LOCAL registry count (unrelated
+// live sessions on node-a itself) that must be ignored; node-b — the
+// decommission target — has zero routing-store-recorded sessions. A
+// decommission request for node-b sent to node-a must resolve node-b's (zero)
+// count and return promptly, rather than blocking on node-a's local count.
+func TestClusterNodeDecommission_UsesTargetNodeSessionCount(t *testing.T) {
+	membershipStore := cluster.NewInMemoryMembershipStore()
+	require.NoError(t, membershipStore.Register(cluster.NodeRecord{
+		ID:           "node-a",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+	require.NoError(t, membershipStore.Register(cluster.NodeRecord{
+		ID:           "node-b",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+
+	routingStore := newTestFlatFileRoutingStore(t)
+
+	// node-b has no routing-store-recorded sessions: a correct fix resolves
+	// Count() == 0 immediately and Decommission returns without polling.
+	// (No RecordConnection calls for node-b — absence is the zero count.)
+
+	nodeA := setupTestServer(t)
+	nodeA.SetMembershipStore(membershipStore)
+	nodeA.SetRoutingStore(routingStore)
+	registryA := registry.NewRegistry()
+	nodeA.SetRegistry(registryA)
+	// node-a's own local registry reports a nonzero count — live sessions on
+	// node-a itself, unrelated to node-b. If the handler used this count
+	// instead of node-b's, the drain-wait would poll every 5s and never
+	// return within the short deadline this test enforces below.
+	registerTestConnection(t, registryA, "steward-on-node-a")
+	require.Equal(t, 1, registryA.Count(), "sanity: node-a's local registry must be nonzero")
+
+	// Bound the worst case (buggy behavior) well below the production 5-minute
+	// default so a regression fails fast instead of hanging the test suite.
+	nodeA.decommissionTimeout = 2 * time.Second
+
+	req := injectAdminPrincipal(decommissionRequest("node-b"), "alice")
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		nodeA.handleClusterNodeDecommission(rec, req)
+		done <- rec
+	}()
+
+	select {
+	case rec := <-done:
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("decommission did not resolve promptly: drain-wait appears to be blocked on " +
+			"node-a's local session count instead of node-b's (target) count")
+	}
+
+	got, err := membershipStore.GetNode("node-b")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDecommissioned, got.State, "node-b must be decommissioned")
+
+	gotA, err := membershipStore.GetNode("node-a")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateActive, gotA.State, "node-a's own state must be untouched")
+}
+
+// TestNodeScopedSessionCounter_CountFailsSafeOnStoreError covers the fail-safe
+// branch of nodeScopedSessionCounter.Count (Issue #3895): when the routing store
+// cannot answer, Count must report a non-zero count.
+//
+// cluster.waitForSessionDrain reads 0 as "drained, stop waiting immediately", so
+// returning 0 on a read failure would let a store outage force-complete a
+// decommission the instant it was requested — dropping live steward sessions
+// that were never counted. Returning 1 keeps the caller in its poll loop, which
+// still force-completes at the deadline, exactly as an honestly non-zero count
+// would.
+//
+// The failure is induced against a real flat-file routing store whose durable
+// state is unparsable, not a substituted implementation.
+func TestNodeScopedSessionCounter_CountFailsSafeOnStoreError(t *testing.T) {
+	srv := setupTestServer(t)
+	routingStore := newUnreadableTestFlatFileRoutingStore(t)
+
+	_, err := routingStore.CountByNode(context.Background(), "node-b")
+	require.Error(t, err, "pre-condition: the routing store must genuinely fail its read")
+
+	counter := &nodeScopedSessionCounter{
+		ctx:          context.Background(),
+		routingStore: routingStore,
+		nodeID:       "node-b",
+		logger:       srv.logger,
+	}
+
+	assert.Equal(t, 1, counter.Count(),
+		"a routing-store read failure must yield a non-zero count, never 0 (which the "+
+			"drain-wait reads as 'already drained')")
+}
+
+// TestNodeScopedSessionCounter_CountReportsTargetNodeCount pins the success path
+// the fail-safe branch is measured against: with a readable store, Count must
+// return the target node's actual recorded session count — not a constant.
+func TestNodeScopedSessionCounter_CountReportsTargetNodeCount(t *testing.T) {
+	srv := setupTestServer(t)
+	routingStore := newTestFlatFileRoutingStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, routingStore.RecordConnection(ctx, "steward-1", "node-b"))
+	require.NoError(t, routingStore.RecordConnection(ctx, "steward-2", "node-b"))
+	require.NoError(t, routingStore.RecordConnection(ctx, "steward-3", "node-a"))
+
+	counter := &nodeScopedSessionCounter{
+		ctx:          ctx,
+		routingStore: routingStore,
+		nodeID:       "node-b",
+		logger:       srv.logger,
+	}
+
+	assert.Equal(t, 2, counter.Count(), "Count must report only the target node's sessions")
+}
+
+// TestClusterNodeDecommission_RoutingStoreErrorWaitsForTimeout is the handler-level
+// half of the Issue #3895 fail-safe: with the routing store unable to answer,
+// handleClusterNodeDecommission must fall back to poll-until-timeout rather than
+// completing immediately.
+//
+// The local registry is deliberately empty (Count() == 0): if the handler read
+// the store failure as 0 — or silently fell back to the local registry — the
+// request would return well inside the deadline. Asserting the elapsed time
+// reaches the configured timeout is what distinguishes the fail-safe from a
+// fail-open. The forced completion afterwards is by design (cluster.Decommission
+// marks the node decommissioned on timeout), so a store outage delays a
+// decommission, it never silently skips the drain.
+func TestClusterNodeDecommission_RoutingStoreErrorWaitsForTimeout(t *testing.T) {
+	membershipStore := cluster.NewInMemoryMembershipStore()
+	require.NoError(t, membershipStore.Register(cluster.NodeRecord{
+		ID:           "node-b",
+		State:        cluster.StateDraining,
+		RegisteredAt: time.Now(),
+	}))
+
+	srv := setupTestServer(t)
+	srv.SetMembershipStore(membershipStore)
+	srv.SetRoutingStore(newUnreadableTestFlatFileRoutingStore(t))
+	srv.SetRegistry(registry.NewRegistry())
+
+	const timeout = 400 * time.Millisecond
+	srv.decommissionTimeout = timeout
+
+	req := injectAdminPrincipal(decommissionRequest("node-b"), "alice")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	srv.handleClusterNodeDecommission(rec, req)
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.GreaterOrEqual(t, elapsed, timeout,
+		"an unreadable routing store must not be mistaken for a drained node: the "+
+			"drain-wait must poll until the deadline instead of returning at once")
+
+	got, err := membershipStore.GetNode("node-b")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateDecommissioned, got.State,
+		"forced decommission after the timeout is by design")
+}

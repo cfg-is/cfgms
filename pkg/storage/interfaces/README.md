@@ -43,7 +43,7 @@ pkg/storage/interfaces/
 | `command_store.go` | `CommandStore`, `CommandRecord`, `CommandStatus`, `CommandTransition` | Durable command dispatch state |
 | `dna_history_store.go` | `DNAHistoryStore` | DNA history access interface used by drift detection |
 | `batch_job_store.go` | `BatchJobStore`, `ErrBatchJobNotFound` | Fleet rolling-batch update job persistence (types in `features/controller/batchjob`) |
-| `case_store.go` | `CaseStore`, `Case`, `Ticket`, `TicketField`, `Pin`, `PinRef`, `ContentEntry` | Cockpit investigation cases: per-field-provenanced ticket, graph-reference pins, typed content entries (ADR-022 §8) |
+| `case_store.go` | `CaseStore`, `Case`, `Ticket`, `TicketField`, `Pin`, `PinRef`, `ContentEntry` | Cockpit investigation cases: per-field-provenanced ticket, graph-reference pins, typed content entries (ADR-022 §8). `Case.Version` + `CaseStore.UpdateCaseCAS` are the compare-and-swap update path (Issue #3895) — see "Compare-and-Swap Writes" below |
 
 Sentinel errors live in the sub-packages: `business.ErrNotSupported`,
 `business.ErrImmutable`, `business.ErrStewardNotFound`,
@@ -60,7 +60,7 @@ tenant, and command stores.
 
 | File | Interface(s) | Purpose |
 |------|--------------|---------|
-| `blob_store.go` | `BlobStore`, `BlobKey`, `BlobMeta`, `BlobInfo`, `BlobProvider`, registry helpers | Stream-oriented blob storage (installers, reports, DNA snapshots) |
+| `blob_store.go` | `BlobStore`, `BlobKey`, `BlobMeta`, `BlobInfo`, `BlobProvider`, registry helpers | Stream-oriented blob storage (installers, reports, DNA snapshots). `PutBlobIfAbsent` is the conditional-create write (Issue #3895) — see "Compare-and-Swap Writes" below |
 
 ### `secrets/` — Placeholder
 
@@ -220,6 +220,53 @@ Use real providers with a temporary directory:
 
 CFGMS does not mock storage interfaces in tests (per CLAUDE.md
 "Real Component Testing").
+
+## Compare-and-Swap Writes
+
+Under ADR-031 Decision 1 (any-node service), every cluster node accepts every
+read and write — there is no leadership gate serializing concurrent writers to
+the same record anymore. Several stores therefore need to guard a write against
+a lost race explicitly, rather than relying on one node's exclusive ownership.
+The established pattern, and where each variant lives:
+
+- **Optimistic version CAS** — a record carries a `Version` field, read
+  alongside the record and passed back unchanged to a CAS write method. The
+  write applies only if the store's current version still matches; a mismatch
+  reports a clean "lost the race" outcome (`ok=false`, no error), never a
+  silent overwrite.
+  - `secretsif.SecretStore.CompareAndSwapSecret` (`pkg/secrets/interfaces`) is
+    the original of this pattern; `handlers_accounts.go`'s `persistAccountCAS`
+    is the reference caller-side wrapper.
+  - `business.CaseStore.UpdateCaseCAS` (Issue #3895) mirrors it for cockpit
+    cases: `Case.Version` is populated by `CreateCase`/`GetCase`/`ListCases`,
+    and `UpdateCaseCAS(ctx, c, expectedVersion)` returns `(newVersion int, ok
+    bool, err error)`.
+- **Expected-old-value guard** — no version column; the write's `WHERE` clause
+  is guarded on the field's expected current value instead (`AND status =
+  'pending'`, `AND tenant_id = $expected`). Same lost-race contract: a
+  mismatch means zero rows affected, surfaced as the same not-found sentinel
+  the store already uses, which callers that already confirmed existence via
+  their own prior read should treat as a conflict.
+  - `business.PendingRegistrationStore.UpdateStatus`'s `claimed` transition
+    (`pkg/storage/providers/{sqlite,database}/pending_registration_store.go`)
+    established this; the `approved`/`denied` transitions extend it
+    (Issue #3895).
+  - `business.StewardStore.UpdateStewardTenant(ctx, stewardID,
+    expectedTenantID, newTenantID)` (Issue #3895) applies the same guard to
+    steward tenant moves.
+- **Conditional-create write** — no existing record to version; the write
+  itself must be atomic with the "does not exist" check, rather than a
+  separate existence read followed by an unconditional write (a TOCTOU gap).
+  - `blob.BlobStore.PutBlobIfAbsent` (Issue #3895) returns
+    `ErrBlobAlreadyExists` without writing if the key already exists at the
+    instant the provider evaluates the condition — the filesystem provider
+    uses an `O_CREATE|O_EXCL` sidecar create as the atomicity point, the S3
+    provider uses `PutObject` with `IfNoneMatch: "*"`.
+
+Pick the shape that fits the record, not a one-size-fits-all abstraction: a
+record that already has natural read-then-write callers wants version CAS: a
+transition between named states wants a value guard; a "create if it doesn't
+exist yet" write wants a conditional-create primitive.
 
 ## References
 
