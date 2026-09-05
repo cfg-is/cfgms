@@ -946,8 +946,14 @@ test_refresh_pins_discovery() {
 # here is silent everywhere that imports them — the same "unenforced until
 # something runs it" failure mode test_claude_pipeline_suites closed for the
 # .claude/scripts/tests/ suites.
+#
+# Recurses (`find`, not a flat glob) because the finder lanes (#3906-#3910)
+# live one level down in lanes/<provider>_test.py -- a flat
+# "$harness_dir"/*_test.py glob would silently never run them, which is
+# exactly the "test file exists but nothing executes it" gap this suite
+# exists to close.
 test_security_review_harness() {
-    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir)..."
+    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir, lanes/...)..."
 
     local harness_dir=".claude/scripts/security-review"
     if [[ ! -d "$harness_dir" ]]; then
@@ -955,27 +961,27 @@ test_security_review_harness() {
         return
     fi
 
-    local suite base out_file rc found=0
-    for suite in "$harness_dir"/*_test.py; do
+    local suite rel out_file rc found=0
+    while IFS= read -r suite; do
         [[ -f "$suite" ]] || continue
         found=$((found + 1))
-        base="$(basename "$suite")"
+        rel="${suite#"$harness_dir"/}"
 
         out_file=$(mktemp)
         rc=0
         python3 "$suite" >"$out_file" 2>&1 || rc=$?
 
         if [[ $rc -eq 0 ]]; then
-            log_pass "${base}: All checks passed"
+            log_pass "${rel}: All checks passed"
         else
-            log_fail "${base}: Checks failed (exit $rc)"
+            log_fail "${rel}: Checks failed (exit $rc)"
             sed 's/^/    /' "$out_file" >&2
         fi
         rm -f "$out_file"
-    done
+    done < <(find "$harness_dir" -name '*_test.py' | sort)
 
     if [[ $found -eq 0 ]]; then
-        log_fail "security-review harness: no *_test.py suites found in ${harness_dir}"
+        log_fail "security-review harness: no *_test.py suites found under ${harness_dir}"
     fi
 }
 

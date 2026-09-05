@@ -333,3 +333,92 @@ literal content: embedded newlines are escaped to `\n` and `|` is escaped to `\|
 insertion, so a forged Markdown heading or table-row sequence embedded in a finding cannot
 become a real heading or an extra table row — it stays inline text inside the cell/line it was
 written into.
+
+## The OpenAI finder lane
+
+`lanes/openai.py` (#3908) is the OpenAI half of the three v1 finder lanes. It iterates every
+step in the sweep's plan not already resolved for lane `openai-gpt56-sol`
+(`resume.py::missing_steps`), calls the OpenAI Chat Completions API with the step's full file
+contents, classifies the response, and writes the result atomically to
+`<step_id>.findings.json` (state == `complete`) or `<step_id>.status.json` (every other state).
+
+**Why this lane's classifier is not the Anthropic lane's classifier, copied.** OpenAI encodes
+refusal differently from Anthropic — there is no `stop_reason: "refusal"` field at all. A
+denylist tuned to Anthropic's `stop_reason` values would silently regress on OpenAI responses:
+exactly the silent-clean-sweep failure mode this epic exists to prevent, relocated to a
+different provider. `classify_response()` is therefore its own allowlist, default-deny function,
+built around OpenAI's actual response shape.
+
+### OpenAI-specific terminating-reason allowlist
+
+`classify_response()` reads the terminating reason — `finish_reason` for Chat Completions, or
+the Responses API's equivalent `status` field (`"completed"`/`"incomplete"` map to the
+`"stop"`/`"length"` cases below; every other status falls through to default-deny) — before
+touching any content field:
+
+| Signal | State | Notes |
+|---|---|---|
+| HTTP `429` | `parked` | Rate limit / quota exhaustion. |
+| Any other non-200 HTTP status | `failed` | Auth errors, malformed requests, etc. |
+| `finish_reason == "content_filter"` | `refused` | OpenAI's moderation layer declined the request outright. |
+| `finish_reason == "length"` | `failed` | Truncated response — an incomplete JSON payload will not parse as valid findings. |
+| `finish_reason == "stop"` and content parses as `{"findings": [...]}` | `complete` | Includes the genuinely-empty case: an explicit `"findings": []` is a valid, distinct clean result. |
+| `finish_reason == "stop"` but content does **not** parse as structured findings | `refused` | See prose-refusal case below. |
+| Any other/unrecognized `finish_reason` | `failed` | Default-deny: a future provider value never falls through to `complete`. |
+
+**The prose-refusal case.** OpenAI's moderation layer can return a refusal as **plain prose
+text with a completely normal-looking `finish_reason: "stop"`**, with no structured output at
+all — no `content_filter`, no error, nothing that a naive "check `finish_reason` only" harness
+would treat as suspicious. `classify_response()` detects this by attempting to parse the
+response as the expected structured findings shape *regardless* of `finish_reason`: a
+`"stop"`-terminated response whose content is not parseable JSON matching `{"findings": [...]}`
+(or a bare list) — prose text, an apology, a declined-request message — maps to `refused`, not
+`complete`. This is deliberately distinct from the genuinely-empty case, which also terminates
+with `"stop"` but *does* parse, to an explicit `findings: []`.
+
+Every written envelope's `stop_reason_raw` carries the exact `finish_reason` (or Responses API
+`status`) value OpenAI returned, unmodified, regardless of which state it produced — including
+when a schema-invalid finding downgrades an otherwise-`complete` classification to `failed`.
+
+### Credential contract
+
+This lane reads its API key from a file path named by an env var — never a keychain lookup,
+mount, or cleanup of its own; all of that is #3903's scope. `load_api_key()` checks, in order:
+
+1. `CFGMS_SECURITY_REVIEW_OPENAI_KEY_FILE` — the name given in this lane's originating issue.
+2. `CFGMS_SECURITY_REVIEW_CRED_FILE` — the generic, single file-path env var the launch
+   primitive #3903 actually shipped with (`agent-dispatch.sh`'s `launch-investigator` credential
+   delivery block). One investigator container runs exactly one lane, so #3903 did not
+   special-case the env var name per provider.
+
+Checking the issue-named variable first costs nothing and preserves a manual-override path;
+falling back to the variable #3903 actually sets is what makes the lane work when dispatched by
+the real launch primitive. If neither is set, or the named file cannot be read, or it is empty,
+the lane fails closed with an actionable error naming both variables rather than proceeding
+with no auth and surfacing an opaque provider 401 later.
+
+**Precondition (not a testable AC):** the credential resolved this way is expected to be a
+dedicated OpenAI project key with a hard spend cap, configured in the OpenAI dashboard before
+this lane is first dispatched. A dev agent cannot create an OpenAI project or set a spend cap,
+so this is stated here as an operational precondition for whoever dispatches the lane, not as
+code the lane can verify.
+
+### Plan-step shape (provisional, pending #3906)
+
+The metadata-only planner (#3906) has not landed yet. Per #3903's actual mount boundary, a lane
+container is bind-mounted `<sweep>/plan` (ro) and `<sweep>/lanes/<lane>` (rw) only — never the
+sweep root — so it cannot read `manifest.json`. This lane therefore expects each
+`plan/step-NNN.json` to carry `sweep_id` and `commit_sha` itself, alongside `step_id`, an
+optional human-readable `scope`, and `files` (a list of repo-relative paths). `files` entries
+are validated the same way `consolidate.py` validates a finding's `file` field — absolute or
+`../`-shaped paths are skipped and logged, never joined onto a filesystem path outside the
+checkout. When #3906 lands, whichever of the two stories lands second reconciles its shape with
+the other.
+
+### Secret scanning
+
+Gitleaks' default ruleset (`useDefault = true` in `.gitleaks.toml`) already includes an
+`openai-api-key` rule matching OpenAI's key format (`sk-`/`sk-proj-`/`sk-svcacct-`/`sk-admin-`
+followed by the fixed `T3BlbkFJ` marker). Verified locally against gitleaks v8.30.1 (the pinned
+version) with a scrubbed fixture matching the rule's pattern. No `.gitleaks.toml` change was
+needed or made for this lane.
