@@ -677,13 +677,26 @@ func TestHandleUpdateCase_NonexistentReturns404(t *testing.T) {
 // and the other loses cleanly (409) rather than being silently overwritten. Two
 // *Server instances share one durable CaseStore, modeling two cluster nodes
 // behind the same database. Run under -race.
+//
+// The two goroutines are not guaranteed to overlap. When the second request
+// reads the first one's committed write it carries the current version, so the
+// compare-and-swap is never contended and both updates legitimately return 200.
+// That is not a defect, but asserting exactly one 409 on a single unsynchronised
+// attempt failed whenever it happened — this test evicted PRs from the merge
+// queue on the macOS, Windows and Linux legs of Cross-Platform Build Validation,
+// including PRs touching neither this file nor handleUpdateCase.
+//
+// Each attempt therefore releases both goroutines from a shared barrier so they
+// enter the read-validate-write sequence together, and retries with a freshly
+// seeded case when they serialize anyway. A compare-and-swap that never yields a
+// 409 fails every attempt and still fails the test deterministically — the retry
+// filters scheduling, not regressions.
 func TestUpdateCase_ConcurrentUpdateLosesCleanly(t *testing.T) {
 	nodeA := setupCasesTestServer(t)
 	cs := nodeA.CasesStore()
 	nodeB := setupTestServer(t)
 	nodeB.SetCasesStore(cs)
 
-	c := seedCase(t, cs, "test-tenant")
 	apiKeyA := newCasesTestKey(t, nodeA, "test-tenant")
 	apiKeyB := newCasesTestKey(t, nodeB, "test-tenant")
 
@@ -704,50 +717,78 @@ func TestUpdateCase_ConcurrentUpdateLosesCleanly(t *testing.T) {
 	bytesB, err := json.Marshal(bodyB)
 	require.NoError(t, err)
 
-	var wg sync.WaitGroup
-	var recA, recB *httptest.ResponseRecorder
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesA))
-		req.Header.Set("X-API-Key", apiKeyA)
-		req.Header.Set("Content-Type", "application/json")
-		recA = httptest.NewRecorder()
-		nodeA.router.ServeHTTP(recA, req)
-	}()
-	go func() {
-		defer wg.Done()
-		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesB))
-		req.Header.Set("X-API-Key", apiKeyB)
-		req.Header.Set("Content-Type", "application/json")
-		recB = httptest.NewRecorder()
-		nodeB.router.ServeHTTP(recB, req)
-	}()
-	wg.Wait()
+	// Bounded: a contended attempt is the expected case, and a working
+	// compare-and-swap cannot serialize indefinitely. A broken one exhausts every
+	// attempt and fails below with the observed codes.
+	const maxAttempts = 50
+	var lastCodes []int
+	var lastBodyA, lastBodyB string
 
-	codes := []int{recA.Code, recB.Code}
-	successes, conflicts := 0, 0
-	for _, code := range codes {
-		switch code {
-		case http.StatusOK:
-			successes++
-		case http.StatusConflict:
-			conflicts++
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		c := seedCase(t, cs, "test-tenant")
+
+		release := make(chan struct{})
+		var wg sync.WaitGroup
+		var recA, recB *httptest.ResponseRecorder
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesA))
+			req.Header.Set("X-API-Key", apiKeyA)
+			req.Header.Set("Content-Type", "application/json")
+			recA = httptest.NewRecorder()
+			<-release
+			nodeA.router.ServeHTTP(recA, req)
+		}()
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesB))
+			req.Header.Set("X-API-Key", apiKeyB)
+			req.Header.Set("Content-Type", "application/json")
+			recB = httptest.NewRecorder()
+			<-release
+			nodeB.router.ServeHTTP(recB, req)
+		}()
+		close(release)
+		wg.Wait()
+
+		codes := []int{recA.Code, recB.Code}
+		successes, conflicts := 0, 0
+		for _, code := range codes {
+			switch code {
+			case http.StatusOK:
+				successes++
+			case http.StatusConflict:
+				conflicts++
+			}
 		}
-	}
-	assert.Equal(t, 1, successes, "exactly one concurrent update must succeed: %v (A: %s, B: %s)",
-		codes, recA.Body.String(), recB.Body.String())
-	assert.Equal(t, 1, conflicts, "exactly one concurrent update must lose the compare-and-swap (409): %v", codes)
+		lastCodes = codes
+		lastBodyA, lastBodyB = recA.Body.String(), recB.Body.String()
 
-	final, err := cs.GetCase(context.Background(), c.ID)
-	require.NoError(t, err)
-	if recA.Code == http.StatusOK {
-		assert.Equal(t, business.CaseStatusClosed, final.Status, "final state must match only the winner's write")
-		assert.Equal(t, "closed by node A", final.Ticket.Title.Value)
-	} else {
-		assert.Equal(t, business.CaseStatusOpen, final.Status, "final state must match only the winner's write")
-		assert.Equal(t, "reopened by node B", final.Ticket.Title.Value)
+		if successes == 2 {
+			// The requests serialized: the second read the first's committed version,
+			// so the compare-and-swap was never contended. Retry.
+			continue
+		}
+
+		require.Equal(t, 1, successes, "exactly one contended update must succeed: %v (A: %s, B: %s)",
+			codes, lastBodyA, lastBodyB)
+		require.Equal(t, 1, conflicts, "exactly one contended update must lose the compare-and-swap (409): %v", codes)
+
+		final, err := cs.GetCase(context.Background(), c.ID)
+		require.NoError(t, err)
+		if recA.Code == http.StatusOK {
+			assert.Equal(t, business.CaseStatusClosed, final.Status, "final state must match only the winner's write")
+			assert.Equal(t, "closed by node A", final.Ticket.Title.Value)
+		} else {
+			assert.Equal(t, business.CaseStatusOpen, final.Status, "final state must match only the winner's write")
+			assert.Equal(t, "reopened by node B", final.Ticket.Title.Value)
+		}
+		return
 	}
+
+	t.Fatalf("no contended update in %d attempts — every pair returned %v; a compare-and-swap that never yields a 409 is the Issue #3895 regression (last bodies A: %s, B: %s)",
+		maxAttempts, lastCodes, lastBodyA, lastBodyB)
 }
 
 // ── PIN helpers ─────────────────────────────────────────────────────────────
