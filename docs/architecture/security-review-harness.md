@@ -217,6 +217,25 @@ re-derive why these entries exist.
 This story (#3905) adds the allowlist entries only. It does not implement either lane's API
 client, credential handling, or dispatch wiring — that is S7/S8.
 
+## Investigator launch primitive
+
+`.claude/scripts/agent-dispatch.sh launch-investigator` (Issue #3903) is the sole way any
+lab-side code runs against this harness's sweep tree. It launches a headless container that is
+technically — not just behaviorally — prevented from writing to the repository, branching,
+committing, pushing, or opening a PR or issue. The full contract, mount boundary, and
+credential-delivery mechanics are documented at the files themselves rather than restated here:
+
+| Concern | Where it's implemented |
+|---|---|
+| Launch subcommand, mount boundary (`:ro` workspace, per-lane/plan writable output only), `--disallowedTools`, session/ledger wiring | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm and the `_investigator_*` helpers immediately above it) |
+| In-container mode dispatch (`plan` execs `claude -p`; a lane id execs that lane's own script) | `.devcontainer/scripts/investigator-entrypoint.sh` |
+| The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
+| Host-side OS-keychain credential lookup (retrieval only — never sources an env file, never exports a secret) | `scripts/load-security-review-credentials.sh` |
+| Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh`, `.claude/scripts/tests/investigator_credentials.test.sh` |
+
+This story assumes a sweep directory already exists (story S2/#3902 owns creating that tree) and
+fails closed if it does not — it never creates the sweep tree itself.
+
 ## Log injection
 
 Findings and step envelopes carry model-generated text (`title`, `evidence`, `stop_reason_raw`)
