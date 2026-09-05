@@ -38,6 +38,46 @@ func (s *blockingIPTrustStore) ListTrustedRanges(ctx context.Context, tenantID s
 	return s.IPTrustStore.ListTrustedRanges(ctx, tenantID)
 }
 
+// leaseCycleWaitBudget bounds how long a two-node lease test waits for the
+// in-flight cycle it is holding open to reach, or leave, the blocking store.
+//
+// A fixed few-second constant here bounded the wrong thing: reaching the
+// blocking call requires a goroutine switch, a flatfile lease acquire and (for
+// the IP-trust job) a SQLite tenant list, none of which have a bounded latency
+// when the whole module runs in parallel under `go test -race` — while the
+// invariant under test is mutual exclusion, not how quickly a cycle starts. So
+// the constant raced the Go scheduler rather than the code, and lost under load
+// even though the code was correct.
+//
+// Deriving the bound from the test binary's own deadline removes that race
+// without weakening any assertion: whatever contention delays the cycle, the
+// wait outlasts it, and a genuine hang — the only failure this wait can
+// legitimately report — still fails with the caller's diagnostic. The margin
+// keeps that diagnostic ahead of the binary's timeout panic, and the cap keeps
+// a hang from burning the entire remaining budget before reporting.
+func leaseCycleWaitBudget(t *testing.T) time.Duration {
+	t.Helper()
+
+	const (
+		maxWait = 60 * time.Second
+		margin  = 5 * time.Second
+		minWait = 2 * time.Second
+	)
+
+	deadline, ok := t.Deadline()
+	if !ok {
+		return maxWait
+	}
+	budget := time.Until(deadline) - margin
+	if budget > maxWait {
+		budget = maxWait
+	}
+	if budget < minWait {
+		budget = minWait
+	}
+	return budget
+}
+
 // [REQUIRED TEST] A two-node simulation proves exactly one node executes a
 // given cycle of IPTrustExpiryJob: run() delegates to LeaseJob.RunIfLeader
 // (ADR-031 Decision 4), so a second job contending for the same lease must not
@@ -88,7 +128,7 @@ func TestIPTrustExpiryJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 
 	select {
 	case <-store.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(leaseCycleWaitBudget(t)):
 		t.Fatal("node-a's cycle never started")
 	}
 
@@ -99,7 +139,7 @@ func TestIPTrustExpiryJob_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	select {
 	case ranA := <-doneA:
 		assert.True(t, ranA)
-	case <-time.After(2 * time.Second):
+	case <-time.After(leaseCycleWaitBudget(t)):
 		t.Fatal("node-a's cycle never completed")
 	}
 }
