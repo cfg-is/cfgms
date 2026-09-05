@@ -267,6 +267,85 @@ until its domain is listed there. That is deliberate — the egress set is enume
 rather than opened wholesale — and is a step in each lane story (#3906–#3908), not something the
 lane can work around at runtime.
 
+## Ollama Cloud lane
+
+`.claude/scripts/security-review/lanes/ollama.py` (Issue #3909) calls Ollama Cloud's
+OpenAI-compatible `/v1/chat/completions` endpoint for every step `resume.missing_steps()`
+reports outstanding for `lanes/ollama-qwen/`, and writes each result atomically as
+`step-NNN.findings.json` or `.status.json`.
+
+**Confirmed response shape (read 2026-09-05, from `ollama/ollama` on GitHub — `api/types.go`,
+`llm/server.go`, `openai/openai.go`, `docs/api.md`), not assumed by analogy to OpenAI:**
+
+- The terminating-reason field is `finish_reason`, inside each `choices[N]` object — the same
+  field *name* as OpenAI, but **not** the same value set. `openai/openai.go` populates it by
+  passing the engine's internal `DoneReason` straight through (remapping only `"stop"` ->
+  `"tool_calls"` when tool calls are present; this lane never requests tools).
+- Documented `DoneReason` values (`llm/server.go`): `"stop"` (normal completion), `"length"`
+  (hit the token/context limit — truncation), `""` (empty string; connection dropped
+  mid-stream).
+- **There is no `content_filter` value.** Ollama applies no OpenAI-style moderation layer, so a
+  declined/refused request still terminates with the ordinary `"stop"` value and shows up only
+  as prose in `message.content`. Assuming `finish_reason == "content_filter"` means refusal —
+  true for OpenAI — would silently never fire against Ollama Cloud, since Ollama never emits
+  that value. This is why the lane's refusal detection is parse-first, not field-value-first.
+- Error responses use `{"error": {"message", "type", "param", "code"}}` (an OpenAI-shaped error
+  envelope, even though the success-path value set is not OpenAI's). HTTP `429` is the
+  rate-limit/quota-exceeded signal for Ollama Cloud's per-plan usage caps.
+
+**Provider-side key scoping (verified 2026-09-05):** Ollama Cloud has no project-scoped key or
+per-key spend cap analogous to OpenAI's dashboard project keys — keys created at
+https://ollama.com/settings/keys are named for identification only, and usage limits are
+account-wide (subscription tier), never attached to an individual key. This lane's only safety
+net is therefore its fail-closed credential consumption and default-deny classification, not a
+provider-side scoping control.
+
+**Allowlist-based classification (default-deny):**
+
+| Observed condition | State |
+|---|---|
+| `finish_reason == "stop"` and `message.content` parses into a JSON array whose every item validates as a `schema.Finding` (empty array included) | `complete` |
+| `finish_reason == "stop"` but content does not parse into such an array (prose, a declined-request message, an apology, malformed JSON, a non-list, or a non-conforming item) | `refused` |
+| `finish_reason == "length"` | `failed` (truncated) |
+| HTTP `429` | `parked` |
+| Any other terminating value — missing, empty, `"tool_calls"`, or anything unrecognized (including a hypothetical `"content_filter"`) | `failed` |
+
+Default-deny means a step never falls through to `complete` on a value this lane does not
+explicitly recognize — if Ollama's real shape ever diverges from what is documented above,
+every step fails visibly in the coverage table instead of completing empty and looking clean.
+`stop_reason_raw` always carries the exact terminating value (or HTTP-error `type`/`message`)
+returned, unmodified.
+
+**Request-side default-deny — a step whose source was never sent is never `complete`.** The
+table above guards the response only. The same false-clean is reachable from the request: a
+request that carries no source still comes back `finish_reason == "stop"` with `[]`, which is a
+schema-valid empty finding array and would score `complete` — a green coverage row for code the
+model never saw. Because sweeps are resumable and `commit_sha` comes from `manifest.json`, a
+rebased-away, garbage-collected, or shallow-cloned commit makes every `git show
+<commit_sha>:<path>` fail and would turn the entire lane green. Two guards run before any API
+call:
+
+- `run_lane` resolves `commit_sha` once up front — shape-checked as a git object name, then
+  `git rev-parse --verify <sha>^{commit}`. An unresolvable commit raises `OllamaLaneError` and
+  the lane processes no steps and writes no envelopes.
+- `build_payload` raises `StepScopeError` if any declared scope path is unreadable at that
+  commit, or if the step resolves to no readable source at all. `run_lane` writes a `failed`
+  envelope whose `stop_reason_raw` names the offending path and does not call the API, so the
+  step shows red in the coverage table rather than clean.
+
+**Credential consumption:** this lane reads its key only from the file path named by
+`CFGMS_SECURITY_REVIEW_OLLAMA_KEY_FILE` (set by #3903's launch primitive) — no keychain lookup,
+mount, or cleanup logic of its own. An unset env var or unreadable file fails closed with an
+actionable error rather than calling the API unauthenticated.
+
+**Gitleaks (verified 2026-09-05):** gitleaks' default ruleset has no rule for Ollama or
+`ollama.com` API keys — a genuine gap, unlike OpenAI/Anthropic. However, Ollama does not
+document (and no SDK enforces) a stable, fixed literal key prefix, unlike OpenAI's
+`sk-proj-`/`sk-` or Anthropic's `sk-ant-` — generated keys are opaque tokens with no publicly
+specified format. A regex rule needs a stable anchor to avoid false-positiving on arbitrary
+opaque strings repo-wide, so `.gitleaks.toml` gains no custom rule for this lane. If Ollama
+later documents a fixed key prefix, add the rule then.
+
 ## Log injection
 
 Findings and step envelopes carry model-generated text (`title`, `evidence`, `stop_reason_raw`)
@@ -276,7 +355,9 @@ tainted content routes through `schema.py::safe_log_event`/`log_event`, which re
 JSON line via `json.dumps` — embedded newlines and control characters inside string values are
 escaped, so a payload crafted to look like a second log line stays inside its field instead of
 becoming one. `resume.py` uses this when it logs a schema-invalid `.findings.json` for human
-diagnosis.
+diagnosis; `lanes/ollama.py` uses the same formatter when a model response's parsed finding
+fails `schema.validate_finding`, so a forged log line embedded in a model-generated `title` or
+`evidence` field cannot spoof a second diagnostic record.
 
 ## Consolidation and the coverage table
 

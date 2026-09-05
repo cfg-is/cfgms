@@ -955,11 +955,14 @@ test_security_review_harness() {
         return
     fi
 
+    # Recursive (not a flat glob): per-lane suites live one level down under
+    # lanes/ (e.g. lanes/ollama_test.py, Issue #3909), and a flat
+    # "$harness_dir"/*_test.py glob would silently never run them.
     local suite base out_file rc found=0
-    for suite in "$harness_dir"/*_test.py; do
+    while IFS= read -r suite; do
         [[ -f "$suite" ]] || continue
         found=$((found + 1))
-        base="$(basename "$suite")"
+        base="${suite#"$harness_dir"/}"
 
         out_file=$(mktemp)
         rc=0
@@ -972,7 +975,7 @@ test_security_review_harness() {
             sed 's/^/    /' "$out_file" >&2
         fi
         rm -f "$out_file"
-    done
+    done < <(find "$harness_dir" -name '*_test.py' | sort)
 
     if [[ $found -eq 0 ]]; then
         log_fail "security-review harness: no *_test.py suites found in ${harness_dir}"
