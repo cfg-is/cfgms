@@ -937,6 +937,48 @@ test_refresh_pins_discovery() {
     rm -f "$out_file"
 }
 
+# Coverage suite for the security review harness core (Issue #3901): schema
+# validation, the atomic writer, the resume scanner, and fail-closed base-dir
+# resolution. Each module under .claude/scripts/security-review/ ships its own
+# <module>_test.py, hand-rolled to the discover_pins_test.py convention above
+# (stdlib only, exit 0 on all-pass). Every downstream harness story (lane
+# adapters, consolidator, orchestrator) depends on these primitives, so a gap
+# here is silent everywhere that imports them — the same "unenforced until
+# something runs it" failure mode test_claude_pipeline_suites closed for the
+# .claude/scripts/tests/ suites.
+test_security_review_harness() {
+    log_test "Testing security-review harness core (schema/atomic_write/resume/basedir)..."
+
+    local harness_dir=".claude/scripts/security-review"
+    if [[ ! -d "$harness_dir" ]]; then
+        log_fail "security-review harness: ${harness_dir} not found"
+        return
+    fi
+
+    local suite base out_file rc found=0
+    for suite in "$harness_dir"/*_test.py; do
+        [[ -f "$suite" ]] || continue
+        found=$((found + 1))
+        base="$(basename "$suite")"
+
+        out_file=$(mktemp)
+        rc=0
+        python3 "$suite" >"$out_file" 2>&1 || rc=$?
+
+        if [[ $rc -eq 0 ]]; then
+            log_pass "${base}: All checks passed"
+        else
+            log_fail "${base}: Checks failed (exit $rc)"
+            sed 's/^/    /' "$out_file" >&2
+        fi
+        rm -f "$out_file"
+    done
+
+    if [[ $found -eq 0 ]]; then
+        log_fail "security-review harness: no *_test.py suites found in ${harness_dir}"
+    fi
+}
+
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
 
 test_security_trivy_init_error() {
@@ -3838,6 +3880,8 @@ echo ""
 test_verify_nancy_ignore_scope
 echo ""
 test_refresh_pins_discovery
+echo ""
+test_security_review_harness
 echo ""
 test_security_trivy_init_error
 echo ""
