@@ -22,6 +22,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory |
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
+| `lanes/anthropic.py` | The Anthropic finder lane (Issue #3907) — see [Anthropic finder lane](#anthropic-finder-lane) below |
 
 This directory's name contains a hyphen, so it is never imported with a plain
 `import security-review` statement. A module that needs a sibling imports it the way
@@ -266,6 +267,103 @@ The allowlist covers `anthropic.com` today; a lane pointed at any other provider
 until its domain is listed there. That is deliberate — the egress set is enumerated per provider
 rather than opened wholesale — and is a step in each lane story (#3906–#3908), not something the
 lane can work around at runtime.
+
+## Anthropic finder lane
+
+`lanes/anthropic.py` (Issue #3907) is the lane directory `anthropic-opus5` names in the layout
+above. It runs inside a `launch-investigator` lane-mode container (Issue #3903) and, for every
+step `resume.py::missing_steps()` reports outstanding, calls the Anthropic Messages API with
+that step's full file contents, classifies the response, and writes the result atomically to
+`lanes/anthropic-opus5/step-NNN.findings.json` or `.status.json`.
+
+**Raw HTTP, never the `anthropic` SDK, and never the `claude` CLI.** The harness-wide
+implementation constraint above (Python 3 standard library plus bash, no new pip dependencies)
+rules out the official SDK, so this lane speaks the Messages API directly over `urllib` —
+exactly the case the general SDK-code convention itself carves out an exception for when no
+dependency is permitted. The `claude` CLI is a separate, deeper exclusion: it authenticates
+with an OAuth session and never exposes the raw `stop_reason` / `stop_details` response fields
+this lane's classifier depends on. A harness built on the CLI cannot distinguish a refusal from
+a genuine empty result at all — it would read `content[0]`, find nothing usable, and either
+crash or silently record a clean pass. That failure mode is exactly what the classifier below
+exists to prevent.
+
+**Credential.** This lane reads its API key from the file path named by the environment
+variable `CFGMS_SECURITY_REVIEW_CRED_FILE` — the actual env var
+`agent-dispatch.sh`'s `launch-investigator --cred-name ANTHROPIC_API_KEY` sets (a single
+generic file-path variable shared by every lane's credential, selected by `--cred-name` at
+launch, not a lane-specific variable name). The lane performs no keychain lookup, mount, or
+cleanup of its own — all of that is #3903's `launch-investigator` credential path; this module
+only reads a file path it is handed. If the variable is unset or the named file is unreadable
+or empty, `load_api_key()` raises and `main()` exits non-zero with an actionable message
+naming #3903 — the lane never proceeds with an unauthenticated request.
+
+*Precondition, not a testable acceptance criterion* (the same ruling applies to the OpenAI and
+Ollama Cloud lanes): the credential resolved at `CFGMS_SECURITY_REVIEW_CRED_FILE` for this lane
+is expected to be a Workspace-scoped Anthropic API key with an isolated spend/rate-limit cap,
+configured in the Anthropic console before this lane is first dispatched. A dev agent cannot
+create or configure an Anthropic Workspace, so this is stated here rather than asserted in
+code — the code's actual, testable obligation is the fail-closed behavior above.
+
+**Plan-step contract.** No planner (story S4) exists yet at the time this lane landed, so this
+story defines the minimal plan-step shape it consumes, mounted read-only at
+`/workspace-plan/step-NNN.json` by the launch primitive:
+
+```json
+{
+  "sweep_id":   "2026-09-05T0214Z-0541b9c8",
+  "commit_sha": "0541b9c8",
+  "files":      ["pkg/example/thing.go", "pkg/example/other.go"],
+  "prompt":     "optional scope note for the reviewer"
+}
+```
+
+`sweep_id` and `commit_sha` are required because a lane-mode container never sees
+`manifest.json` (`.claude/agents/investigator.md`) — they must travel with each step. `files`
+is a list of paths relative to the read-only `/workspace` checkout mount; this lane reads each
+one's full contents into the request and skips (with a logged diagnostic) any path that fails
+a traversal guard or does not resolve to a real file, rather than aborting the whole step. A
+plan step missing `sweep_id`/`commit_sha`/`files` is logged and left unresolved for the next
+resume pass — this lane cannot fabricate the sweep/commit identity a valid envelope requires.
+
+**Classifier — allowlist, default-deny.** `classify_response()` reads `stop_reason` (and, on a
+refusal, `stop_details`) from the response *before* touching `content[]`, and recognizes
+exactly two `stop_reason` values:
+
+| Condition | State |
+|---|---|
+| HTTP `429` | `parked` |
+| HTTP status other than `200`/`429`, or a network failure with no HTTP response at all | `failed` |
+| `stop_reason == "refusal"` | `refused` (see retry below) |
+| `stop_reason == "end_turn"` **and** the body parses into schema-valid findings (`schema.validate_finding`) | `complete` |
+| Everything else — `max_tokens`/length truncation, `tool_use`, `pause_turn`, an `end_turn` response with prose and no parseable JSON, or any future/unrecognized `stop_reason` string | `failed` |
+
+Because only `end_turn` and `refusal` are recognized, a new terminating reason a future
+provider update introduces is `failed` by construction, never silently `complete` — this is
+what makes the allowlist default-deny rather than a denylist that has to be kept in sync with
+every new value a provider might ship. A genuinely clean step (`stop_reason: "end_turn"`, body
+`{"findings": []}`) is `complete` with an empty findings list, distinct from `refused`, which
+never carries a findings array at all — `anthropic_test.py`'s table-driven fixture test asserts
+this distinction directly, alongside truncation and prose-with-no-structure fixtures that both
+resolve to `failed`.
+
+The lane requests the response shape via `output_config.format` (structured outputs, GA, no
+beta header) rather than prompting for JSON in free text — this reduces how often a real
+response lands in the prose-with-no-structure bucket, but the classifier treats an unparseable
+body as `failed` regardless of why, since a provider-side format regression is exactly the
+scenario default-deny exists to catch.
+
+**Refusal retry.** `call_anthropic_with_refusal_retry()` is the one place this lane retries
+within a single invocation: on `refused`, it retries exactly once with the server-side fallback
+beta (`betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"` in the request body)
+and returns whatever that second call classifies to — including `refused` again, which is then
+written and surfaced, never retried a second time in-process. `parked` and a first-pass
+`failed` are not retried in-process at all; per the four-terminal-state table above, `parked`
+retry is deferred to the *next* invocation of this lane (`resume.py` reports it outstanding
+again) and `failed` is never auto-retried.
+
+**Envelope.** Every written step envelope's `stop_reason_raw` field carries the verbatim
+`stop_reason`/`stop_details` pair from the API response, JSON-encoded so the structure survives
+unmodified — never reworded into the normalized `state` enum written alongside it.
 
 ## Log injection
 
