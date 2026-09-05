@@ -351,10 +351,11 @@ built around OpenAI's actual response shape.
 
 ### OpenAI-specific terminating-reason allowlist
 
-`classify_response()` reads the terminating reason — `finish_reason` for Chat Completions, or
-the Responses API's equivalent `status` field (`"completed"`/`"incomplete"` map to the
-`"stop"`/`"length"` cases below; every other status falls through to default-deny) — before
-touching any content field:
+`classify_response()` reads the terminating reason — `finish_reason` on the Chat Completions
+response — before touching any content field. (OpenAI's Responses API encodes this differently
+again, via a `status` field; this lane only implements Chat Completions, the API `call_openai()`
+actually calls, so `classify_response()` has no Responses-API branch to keep untested surface
+out of the classifier.)
 
 | Signal | State | Notes |
 |---|---|---|
@@ -376,9 +377,9 @@ response as the expected structured findings shape *regardless* of `finish_reaso
 `complete`. This is deliberately distinct from the genuinely-empty case, which also terminates
 with `"stop"` but *does* parse, to an explicit `findings: []`.
 
-Every written envelope's `stop_reason_raw` carries the exact `finish_reason` (or Responses API
-`status`) value OpenAI returned, unmodified, regardless of which state it produced — including
-when a schema-invalid finding downgrades an otherwise-`complete` classification to `failed`.
+Every written envelope's `stop_reason_raw` carries the exact `finish_reason` value OpenAI
+returned, unmodified, regardless of which state it produced — including when a schema-invalid
+finding downgrades an otherwise-`complete` classification to `failed`.
 
 ### Credential contract
 
@@ -409,11 +410,25 @@ The metadata-only planner (#3906) has not landed yet. Per #3903's actual mount b
 container is bind-mounted `<sweep>/plan` (ro) and `<sweep>/lanes/<lane>` (rw) only — never the
 sweep root — so it cannot read `manifest.json`. This lane therefore expects each
 `plan/step-NNN.json` to carry `sweep_id` and `commit_sha` itself, alongside `step_id`, an
-optional human-readable `scope`, and `files` (a list of repo-relative paths). `files` entries
-are validated the same way `consolidate.py` validates a finding's `file` field — absolute or
-`../`-shaped paths are skipped and logged, never joined onto a filesystem path outside the
-checkout. When #3906 lands, whichever of the two stories lands second reconciles its shape with
-the other.
+optional human-readable `scope`, and `files` (a list of repo-relative paths). When #3906 lands,
+whichever of the two stories lands second reconciles its shape with the other.
+
+`files` entries are validated in two stages, and the second stage is not optional here.
+`consolidate.py` only needs the syntactic check (absolute and `../`-shaped values rejected)
+because it never touches the filesystem with the value — it checks git-tree membership. This
+lane *does* join the value onto the read-only repo mount and open it, so the syntactic check
+alone is insufficient: a plain repo-relative name can be a symlink whose target is outside the
+checkout — `/run/cfgms/security-review-cred/<name>.key` (this lane's own provider key, mounted
+by #3903), `/proc/self/environ`, `/etc/passwd` — and the file contents go into the user message
+sent to the provider, whose endpoint is allowlisted through the container's egress firewall.
+That symlink is attacker-supplied under this harness's threat model: the PR under review can
+add it, and `files` comes from a planner that deliberately ingests untrusted repository source.
+`read_step_files()` therefore also resolves each path with `realpath` — following symlinks in
+every component, including intermediate directories — and reads it only if the resolved real
+path is a strict descendant of the resolved repo root. The read itself uses `O_NOFOLLOW` and
+rejects anything that is not a regular file, so a component swapped after the check fails
+closed rather than being followed. In-repo symlinks remain readable; escaping ones are skipped
+and logged as `unsafe_file_path_skipped`.
 
 ### Secret scanning
 
@@ -422,3 +437,20 @@ Gitleaks' default ruleset (`useDefault = true` in `.gitleaks.toml`) already incl
 followed by the fixed `T3BlbkFJ` marker). Verified locally against gitleaks v8.30.1 (the pinned
 version) with a scrubbed fixture matching the rule's pattern. No `.gitleaks.toml` change was
 needed or made for this lane.
+
+### Mount paths and standalone use
+
+Inside the container, `investigator-entrypoint.sh` execs this file for lane mode with
+`/workspace` (repo, ro), `/workspace-plan` (this sweep's `plan/`, ro), and `/workspace-out`
+(this lane's own `lanes/openai-gpt56-sol/`, rw) already bind-mounted — those three paths are
+this script's defaults. Each is overridable via an env var
+(`CFGMS_SECURITY_REVIEW_{PLAN,OUT,REPO_ROOT}_DIR`) so `run_lane()` can be exercised standalone
+against temp directories in tests, and the model id defaults to `gpt-5.6-sol`, overridable via
+`CFGMS_SECURITY_REVIEW_OPENAI_MODEL`.
+
+Only this single file is bind-mounted into the container (at
+`/usr/local/bin/investigator-lane-entrypoint.py`), so it cannot import its `schema.py` /
+`atomic_write.py` / `resume.py` siblings from its own parent directory the way it can when run
+from a checkout — `__file__` resolves to a path with no siblings at all. It falls back to
+importing them from `/workspace/.claude/scripts/security-review`, since the *whole* repository
+is separately bind-mounted read-only at `/workspace` regardless of mode.
