@@ -323,9 +323,31 @@ credential-delivery mechanics are documented at the files themselves rather than
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
 | Host-side OS-keychain credential lookup (retrieval only — never sources an env file, never exports a secret) | `scripts/load-security-review-credentials.sh` |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh`, `.claude/scripts/tests/investigator_credentials.test.sh` |
+| Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
 
 This story assumes a sweep directory already exists (story S2/#3902 owns creating that tree) and
 fails closed if it does not — it never creates the sweep tree itself.
+
+**`--harness`/`--model` (Issue #3932, epic #3927's contract C2).** The architectural correction
+in epic #3927 — model access by subscription rather than API key — needs a lane to authenticate
+as an agent harness's own session, not an OS-keychain credential file. `launch-investigator
+--harness <id> --model <id>` generalizes the plan-mode-only credential mount above: passing
+`--harness claude` mounts `~/.claude/.credentials.json` **read-only** into the container (a
+separate mount from plan mode's own, which stays exactly as it was — writable, unaffected by this
+flag) and sets three environment variables the container-side harness runner reads:
+
+| Variable | Set to |
+|---|---|
+| `CFGMS_SECURITY_REVIEW_HARNESS` | the `--harness` value (`claude` / `codex` / `opencode`) |
+| `CFGMS_SECURITY_REVIEW_MODEL` | the `--model` value |
+| `CFGMS_SECURITY_REVIEW_LANE_ID` | the `--mode` value (the lane's own directory name under `lanes/`) |
+
+Only `claude` is wired to an actual credential mount today — `codex`/`opencode` are STORY-7/8.
+An unrecognized `--harness` value still sets the three environment variables (so the roster
+mechanism below can dispatch a lane under a harness id this file does not yet know how to hand
+credentials to — including a test's own stub harness) but gets no credential mount, which is a
+deliberate no-op rather than a hard failure at this layer; a harness's own runner script is
+responsible for failing loudly if it needed a credential that never arrived.
 
 ### Egress containment
 
@@ -351,11 +373,43 @@ The entrypoint fails closed: it verifies after init that the `OUTPUT` policy is 
 without starting either mode if any of the three is not true. A missing `NET_ADMIN` capability
 surfaces as a container that exits immediately, not as one that runs with open egress.
 
-**Adding a lane means adding its provider domain** to `.devcontainer/dnsmasq-allowlist.conf`.
-The allowlist covers `anthropic.com` today; a lane pointed at any other provider gets `NXDOMAIN`
-until its domain is listed there. That is deliberate — the egress set is enumerated per provider
-rather than opened wholesale — and is a step in each lane story (#3906–#3908), not something the
-lane can work around at runtime.
+**Per-harness allowlist split (Issue #3932).** The founder chose one investigator image with the
+harness selected at launch, rather than an image per harness — credential and tool separation are
+already per-launch (`--harness`/`--model`, above), so that choice is sound on its own. But before
+this story the egress allowlist was not per-launch: `.devcontainer/init-firewall.sh` started
+dnsmasq from a single baked `/etc/dnsmasq-allowlist.conf` covering every provider, so any
+container — regardless of which harness or lane it was — could resolve every provider's domain.
+That was the one real cross-harness bleed the single-image model had, and it is what this story
+closes:
+
+- `.devcontainer/dnsmasq-allowlist-base.conf` — everything that is not a model provider (GitHub,
+  the Go toolchain, package registries, the security scanners), unchanged from before the split.
+- `.devcontainer/dnsmasq-allowlist.d/<harness>.conf` — one fragment per harness. `legacy.conf`
+  holds exactly today's full provider domain set (Anthropic + OpenAI + Ollama) and is selected
+  whenever no harness is supplied — every existing dev/review/fix agent container, plan mode's own
+  untouched invocation, and the three pre-#3932 REST finder lanes all launch this way and keep
+  resolving exactly what they resolve today. `claude.conf` holds only what the Claude Code harness
+  itself needs (`anthropic.com`, `claude.ai`, `claude.com`, `sentry.io`) and is selected when
+  `--harness claude` sets `CFGMS_SECURITY_REVIEW_HARNESS=claude`.
+- `init-firewall.sh` reads `CFGMS_SECURITY_REVIEW_HARNESS` (defaulting to `legacy`), validates it
+  against the same strict shape `launch-investigator --mode` already enforces, and loads the base
+  file plus **exactly one** fragment named by that value. An unrecognized value — a typo, or a
+  harness whose fragment doesn't exist yet (`codex`/`opencode`, STORY-7/8) — aborts the container
+  before dnsmasq ever starts: fail closed, never a fallback to loading every fragment, which would
+  silently reopen the bleed this mechanism exists to close.
+- `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file) is no longer baked
+  into the image — kept only, unbaked, as the fixed regression fixture
+  `dnsmasq-allowlist_test.sh` still exercises directly.
+
+STORY-5b retires `legacy.conf` once the REST lanes and their non-harness launches are gone, at
+which point every launch will name a real harness and the fallback stops being reachable.
+
+**Adding a lane on an existing harness** needs no new allowlist entry — it already resolves that
+harness's fragment. **Adding a new harness** means adding both a fragment file under
+`dnsmasq-allowlist.d/` and that harness's provider domain(s) to it; a harness with no fragment
+gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate — the egress set is
+enumerated per harness rather than opened wholesale — and is a step in each future harness story
+(STORY-7/8), not something a lane can work around at runtime.
 
 ## Anthropic finder lane
 
@@ -1032,3 +1086,54 @@ happened synchronously. A stub `secret-tool` satisfies the OS-keychain lookup
 orchestration logic — sequencing, per-lane independence, the resume no-op check, exit codes —
 against the real `manifest.py`/`planner.py`/`consolidate.py`/`agent-dispatch.sh` entry points,
 without a real docker daemon, real credentials, or real network access.
+
+### Roster dispatch (`CFGMS_SECURITY_REVIEW_LANES`) — available, not yet exclusive (Issue #3932)
+
+Epic #3927's contract C5 describes a `.env`-driven roster — a comma-separated list of
+`harness:model` pairs, every entry running at every step, fanned out rather than tried as a
+fallback chain. This story lands that mechanism as a **second, opt-in dispatch path** alongside
+the hardcoded three-lane path documented above; it changes no existing lane's behavior. STORY-5b
+is the story that deletes the hardcoded `LANE_IDS`/`LANE_CRED_NAMES`/`LANE_SCRIPTS` arrays and
+their REST lane adapters and makes the roster path the only one — until then, both paths exist in
+`security-review.sh` and exactly one runs per invocation:
+
+- **`CFGMS_SECURITY_REVIEW_LANES` unset** — `dispatch_all_lanes` runs precisely the loop
+  documented above: the three hardcoded REST lanes (`anthropic-opus5`, `openai-gpt56-sol`,
+  `ollama-qwen`), `--cred-name`/`--lane-entrypoint`, byte-for-byte unmodified by this story.
+- **`CFGMS_SECURITY_REVIEW_LANES` set** — `dispatch_all_lanes` delegates to
+  `dispatch_roster_lanes`, the roster-aware counterpart added by this story.
+
+**`.claude/scripts/security-review/roster.py`** is the pure-function parser: `parse_roster()`
+turns the env var's value into a list of `(harness, model, lane_dir_name)` tuples —
+`lane_dir_name` is `<harness>-<model>`, matching C5's "lane directories are named for the pair, so
+provenance is structural" rule, and is validated against the same strict lane-id shape
+`launch-investigator --mode` already enforces (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, no `..`) before the
+two halves are joined. A malformed entry — missing or doubled `:` separator, an empty half, or
+either half failing that shape — raises, and the parser produces no partial list: one bad entry
+fails the whole roster rather than silently running a subset of it. `roster_test.py` covers the
+valid and malformed cases as pure unit tests, no docker or container involved.
+
+**`dispatch_roster_lanes`** loops over the parsed tuples and calls `agent-dispatch.sh
+launch-investigator --sweep-dir <dir> --mode <lane_dir_name> --harness <harness> --model <model>
+--lane-entrypoint <entrypoint>` once per lane — `--harness`/`--model` in place of the hardcoded
+path's `--cred-name`/`--lane-entrypoint` pairing, since a roster lane authenticates as its
+harness's own subscription session (C2) rather than an OS-keychain API key. The entrypoint script
+is resolved by harness id as `<dir>/<harness>_lane.py`, where `<dir>` is
+`CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR` if set, else `lanes/` alongside `security-review.sh`
+itself. It mirrors `dispatch_all_lanes`'s own failure-propagation contract exactly (Issue #3930):
+a documented credential-unavailable skip is logged and does not fail the sweep; any other
+non-zero `launch-investigator` exit is a real failure, and `dispatch_roster_lanes` returns 1 so
+`cmd_launch`/`cmd_resume` do not report the sweep as having completed cleanly — the same property
+`security_review_cli.test.sh` already asserted for the hardcoded path, now asserted again for the
+roster path so a future edit cannot silently swallow it back.
+
+**Proven with a stub harness, not a real one.** No per-harness lane runner exists yet for the
+roster path to call — `claude_lane.py` does not exist until STORY-5b (`codex_lane.py`/
+`opencode_lane.py` are STORY-7/8). `security_review_cli.test.sh`'s roster-path test therefore
+drives the mechanism with a stub `--lane-entrypoint` script created for that test alone (harness
+id `stub`, mode `stubmodel`), pointed to via `CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR`, and
+confirms the resulting lane's envelope is picked up by the existing, unmodified consolidator —
+proving the roster-dispatch plumbing end to end without asserting anything about a real harness.
+Setting `CFGMS_SECURITY_REVIEW_LANES=claude:<model>` today dispatches through the same mechanism
+but fails closed at `launch-investigator`'s own `--lane-entrypoint` file-existence check, because
+`claude_lane.py` is not there yet — expected, and out of this story's scope to fix.
