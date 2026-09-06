@@ -59,18 +59,32 @@ The launcher and the lane agree on exactly this. Nothing else is mounted or set.
 
 | | Value |
 |---|---|
-| Lane code | `/usr/local/bin/investigator-lane-entrypoint.py` (`:ro`, single file) |
 | Repo checkout | `/workspace` (`:ro`) |
 | Writable output | the lane's own directory only — never the sweep root |
-| Credential | `CFGMS_SECURITY_REVIEW_CRED_FILE` |
+| Subscription credential | the harness's own session file, mounted as `agent-dispatch.sh:2916` already does for plan mode |
+| Harness | `CFGMS_SECURITY_REVIEW_HARNESS` — `claude` / `codex` / `opencode` |
 | Model | `CFGMS_SECURITY_REVIEW_MODEL` |
 | Lane id | `CFGMS_SECURITY_REVIEW_LANE_ID` |
 | Plan | `CFGMS_SECURITY_REVIEW_PLAN_DIR` (`:ro`) |
 | Output dir | `CFGMS_SECURITY_REVIEW_OUT_DIR` |
 
-**A lane may not compute a path from `__file__`.** Mounted at
-`/usr/local/bin/`, `Path(__file__).parent.parent` is `/usr` — which is why two of the
-three lanes fail on import today. Shared modules are imported from
+**Lanes are driven by an agent harness, not by raw HTTP.** Access to these models is
+by **subscription**, so authentication is the harness's own session — the same
+`~/.claude/.credentials.json` mount `agent-dispatch.sh:2916` already performs for plan
+mode, and its equivalent for Codex and OpenCode. An API-key path bills separately from
+the subscription and is not the intended cost model, so
+`CFGMS_SECURITY_REVIEW_CRED_FILE` and the per-provider key variables are retired for
+lanes.
+
+This is the largest correction to what was first built: all three lane adapters call
+provider REST endpoints with an API key. That is the wrong auth model, and the
+classification logic built on `stop_reason`/`finish_reason` (C3) goes with it, because a
+harness returns prose and an exit code, never a provider field.
+
+**A lane may not compute a path from `__file__`.** Any wrapper mounted outside the
+harness directory resolves its parent to the wrong place — mounted at
+`/usr/local/bin/`, `Path(__file__).parent.parent` is `/usr`, which is why two of the
+three original lanes died on import. Shared modules are imported from
 `/workspace/.claude/scripts/security-review`.
 
 **One writable directory per lane is the property that makes the union mean anything.**
@@ -87,14 +101,18 @@ a variable nothing sets fails closed and reviews nothing, silently.
 
 One table. It governs every lane; a lane does not get its own mapping.
 
+**State is derived from the artifact, not from a provider field.** A harness returns
+prose and an exit code; there is no `stop_reason` to branch on. The file-exists-and-
+validates check is therefore the only trustworthy signal, and a chatty "I did not find
+anything" with no file written is `refused` — never `complete`.
+
 | Condition | State | Retried on resume? |
 |---|---|---|
-| Findings parse and validate (empty array included) | `complete` | no |
-| Normal stop, content does not parse as findings | `refused` | once, then surfaced |
-| Documented refusal / moderation / safety decline | `refused` | once, then surfaced |
-| Rate limit, quota exhausted (HTTP 429) | `parked` | yes, next invocation |
-| Truncation / length limit | `failed` | no |
-| Auth error, transport error, unrecognized terminating value | `failed` | no |
+| `findings.json` exists and validates (empty array included) | `complete` | no |
+| Harness exits 0, no valid findings file written | `refused` | once, then surfaced |
+| Harness reports a policy decline | `refused` | once, then surfaced |
+| Harness reports rate limit or subscription quota exhausted | `parked` | yes, next invocation |
+| Harness exits non-zero for any other reason, or writes a malformed file | `failed` | no |
 
 Today the same condition — normal stop with unparseable content — is `failed` in one
 lane and `refused` in two. Since `refused` is retried and `failed` is not, identical
@@ -127,44 +145,56 @@ form, and is recorded in the envelope.
 fallback chain: every listed model reviews every step, and the union of their findings
 is the product.
 
+Each entry is a `harness:model` pair — the harness that authenticates and drives the
+model, and the model it runs.
+
 ```
 # Planner(s). One or more; each produces a plan independently (see C6).
-CFGMS_SECURITY_REVIEW_PLANNERS=<fable-id>,<sol-id>          # or <astra-id>
+CFGMS_SECURITY_REVIEW_PLANNERS=claude:<fable-id>            # or codex:<sol-id>, <harness>:<astra-id>
 
-# Investigator lanes. EVERY model listed here runs at EVERY step.
-CFGMS_SECURITY_REVIEW_LANES=<sonnet-id>,<glm-id>,<qwen-id>,<gpt-terra-id>
+# Investigator lanes. EVERY entry listed here runs at EVERY step.
+CFGMS_SECURITY_REVIEW_LANES=claude:<sonnet-id>,codex:<gpt-terra-id>,opencode:<qwen-id>,opencode:<glm-id>
 ```
 
 **Model ids are placeholders until confirmed.** The intended roster is sonnet, glm,
 qwen and gpt-terra for the lanes, and a choice among fable, Sol and Astra for the
 planner. Only two of those are presently pinned in code — `claude-fable-5-1` and
 `gpt-5.6-sol` (`lanes/openai.py`). The story that lands C5 records the exact id and
-API shape for each remaining name before wiring it; the harness must never guess a
-model id, because an unknown id fails at the provider as an opaque error rather than
-at config time.
+owning harness for each remaining name before wiring it, and must never guess: an
+unknown model id fails inside the harness as an opaque error rather than at config
+time.
 
 **"Use", not "try".** There is no failover here. A model that errors, refuses or parks
 is recorded in that state for that step and the other lanes carry on — its absence is
 never silently covered by a substitute, because a substituted model would make the
 coverage table a lie about which model reviewed what.
 
-**A lane is a model, not a provider.** Lane directories are named for the model —
-`lanes/claude-sonnet-5/`, `lanes/qwen3-cloud/` — so provenance is structural and the
-consolidator needs no lookup table.
+**A lane is a `harness:model` pair, not a provider.** Lane directories are named for
+the pair — `lanes/claude-sonnet-5/`, `lanes/opencode-qwen3-cloud/` — so provenance is
+structural and the consolidator needs no lookup table. The same model driven by two
+different harnesses is two lanes, because the harness shapes the review.
 
-**Two adapters, not one per provider.** Ollama Cloud serves OpenAI's
-`/v1/chat/completions`, so one OpenAI-compatible adapter covers both providers on a
-different base URL; Anthropic Messages is the only other API shape. Adding a model is a
-line in `.env`, not a new file. The three current adapters reimplement the same six
-concerns — credential load, HTTP POST, findings parse, envelope build, envelope write,
-step discovery — in 1,809 lines; two adapters over a shared base is roughly a third of
-that.
+**One runner per harness, not one adapter per provider.** A lane runner does three
+things: hand the harness the shared prompt (C4) and the step, wait for it to exit, then
+validate whatever landed in the output directory against C1/C3. It parses no provider
+response, because the harness owns the API call. Ollama models run under OpenCode
+specifically.
+
+That is a small wrapper per harness — `claude`, `codex`, `opencode` — and adding a
+**model** on an existing harness is a line in `.env` with no new code at all. It
+replaces the three raw-HTTP adapters, 1,809 lines of source and 1,966 of tests, which
+were written against API-key auth and provider-field classification and do not survive
+the move to subscriptions. The response-shape research inside them
+(Ollama's `DoneReason` values, OpenAI's `content_filter`) is superseded with them: the
+harness never surfaces those fields.
 
 The roster is copied into `manifest.json` at sweep creation, so a finished sweep records
 which models actually ran rather than which were configured at read time.
 
-**Cost is `len(LANES) × steps` calls per sweep.** On this repo that is ~250 steps, so
-each model added is ~250 more calls. The roster is the cost dial.
+**Load is `len(LANES) x steps` harness invocations per sweep.** On this repo that is
+~250 steps, so each lane added is ~250 more runs. Under subscriptions the binding
+constraint is the plan's rate and usage limits rather than a per-token bill, which makes
+`parked` the expected state late in a sweep and resume the normal path, not an edge case.
 
 ### C6 — Planner selection, and how plans merge
 
