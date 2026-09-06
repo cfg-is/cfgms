@@ -9,6 +9,179 @@ resume rule, and the de-duplication key rule. Every harness story (schema valida
 lane adapters, the consolidator, the orchestrator) points here instead of re-deriving these
 rules independently.
 
+## Locked contracts
+
+Four contracts were left implicit when this harness was first built across ten
+independent stories, and every one of them was resolved differently by different
+authors. The result compiled, tested green, and did nothing: the planner emitted a
+step shape no lane could read, two lanes could not import their own dependencies
+inside the container, and a third was written against a directory layout that is
+deliberately never mounted. None of that is visible from any single story.
+
+These are now decided. **A story that changes any contract below changes this section
+first, in the same PR.** They are ordered by how much damage they did.
+
+### C1 — Plan step
+
+One shape, written by the planner, read by every lane. Validated by
+`schema.validate_plan_step()` — a shared function, not a private helper on either
+side of the boundary.
+
+```json
+{
+  "step_id":     "step-007",
+  "sweep_id":    "2026-09-05T2312Z-9735bb32",
+  "commit_sha":  "9735bb32...",
+  "scope":       "pkg/storage/providers/database",
+  "description": "PostgreSQL storage provider: stores, schema migration, CAS writes",
+  "files":       ["pkg/storage/providers/database/case_store.go", "..."],
+  "planners":    ["gpt-5.6-sol", "claude-fable-5-1"]
+}
+```
+
+`sweep_id`, `commit_sha` and `files` are what the lanes need and what the planner never
+emitted. `planners` records which planners proposed the step (see C5) and is
+informational — no lane branches on it.
+
+**A step is never partially valid.** `finalize()` drops individual invalid steps and
+records them; it must not delete the whole plan because one step failed, which is the
+current behaviour and would destroy a good plan over one bad entry.
+
+**Scope boundaries are a denylist, not an allowlist.** The current four-subtree
+allowlist (`pkg/`, `features/`, `cmd/`, `web/src/`) silently excludes 31 of this repo's
+250 Go packages — `internal/`, `api/proto/`, `examples/`, `scripts/` — from ever being
+security reviewed. Any repo-relative path that resolves inside the tree is a valid
+scope; the harness excludes only what it can justify excluding.
+
+### C2 — Container contract
+
+The launcher and the lane agree on exactly this. Nothing else is mounted or set.
+
+| | Value |
+|---|---|
+| Lane code | `/usr/local/bin/investigator-lane-entrypoint.py` (`:ro`, single file) |
+| Repo checkout | `/workspace` (`:ro`) |
+| Writable output | the lane's own directory only — never the sweep root |
+| Credential | `CFGMS_SECURITY_REVIEW_CRED_FILE` |
+| Model | `CFGMS_SECURITY_REVIEW_MODEL` |
+| Lane id | `CFGMS_SECURITY_REVIEW_LANE_ID` |
+| Plan | `CFGMS_SECURITY_REVIEW_PLAN_DIR` (`:ro`) |
+| Output dir | `CFGMS_SECURITY_REVIEW_OUT_DIR` |
+
+**A lane may not compute a path from `__file__`.** Mounted at
+`/usr/local/bin/`, `Path(__file__).parent.parent` is `/usr` — which is why two of the
+three lanes fail on import today. Shared modules are imported from
+`/workspace/.claude/scripts/security-review`.
+
+**One writable directory per lane is the property that makes the union mean anything.**
+A lane that could read another lane's findings would make agreement between them
+evidence of nothing. The consolidator runs on the host, where every lane directory is
+visible, and derives provenance from the directory name.
+
+**Per-provider credential variables are retired.**
+`CFGMS_SECURITY_REVIEW_OLLAMA_KEY_FILE` and `..._OPENAI_KEY_FILE` are replaced by the
+single `CFGMS_SECURITY_REVIEW_CRED_FILE` the launcher actually sets. A lane that reads
+a variable nothing sets fails closed and reviews nothing, silently.
+
+### C3 — Terminal states
+
+One table. It governs every lane; a lane does not get its own mapping.
+
+| Condition | State | Retried on resume? |
+|---|---|---|
+| Findings parse and validate (empty array included) | `complete` | no |
+| Normal stop, content does not parse as findings | `refused` | once, then surfaced |
+| Documented refusal / moderation / safety decline | `refused` | once, then surfaced |
+| Rate limit, quota exhausted (HTTP 429) | `parked` | yes, next invocation |
+| Truncation / length limit | `failed` | no |
+| Auth error, transport error, unrecognized terminating value | `failed` | no |
+
+Today the same condition — normal stop with unparseable content — is `failed` in one
+lane and `refused` in two. Since `refused` is retried and `failed` is not, identical
+provider behaviour produces different resume semantics per lane, and the coverage
+table's columns mean different things on different rows.
+
+**`refused` retries exactly once.** The envelope carries `refusal_attempts`; `resume`
+reports a step outstanding only while that count is below 1. Nothing counts refusals
+today, so a refusing model is retried forever.
+
+**Default-deny is absolute.** An unrecognized terminating value is `failed`, never
+`complete`. A model that produced no parseable findings has not reviewed that step, and
+recording it as `complete` with zero findings is the one failure this harness exists to
+prevent.
+
+### C4 — One prompt, one output schema
+
+Every lane sends the **same** system prompt and requests the **same** output shape,
+from `lanes/prompt.py`.
+
+The premise is that different *models* find different bugs. Three lanes with three
+differently-worded prompts and two different output shapes measure prompt variance
+confounded with model variance, and the union stops being evidence about the models at
+all. A per-model deviation is permitted only where an API cannot express the shared
+form, and is recorded in the envelope.
+
+### C5 — Model roster, from `.env`
+
+`.env` lists the **exact models to run at every step**. This is a fan-out, not a
+fallback chain: every listed model reviews every step, and the union of their findings
+is the product.
+
+```
+# Planner(s). One or more; each produces a plan independently (see C6).
+CFGMS_SECURITY_REVIEW_PLANNERS=<fable-id>,<sol-id>          # or <astra-id>
+
+# Investigator lanes. EVERY model listed here runs at EVERY step.
+CFGMS_SECURITY_REVIEW_LANES=<sonnet-id>,<glm-id>,<qwen-id>,<gpt-terra-id>
+```
+
+**Model ids are placeholders until confirmed.** The intended roster is sonnet, glm,
+qwen and gpt-terra for the lanes, and a choice among fable, Sol and Astra for the
+planner. Only two of those are presently pinned in code — `claude-fable-5-1` and
+`gpt-5.6-sol` (`lanes/openai.py`). The story that lands C5 records the exact id and
+API shape for each remaining name before wiring it; the harness must never guess a
+model id, because an unknown id fails at the provider as an opaque error rather than
+at config time.
+
+**"Use", not "try".** There is no failover here. A model that errors, refuses or parks
+is recorded in that state for that step and the other lanes carry on — its absence is
+never silently covered by a substitute, because a substituted model would make the
+coverage table a lie about which model reviewed what.
+
+**A lane is a model, not a provider.** Lane directories are named for the model —
+`lanes/claude-sonnet-5/`, `lanes/qwen3-cloud/` — so provenance is structural and the
+consolidator needs no lookup table.
+
+**Two adapters, not one per provider.** Ollama Cloud serves OpenAI's
+`/v1/chat/completions`, so one OpenAI-compatible adapter covers both providers on a
+different base URL; Anthropic Messages is the only other API shape. Adding a model is a
+line in `.env`, not a new file. The three current adapters reimplement the same six
+concerns — credential load, HTTP POST, findings parse, envelope build, envelope write,
+step discovery — in 1,809 lines; two adapters over a shared base is roughly a third of
+that.
+
+The roster is copied into `manifest.json` at sweep creation, so a finished sweep records
+which models actually ran rather than which were configured at read time.
+
+**Cost is `len(LANES) × steps` calls per sweep.** On this repo that is ~250 steps, so
+each model added is ~250 more calls. The roster is the cost dial.
+
+### C6 — Planner selection, and how plans merge
+
+`CFGMS_SECURITY_REVIEW_PLANNERS` selects which model builds the plan — one entry is the
+ordinary case, and the choice is between fable, Sol and Astra.
+
+When more than one is listed, each produces a plan **independently** and the plans are
+merged by `scope`: one step per scope, `files` is the union, and `planners` records every
+planner that proposed it. Two planners naming the same package is agreement, not
+duplicated work — a scope is reviewed once per lane no matter how many planners
+proposed it, so a second planner costs one extra planning call and buys wider coverage
+of *what is worth reviewing*, never a second review of the same code.
+
+Planning reads metadata only — package names, route registrations, schema files — never
+file contents, so it is cheap relative to a sweep regardless of which model runs it.
+
+
 ## Implementation
 
 Python 3 standard library plus bash, matching the existing `.claude/scripts/` convention —
@@ -76,6 +249,10 @@ fail-closed base-dir resolver only. It does not create the sweep tree above — 
 story S2 (#3902).
 
 ## The four terminal states
+
+> **C3 above is authoritative.** This section records the shape as first built,
+> where the same condition was classified differently by different lanes. It is
+> reconciled — and this note removed — by the story that lands C3.
 
 A step is the unit of restartability. Resume is stateless: rescan the lane directory, run
 whatever `resume.py::missing_steps()` reports as outstanding. There is no separate progress
@@ -273,6 +450,10 @@ lane can work around at runtime.
 
 ## Anthropic finder lane
 
+> **Superseded in part by C1-C5 above.** The per-lane classification table and
+> system prompt below are replaced by the single table in C3 and the shared prompt
+> in C4; this section survives only until the two shared adapters land.
+
 `lanes/anthropic.py` (Issue #3907) is the lane directory `anthropic-opus5` names in the layout
 above. It runs inside a `launch-investigator` lane-mode container (Issue #3903) and, for every
 step `resume.py::missing_steps()` reports outstanding, calls the Anthropic Messages API with
@@ -369,6 +550,10 @@ again) and `failed` is never auto-retried.
 unmodified — never reworded into the normalized `state` enum written alongside it.
 
 ## Ollama Cloud lane
+
+> **Superseded in part by C1-C5 above.** Ollama Cloud is served by the shared
+> OpenAI-compatible adapter (C5) on a different base URL. The confirmed
+> response-shape research below stays; the separate adapter it describes does not.
 
 `.claude/scripts/security-review/lanes/ollama.py` (Issue #3909) calls Ollama Cloud's
 OpenAI-compatible `/v1/chat/completions` endpoint for every step `resume.missing_steps()`
@@ -635,6 +820,10 @@ written into.
 
 ## The OpenAI finder lane
 
+> **Superseded in part by C1-C5 above.** This becomes the shared
+> OpenAI-compatible adapter serving every OpenAI-shaped model in the roster,
+> including Ollama Cloud.
+
 `lanes/openai.py` (#3908) is the OpenAI half of the three v1 finder lanes. It iterates every
 step in the sweep's plan not already resolved for lane `openai-gpt56-sol`
 (`resume.py::missing_steps`), calls the OpenAI Chat Completions API with the step's full file
@@ -703,7 +892,7 @@ this lane is first dispatched. A dev agent cannot create an OpenAI project or se
 so this is stated here as an operational precondition for whoever dispatches the lane, not as
 code the lane can verify.
 
-### Plan-step shape (provisional, pending #3906)
+### Plan-step shape (superseded — see "C1 — Plan step" above)
 
 The metadata-only planner (#3906) has not landed yet. Per #3903's actual mount boundary, a lane
 container is bind-mounted `<sweep>/plan` (ro) and `<sweep>/lanes/<lane>` (rw) only — never the
