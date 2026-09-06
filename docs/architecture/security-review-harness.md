@@ -20,7 +20,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `schema.py` | `validate_finding`, `validate_step_envelope`, and the injection-safe `safe_log_event`/`log_event` log formatter |
 | `atomic_write.py` | `write_json_atomic` — temp file + `os.replace`, never a partial file visible at the final path |
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
-| `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory |
+| `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
 | `lanes/anthropic.py` | The Anthropic finder lane (Issue #3907) — see [Anthropic finder lane](#anthropic-finder-lane) below |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
