@@ -934,14 +934,37 @@ same fire-and-forget `docker run -d` semantics `planner.launch()` uses for the p
 container. Once every dispatched container has exited (`docker wait`), it runs
 `consolidate.py` and prints the path to `report/consolidated.md`.
 
+**Reap-before-relaunch (Issue #3930).** `launch-investigator`'s `docker run -d` carries no `--rm`,
+so a container's name stays taken after it exits — nothing else removes it. Before Issue #3930,
+`agent-dispatch.sh` refused to launch whenever ANY container by that name existed in ANY state, so
+once a sweep's investigator container had exited, `resume` could never dispatch that lane again:
+every retry hit the same name collision and silently no-op'd forever. The container-exists check
+is now state-aware (`_container_safe_to_reap` in `agent-dispatch.sh`, reused by
+`launch-investigator`'s own container-conflict gate): a container whose `docker ps` `.State` is
+exactly `exited` is removed and the launch proceeds; a container that is `running`, `restarting`,
+or `created` — or in any state this script cannot positively identify as `exited` — is refused
+exactly as before, never reaped, never raced.
+
 **Each lane's dispatch is independent (AC6).** The three `launch-investigator` calls are made in
-a loop; a lane that fails to dispatch at all (credential unavailable, a stale container name
-collision) is logged and skipped — it never stops the loop from dispatching the remaining lanes,
-and never prevents the consolidator from running afterward against whatever the other lanes
-produced. A lane whose container exits having `parked`, `refused`, or `failed` some or all of its
-steps is not a dispatch failure at all from this script's point of view — the container still
-exited normally, `docker wait` still returns, and the consolidator still renders that lane's real
-coverage in the table (see [Consolidation and the coverage table](#consolidation-and-the-coverage-table)).
+a loop; a lane that fails to dispatch for a documented, non-fatal reason — credentials not yet
+provisioned (`LAUNCH_FAILED:...:credential_unavailable` from the lane-mode credential loader, or
+`DISPATCH_DEFERRED:creds_missing:...` from the plan-mode credential gate) — is logged and skipped;
+it never stops the loop from dispatching the remaining lanes, and never prevents the consolidator
+from running afterward against whatever the other lanes produced. A lane whose container exits
+having `parked`, `refused`, or `failed` some or all of its steps is not a dispatch failure at all
+from this script's point of view — the container still exited normally, `docker wait` still
+returns, and the consolidator still renders that lane's real coverage in the table (see
+[Consolidation and the coverage table](#consolidation-and-the-coverage-table)).
+
+**A non-skip dispatch failure is not swallowed (Issue #3930).** A `launch-investigator` non-zero
+exit that is *not* one of the two documented credential-unavailable skips above — a stale
+container that could not be reaped, a container-name collision with a still-running container, or
+any other failure — is a real problem, not an expected transient state. `dispatch_planner` and
+`dispatch_all_lanes` both distinguish the two cases (`_is_intentional_dispatch_skip`, matched
+against the failed call's own output) and report a real failure to their caller. `cmd_launch` and
+`cmd_resume` still let every other lane dispatch and still run the consolidator against whatever
+did succeed, but they exit non-zero and never print the bare `report/consolidated.md` path — the
+line that means "this sweep completed cleanly" — for a sweep that had a real dispatch failure.
 
 **`resume <sweep-id>`.** Requires the sweep to already exist (`manifest.json` present) — unlike
 `launch`, it never creates a sweep tree. Re-invokes the planner only if `plan/` is not already
@@ -968,13 +991,17 @@ is left exactly as it was.
 if the sweep base directory cannot be resolved (`basedir.py::resolve_base_dir()`'s fail-closed
 guard — an in-repo path, an unwritable directory, or an undetectable repository root) — the same
 principle #3901 established at the base-dir layer, applied here at the top-level command a human
-actually runs. Every other failure inside `launch`/`resume` (a planner prepare/launch/finalize
-failure, a single lane's dispatch failure) is logged to stderr and treated as non-fatal to the
-overall command: the remaining work still runs, and the consolidator still produces a report that
-visibly reflects whatever happened, rather than the whole command aborting on a partial failure
-that a rerun would recover from anyway. The one exception is the consolidator itself failing to
-run at all (only possible if the repository root cannot be determined) — `launch`/`resume` exit
-non-zero in that case rather than reporting success for a sweep that produced no report.
+actually runs. A planner `prepare`/`finalize` failure is still logged to stderr and treated as
+non-fatal (a broken plan just leaves the lanes with zero outstanding steps, and the consolidator
+still renders that visibly). A planner `launch` failure or a lane's `launch-investigator` dispatch
+failure (Issue #3930) is only non-fatal when it is one of the two documented credential-unavailable
+skips; any other failure — a stale container that could not be reaped, a container-name collision
+with a still-running container, or anything else `launch-investigator` can fail on — still lets
+every other lane dispatch and the consolidator still run against whatever succeeded, but
+`launch`/`resume` exit non-zero and never print the bare `report/consolidated.md` success line for
+that sweep. The consolidator itself failing to run at all (only possible if the repository root
+cannot be determined) is the other non-zero case — `launch`/`resume` exit non-zero rather than
+reporting success for a sweep that produced no report.
 
 **Container lifecycle is short-lived and per-invocation, not one long-running process per
 lane.** Each `launch`/`resume` call dispatches a lane's container for one pass over its
