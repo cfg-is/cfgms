@@ -22,6 +22,8 @@ primitives live in `.claude/scripts/security-review/`:
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
+| `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
+| `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
 | `lanes/anthropic.py` | The Anthropic finder lane (Issue #3907) — see [Anthropic finder lane](#anthropic-finder-lane) below |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output |
@@ -138,6 +140,52 @@ inconsistency. **Default-deny is absolute:** any outcome that does not affirmati
 findings file is `complete` only if it parses to a JSON object with a `findings` list (which may
 be empty) whose every entry independently passes `schema.validate_finding()` — one schema-invalid
 finding among otherwise-valid ones fails the whole file, it is never silently dropped.
+
+### Shared harness lane-runner library (C4 and refusal-retry-once)
+
+`lanes/harness_runner.py` (Issue #3931) is the shared module every future per-harness lane
+runner (`claude_lane.py`, `codex_lane.py`, `opencode_lane.py` — STORY-5b/7/8) calls into. It
+implements two of the epic's contracts on top of `lanes/terminal_state.py::classify()` (C3)
+and leaves `resume.py` itself untouched, per the epic's non-goals.
+
+**C4 — one shared system prompt, one shared output-schema description.** `SYSTEM_PROMPT` and
+`OUTPUT_SCHEMA_DESCRIPTION` are each defined exactly once, in this module, and nowhere else.
+This becomes the sole surviving definition once STORY-5b deletes the three REST lanes that
+each carried their own, differently-worded prompt (`anthropic.py:126`, `openai.py:118`,
+`ollama.py:139`) — finding 10's point that divergent prompts confound any comparison between
+what different *models* find, since the divergence could just as well be prompt variance. A
+per-harness deviation — e.g. how a given harness is told where to write its output file — is
+layered around these two constants by that harness's own runner script and recorded in the
+envelope; it is never a second copy of the shared text.
+
+**Refusal-retry-once bookkeeping (finding 9).** `resume.py`'s own docstring (`resume.py:19-22`)
+already assigns this exact concern elsewhere: *"distinguishing a first-refusal-retry from a
+second-refusal-surface is a lane-side concern... this module only reports 'still needs
+work'."* Nothing implemented that lane-side concern before this story — `resume.py::missing_steps`
+returns every non-`complete`/non-`failed` status as outstanding forever, so a `refused` step
+retried without bound. `harness_runner.py` is that lane-side concern, implemented once and
+shared, instead of copied into three future lane runners or never implemented at all:
+
+- `refusal_decision(refusal_attempts)` is the pure decision: `RETRY` the first time a step
+  classifies `refused` (`refusal_attempts == 0`), `SURFACE` every time after — never a third
+  retry.
+- Every envelope this module builds carries an integer `refusal_attempts` field.
+  `schema.py::validate_step_envelope` does not reject unknown fields (the same tolerance it
+  already extends to a caller-supplied line-number field on a finding), so this required no
+  change to `schema.py`.
+- `read_refusal_attempts()` is the only source of that count, and it always re-reads whatever
+  envelope a step's previous attempt actually wrote to disk — this module keeps no in-memory
+  record of a step's refusal history between calls, matching `resume.py`'s own statelessness.
+  The count therefore survives a process restart, a container being relaunched, or a
+  completely different process running the retry.
+- `apply_refusal_policy()` ties classification to bookkeeping: on a step's first `refused`
+  classification it writes the envelope back with `state` still `refused` (so
+  `resume.missing_steps` retries it on that lane's *next* invocation — this module never
+  retries in-process) and `refusal_attempts` bumped to `1`. A second consecutive `refused`
+  classification for the same step is written `failed` instead — a state `resume.missing_steps`
+  never retries — carrying `refusal_attempts=2`, so "surfaced" means surfaced: no third retry,
+  ever, and the envelope itself records how it got there. Every other classification
+  (`complete`, `parked`, a first-pass `failed`) passes `refusal_attempts` through unchanged.
 
 ## Writes are atomic
 
