@@ -101,6 +101,44 @@ second-refusal-surface is a lane-side concern (only the lane knows its own fallb
 policy) — `resume.py` only reports "still needs work". A `failed` step is deliberately never
 returned as missing: it is surfaced to a human, never auto-retried, per the table above.
 
+### The shared terminal-state classifier (epic #3927's contract C3)
+
+`lanes/terminal_state.py::classify()` (Issue #3928) is a shared classifier every future lane
+runner calls to derive one of the four states above — landed ahead of any lane that uses it,
+because the architectural correction this epic makes is that a lane runs under a subscription
+agent harness (`claude`, `codex`, `opencode`), not a REST API call with a provider-specific
+`stop_reason`/`finish_reason` field to read. A harness returns prose and an exit code; state is
+derived **purely from the artifact** a harness process leaves behind, never a provider-specific
+field:
+
+| Condition | State | Retried on resume? |
+|---|---|---|
+| `findings.json` exists and validates (empty array included) | `complete` | no |
+| Harness exits 0, no valid findings file written | `refused` | once, then surfaced |
+| Harness reports a policy decline | `refused` | once, then surfaced |
+| Harness reports rate limit or subscription quota exhausted | `parked` | yes, next invocation |
+| Harness exits non-zero otherwise, or writes a malformed file | `failed` | no |
+
+`classify(exit_code, findings_path, rate_limited=False)` takes exactly those two artifacts plus
+one explicit signal: `rate_limited` is passed in by the caller (a lane runner recognizing its own
+harness's rate-limit/quota condition), never sniffed out of prose text by this module itself —
+keeping the classifier's own contract to "exit code plus findings-file artifact," not a growing
+pile of per-harness text matching. A "policy decline" collapses into the same `refused` bucket as
+"exits 0, no valid findings file": both are the harness exiting cleanly without producing
+reviewable output, and the classifier cannot, and does not try to, distinguish *why* from the
+exit code and output file alone.
+
+Landing this module before any lane migrates to the harness model is deliberate: today's three
+REST lanes (`anthropic.py`, `openai.py`, `ollama.py`, still unmigrated as of this story) already
+classify the same "exits cleanly with no parseable output" condition inconsistently —
+`anthropic.py` calls it `failed`, the other two call it `refused` — and any later story that
+touches per-lane state logic now builds on this one classifier instead of reimplementing the
+inconsistency. **Default-deny is absolute:** any outcome that does not affirmatively match the
+`complete` case falls through to `failed` unless `rate_limited` is set — never `complete`. A
+findings file is `complete` only if it parses to a JSON object with a `findings` list (which may
+be empty) whose every entry independently passes `schema.validate_finding()` — one schema-invalid
+finding among otherwise-valid ones fails the whole file, it is never silently dropped.
+
 ## Writes are atomic
 
 Every artifact under the sweep tree is written via `atomic_write.py::write_json_atomic()`:
@@ -524,22 +562,26 @@ only — `Write` was never available, independent of the container's `--disallow
 to `/workspace-out/step-NNN.json`, the container's only writable mount in plan mode (bind-mounted
 at `<sweep_dir>/plan`).
 
-**Bounded scope.** Every step's `scope` must resolve to exactly one top-level `pkg/<name>`,
-`features/<name>`, `cmd/<name>`, or `web/src/<name>` subtree — never a scope spanning two
-different top-level directories, and never a scope spanning two different second-level
-directories under the same one. `planner.validate_step()` enforces this mechanically over
-whatever the model actually writes; the default heuristic (one step per Go package) is prompt
-guidance only; the model may combine small packages or split a large area into more than one
-step, but a scope that violates the bounded-scope rule fails validation regardless.
+**Bounded scope.** Every step's `scope` must resolve to exactly one top-level subtree — never a
+scope spanning two different top-level directories, and never a scope spanning two different
+second-level directories under the same one. `planner.validate_step()` enforces this
+mechanically over whatever the model actually writes; the default heuristic (one step per Go
+package) is prompt guidance only; the model may combine small packages or split a large area
+into more than one step, but a scope that violates the bounded-scope rule fails validation
+regardless. As of Issue #3928, this is a **denylist**, not an allowlist of four named subtrees —
+see [Plan-step shape](#plan-step-shape) below for the full rule and why the old allowlist was a
+defect, not a simplification.
 
-**Schema-invalid or empty output is a planning failure, not a silent empty plan.**
-`planner.finalize(sweep_dir)` scans `plan/` for `step-*.json` files after the container exits and
-validates each one. If there are zero step files, or *any* file fails to parse as JSON or fails
-schema/bounded-scope validation, `finalize()` removes every `step-*.json` file that was produced
-— including ones that were individually valid — and writes `plan/PLANNING_FAILED` instead. A
-sweep never ends up with a partial plan sitting next to the failure marker, and an empty `plan/`
-directory is never mistaken for "nothing to review": either `plan/` holds a fully valid,
-non-empty set of step files, or it holds `PLANNING_FAILED`, never a mix and never neither.
+**Schema-invalid output excludes only the invalid step, never the whole plan; zero valid steps
+is still a planning failure.** `planner.finalize(sweep_dir)` scans `plan/` for `step-*.json`
+files after the container exits, injects each step's authoritative `sweep_id`/`commit_sha`/
+`planners` (see [Plan-step shape](#plan-step-shape)), and validates the result. A step that
+fails to parse as JSON or fails schema/bounded-scope validation is removed and its error is
+recorded — every other, independently valid step file is left in place. Only when *zero* steps
+survive does `finalize()` write `plan/PLANNING_FAILED` instead: an empty `plan/` directory must
+never be mistaken for "nothing to review," but one bad step must never take the good ones down
+with it either. Before Issue #3928, *any* single invalid step deleted every step file that had
+been produced, including the independently valid ones.
 
 **Launch mechanics.** `planner.launch(sweep_dir)` is the only thing in this story that starts a
 container, and it does so through nothing but `agent-dispatch.sh launch-investigator --sweep-dir
@@ -703,14 +745,82 @@ this lane is first dispatched. A dev agent cannot create an OpenAI project or se
 so this is stated here as an operational precondition for whoever dispatches the lane, not as
 code the lane can verify.
 
-### Plan-step shape (provisional, pending #3906)
+### Plan-step shape
 
-The metadata-only planner (#3906) has not landed yet. Per #3903's actual mount boundary, a lane
-container is bind-mounted `<sweep>/plan` (ro) and `<sweep>/lanes/<lane>` (rw) only — never the
-sweep root — so it cannot read `manifest.json`. This lane therefore expects each
-`plan/step-NNN.json` to carry `sweep_id` and `commit_sha` itself, alongside `step_id`, an
-optional human-readable `scope`, and `files` (a list of repo-relative paths). When #3906 lands,
-whichever of the two stories lands second reconciles its shape with the other.
+The plan-step shape is defined once, by `schema.py::validate_plan_step()` (Issue #3928, epic
+#3927's contract C1), and every lane reads that one shape — never a private per-lane
+understanding of what a step file contains. `planner.py` (#3906) writes it; every lane, present
+or future, reads it. Before this story, the planner emitted `{step_id, scope, description}`
+while this lane (and the Anthropic lane) each independently demanded `sweep_id`/`commit_sha`/
+`files` and silently `continue`d past any step that lacked them — zero API calls, zero files
+written, and nothing about that gap visible from inside either side of the contract. That is
+exactly the failure this shared schema exists to close.
+
+```json
+{
+  "step_id":     "step-007",
+  "sweep_id":    "2026-09-05T2312Z-9735bb32",
+  "commit_sha":  "9735bb32...",
+  "scope":       "pkg/storage/providers/database",
+  "description": "PostgreSQL storage provider: stores, schema migration, CAS writes",
+  "files":       ["pkg/storage/providers/database/case_store.go"],
+  "planners":    ["<planner-id>"]
+}
+```
+
+All seven fields are required. `step_id`/`sweep_id`/`commit_sha`/`description` are non-empty
+strings; `scope` is a non-empty string or a non-empty list of non-empty strings; `files` is a
+list of non-empty strings (may be empty); `planners` is a non-empty list of non-empty strings
+(C6's multi-planner merge — out of scope for this story — is what gives `planners` more than one
+entry; today's single planner always writes exactly one).
+
+**`sweep_id`/`commit_sha`/`planners` are never sourced from the model.** `planner.py`'s prompt
+never asks the model writing `step-NNN.json` for these three fields at all — a model is not a
+trustworthy source for a sweep's own identity. Instead, `planner.prepare()` (which already
+receives `commit_sha` and derives `sweep_id` from the sweep directory name) writes both to a
+`<sweep_dir>/.plan-context.json` sidecar, and `planner.finalize()` injects `sweep_id`/`commit_sha`
+from that sidecar plus a fixed `planners` value onto every step before validating it — discarding
+whatever a step file already contained for those three fields, unconditionally. `scope`,
+`description`, and `files` remain the model's own output: the model has `Glob` (but not `Read`)
+in plan mode specifically so it can enumerate a scope's files by name, listed under `files`,
+without reading any file's contents.
+
+**The sidecar lives in the sweep root, not in `plan/`, and its absence fails the plan closed.**
+Both properties are load-bearing, and neither is cosmetic. `agent-dispatch.sh
+launch-investigator --mode plan` bind-mounts `<sweep_dir>/plan` as `/workspace-out:rw` into a
+container running `claude --dangerously-skip-permissions` with `Bash` — so a sidecar written
+under `plan/` would sit inside the writable mount of the exact entity it exists to distrust,
+where it could be overwritten with an attacker-chosen `sweep_id`/`commit_sha` or simply deleted.
+The sweep root is bind-mounted into no container (`agent-dispatch.sh`: "Mount plan/lane subpaths
+only — never the sweep root"), which is what makes it usable as this control's root of trust.
+And when step files exist but the sidecar is missing or malformed, `finalize()` excludes every
+step and writes `plan/PLANNING_FAILED` rather than falling back to the step's own values: a
+fallback would mean one `rm` inside the container downgrades the whole control to trusting
+model-written identity, validated only for "non-empty string" shape.
+
+**Scope boundaries are a denylist, not an allowlist.** `planner._scope_boundary()` used to
+recognize exactly four top-level subtrees (`pkg/`, `features/`, `cmd/`, `web/src/`) and reject
+every other path outright — silently marking real, reviewable Go packages under `internal/`,
+`api/proto/`, `examples/`, and `scripts/` (among others) as invalid scopes. Now, any
+repo-relative path that resolves inside the repository tree is a valid scope boundary unless it
+is absolute, escapes the tree via `../`, or falls under an explicitly excluded top-level
+directory (currently just `.git/`, which is repository plumbing, never reviewable source). A
+step's scope must still resolve to exactly one such boundary — never a scope spanning two
+different top-level directories, and never a scope spanning two different second-level
+directories under the same top-level one — but the harness excludes only what it can justify
+excluding, not everything it doesn't already know about.
+
+**`finalize()` drops individual invalid steps and records them — it never deletes the whole
+plan because one step failed.** Each `step-NNN.json` is validated independently; a step that
+fails validation is removed and its errors are logged (`invalid_plan_step`, via
+`schema.log_event`/`safe_log_event`, matching every other diagnostic in this package), while
+every other, independently valid step file is left exactly where it was. Only when *zero* steps
+survive validation does `finalize()` write `plan/PLANNING_FAILED` — an empty `plan/` must never
+be mistaken for "nothing to review" rather than "planning broke," but one bad step among several
+good ones must never take the good ones down with it. Before this story, *any* single invalid
+step deleted every step file that had been produced, including the independently valid ones —
+one step scoped to `internal/controller` (a directory the old allowlist rejected) could silently
+wipe an entire sweep's plan.
 
 `files` entries are validated in two stages, and the second stage is not optional here.
 `consolidate.py` only needs the syntactic check (absolute and `../`-shaped values rejected)
