@@ -24,7 +24,8 @@ primitives live in `.claude/scripts/security-review/`:
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
 | `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
 | `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
-| `lanes/anthropic.py` | The Anthropic finder lane (Issue #3907) — see [Anthropic finder lane](#anthropic-finder-lane) below |
+| `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
+| `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output |
 | `security-review.sh` | The operator-facing `launch`/`status`/`resume` CLI (Issue #3910) — see [Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below. Lives in `.claude/scripts/`, one level up from this directory, alongside `agent-dispatch.sh` |
@@ -50,14 +51,11 @@ All sweep state lives outside the repository, under a base directory resolved by
       step-002.json
       ...
     lanes/
-      anthropic-opus5/
+      claude-sonnet-5/
         step-001.findings.json         terminal: step complete and validated
         step-002.status.json           non-terminal: parked | refused | failed
         ...
-      openai-gpt56-sol/
-        step-001.findings.json
-        ...
-      ollama-qwen/
+      claude-opus-5/
         step-001.findings.json
         ...
     report/
@@ -70,8 +68,8 @@ sweep to the exact commit it reviewed — findings are only meaningful against t
 were produced from, and `develop` moves several times an hour.
 
 **Naming is deterministic and self-describing.** From any path you can read the sweep, the
-lane (lab + model), and the step — `lanes/openai-gpt56-sol/step-007.findings.json` needs no
-index to interpret.
+lane (harness + model — `roster.py`'s `<harness>-<model>` convention, Issue #3932), and the
+step — `lanes/claude-sonnet-5/step-007.findings.json` needs no index to interpret.
 
 This story (#3901) defines the schema, the atomic writer, the resume scanner, and the
 fail-closed base-dir resolver only. It does not create the sweep tree above — that is
@@ -130,12 +128,13 @@ pile of per-harness text matching. A "policy decline" collapses into the same `r
 reviewable output, and the classifier cannot, and does not try to, distinguish *why* from the
 exit code and output file alone.
 
-Landing this module before any lane migrates to the harness model is deliberate: today's three
-REST lanes (`anthropic.py`, `openai.py`, `ollama.py`, still unmigrated as of this story) already
-classify the same "exits cleanly with no parseable output" condition inconsistently —
-`anthropic.py` calls it `failed`, the other two call it `refused` — and any later story that
-touches per-lane state logic now builds on this one classifier instead of reimplementing the
-inconsistency. **Default-deny is absolute:** any outcome that does not affirmatively match the
+This module landed before any lane migrated to the harness model, deliberately: the three REST
+lanes it superseded (`anthropic.py`, `openai.py`, `ollama.py` — deleted by Issue #3933's
+switchover cutover, once the sole harness lane, `claude_lane.py`, was proven working) classified
+the same "exits cleanly with no parseable output" condition inconsistently — `anthropic.py` called
+it `failed`, the other two called it `refused`. `claude_lane.py` and every future harness lane
+build on this one classifier instead of reimplementing that inconsistency. **Default-deny is
+absolute:** any outcome that does not affirmatively match the
 `complete` case falls through to `failed` unless `rate_limited` is set — never `complete`. A
 findings file is `complete` only if it parses to a JSON object with a `findings` list (which may
 be empty) whose every entry independently passes `schema.validate_finding()` — one schema-invalid
@@ -143,15 +142,15 @@ finding among otherwise-valid ones fails the whole file, it is never silently dr
 
 ### Shared harness lane-runner library (C4 and refusal-retry-once)
 
-`lanes/harness_runner.py` (Issue #3931) is the shared module every future per-harness lane
-runner (`claude_lane.py`, `codex_lane.py`, `opencode_lane.py` — STORY-5b/7/8) calls into. It
+`lanes/harness_runner.py` (Issue #3931) is the shared module every per-harness lane runner
+(`claude_lane.py` — Issue #3933; `codex_lane.py`/`opencode_lane.py` — STORY-7/8) calls into. It
 implements two of the epic's contracts on top of `lanes/terminal_state.py::classify()` (C3)
 and leaves `resume.py` itself untouched, per the epic's non-goals.
 
 **C4 — one shared system prompt, one shared output-schema description.** `SYSTEM_PROMPT` and
 `OUTPUT_SCHEMA_DESCRIPTION` are each defined exactly once, in this module, and nowhere else.
-This becomes the sole surviving definition once STORY-5b deletes the three REST lanes that
-each carried their own, differently-worded prompt (`anthropic.py:126`, `openai.py:118`,
+This is now the sole surviving definition: Issue #3933 deleted the three REST lanes that each
+carried their own, differently-worded prompt (`anthropic.py:126`, `openai.py:118`,
 `ollama.py:139`) — finding 10's point that divergent prompts confound any comparison between
 what different *models* find, since the divergence could just as well be prompt variance. A
 per-harness deviation — e.g. how a given harness is told where to write its output file — is
@@ -206,7 +205,7 @@ Every lane emits the same shape (`schema.py::validate_finding`):
 {
   "sweep_id":      "2026-09-05T0214Z-0541b9c8",
   "commit_sha":    "0541b9c8",
-  "lane":          "anthropic-opus5",
+  "lane":          "claude-sonnet-5",
   "step_id":       "step-007",
   "file":          "pkg/example/thing.go",
   "symbol":        "Thing.DoSomething",
@@ -240,7 +239,7 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
 {
   "sweep_id":        "2026-09-05T0214Z-0541b9c8",
   "commit_sha":      "0541b9c8",
-  "lane":            "anthropic-opus5",
+  "lane":            "claude-sonnet-5",
   "step_id":         "step-007",
   "state":           "<complete|parked|refused|failed>",
   "model_id":        "claude-opus-5",
@@ -257,12 +256,13 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
 - For every other state: `stop_reason_raw` is required and must be non-empty. `findings` is
   not read.
 
-`stop_reason_raw` is recorded **verbatim** — whatever the provider actually returned, unmodified
-— so a new refusal encoding after a provider update is diagnosable from the recorded envelope
-rather than lost to a normalized enum. This module defines the envelope shape only; each lane
-decides how it populates `stop_reason_raw` from its own provider's response shape (Anthropic
-`stop_reason`, OpenAI `finish_reason`, or another provider's equivalent field) — that mapping,
-and refusal detection itself, are lane stories (#3906–#3908), not this one.
+`stop_reason_raw` is recorded **verbatim** — whatever diagnostic the lane actually derived,
+unmodified — so a new failure mode is diagnosable from the recorded envelope rather than lost to
+a normalized enum. This module defines the envelope shape only; each lane decides how it
+populates `stop_reason_raw` from its own harness's artifact (`claude_lane.py` records e.g.
+`no_valid_findings_file`, `invalid_findings_schema`, or `harness_exit_<code>` — see
+[The Claude harness lane](#the-claude-harness-lane)) — that mapping is a lane concern, not this
+one.
 
 ## Fail-closed base directory
 
@@ -287,25 +287,14 @@ There is no working-directory fallback and no `./` default. This is the actual c
 `.gitignore` entry is belt-and-braces only, since a root-anchored entry would not catch a
 sweep tree written to an unexpected in-repo path.
 
-## Egress allowlist (OpenAI + Ollama Cloud)
+## Egress allowlist
 
-The OpenAI and Ollama Cloud finder lanes (Stories S7/S8) need outbound access to their
-provider APIs from inside the agent container. `.devcontainer/dnsmasq-allowlist.conf` adds
-two entries at the tightest label each provider's own documentation supports:
-
-| Destination | Entry | Why this label |
-|---|---|---|
-| OpenAI | `server=/api.openai.com/9.9.9.9` | API traffic is served from a dedicated subdomain, distinct from the marketing site — the apex `openai.com` is not needed. |
-| Ollama Cloud | `server=/ollama.com/9.9.9.9` | Ollama's cloud API (both the native `/api` and OpenAI-compatible `/v1` paths) is served from the bare apex — there is no dedicated API subdomain to narrow to, so the apex is already the tightest label available. |
-
-**Consequence:** repository source content (the finder lane's review payload) and
-vulnerability-finding content (the model's response) both transit these two destinations once
-S7/S8 land. This is an accepted consequence of the epic's locked "all three lanes in v1"
-decision (#3900) — written down here so a future reader auditing egress does not have to
-re-derive why these entries exist.
-
-This story (#3905) adds the allowlist entries only. It does not implement either lane's API
-client, credential handling, or dispatch wiring — that is S7/S8.
+The v1 OpenAI and Ollama Cloud REST finder lanes once needed `api.openai.com`/`ollama.com`
+outbound access from inside the agent container. Issue #3933's switchover cutover deleted both
+lanes along with those two allowlist entries — from the base file and from every per-harness
+fragment — since nothing in the harness calls either provider anymore. See
+[Per-harness egress isolation](#egress-containment) below for the allowlist mechanism the Claude
+harness lane (and any future harness lane) actually runs behind today.
 
 ## Investigator launch primitive
 
@@ -317,24 +306,35 @@ credential-delivery mechanics are documented at the files themselves rather than
 
 | Concern | Where it's implemented |
 |---|---|
-| Launch subcommand, mount boundary (`:ro` workspace, per-lane/plan writable output only), `--disallowedTools`, `--cap-add NET_ADMIN`, session/ledger wiring | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm and the `_investigator_*` helpers immediately above it) |
+| Launch subcommand, mount boundary (`:ro` workspace, per-lane/plan writable output only), `--disallowedTools`, `--cap-add NET_ADMIN`, session/ledger wiring | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | In-container mode dispatch (`plan` execs `claude -p`; a lane id execs that lane's own script) and the egress-firewall init that precedes both | `.devcontainer/scripts/investigator-entrypoint.sh` |
-| Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist.conf` |
+| Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist-base.conf` + `.devcontainer/dnsmasq-allowlist.d/` |
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
-| Host-side OS-keychain credential lookup (retrieval only — never sources an env file, never exports a secret) | `scripts/load-security-review-credentials.sh` |
-| Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh`, `.claude/scripts/tests/investigator_credentials.test.sh` |
+| Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
+| Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
 
 This story assumes a sweep directory already exists (story S2/#3902 owns creating that tree) and
 fails closed if it does not — it never creates the sweep tree itself.
 
-**`--harness`/`--model` (Issue #3932, epic #3927's contract C2).** The architectural correction
-in epic #3927 — model access by subscription rather than API key — needs a lane to authenticate
-as an agent harness's own session, not an OS-keychain credential file. `launch-investigator
---harness <id> --model <id>` generalizes the plan-mode-only credential mount above: passing
-`--harness claude` mounts `~/.claude/.credentials.json` **read-only** into the container (a
-separate mount from plan mode's own, which stays exactly as it was — writable, unaffected by this
-flag) and sets three environment variables the container-side harness runner reads:
+**`--harness`/`--model` (Issue #3932, epic #3927's contract C2) — the only credential path
+(Issue #3933).** The architectural correction in epic #3927 — model access by subscription
+rather than API key — needs a lane to authenticate as an agent harness's own session, never an
+OS-keychain credential file. Issue #3903 originally shipped both: `--cred-name` delivered one
+OS-keychain key as a 0600 file in a memory-backed, `:ro`-mounted directory removed on container
+exit (`scripts/load-security-review-credentials.sh` did the host-side keychain lookup), and
+`--harness`/`--model` mounted a harness's own session credentials instead. Issue #3933 retired
+`--cred-name` in full — its whole delivery mechanism (`_investigator_prepare_cred_dir`,
+`_investigator_cred_cleanup_watcher`, `scripts/load-security-review-credentials.sh`, and their
+test coverage) is deleted, not narrowed, because every one of its callers was a REST lane deleted
+by that same story. **`--harness`/`--model` is now the only credential-delivery mechanism
+`launch-investigator` has for lane mode.**
+
+`launch-investigator --harness <id> --model <id>` generalizes the plan-mode-only credential mount
+above: passing `--harness claude` mounts `~/.claude/.credentials.json` **read-only** into the
+container (a separate mount from plan mode's own, which stays exactly as it was — writable,
+unaffected by this flag) and sets three environment variables the container-side harness runner
+reads:
 
 | Variable | Set to |
 |---|---|
@@ -354,11 +354,11 @@ responsible for failing loudly if it needed a credential that never arrived.
 The investigator container runs behind the same default-deny egress firewall as every other
 agent container, and it is the profile that needs it most: it is the only one that at the same
 time holds the host's live Claude OAuth credentials (plan mode, bind-mounted from
-`~/.claude/.credentials.json`), holds a third-party provider API key on disk at
-`/run/cfgms/security-review-cred/<name>.key` (lane mode), and *by design* ingests untrusted
-content — repository source under review, plus raw third-party model responses in finder lanes.
-Open egress beside those three facts is a direct exfiltration channel for a prompt injection, so
-the firewall is a load-bearing control here rather than a background default.
+`~/.claude/.credentials.json`; lane mode holds the same credentials read-only when launched with
+`--harness claude`), and *by design* ingests untrusted content — repository source under review,
+plus raw harness output in finder lanes. Open egress beside those facts is a direct exfiltration
+channel for a prompt injection, so the firewall is a load-bearing control here rather than a
+background default.
 
 Two halves make it work, and both must stay:
 
@@ -373,36 +373,39 @@ The entrypoint fails closed: it verifies after init that the `OUTPUT` policy is 
 without starting either mode if any of the three is not true. A missing `NET_ADMIN` capability
 surfaces as a container that exits immediately, not as one that runs with open egress.
 
-**Per-harness allowlist split (Issue #3932).** The founder chose one investigator image with the
-harness selected at launch, rather than an image per harness — credential and tool separation are
-already per-launch (`--harness`/`--model`, above), so that choice is sound on its own. But before
-this story the egress allowlist was not per-launch: `.devcontainer/init-firewall.sh` started
-dnsmasq from a single baked `/etc/dnsmasq-allowlist.conf` covering every provider, so any
-container — regardless of which harness or lane it was — could resolve every provider's domain.
-That was the one real cross-harness bleed the single-image model had, and it is what this story
-closes:
+**Per-harness allowlist split (Issue #3932), `claude` now the only fragment (Issue #3933).** The
+founder chose one investigator image with the harness selected at launch, rather than an image
+per harness — credential and tool separation are already per-launch (`--harness`/`--model`,
+above), so that choice is sound on its own. Before Issue #3932, the egress allowlist was not
+per-launch: `.devcontainer/init-firewall.sh` started dnsmasq from a single baked
+`/etc/dnsmasq-allowlist.conf` covering every provider, so any container — regardless of which
+harness or lane it was — could resolve every provider's domain. That was the one real
+cross-harness bleed the single-image model had, and splitting the allowlist is what closed it:
 
 - `.devcontainer/dnsmasq-allowlist-base.conf` — everything that is not a model provider (GitHub,
-  the Go toolchain, package registries, the security scanners), unchanged from before the split.
-- `.devcontainer/dnsmasq-allowlist.d/<harness>.conf` — one fragment per harness. `legacy.conf`
-  holds exactly today's full provider domain set (Anthropic + OpenAI + Ollama) and is selected
-  whenever no harness is supplied — every existing dev/review/fix agent container, plan mode's own
-  untouched invocation, and the three pre-#3932 REST finder lanes all launch this way and keep
-  resolving exactly what they resolve today. `claude.conf` holds only what the Claude Code harness
-  itself needs (`anthropic.com`, `claude.ai`, `claude.com`, `sentry.io`) and is selected when
-  `--harness claude` sets `CFGMS_SECURITY_REVIEW_HARNESS=claude`.
-- `init-firewall.sh` reads `CFGMS_SECURITY_REVIEW_HARNESS` (defaulting to `legacy`), validates it
+  the Go toolchain, package registries, the security scanners).
+- `.devcontainer/dnsmasq-allowlist.d/<harness>.conf` — one fragment per harness. `claude.conf`
+  holds only what the Claude Code harness itself needs (`anthropic.com`, `claude.ai`,
+  `claude.com`, `sentry.io`) and is selected both when `--harness claude` sets
+  `CFGMS_SECURITY_REVIEW_HARNESS=claude` **and** when no harness value is supplied at all —
+  `claude` is the default (Issue #3933), because every existing dev/review/fix agent container
+  and plan mode's own untouched invocation run Claude Code, so resolving exactly the Claude
+  harness's own domains is what keeps them working, not a legacy compatibility shim. Issue #3932
+  originally shipped a second fragment, `legacy.conf`, holding the union of Anthropic + OpenAI +
+  Ollama domains and selected by default so the three REST finder lanes (and every non-harness
+  launch) kept resolving what they resolved before the split existed. Issue #3933 deleted
+  `legacy.conf` outright, along with `api.openai.com`/`ollama.com` from every remaining fragment
+  and the base file — those lanes are the only reason those domains were ever allowlisted.
+- `init-firewall.sh` reads `CFGMS_SECURITY_REVIEW_HARNESS` (defaulting to `claude`), validates it
   against the same strict shape `launch-investigator --mode` already enforces, and loads the base
   file plus **exactly one** fragment named by that value. An unrecognized value — a typo, or a
   harness whose fragment doesn't exist yet (`codex`/`opencode`, STORY-7/8) — aborts the container
   before dnsmasq ever starts: fail closed, never a fallback to loading every fragment, which would
   silently reopen the bleed this mechanism exists to close.
-- `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file) is no longer baked
-  into the image — kept only, unbaked, as the fixed regression fixture
-  `dnsmasq-allowlist_test.sh` still exercises directly.
-
-STORY-5b retires `legacy.conf` once the REST lanes and their non-harness launches are gone, at
-which point every launch will name a real harness and the fallback stops being reachable.
+- `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file, pre-#3932) is no
+  longer baked into the image — kept only, unbaked, as the fixed regression fixture
+  `dnsmasq-allowlist_test.sh` still exercises directly. Its domain set matches
+  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly.
 
 **Adding a lane on an existing harness** needs no new allowlist entry — it already resolves that
 harness's fragment. **Adding a new harness** means adding both a fragment file under
@@ -411,181 +414,72 @@ gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate �
 enumerated per harness rather than opened wholesale — and is a step in each future harness story
 (STORY-7/8), not something a lane can work around at runtime.
 
-## Anthropic finder lane
+## The Claude harness lane
 
-`lanes/anthropic.py` (Issue #3907) is the lane directory `anthropic-opus5` names in the layout
-above. It runs inside a `launch-investigator` lane-mode container (Issue #3903) and, for every
-step `resume.py::missing_steps()` reports outstanding, calls the Anthropic Messages API with
-that step's full file contents, classifies the response, and writes the result atomically to
-`lanes/anthropic-opus5/step-NNN.findings.json` or `.status.json`.
+`.claude/scripts/security-review/lanes/claude_lane.py` (Issue #3933, epic #3927's switchover
+cutover) is the first — and, as of this story, only — lane built on the architectural correction
+the epic makes: a lane authenticates as a subscription agent harness's own session, never a REST
+API key. It replaces the three REST lanes this same story deletes (`anthropic.py`, `openai.py`,
+`ollama.py`, and their test files) — the deletion and this lane land together, satisfying the
+epic's hard constraint that the harness never be left half-migrated between the two models.
 
-**Raw HTTP, never the `anthropic` SDK, and never the `claude` CLI.** The harness-wide
-implementation constraint above (Python 3 standard library plus bash, no new pip dependencies)
-rules out the official SDK, so this lane speaks the Messages API directly over `urllib` —
-exactly the case the general SDK-code convention itself carves out an exception for when no
-dependency is permitted. The `claude` CLI is a separate, deeper exclusion: it authenticates
-with an OAuth session and never exposes the raw `stop_reason` / `stop_details` response fields
-this lane's classifier depends on. A harness built on the CLI cannot distinguish a refusal from
-a genuine empty result at all — it would read `content[0]`, find nothing usable, and either
-crash or silently record a clean pass. That failure mode is exactly what the classifier below
-exists to prevent.
+**Invocation.** `investigator-entrypoint.sh`'s mode dispatch is unchanged in shape (it already
+execs any non-`plan` mode as a mounted lane entrypoint by lane id); a `claude:<model>` roster
+entry now resolves there. `claude_lane.py` runs as `python3 claude_lane.py <lane-id>` inside a
+`launch-investigator --harness claude --model <model>` container, which mounts
+`~/.claude/.credentials.json` **read-only** and sets `CFGMS_SECURITY_REVIEW_HARNESS=claude`,
+`CFGMS_SECURITY_REVIEW_MODEL`, and `CFGMS_SECURITY_REVIEW_LANE_ID` (see
+[Investigator launch primitive](#investigator-launch-primitive) above). For every step
+`resume.py::missing_steps()` reports outstanding, the module invokes the `claude` binary
+(resolved on `PATH`, matching every other agent-container invocation in this repository) as a
+subprocess — this is what "runs under a subscription agent harness" means concretely: a nested
+`claude` CLI call authenticated by the mounted OAuth session, not an HTTP request signed with an
+API key.
 
-**Credential.** This lane reads its API key from the file path named by the environment
-variable `CFGMS_SECURITY_REVIEW_CRED_FILE` — the actual env var
-`agent-dispatch.sh`'s `launch-investigator --cred-name ANTHROPIC_API_KEY` sets (a single
-generic file-path variable shared by every lane's credential, selected by `--cred-name` at
-launch, not a lane-specific variable name). The lane performs no keychain lookup, mount, or
-cleanup of its own — all of that is #3903's `launch-investigator` credential path; this module
-only reads a file path it is handed. If the variable is unset or the named file is unreadable
-or empty, `load_api_key()` raises and `main()` exits non-zero with an actionable message
-naming #3903 — the lane never proceeds with an unauthenticated request.
+**Shared prompt and classifier, no lane-specific copies.** The prompt sent to `claude` is built
+entirely from `lanes/harness_runner.py`'s shared `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4)
+plus the step's own scope/description/file contents — never a second, differently-worded prompt.
+State is derived by `lanes/terminal_state.py::classify()` (C3) from the subprocess's exit code
+plus whether a findings file exists at an exact path named in the prompt and in the subprocess's
+environment (`CFGMS_SECURITY_REVIEW_STEP_OUTPUT_FILE`) — never from a provider-specific
+`stop_reason`/`finish_reason` field, because a harness has none. Refusal-retry-once bookkeeping
+(`harness_runner.apply_refusal_policy()`) is applied uniformly to every step's classification.
 
-*Precondition, not a testable acceptance criterion* (the same ruling applies to the OpenAI and
-Ollama Cloud lanes): the credential resolved at `CFGMS_SECURITY_REVIEW_CRED_FILE` for this lane
-is expected to be a Workspace-scoped Anthropic API key with an isolated spend/rate-limit cap,
-configured in the Anthropic console before this lane is first dispatched. A dev agent cannot
-create or configure an Anthropic Workspace, so this is stated here rather than asserted in
-code — the code's actual, testable obligation is the fail-closed behavior above.
+**Raw output, then an enriched candidate — never the model's raw file directly.** The model is
+told to write a bare `{"findings": [...]}` shape (no `sweep_id`/`commit_sha`/`lane`/`step_id` —
+those identity fields are never sourced from the model, matching the plan step's own
+`sweep_id`/`commit_sha` never being model-sourced). `claude_lane.py` reads that raw file, injects
+the four harness-owned identity fields into each entry, and writes the result to a second,
+candidate file — the one actually handed to `classify()`, whose own per-item
+`schema.validate_finding()` check is what decides `complete` vs. `failed`. A raw response that
+never parses to a findings list at all (prose, a decline, nothing written) leaves the candidate
+file unwritten, which `classify()` reads as `refused` when the harness exited 0 — the "harness
+exits 0, no valid findings file written" row of the four-terminal-state table.
 
-**Plan-step contract.** No planner (story S4) exists yet at the time this lane landed, so this
-story defines the minimal plan-step shape it consumes, mounted read-only at
-`/workspace-plan/step-NNN.json` by the launch primitive:
+**Rate-limit/quota detection.** `classify()` never sniffs a rate-limit condition out of prose
+itself — recognizing it is explicitly a caller concern (its own docstring). `claude_lane.py`
+scans the subprocess's combined stdout+stderr for a small set of case-insensitive markers
+(`"rate limit"`, `"usage limit"`, `"quota exceeded"`, `"429"`) and passes the result as
+`classify()`'s `rate_limited` argument, which maps to `parked`.
 
-```json
-{
-  "sweep_id":   "2026-09-05T0214Z-0541b9c8",
-  "commit_sha": "0541b9c8",
-  "files":      ["pkg/example/thing.go", "pkg/example/other.go"],
-  "prompt":     "optional scope note for the reviewer"
-}
-```
+**Import isolation.** `claude_lane.py`'s bootstrap uses the `/workspace`-relative two-layout
+pattern `openai.py` (deleted by this story) already proved correct — never the `__file__`-relative
+one `anthropic.py`/`ollama.py` used, which broke in the container's single-file-mount layout
+(finding 2): candidates are tried in order (this file's own sibling directories first, then
+`/workspace/.claude/scripts/security-review[/lanes]`), so the module imports cleanly whether run
+from a checkout or as the single file `investigator-entrypoint.sh` mounts at
+`/usr/local/bin/investigator-lane-entrypoint.py`.
 
-`sweep_id` and `commit_sha` are required because a lane-mode container never sees
-`manifest.json` (`.claude/agents/investigator.md`) — they must travel with each step. `files`
-is a list of paths relative to the read-only `/workspace` checkout mount; this lane reads each
-one's full contents into the request and skips (with a logged diagnostic) any path that fails
-a traversal guard or does not resolve to a real file, rather than aborting the whole step. A
-plan step missing `sweep_id`/`commit_sha`/`files` is logged and left unresolved for the next
-resume pass — this lane cannot fabricate the sweep/commit identity a valid envelope requires.
-
-**Classifier — allowlist, default-deny.** `classify_response()` reads `stop_reason` (and, on a
-refusal, `stop_details`) from the response *before* touching `content[]`, and recognizes
-exactly two `stop_reason` values:
-
-| Condition | State |
-|---|---|
-| HTTP `429` | `parked` |
-| HTTP status other than `200`/`429`, or a network failure with no HTTP response at all | `failed` |
-| `stop_reason == "refusal"` | `refused` (see retry below) |
-| `stop_reason == "end_turn"` **and** the body parses into schema-valid findings (`schema.validate_finding`) | `complete` |
-| Everything else — `max_tokens`/length truncation, `tool_use`, `pause_turn`, an `end_turn` response with prose and no parseable JSON, or any future/unrecognized `stop_reason` string | `failed` |
-
-Because only `end_turn` and `refusal` are recognized, a new terminating reason a future
-provider update introduces is `failed` by construction, never silently `complete` — this is
-what makes the allowlist default-deny rather than a denylist that has to be kept in sync with
-every new value a provider might ship. A genuinely clean step (`stop_reason: "end_turn"`, body
-`{"findings": []}`) is `complete` with an empty findings list, distinct from `refused`, which
-never carries a findings array at all — `anthropic_test.py`'s table-driven fixture test asserts
-this distinction directly, alongside truncation and prose-with-no-structure fixtures that both
-resolve to `failed`.
-
-The lane requests the response shape via `output_config.format` (structured outputs, GA, no
-beta header) rather than prompting for JSON in free text — this reduces how often a real
-response lands in the prose-with-no-structure bucket, but the classifier treats an unparseable
-body as `failed` regardless of why, since a provider-side format regression is exactly the
-scenario default-deny exists to catch.
-
-**Refusal retry.** `call_anthropic_with_refusal_retry()` is the one place this lane retries
-within a single invocation: on `refused`, it retries exactly once with the server-side fallback
-beta (`betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"` in the request body)
-and returns whatever that second call classifies to — including `refused` again, which is then
-written and surfaced, never retried a second time in-process. `parked` and a first-pass
-`failed` are not retried in-process at all; per the four-terminal-state table above, `parked`
-retry is deferred to the *next* invocation of this lane (`resume.py` reports it outstanding
-again) and `failed` is never auto-retried.
-
-**Envelope.** Every written step envelope's `stop_reason_raw` field carries the verbatim
-`stop_reason`/`stop_details` pair from the API response, JSON-encoded so the structure survives
-unmodified — never reworded into the normalized `state` enum written alongside it.
-
-## Ollama Cloud lane
-
-`.claude/scripts/security-review/lanes/ollama.py` (Issue #3909) calls Ollama Cloud's
-OpenAI-compatible `/v1/chat/completions` endpoint for every step `resume.missing_steps()`
-reports outstanding for `lanes/ollama-qwen/`, and writes each result atomically as
-`step-NNN.findings.json` or `.status.json`.
-
-**Confirmed response shape (read 2026-09-05, from `ollama/ollama` on GitHub — `api/types.go`,
-`llm/server.go`, `openai/openai.go`, `docs/api.md`), not assumed by analogy to OpenAI:**
-
-- The terminating-reason field is `finish_reason`, inside each `choices[N]` object — the same
-  field *name* as OpenAI, but **not** the same value set. `openai/openai.go` populates it by
-  passing the engine's internal `DoneReason` straight through (remapping only `"stop"` ->
-  `"tool_calls"` when tool calls are present; this lane never requests tools).
-- Documented `DoneReason` values (`llm/server.go`): `"stop"` (normal completion), `"length"`
-  (hit the token/context limit — truncation), `""` (empty string; connection dropped
-  mid-stream).
-- **There is no `content_filter` value.** Ollama applies no OpenAI-style moderation layer, so a
-  declined/refused request still terminates with the ordinary `"stop"` value and shows up only
-  as prose in `message.content`. Assuming `finish_reason == "content_filter"` means refusal —
-  true for OpenAI — would silently never fire against Ollama Cloud, since Ollama never emits
-  that value. This is why the lane's refusal detection is parse-first, not field-value-first.
-- Error responses use `{"error": {"message", "type", "param", "code"}}` (an OpenAI-shaped error
-  envelope, even though the success-path value set is not OpenAI's). HTTP `429` is the
-  rate-limit/quota-exceeded signal for Ollama Cloud's per-plan usage caps.
-
-**Provider-side key scoping (verified 2026-09-05):** Ollama Cloud has no project-scoped key or
-per-key spend cap analogous to OpenAI's dashboard project keys — keys created at
-https://ollama.com/settings/keys are named for identification only, and usage limits are
-account-wide (subscription tier), never attached to an individual key. This lane's only safety
-net is therefore its fail-closed credential consumption and default-deny classification, not a
-provider-side scoping control.
-
-**Allowlist-based classification (default-deny):**
-
-| Observed condition | State |
-|---|---|
-| `finish_reason == "stop"` and `message.content` parses into a JSON array whose every item validates as a `schema.Finding` (empty array included) | `complete` |
-| `finish_reason == "stop"` but content does not parse into such an array (prose, a declined-request message, an apology, malformed JSON, a non-list, or a non-conforming item) | `refused` |
-| `finish_reason == "length"` | `failed` (truncated) |
-| HTTP `429` | `parked` |
-| Any other terminating value — missing, empty, `"tool_calls"`, or anything unrecognized (including a hypothetical `"content_filter"`) | `failed` |
-
-Default-deny means a step never falls through to `complete` on a value this lane does not
-explicitly recognize — if Ollama's real shape ever diverges from what is documented above,
-every step fails visibly in the coverage table instead of completing empty and looking clean.
-`stop_reason_raw` always carries the exact terminating value (or HTTP-error `type`/`message`)
-returned, unmodified.
-
-**Request-side default-deny — a step whose source was never sent is never `complete`.** The
-table above guards the response only. The same false-clean is reachable from the request: a
-request that carries no source still comes back `finish_reason == "stop"` with `[]`, which is a
-schema-valid empty finding array and would score `complete` — a green coverage row for code the
-model never saw. Because sweeps are resumable and `commit_sha` comes from `manifest.json`, a
-rebased-away, garbage-collected, or shallow-cloned commit makes every `git show
-<commit_sha>:<path>` fail and would turn the entire lane green. Two guards run before any API
-call:
-
-- `run_lane` resolves `commit_sha` once up front — shape-checked as a git object name, then
-  `git rev-parse --verify <sha>^{commit}`. An unresolvable commit raises `OllamaLaneError` and
-  the lane processes no steps and writes no envelopes.
-- `build_payload` raises `StepScopeError` if any declared scope path is unreadable at that
-  commit, or if the step resolves to no readable source at all. `run_lane` writes a `failed`
-  envelope whose `stop_reason_raw` names the offending path and does not call the API, so the
-  step shows red in the coverage table rather than clean.
-
-**Credential consumption:** this lane reads its key only from the file path named by
-`CFGMS_SECURITY_REVIEW_OLLAMA_KEY_FILE` (set by #3903's launch primitive) — no keychain lookup,
-mount, or cleanup logic of its own. An unset env var or unreadable file fails closed with an
-actionable error rather than calling the API unauthenticated.
-
-**Gitleaks (verified 2026-09-05):** gitleaks' default ruleset has no rule for Ollama or
-`ollama.com` API keys — a genuine gap, unlike OpenAI/Anthropic. However, Ollama does not
-document (and no SDK enforces) a stable, fixed literal key prefix, unlike OpenAI's
-`sk-proj-`/`sk-` or Anthropic's `sk-ant-` — generated keys are opaque tokens with no publicly
-specified format. A regex rule needs a stable anchor to avoid false-positiving on arbitrary
-opaque strings repo-wide, so `.gitleaks.toml` gains no custom rule for this lane. If Ollama
-later documents a fixed key prefix, add the rule then.
+**Testing.** `claude_lane_test.py` covers classification (stub-injected `call_harness_fn`,
+matching the REST lanes' own `post_fn`/`call_openai_fn` precedent), the refusal-retry-once
+integration, path-traversal containment on `files`, and the import-isolation property above via a
+real subprocess. `claude_lane_integration_test.py` is this story's own end-to-end proof of the
+switchover's central claim: a real plan step, a real stub `claude` binary on `PATH`, a real
+`claude_lane.py` subprocess run producing a schema-valid `complete` envelope on disk, and a real
+`consolidate.py` subprocess run producing a non-empty `report/consolidated.md` that reflects it.
+Reverting any part of the switchover that reintroduces a zero-API-calls/zero-files-written silent
+pass (finding 1's original failure mode) makes this test fail — there is no seam left for a stub
+to paper over, since every step in the chain is a real subprocess run, not an injected fake.
 
 ## Step plan generation (metadata-only planner)
 
@@ -717,9 +611,9 @@ tainted content routes through `schema.py::safe_log_event`/`log_event`, which re
 JSON line via `json.dumps` — embedded newlines and control characters inside string values are
 escaped, so a payload crafted to look like a second log line stays inside its field instead of
 becoming one. `resume.py` uses this when it logs a schema-invalid `.findings.json` for human
-diagnosis; `lanes/ollama.py` uses the same formatter when a model response's parsed finding
-fails `schema.validate_finding`, so a forged log line embedded in a model-generated `title` or
-`evidence` field cannot spoof a second diagnostic record.
+diagnosis; `claude_lane.py` uses the same formatter for its own `invalid_plan_step`/
+`unsafe_file_path_skipped`/`step_launch_failed` diagnostics, so a forged log line embedded in
+model-generated or repository-path text cannot spoof a second diagnostic record.
 
 ## Consolidation and the coverage table
 
@@ -777,86 +671,16 @@ insertion, so a forged Markdown heading or table-row sequence embedded in a find
 become a real heading or an extra table row — it stays inline text inside the cell/line it was
 written into.
 
-## The OpenAI finder lane
-
-`lanes/openai.py` (#3908) is the OpenAI half of the three v1 finder lanes. It iterates every
-step in the sweep's plan not already resolved for lane `openai-gpt56-sol`
-(`resume.py::missing_steps`), calls the OpenAI Chat Completions API with the step's full file
-contents, classifies the response, and writes the result atomically to
-`<step_id>.findings.json` (state == `complete`) or `<step_id>.status.json` (every other state).
-
-**Why this lane's classifier is not the Anthropic lane's classifier, copied.** OpenAI encodes
-refusal differently from Anthropic — there is no `stop_reason: "refusal"` field at all. A
-denylist tuned to Anthropic's `stop_reason` values would silently regress on OpenAI responses:
-exactly the silent-clean-sweep failure mode this epic exists to prevent, relocated to a
-different provider. `classify_response()` is therefore its own allowlist, default-deny function,
-built around OpenAI's actual response shape.
-
-### OpenAI-specific terminating-reason allowlist
-
-`classify_response()` reads the terminating reason — `finish_reason` on the Chat Completions
-response — before touching any content field. (OpenAI's Responses API encodes this differently
-again, via a `status` field; this lane only implements Chat Completions, the API `call_openai()`
-actually calls, so `classify_response()` has no Responses-API branch to keep untested surface
-out of the classifier.)
-
-| Signal | State | Notes |
-|---|---|---|
-| HTTP `429` | `parked` | Rate limit / quota exhaustion. |
-| Any other non-200 HTTP status | `failed` | Auth errors, malformed requests, etc. |
-| `finish_reason == "content_filter"` | `refused` | OpenAI's moderation layer declined the request outright. |
-| `finish_reason == "length"` | `failed` | Truncated response — an incomplete JSON payload will not parse as valid findings. |
-| `finish_reason == "stop"` and content parses as `{"findings": [...]}` | `complete` | Includes the genuinely-empty case: an explicit `"findings": []` is a valid, distinct clean result. |
-| `finish_reason == "stop"` but content does **not** parse as structured findings | `refused` | See prose-refusal case below. |
-| Any other/unrecognized `finish_reason` | `failed` | Default-deny: a future provider value never falls through to `complete`. |
-
-**The prose-refusal case.** OpenAI's moderation layer can return a refusal as **plain prose
-text with a completely normal-looking `finish_reason: "stop"`**, with no structured output at
-all — no `content_filter`, no error, nothing that a naive "check `finish_reason` only" harness
-would treat as suspicious. `classify_response()` detects this by attempting to parse the
-response as the expected structured findings shape *regardless* of `finish_reason`: a
-`"stop"`-terminated response whose content is not parseable JSON matching `{"findings": [...]}`
-(or a bare list) — prose text, an apology, a declined-request message — maps to `refused`, not
-`complete`. This is deliberately distinct from the genuinely-empty case, which also terminates
-with `"stop"` but *does* parse, to an explicit `findings: []`.
-
-Every written envelope's `stop_reason_raw` carries the exact `finish_reason` value OpenAI
-returned, unmodified, regardless of which state it produced — including when a schema-invalid
-finding downgrades an otherwise-`complete` classification to `failed`.
-
-### Credential contract
-
-This lane reads its API key from a file path named by an env var — never a keychain lookup,
-mount, or cleanup of its own; all of that is #3903's scope. `load_api_key()` checks, in order:
-
-1. `CFGMS_SECURITY_REVIEW_OPENAI_KEY_FILE` — the name given in this lane's originating issue.
-2. `CFGMS_SECURITY_REVIEW_CRED_FILE` — the generic, single file-path env var the launch
-   primitive #3903 actually shipped with (`agent-dispatch.sh`'s `launch-investigator` credential
-   delivery block). One investigator container runs exactly one lane, so #3903 did not
-   special-case the env var name per provider.
-
-Checking the issue-named variable first costs nothing and preserves a manual-override path;
-falling back to the variable #3903 actually sets is what makes the lane work when dispatched by
-the real launch primitive. If neither is set, or the named file cannot be read, or it is empty,
-the lane fails closed with an actionable error naming both variables rather than proceeding
-with no auth and surfacing an opaque provider 401 later.
-
-**Precondition (not a testable AC):** the credential resolved this way is expected to be a
-dedicated OpenAI project key with a hard spend cap, configured in the OpenAI dashboard before
-this lane is first dispatched. A dev agent cannot create an OpenAI project or set a spend cap,
-so this is stated here as an operational precondition for whoever dispatches the lane, not as
-code the lane can verify.
-
-### Plan-step shape
+## Plan-step shape
 
 The plan-step shape is defined once, by `schema.py::validate_plan_step()` (Issue #3928, epic
 #3927's contract C1), and every lane reads that one shape — never a private per-lane
 understanding of what a step file contains. `planner.py` (#3906) writes it; every lane, present
-or future, reads it. Before this story, the planner emitted `{step_id, scope, description}`
-while this lane (and the Anthropic lane) each independently demanded `sweep_id`/`commit_sha`/
-`files` and silently `continue`d past any step that lacked them — zero API calls, zero files
-written, and nothing about that gap visible from inside either side of the contract. That is
-exactly the failure this shared schema exists to close.
+or future, reads it. Before Issue #3928, the planner emitted `{step_id, scope, description}`
+while each REST lane independently demanded `sweep_id`/`commit_sha`/`files` and silently
+`continue`d past any step that lacked them — zero API calls, zero files written, and nothing
+about that gap visible from inside either side of the contract. That is exactly the failure this
+shared schema exists to close.
 
 ```json
 {
@@ -926,53 +750,27 @@ wipe an entire sweep's plan.
 
 `files` entries are validated in two stages, and the second stage is not optional here.
 `consolidate.py` only needs the syntactic check (absolute and `../`-shaped values rejected)
-because it never touches the filesystem with the value — it checks git-tree membership. This
+because it never touches the filesystem with the value — it checks git-tree membership. A finder
 lane *does* join the value onto the read-only repo mount and open it, so the syntactic check
 alone is insufficient: a plain repo-relative name can be a symlink whose target is outside the
-checkout — `/run/cfgms/security-review-cred/<name>.key` (this lane's own provider key, mounted
-by #3903), `/proc/self/environ`, `/etc/passwd` — and the file contents go into the user message
-sent to the provider, whose endpoint is allowlisted through the container's egress firewall.
-That symlink is attacker-supplied under this harness's threat model: the PR under review can
-add it, and `files` comes from a planner that deliberately ingests untrusted repository source.
-`read_step_files()` therefore also resolves each path with `realpath` — following symlinks in
-every component, including intermediate directories — and reads it only if the resolved real
-path is a strict descendant of the resolved repo root. The read itself uses `O_NOFOLLOW` and
-rejects anything that is not a regular file, so a component swapped after the check fails
-closed rather than being followed. In-repo symlinks remain readable; escaping ones are skipped
-and logged as `unsafe_file_path_skipped`.
-
-### Secret scanning
-
-Gitleaks' default ruleset (`useDefault = true` in `.gitleaks.toml`) already includes an
-`openai-api-key` rule matching OpenAI's key format (`sk-`/`sk-proj-`/`sk-svcacct-`/`sk-admin-`
-followed by the fixed `T3BlbkFJ` marker). Verified locally against gitleaks v8.30.1 (the pinned
-version) with a scrubbed fixture matching the rule's pattern. No `.gitleaks.toml` change was
-needed or made for this lane.
-
-### Mount paths and standalone use
-
-Inside the container, `investigator-entrypoint.sh` execs this file for lane mode with
-`/workspace` (repo, ro), `/workspace-plan` (this sweep's `plan/`, ro), and `/workspace-out`
-(this lane's own `lanes/openai-gpt56-sol/`, rw) already bind-mounted — those three paths are
-this script's defaults. Each is overridable via an env var
-(`CFGMS_SECURITY_REVIEW_{PLAN,OUT,REPO_ROOT}_DIR`) so `run_lane()` can be exercised standalone
-against temp directories in tests, and the model id defaults to `gpt-5.6-sol`, overridable via
-`CFGMS_SECURITY_REVIEW_OPENAI_MODEL`.
-
-Only this single file is bind-mounted into the container (at
-`/usr/local/bin/investigator-lane-entrypoint.py`), so it cannot import its `schema.py` /
-`atomic_write.py` / `resume.py` siblings from its own parent directory the way it can when run
-from a checkout — `__file__` resolves to a path with no siblings at all. It falls back to
-importing them from `/workspace/.claude/scripts/security-review`, since the *whole* repository
-is separately bind-mounted read-only at `/workspace` regardless of mode.
+checkout (`/proc/self/environ`, `/etc/passwd`, ...) — and the file contents go into the prompt
+sent to the harness. That symlink is attacker-supplied under this harness's threat model: the PR
+under review can add it, and `files` comes from a planner that deliberately ingests untrusted
+repository source. `claude_lane.py::read_step_files()` (the same pattern the deleted REST lanes
+used) therefore also resolves each path with `realpath` — following symlinks in every component,
+including intermediate directories — and reads it only if the resolved real path is a strict
+descendant of the resolved repo root. The read itself uses `O_NOFOLLOW` and rejects anything
+that is not a regular file, so a component swapped after the check fails closed rather than
+being followed. In-repo symlinks remain readable; escaping ones are skipped and logged as
+`unsafe_file_path_skipped`.
 
 ## Sweep orchestration CLI (launch/status/resume)
 
 `.claude/scripts/security-review.sh` (Issue #3910) is the harness's single operator-facing entry
 point — the command a human runs to operate the whole harness end to end, tying the manifest
-(#3902), the planner (#3906), the three finder lanes (#3907/#3908/#3909), and the consolidator
-(#3904) into one workflow. It is a thin CLI: it adds no classification, schema, or credential
-logic of its own, only calling each dependency's existing entry point in sequence.
+(#3902), the planner (#3906), every roster lane (Issue #3932/#3933), and the consolidator (#3904)
+into one workflow. It is a thin CLI: it adds no classification, schema, or credential logic of
+its own, only calling each dependency's existing entry point in sequence.
 
 ```
 security-review.sh launch <ref>        # start a new sweep
@@ -980,10 +778,14 @@ security-review.sh resume <sweep-id>   # continue an interrupted or parked sweep
 security-review.sh status <sweep-id>   # coverage only, never re-runs anything
 ```
 
-**`launch <ref>`.** Creates the sweep tree (`manifest.py::create_sweep`), then runs
-`planner.py`'s `prepare()` → `launch()` → (`docker wait` on the plan-mode container) →
-`finalize()`, then dispatches all three finder lanes via `agent-dispatch.sh launch-investigator
---mode <lane-id> --cred-name <NAME> --lane-entrypoint <lane script>` — one container per lane,
+**`launch <ref>`.** Requires `CFGMS_SECURITY_REVIEW_LANES` to be set (Issue #3933 — the roster is
+the only lane-dispatch path; there is no hardcoded lane set to fall back to) and fails closed,
+before creating anything, if it is unset or fails `roster.py::parse_roster()`. Resolves the
+roster into a `lane_dir_name` list and creates the sweep tree
+(`manifest.py::create_sweep(ref, lanes=<roster-derived tuple>, ...)`), then runs `planner.py`'s
+`prepare()` → `launch()` → (`docker wait` on the plan-mode container) → `finalize()`, then
+dispatches every roster lane via `agent-dispatch.sh launch-investigator --mode <lane_dir_name>
+--harness <harness> --model <model> --lane-entrypoint <lane script>` — one container per lane,
 same fire-and-forget `docker run -d` semantics `planner.launch()` uses for the plan-mode
 container. Once every dispatched container has exited (`docker wait`), it runs
 `consolidate.py` and prints the path to `report/consolidated.md`.
@@ -999,10 +801,11 @@ exactly `exited` is removed and the launch proceeds; a container that is `runnin
 or `created` — or in any state this script cannot positively identify as `exited` — is refused
 exactly as before, never reaped, never raced.
 
-**Each lane's dispatch is independent (AC6).** The three `launch-investigator` calls are made in
-a loop; a lane that fails to dispatch for a documented, non-fatal reason — credentials not yet
-provisioned (`LAUNCH_FAILED:...:credential_unavailable` from the lane-mode credential loader, or
-`DISPATCH_DEFERRED:creds_missing:...` from the plan-mode credential gate) — is logged and skipped;
+**Each lane's dispatch is independent (AC6).** Every roster lane's `launch-investigator` call is
+made in a loop (`dispatch_roster_lanes`); a lane that fails to dispatch for a documented,
+non-fatal reason — credentials not yet provisioned (`LAUNCH_FAILED:...:credential_unavailable`,
+or `DISPATCH_DEFERRED:creds_missing:...` from the plan-mode credential gate) — is logged and
+skipped;
 it never stops the loop from dispatching the remaining lanes, and never prevents the consolidator
 from running afterward against whatever the other lanes produced. A lane whose container exits
 having `parked`, `refused`, or `failed` some or all of its steps is not a dispatch failure at all
@@ -1014,7 +817,7 @@ returns, and the consolidator still renders that lane's real coverage in the tab
 exit that is *not* one of the two documented credential-unavailable skips above — a stale
 container that could not be reaped, a container-name collision with a still-running container, or
 any other failure — is a real problem, not an expected transient state. `dispatch_planner` and
-`dispatch_all_lanes` both distinguish the two cases (`_is_intentional_dispatch_skip`, matched
+`dispatch_roster_lanes` both distinguish the two cases (`_is_intentional_dispatch_skip`, matched
 against the failed call's own output) and report a real failure to their caller. `cmd_launch` and
 `cmd_resume` still let every other lane dispatch and still run the consolidator against whatever
 did succeed, but they exit non-zero and never print the bare `report/consolidated.md` path — the
@@ -1024,11 +827,11 @@ line that means "this sweep completed cleanly" — for a sweep that had a real d
 `launch`, it never creates a sweep tree. Re-invokes the planner only if `plan/` is not already
 populated with at least one `step-NNN.json` (a plain `plan/step-*.json` glob check) — if it is,
 planner re-dispatch is skipped entirely as a no-op, logged to stderr, rather than asking the
-model to regenerate a plan that already exists. It then re-dispatches all three lanes exactly as
-`launch` does. No lane-specific resume logic lives here: dispatching a lane's container again
+model to regenerate a plan that already exists. It then re-dispatches every roster lane exactly
+as `launch` does. No lane-specific resume logic lives here: dispatching a lane's container again
 *is* how it resumes, because that container's own entry point calls `resume.py::missing_steps()`
 against its lane directory before doing any work (#3901's resume scanner, used inside
-#3907/#3908/#3909) — a step already `complete` is never re-sent, and its `.findings.json` is
+`claude_lane.py`) — a step already `complete` is never re-sent, and its `.findings.json` is
 never touched. [REQUIRED TEST] `security_review_cli.test.sh` proves this at the CLI level: it
 kills a launch mid-run (removing one step's result from every lane's directory, simulating an
 interrupted sweep) and asserts that `resume` leaves every already-complete step's file
@@ -1061,12 +864,10 @@ reporting success for a sweep that produced no report.
 lane.** Each `launch`/`resume` call dispatches a lane's container for one pass over its
 currently-missing steps; the container exits — whether it completed everything currently
 possible or hit `parked`/`refused` on the remainder — and a later `resume` call re-dispatches a
-fresh container. This is load-bearing for #3903's credential-cleanup design: "parking is defined
-as ending the container" holds structurally under this lifecycle, so the per-invocation
-credential file `_investigator_cred_cleanup_watcher` removes on every container exit is never
-left mounted into a still-running container across a park interval spanning days. #3903 depends
-on this story for that lifecycle guarantee rather than re-implementing park-detection logic for a
-state (a long-lived, still-parked container) that cannot occur here.
+fresh container. A harness-session credential mount (`--harness`/`--model`) is read-only and
+scoped to the container's own lifetime by the bind mount itself — there is no per-invocation
+credential file to clean up on exit (Issue #3933 retired that mechanism along with the REST
+lanes that used it).
 
 **No new GitHub or CI surface.** This command adds no GitHub Actions workflow and no repository
 secret — it is a host-only tool, matching the epic's locked "runtime: existing agent container
@@ -1081,27 +882,24 @@ synchronously performs the simulated container's job against the actual host pat
 its own `docker run` argv — writing `plan/step-NNN.json` for plan mode, or a findings/status
 envelope per outstanding step for lane mode, honoring whatever steps are already resolved exactly
 as a real lane container would via `resume.py`. `docker wait` is a no-op since the work already
-happened synchronously. A stub `secret-tool` satisfies the OS-keychain lookup
-`_investigator_prepare_cred_dir` performs for each `--cred-name`. This exercises the CLI's real
+happened synchronously. Every case dispatches through a roster (a small stub harness/lane
+fixture standing in for `claude_lane.py`, mirroring the real-lane proof
+`claude_lane_integration_test.py` carries separately). This exercises the CLI's real
 orchestration logic — sequencing, per-lane independence, the resume no-op check, exit codes —
 against the real `manifest.py`/`planner.py`/`consolidate.py`/`agent-dispatch.sh` entry points,
 without a real docker daemon, real credentials, or real network access.
 
-### Roster dispatch (`CFGMS_SECURITY_REVIEW_LANES`) — available, not yet exclusive (Issue #3932)
+### Roster dispatch (`CFGMS_SECURITY_REVIEW_LANES`) — the only lane-dispatch path (Issue #3932/#3933)
 
 Epic #3927's contract C5 describes a `.env`-driven roster — a comma-separated list of
 `harness:model` pairs, every entry running at every step, fanned out rather than tried as a
-fallback chain. This story lands that mechanism as a **second, opt-in dispatch path** alongside
-the hardcoded three-lane path documented above; it changes no existing lane's behavior. STORY-5b
-is the story that deletes the hardcoded `LANE_IDS`/`LANE_CRED_NAMES`/`LANE_SCRIPTS` arrays and
-their REST lane adapters and makes the roster path the only one — until then, both paths exist in
-`security-review.sh` and exactly one runs per invocation:
-
-- **`CFGMS_SECURITY_REVIEW_LANES` unset** — `dispatch_all_lanes` runs precisely the loop
-  documented above: the three hardcoded REST lanes (`anthropic-opus5`, `openai-gpt56-sol`,
-  `ollama-qwen`), `--cred-name`/`--lane-entrypoint`, byte-for-byte unmodified by this story.
-- **`CFGMS_SECURITY_REVIEW_LANES` set** — `dispatch_all_lanes` delegates to
-  `dispatch_roster_lanes`, the roster-aware counterpart added by this story.
+fallback chain. Issue #3932 landed this mechanism as a second, opt-in dispatch path alongside a
+hardcoded three-lane path (`anthropic-opus5`/`openai-gpt56-sol`/`ollama-qwen`,
+`--cred-name`/`--lane-entrypoint`); Issue #3933 deleted that hardcoded path — and the REST lane
+adapters and OS-keychain credential mechanism it depended on — in the same switchover cutover
+that landed `claude_lane.py`. **The roster is now the only lane-dispatch path.**
+`CFGMS_SECURITY_REVIEW_LANES` must be set; `security-review.sh` fails closed, before creating or
+dispatching anything, if it is unset or malformed.
 
 **`.claude/scripts/security-review/roster.py`** is the pure-function parser: `parse_roster()`
 turns the env var's value into a list of `(harness, model, lane_dir_name)` tuples —
@@ -1112,28 +910,25 @@ two halves are joined. A malformed entry — missing or doubled `:` separator, a
 either half failing that shape — raises, and the parser produces no partial list: one bad entry
 fails the whole roster rather than silently running a subset of it. `roster_test.py` covers the
 valid and malformed cases as pure unit tests, no docker or container involved.
+`.env.local.example` documents `CFGMS_SECURITY_REVIEW_LANES` with the epic's `harness:model`
+format, e.g. `claude:sonnet-5`.
+
+**`manifest.py::create_sweep()` takes `lanes` as a required argument.** The old hardcoded `LANES`
+tuple (`manifest.py:42`, pre-#3933) is gone with no module-level replacement:
+`security-review.sh`'s `create_sweep_tree()` resolves the roster via `roster.py` first and passes
+the resulting `lane_dir_name` tuple to `create_sweep()` explicitly, so `manifest.json`'s `lanes`
+field always reflects whatever roster actually dispatched — never a value this module invented on
+its own.
 
 **`dispatch_roster_lanes`** loops over the parsed tuples and calls `agent-dispatch.sh
 launch-investigator --sweep-dir <dir> --mode <lane_dir_name> --harness <harness> --model <model>
---lane-entrypoint <entrypoint>` once per lane — `--harness`/`--model` in place of the hardcoded
-path's `--cred-name`/`--lane-entrypoint` pairing, since a roster lane authenticates as its
-harness's own subscription session (C2) rather than an OS-keychain API key. The entrypoint script
-is resolved by harness id as `<dir>/<harness>_lane.py`, where `<dir>` is
-`CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR` if set, else `lanes/` alongside `security-review.sh`
-itself. It mirrors `dispatch_all_lanes`'s own failure-propagation contract exactly (Issue #3930):
-a documented credential-unavailable skip is logged and does not fail the sweep; any other
-non-zero `launch-investigator` exit is a real failure, and `dispatch_roster_lanes` returns 1 so
-`cmd_launch`/`cmd_resume` do not report the sweep as having completed cleanly — the same property
-`security_review_cli.test.sh` already asserted for the hardcoded path, now asserted again for the
-roster path so a future edit cannot silently swallow it back.
-
-**Proven with a stub harness, not a real one.** No per-harness lane runner exists yet for the
-roster path to call — `claude_lane.py` does not exist until STORY-5b (`codex_lane.py`/
-`opencode_lane.py` are STORY-7/8). `security_review_cli.test.sh`'s roster-path test therefore
-drives the mechanism with a stub `--lane-entrypoint` script created for that test alone (harness
-id `stub`, mode `stubmodel`), pointed to via `CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR`, and
-confirms the resulting lane's envelope is picked up by the existing, unmodified consolidator —
-proving the roster-dispatch plumbing end to end without asserting anything about a real harness.
-Setting `CFGMS_SECURITY_REVIEW_LANES=claude:<model>` today dispatches through the same mechanism
-but fails closed at `launch-investigator`'s own `--lane-entrypoint` file-existence check, because
-`claude_lane.py` is not there yet — expected, and out of this story's scope to fix.
+--lane-entrypoint <entrypoint>` once per lane, since a roster lane authenticates as its harness's
+own subscription session (C2) rather than an OS-keychain API key. The entrypoint script is
+resolved by harness id as `<dir>/<harness>_lane.py` (e.g. `claude_lane.py` for harness `claude`),
+where `<dir>` is `CFGMS_SECURITY_REVIEW_LANE_ENTRYPOINT_DIR` if set, else `lanes/` alongside
+`security-review.sh` itself. `dispatch_all_lanes` — the function `cmd_launch`/`cmd_resume` call —
+is now nothing more than the `CFGMS_SECURITY_REVIEW_LANES`-required guard plus this delegation;
+the failure-propagation contract (Issue #3930) is unchanged: a documented credential-unavailable
+skip is logged and does not fail the sweep; any other non-zero `launch-investigator` exit is a
+real failure, and `dispatch_roster_lanes` returns 1 so `cmd_launch`/`cmd_resume` do not report the
+sweep as having completed cleanly.
