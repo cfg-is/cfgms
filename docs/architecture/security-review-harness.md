@@ -996,6 +996,78 @@ merged plan is a new numbering, not any single planner's own (two planners indep
 something `step-001` must never collide). Merging is idempotent: merging an already-merged list
 is a no-op.
 
+**`security-review.sh`'s `dispatch_planner()` waits for EVERY container it launched, not just
+the last one (Issue #3954, epic #3950's D2/D3).** `launch()`'s multi-planner path calls
+`agent-dispatch.sh launch-investigator` once per roster entry and concatenates each call's own
+stdout, so a two-planner dispatch's combined output carries two `LAUNCHED_INVESTIGATOR:plan:<id>`
+lines, one per entry. Before this fix, `dispatch_planner()` extracted only the *last* line
+(`tail -n1`) and called `docker wait` on that one container alone — `finalize()`/
+`finalize_multi_planner()` could then run while an earlier-launched planner's container was still
+writing into its own `<sweep_dir>/planners/<lane_dir_name>/plan/` directory, silently merging
+whatever had landed by that point rather than every planner's actual output. `dispatch_planner()`
+now loops over every `LAUNCHED_INVESTIGATOR:plan:` line in the launch output and calls `docker
+wait` on each one before `finalize`/`finalize_multi_planner` runs, so the merge always sees every
+configured planner's complete output, dispatched in any order the containers happen to exit in.
+
+**Plan-mode `--model` plumbing (Issue #3954).** `agent-dispatch.sh` has always forwarded a roster
+planner's `--harness`/`--model` into the container as `CFGMS_SECURITY_REVIEW_HARNESS`/
+`CFGMS_SECURITY_REVIEW_MODEL` env vars, but `investigator-entrypoint.sh`'s plan-mode branch used
+to ignore both and always run `claude -p <prompt>` with no `--model` flag at all — so a configured
+`claude:sonnet-5` planner and a configured `claude:opus-5` planner ran with whatever model `claude`
+itself defaulted to, not the one the roster named, with nothing to say so. The entrypoint now
+passes `--model "$CFGMS_SECURITY_REVIEW_MODEL"` whenever that variable is non-empty (i.e., whenever
+`--harness`/`--model` were actually supplied to `launch-investigator`), and adds `--output-format
+json`, redirecting the CLI's own single-result JSON envelope to a fixed path,
+`/workspace-out/.investigator-plan-result.json`, instead of only stdout — confirmed against the
+installed CLI, that envelope's top-level `modelUsage` object is keyed by the canonical model id
+that actually served the request, independent of whichever alias `--model` was given. The legacy,
+no-roster call (`planners=None`) sets neither env var and is unchanged: it still runs `claude -p
+<prompt>` with no `--model`/`--output-format` at all.
+
+**The dispatch-outcome record: `<sweep_dir>/dispatch_report.json` (Issue #3954, epic #3950's
+D3).** `security-review.sh` — never `planner.py` — writes one JSON file per sweep, on every
+`launch` and `resume`, with one entry per configured planner and per configured finder lane:
+
+```json
+{
+  "planners": [
+    {"requested_harness": "codex", "requested_model": "gpt-5-codex",
+     "passed_harness": "codex", "passed_model": "gpt-5-codex",
+     "resolved_model": "unknown", "outcome": "dispatched"}
+  ],
+  "lanes": [
+    {"requested_harness": "opencode", "requested_model": "glm-4.6",
+     "passed_harness": "opencode", "passed_model": "glm-4.6",
+     "outcome": "credential_unavailable"}
+  ]
+}
+```
+
+Both `dispatch_planner()` (the `"planners"` array) and `dispatch_roster_lanes()` (the `"lanes"`
+array) write into the same file, merging with whatever the other half already wrote rather than
+overwriting it — `dispatch_planner()` always runs first in both `launch` and `resume`, so
+`dispatch_roster_lanes()` is what actually creates the file on a fresh sweep. `outcome` is one of
+`dispatched` / `credential_unavailable` / `launch_failed`, sourced from the same
+`_is_intentional_dispatch_skip` classification the script already used for its WARNING/ERROR
+lines — this is persistence of a fact the script already determined, not a new classification. A
+credential-unavailable skip is recorded with that exact outcome, never omitted from the file.
+`passed_harness`/`passed_model` always equal `requested_harness`/`requested_model` today — recorded
+as separate fields anyway, per D3's requirement that the three identities stay distinguishable even
+when two happen to be equal in the current implementation, since there is no transformation between
+"configured" and "passed to the executable" anywhere in this codebase. For a multi-planner dispatch,
+`resolved_model` is read back from `planner.py::finalize_multi_planner()`'s own
+`<sweep_dir>/.plan-resolved-models.json` sidecar — written by that function's
+`_extract_resolved_model()`, keyed by `lane_dir_name`, from each planner's own
+`.investigator-plan-result.json` — and is `"unknown"` wherever that sidecar has nothing for a given
+entry, including always on the legacy no-roster path, which never asks the CLI for a resolved
+identity in the first place. `resolved_model` is never fabricated by copying `requested_model` or
+`passed_model` into it: an unresolved value is reported as `"unknown"`, not silently backfilled.
+Because a multi-planner `launch()` call reports one aggregated success/failure across the whole
+roster rather than a per-entry result (see `launch()`'s own docstring), every configured planner in
+one `dispatch_planner()` call is recorded with the same `outcome` — the finest granularity available
+without changing that contract. Finder lanes get true per-entry outcomes, since
+`dispatch_roster_lanes()`'s loop already tracks each entry's own launch result independently.
+
 ## Log injection
 
 Findings and step envelopes carry model-generated text (`title`, `evidence`, `stop_reason_raw`)
