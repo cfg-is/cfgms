@@ -49,6 +49,13 @@ metadata-listing commands only (e.g. `git ls-tree`, `go list`, `find -type f -na
 commands for that mode; do not reach for a command outside it just because the shell would
 technically run it.
 
+This restriction is actually loaded, not aspirational: `investigator-entrypoint.sh`'s plan-mode
+invocation execs `claude --agent investigator`, which resolves this file and applies its `tools:`
+line as the session's real tool surface (Issue #3938 — before that flag was added, nothing
+selected this profile, so the session ran with the default tool set and this restriction was
+never enforced regardless of what this file said). `agent-dispatch.sh`'s `inv_disallowed` list
+also denies `Read`/`Grep` via `--disallowedTools`, on top of the profile, as defense-in-depth.
+
 Finder-lane modes (S6/S7/S8) do not run through this profile's `claude` session at all — they
 exec their own Python entrypoint directly (see `.devcontainer/scripts/investigator-entrypoint.sh`)
 and call their provider's API without going through Claude Code tool use. This profile document
