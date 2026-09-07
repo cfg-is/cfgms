@@ -144,7 +144,7 @@ finding among otherwise-valid ones fails the whole file, it is never silently dr
 ### Shared harness lane-runner library (C4 and refusal-retry-once)
 
 `lanes/harness_runner.py` (Issue #3931) is the shared module every per-harness lane runner
-(`claude_lane.py` — Issue #3933; `codex_lane.py` — Issue #3935; `opencode_lane.py` — STORY-8)
+(`claude_lane.py` — Issue #3933; `codex_lane.py` — Issue #3935; `opencode_lane.py` — Issue #3936)
 calls into. It
 implements two of the epic's contracts on top of `lanes/terminal_state.py::classify()` (C3)
 and leaves `resume.py` itself untouched, per the epic's non-goals.
@@ -342,15 +342,16 @@ container and sets three environment variables the container-side harness runner
 | `CFGMS_SECURITY_REVIEW_MODEL` | the `--model` value |
 | `CFGMS_SECURITY_REVIEW_LANE_ID` | the `--mode` value (the lane's own directory name under `lanes/`) |
 
-`claude` and `codex` are wired to an actual credential mount — `--harness codex` mounts
-`~/.codex/auth.json` **read-only** (Issue #3935; `opencode` is STORY-8). Unlike `claude` in lane
-mode, `codex`'s mount is gated on the host file's *existence*, checked before any docker call: a
-missing `~/.codex/auth.json` (a host that has never run `codex login`) fails closed with
-`LAUNCH_FAILED:<container>:credential_unavailable:...`, a message `security-review.sh`'s
-`_is_intentional_dispatch_skip` already recognizes (the same substring
-`gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex lane
-missing its credential is recorded and skipped without blocking any other roster lane's dispatch
-or the consolidator run. An unrecognized `--harness` value still sets the three environment
+`claude`, `codex`, and `opencode` are all wired to an actual credential mount — `--harness codex`
+mounts `~/.codex/auth.json` **read-only** (Issue #3935) and `--harness opencode` mounts
+`~/.local/share/opencode/auth.json` **read-only** (Issue #3936). Unlike `claude` in lane mode, both
+`codex` and `opencode`'s mounts are gated on the host file's *existence*, checked before any docker
+call: a missing credential file (a host that has never run `codex login` / `opencode auth login`)
+fails closed with `LAUNCH_FAILED:<container>:credential_unavailable:...`, a message
+`security-review.sh`'s `_is_intentional_dispatch_skip` already recognizes (the same substring
+`gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex or opencode
+lane missing its credential is recorded and skipped without blocking any other roster lane's
+dispatch or the consolidator run. An unrecognized `--harness` value still sets the three environment
 variables (so the roster mechanism below can dispatch a lane under a harness id this file does
 not yet know how to hand credentials to — including a test's own stub harness) but gets no
 credential mount, which is a deliberate no-op rather than a hard failure at this layer; a
@@ -417,9 +418,9 @@ harness or lane it was — could resolve every provider's domain. That was the o
 cross-harness bleed the single-image model had, and splitting the allowlist is what closed it:
 
 - `.devcontainer/dnsmasq-allowlist-base.conf` — everything that is not a model provider (GitHub,
-  the Go toolchain, package registries, the security scanners). Issue #3935 adds no domain here —
-  a base entry is reachable by every lane regardless of harness, which would undo the separation
-  this whole mechanism exists to provide.
+  the Go toolchain, package registries, the security scanners). Issues #3935/#3936 add no domain
+  here — a base entry is reachable by every lane regardless of harness, which would undo the
+  separation this whole mechanism exists to provide.
 - `.devcontainer/dnsmasq-allowlist.d/<harness>.conf` — one fragment per harness. `claude.conf`
   holds only what the Claude Code harness itself needs (`anthropic.com`, `claude.ai`,
   `claude.com`, `sentry.io`) and is selected both when `--harness claude` sets
@@ -434,31 +435,43 @@ cross-harness bleed the single-image model had, and splitting the allowlist is w
   the deleted REST `openai.py` lane's API-key HTTP calls (Issue #3933), a completely different
   auth mechanism from the ChatGPT-subscription session `--harness codex` mounts, and adding it
   here would silently reinstate that lane's egress under this story's name rather than serving
-  Codex's own harness-auth flow. Issue #3932 originally shipped a second fragment, `legacy.conf`,
-  holding the union of Anthropic + OpenAI + Ollama domains and selected by default so the three
-  REST finder lanes (and every non-harness launch) kept resolving what they resolved before the
-  split existed. Issue #3933 deleted `legacy.conf` outright, along with `api.openai.com`/
-  `ollama.com` from every remaining fragment and the base file — those lanes are the only reason
-  those domains were ever allowlisted.
+  Codex's own harness-auth flow. `opencode.conf` (Issue #3936) holds only `opencode.ai` — the
+  single apex domain the OpenCode CLI's own account/subscription flow (login, plus the "OpenCode
+  Zen" hosted multi-model gateway `opencode/<model>` requests resolve through) lives under,
+  confirmed against the installed CLI's own compiled-in endpoints and its own
+  `opencode providers list --print-logs --log-level DEBUG` output. One entry covers every
+  subdomain the same binary also references (`api.opencode.ai`, `app.opencode.ai`,
+  `models.opencode.ai`, `dev.opencode.ai`) because dnsmasq's `server=/<domain>/` directive matches
+  a domain's subdomains too — verified directly against this allowlist's own dnsmasq build.
+  **Every other provider domain the OpenCode CLI can reach is deliberately absent from
+  `opencode.conf`**: those serve a user configuring a third-party provider directly with their own
+  API key, a different auth mechanism from the single OpenCode Zen account session `--harness
+  opencode` mounts, and this harness's roster entries are always bare Zen model ids, never a
+  `provider/model` string naming one of those other providers. Issue #3932 originally shipped a
+  second fragment, `legacy.conf`, holding the union of Anthropic + OpenAI + Ollama domains and
+  selected by default so the three REST finder lanes (and every non-harness launch) kept resolving
+  what they resolved before the split existed. Issue #3933 deleted `legacy.conf` outright, along
+  with `api.openai.com`/`ollama.com` from every remaining fragment and the base file — those lanes
+  are the only reason those domains were ever allowlisted.
 - `init-firewall.sh` reads `CFGMS_SECURITY_REVIEW_HARNESS` (defaulting to `claude`), validates it
   against the same strict shape `launch-investigator --mode` already enforces, and loads the base
   file plus **exactly one** fragment named by that value. An unrecognized value — a typo, or a
-  harness whose fragment doesn't exist yet (`opencode`, STORY-8) — aborts the container before
-  dnsmasq ever starts: fail closed, never a fallback to loading every fragment, which would
-  silently reopen the bleed this mechanism exists to close.
+  harness with no fragment at all — aborts the container before dnsmasq ever starts: fail closed,
+  never a fallback to loading every fragment, which would silently reopen the bleed this mechanism
+  exists to close.
 - `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file, pre-#3932) is no
   longer baked into the image — kept only, unbaked, as the fixed regression fixture
   `dnsmasq-allowlist_test.sh` still exercises directly. Its domain set matches
-  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly; Issue #3935 leaves
-  this file untouched (the Codex domains live only in `codex.conf`, never in this shared/legacy
-  file or the base file).
+  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly; Issues #3935/#3936
+  leave this file untouched (the Codex and OpenCode domains live only in their own fragments,
+  never in this shared/legacy file or the base file).
 
 **Adding a lane on an existing harness** needs no new allowlist entry — it already resolves that
 harness's fragment. **Adding a new harness** means adding both a fragment file under
 `dnsmasq-allowlist.d/` and that harness's provider domain(s) to it; a harness with no fragment
 gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate — the egress set is
 enumerated per harness rather than opened wholesale — and is a step in each future harness story
-(`codex.conf` landed by this story; STORY-8 adds `opencode.conf`), not something a lane can work
+(`codex.conf` landed by Issue #3935; `opencode.conf` by this story) not something a lane can work
 around at runtime.
 
 ## The Claude harness lane
@@ -588,6 +601,101 @@ classification via an injected `call_harness_fn`, the refusal-retry-once integra
 path-traversal containment, and a real-subprocess check against a stub `codex` binary that proves
 the real, confirmed flag names (`exec`, `--model`, `--sandbox read-only`,
 `--skip-git-repo-check`, `--output-last-message`) actually reach the invocation.
+
+## The OpenCode harness lane
+
+`.claude/scripts/security-review/lanes/opencode_lane.py` (Issue #3936) is the third lane on the
+architectural correction the epic makes, landed on top of `codex_lane.py`. It is also the harness
+epic #3927's C5 roster example configures TWICE with different models
+(`opencode:<qwen-id>,opencode:<glm-id>`), so this lane proves the narrower half of "adding to the
+roster is additive" that `codex_lane.py` could not: not just that a *second harness* needs no
+dispatch-loop change, but that a *second model on the same harness* needs none either —
+`security_review_cli.test.sh` dispatches `opencode:<model-a>,opencode:<model-b>` through the
+literal same `opencode_lane.py` file for both and asserts two independently-tracked lane
+directories come out the other end.
+
+**Invocation.** Identical shape to the other two lanes: an `opencode:<model>` roster entry
+resolves to `python3 opencode_lane.py <lane-id>` inside a `launch-investigator --harness opencode
+--model <model>` container, which mounts `~/.local/share/opencode/auth.json` **read-only**
+(OpenCode's own session credential file — confirmed via `opencode providers list --print-logs
+--log-level DEBUG` against the CLI actually installed for this story, `opencode-ai@1.18.29`, which
+prints its credential path directly) and sets the same three `CFGMS_SECURITY_REVIEW_HARNESS`/
+`_MODEL`/`_LANE_ID` variables documented above. For every step `resume.py::missing_steps()`
+reports outstanding, the module invokes the `opencode` binary (resolved on `PATH`) as a
+subprocess.
+
+**Model id shape is the one real difference from the other two lanes.** `opencode run` takes
+`--model <provider/model>`, never a bare model id — confirmed via `opencode run --help`. Every
+model this harness's roster entries name is served through OpenCode's own hosted multi-model
+gateway ("OpenCode Zen"), whose provider id is the literal string `opencode` (confirmed via
+`opencode models`, which lists its free catalog as `opencode/<id>` with no login required). A
+roster entry's `--model` value is always the bare Zen model id — `roster.py`'s token charset
+excludes `/`, so it could not be a pre-formed `provider/model` string even if a story tried — and
+`opencode_lane.py::call_opencode_harness` builds `f"opencode/{model}"` itself before invoking the
+CLI.
+
+**Same shared prompt and classifier as the other two lanes; capture mechanism matches
+`claude_lane.py`, not `codex_lane.py`, and for a documented reason.** The prompt is built from the
+same `harness_runner.py` `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) plus the step's own
+scope/description/file contents, and state is derived by the same `terminal_state.py::classify()`
+(C3). `opencode run` has no `codex`-style `--output-last-message` flag (confirmed via `--help`) —
+it streams a formatted transcript to stdout, not a bare final-answer string — and its raw
+`--format json` event-stream shape could not be verified against a real Zen model call during this
+story (there is no way to drive one without a live account). Rather than guess at an unverified
+stdout contract, `opencode_lane.py` reuses `claude_lane.py`'s proven mechanism instead: the model
+is told to write `{"findings": [...]}` to an exact path via its own `write` tool, and every other
+tool is denied.
+
+**Tool-surface control is an `opencode.json` permission file, not an `--agent`/`--sandbox` flag —
+two things confirmed directly against the installed CLI ruled out the more obvious `--agent
+plan`.** OpenCode has no `claude`-style `--disallowedTools` or `codex`-style `--sandbox` CLI flag;
+tool permissions are project-scoped config (`opencode.json`'s `"permission"` block, confirmed
+against this CLI version's own `opencode agent list` output, which dumps each built-in agent's
+resolved permission-rule array in exactly that shape).
+
+1. `opencode agent list`'s `plan` agent denies `edit` broadly but does **not** deny `bash` — the
+   top-level default rule still allows it unless an agent's own array overrides that key.
+   `--agent plan` alone is therefore not the read-only control its name suggests; it still needs
+   an explicit denylist.
+2. OpenCode has no separate `write` permission key: `write`/`edit`/`patch` are all gated by the
+   single `edit` permission (no built-in agent's resolved rule array ever mentions a `write` key).
+   Denying `edit` broadly would also deny the one tool call this lane's contract depends on, so
+   `edit` is the one permission `opencode_lane.py` allows — exactly mirroring `claude_lane.py`'s
+   own `LANE_REQUIRED_TOOLS = ("Write",)` carve-out of an otherwise-broad denylist.
+
+Every other permission this CLI version exposes (`bash`, `webfetch`, `websearch`, `task`,
+`question`, `external_directory`, `read`, `glob`, `grep`, `list`, `todowrite`, `doom_loop`,
+`skill`, `lsp`) is set to `deny` explicitly, never left at an unreviewed default — `deny` always
+short-circuits without prompting, so an explicit denylist cannot hang this subprocess the way an
+unreviewed `"ask"` default could in a container with no TTY to answer one. The config is written
+into `out_dir` itself, which is also where `--dir` points `opencode run` at and where
+`output_path` lives — the `write` tool never has to reach outside its own project root, so
+`external_directory` can stay denied too. This lane never points `--dir` at `/workspace`: exactly
+like the other two lanes, every file's content is embedded directly in the prompt, so OpenCode is
+never told to operate on the real checkout.
+
+The raw text the model's `write` tool produces is parsed for a bare `{"findings": [...]}` shape and
+enriched with the four harness-owned identity fields exactly as the other two lanes do, writing the
+result to a second, candidate path that `classify()` actually inspects. A response that isn't that
+shape leaves the candidate path unwritten, which `classify()` reads as `refused` when the harness
+exited 0. Rate-limit detection reuses the identical marker set (`"rate limit"`, `"usage limit"`,
+`"quota exceeded"`, `"429"`) over the subprocess's combined stdout+stderr.
+
+**Credential-unavailable is a recorded, skippable failure, never a silent substitution** — the
+identical shape `codex_lane.py` established: `--harness opencode`'s credential mount is gated on
+`~/.local/share/opencode/auth.json`'s *existence* on the host, checked by `agent-dispatch.sh`
+before any docker call, failing the launch closed with `LAUNCH_FAILED:...:credential_unavailable`
+on a host that has never run `opencode auth login`.
+
+**Import isolation, testing.** Identical bootstrap pattern to the other two lanes (the
+`/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a
+`__file__`-relative-only import). `opencode_lane_test.py` mirrors `claude_lane_test.py`'s/
+`codex_lane_test.py`'s coverage — classification via an injected `call_harness_fn`, the
+refusal-retry-once integration, path-traversal containment, a real-subprocess check against a stub
+`opencode` binary that proves the real, confirmed flag names (`run`, `--model opencode/<model>`,
+`--dir <out_dir>`) and the `opencode.json` permission file actually reach/precede the invocation,
+and a dedicated same-script-two-models test proving one imported module instance handles two
+distinct model ids with no per-model branch.
 
 ## Step plan generation (metadata-only planner)
 
