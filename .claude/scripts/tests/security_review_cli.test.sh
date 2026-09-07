@@ -1276,17 +1276,37 @@ git -C "$CONTENT_FIXTURE_REPO" config user.name "Test"
 # default_dispatch_script() both resolve the harness's own files --
 # agent-dispatch.sh itself, investigator-entrypoint.sh -- relative to
 # $REPO_ROOT/CFGMS_TEST_REPO_ROOT, which this test intentionally points at
-# this synthetic fixture instead of the real checkout. Symlinking these two
-# directories in (never committed -- they exist on the filesystem for
-# os.path.isfile()/subprocess lookups only, and git archive HEAD below never
-# walks through them) supplies the harness's own code from the real
-# checkout while leaving the fixture's OWN git history -- the "reviewed
-# content" this test controls -- completely independent.
-ln -s "${REPO_ROOT}/.claude" "${CONTENT_FIXTURE_REPO}/.claude"
-ln -s "${REPO_ROOT}/.devcontainer" "${CONTENT_FIXTURE_REPO}/.devcontainer"
+# this synthetic fixture instead of the real checkout. Copying (not
+# symlinking) these two directories in, as real tracked files, supplies the
+# harness's own code from the real checkout while leaving the fixture's OWN
+# git history -- the "reviewed content" this test controls -- completely
+# independent of the marker file below.
+#
+# These copies ARE committed, and that is deliberate: claude_lane.py's
+# CFGMS_SECURITY_REVIEW_REPO_ROOT import-bootstrap fallback resolves its
+# sibling modules (schema.py, terminal_state.py, ...) from
+# "<repo_root>/.claude/scripts/security-review", and after this story's
+# cutover, <repo_root> here is <sweep_dir>/snapshot -- git archive HEAD's
+# own output, not this working tree. An untracked file (or a directory
+# symlink, tried and reverted here -- `_walk_relative_files()`'s
+# `os.walk(..., followlinks=False)` never lists a directory-type symlink as
+# a file at all, so `verify_snapshot()` reports it "missing from snapshot"
+# even once `git archive` has faithfully extracted it) is invisible to
+# `git archive`'s tree walk, so `<sweep_dir>/snapshot` ended up without a
+# `.claude` at all; the sibling imports only kept working by accident, via
+# the harness's hardcoded `/workspace` fallback candidate matching this dev
+# sandbox's own checkout path -- a coincidence that does not hold on a CI
+# runner, where the checkout lives elsewhere and the same imports raise
+# ModuleNotFoundError (swallowed by this file's own docker stub's
+# `|| true`, so the lane silently never runs). Committing real copies makes
+# `git archive` include them as ordinary blobs, exactly like a real
+# checkout's own tracked `.claude/` would produce, so the fallback resolves
+# the same way everywhere, not just where the coincidence holds.
+cp -r "${REPO_ROOT}/.claude" "${CONTENT_FIXTURE_REPO}/.claude"
+cp -r "${REPO_ROOT}/.devcontainer" "${CONTENT_FIXTURE_REPO}/.devcontainer"
 mkdir -p "${CONTENT_FIXTURE_REPO}/pkg/example"
 echo "COMMITTED_SNAPSHOT_MARKER_c3a91f" > "${CONTENT_FIXTURE_REPO}/pkg/example/file.go"
-git -C "$CONTENT_FIXTURE_REPO" add pkg
+git -C "$CONTENT_FIXTURE_REPO" add pkg .claude .devcontainer
 git -C "$CONTENT_FIXTURE_REPO" commit --quiet -m "init"
 # Dirty the working tree AFTER the commit the sweep will pin to -- exactly
 # what "develop moves several times an hour" looks like between sweep
