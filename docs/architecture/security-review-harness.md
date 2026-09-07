@@ -27,7 +27,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
-| `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output |
+| `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output; `launch(..., planners=...)`/`finalize_multi_planner`/`merge_steps_by_scope` add the `CFGMS_SECURITY_REVIEW_PLANNERS` multi-planner path (C6, Issue #3937) — see [Multi-planner plan merge](#multi-planner-plan-merge-c6-issue-3937) below |
 | `security-review.sh` | The operator-facing `launch`/`status`/`resume` CLI (Issue #3910) — see [Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below. Lives in `.claude/scripts/`, one level up from this directory, alongside `agent-dispatch.sh` |
 
 This directory's name contains a hyphen, so it is never imported with a plain
@@ -332,9 +332,7 @@ by that same story. **`--harness`/`--model` is now the only credential-delivery 
 
 `launch-investigator --harness <id> --model <id>` generalizes the plan-mode-only credential mount
 above: passing `--harness claude` mounts `~/.claude/.credentials.json` **read-only** into the
-container (a separate mount from plan mode's own, which stays exactly as it was — writable,
-unaffected by this flag) and sets three environment variables the container-side harness runner
-reads:
+container and sets three environment variables the container-side harness runner reads:
 
 | Variable | Set to |
 |---|---|
@@ -349,12 +347,38 @@ credentials to — including a test's own stub harness) but gets no credential m
 deliberate no-op rather than a hard failure at this layer; a harness's own runner script is
 responsible for failing loudly if it needed a credential that never arrived.
 
+**Credential delivery is gated on the harness id in *both* modes, and is always read-only.**
+Multi-planner dispatch (C6, Issue #3937) made `--mode plan --harness <id>` a real call shape;
+until then plan mode was only ever launched without `--harness`, so its unconditional Claude
+credential mount always matched the harness that ran. It no longer would, so the plan branch now
+mounts `~/.claude/.credentials.json` **only when `--harness` is omitted**, and the `--harness`
+block is the single owner of that mount whenever the flag is supplied. Two properties follow, and
+`investigator_launch.test.sh` asserts both against the rendered `docker run` argv:
+
+- A planner whose roster entry names a non-`claude` harness receives **no** Claude credential. It
+  is a container running a third-party harness that deliberately ingests untrusted repository
+  source and third-party model output; the egress firewall bounds *where* it can send data, but
+  `api.anthropic.com` is necessarily allowlisted, so not handing it the session at all is the
+  control that matters. `investigator-entrypoint.sh`'s plan branch then fails closed on its own
+  `~/.claude/.credentials.json` check rather than running under someone else's session.
+- `--harness claude` renders **exactly one** `-v` for that container destination. Two mounts with
+  the same destination and conflicting `rw`/`ro` modes are rejected by the daemon, and a daemon
+  that tolerated them would leave the effective mode of a live credential file undefined.
+
+The mount is `:ro` in plan mode as it has always been in lane mode: the container refreshes an
+OAuth token in memory for the life of the process and never needs to write back to the host file,
+while a writable mount let a container that ingests untrusted input overwrite the host's live
+credential. Plan mode drives the same `claude` CLI that `lanes/claude_lane.py` already runs
+read-only, so this is proven for that exact binary. Plan mode's `DISPATCH_DEFERRED:creds_missing`
+gate still runs whenever the Claude credential is the one being delivered (no `--harness`, or
+`--harness claude`) and is skipped for a harness that is not being handed it.
+
 ### Egress containment
 
 The investigator container runs behind the same default-deny egress firewall as every other
 agent container, and it is the profile that needs it most: it is the only one that at the same
-time holds the host's live Claude OAuth credentials (plan mode, bind-mounted from
-`~/.claude/.credentials.json`; lane mode holds the same credentials read-only when launched with
+time holds the host's live Claude OAuth credentials (read-only, bind-mounted from
+`~/.claude/.credentials.json`, in plan mode without `--harness` and in either mode with
 `--harness claude`), and *by design* ingests untrusted content — repository source under review,
 plus raw harness output in finder lanes. Open egress beside those facts is a direct exfiltration
 channel for a prompt injection, so the firewall is a load-bearing control here rather than a
@@ -579,13 +603,15 @@ never be mistaken for "nothing to review," but one bad step must never take the 
 with it either. Before Issue #3928, *any* single invalid step deleted every step file that had
 been produced, including the independently valid ones.
 
-**Launch mechanics.** `planner.launch(sweep_dir)` is the only thing in this story that starts a
-container, and it does so through nothing but `agent-dispatch.sh launch-investigator --sweep-dir
-<sweep_dir> --mode plan` (#3903) — the same fire-and-forget `docker run -d` semantics as every
-other launch path here. It adds no launch mechanism, no mount, and no credential path of its
-own. Waiting for that container to exit and then calling `finalize()` is sweep-wide
-orchestration (epic #3900's S10) and is out of scope for this story; `finalize()` is written to
-be called at any later time by whatever eventually owns that wait.
+**Launch mechanics.** `planner.launch(sweep_dir)` starts a container through nothing but
+`agent-dispatch.sh launch-investigator --sweep-dir <sweep_dir> --mode plan` (#3903) — the same
+fire-and-forget `docker run -d` semantics as every other launch path here — when no planner
+roster is configured (`planners=None`, the default). It adds no launch mechanism, no mount, and
+no credential path of its own beyond that one call. Waiting for that container to exit and then
+calling `finalize()` is sweep-wide orchestration (epic #3900's S10) and is out of scope for this
+story; `finalize()` is written to be called at any later time by whatever eventually owns that
+wait. See [Multi-planner plan merge (C6)](#multi-planner-plan-merge-c6-issue-3937) below for
+`launch()`'s roster-aware dispatch path.
 
 **AC9 (read-only posture) is inherited from #3903, not restated here.** This story's launch
 relies entirely on #3903's two load-bearing controls — no write-capable `GH_TOKEN`, the `:ro`
@@ -601,6 +627,73 @@ attacker-influenced, even though neither carries finding content. Both route thr
 `schema.py::log_event`/`safe_log_event`, exactly as `resume.py`/`consolidate.py` do, so an
 embedded newline plus a forged log line stays inside that one record's field instead of becoming
 a second, spoofed record.
+
+### Multi-planner plan merge (C6, Issue #3937)
+
+Epic #3927's contract C6: `CFGMS_SECURITY_REVIEW_PLANNERS` selects which model(s) build the
+plan — a comma-separated `harness:model` roster in the same shape as `CFGMS_SECURITY_REVIEW_LANES`
+(C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case. When more
+than one is listed, each plans independently over the same metadata-only payload and the
+resulting steps merge by `scope`: one step per distinct scope, `files` the union of every
+proposal for that scope, `planners` recording every planner id that proposed it. A scope is
+reviewed once per lane regardless of how many planners proposed it — a second planner buys wider
+coverage of *what* is worth reviewing, never a second review of the same code.
+
+**The single-planner path is untouched.** `planner.finalize(sweep_dir)` — STORY-1's
+per-step-exclusion validator — and its call from `launch(sweep_dir, planners=None)` (the default)
+are exactly the code they were before this story; every `finalize()`-named test that predates C6
+still passes unmodified against that same code path. C6 is reached only through two new,
+additive entry points: `launch(..., planners=<roster>)` and `finalize_multi_planner(sweep_dir,
+planners)`. Both take the roster as an explicit argument — the CLI's `_planners_from_env()` is
+the only thing that reads `CFGMS_SECURITY_REVIEW_PLANNERS` itself, exactly mirroring how
+`security-review.sh` reads `CFGMS_SECURITY_REVIEW_LANES` for finder lanes rather than pushing
+env-var parsing into `roster.py` or the Python API.
+
+**Why each planner needs its own sub-sweep-dir.** `agent-dispatch.sh launch-investigator --mode
+plan` always mounts `<the --sweep-dir you were given>/plan` as the container's only writable
+directory and derives the container name from that same `--sweep-dir`'s basename — a property
+this story does not change, since `agent-dispatch.sh` is out of scope for it. Two planner
+containers sharing one `--sweep-dir` would therefore collide twice over: on the container name
+(the second dispatch would hit the container-conflict gate, Issue #3930) and on `step-NNN.json`
+filenames written concurrently into the same directory. `launch()`'s multi-planner path avoids
+both by passing a distinct `--sweep-dir` per roster entry —
+`<sweep_dir>/planners/<lane_dir_name>/` — reusing C5's `lane_dir_name` (`<harness>-<model>`) as
+the directory name, so `agent-dispatch.sh` creates and mounts
+`<sweep_dir>/planners/<lane_dir_name>/plan/` as that entry's own `/workspace-out`. Since the
+container looks for its prompt at the fixed path
+`/workspace-out/.investigator-plan-prompt.md` (`investigator-entrypoint.sh`'s plan mode), `launch()`
+copies the one prompt `prepare()` already wrote into each sub-sweep-dir's own `plan/` before
+dispatch — every planner reviews the same metadata regardless of which harness/model executes it,
+so one prompt, copied, is correct rather than a second call to `build_prompt()`.
+
+**Dispatch is independent per entry, matching `dispatch_roster_lanes`.** Every configured planner
+is attempted even if an earlier one fails to launch; `launch()` raises `PlannerError` once, after
+every entry has been attempted, naming every entry that failed — the same "one bad entry must not
+stop the others" property `security-review.sh`'s finder-lane dispatch already has for C5.
+
+**`finalize_multi_planner(sweep_dir, planners)` validates, then merges, then writes the canonical
+plan.** For each roster entry it applies the same per-step validation `finalize()` does —
+JSON parsing, `schema.validate_plan_step()`, the bounded-scope rule, and unconditional injection
+of `sweep_id`/`commit_sha` from the one sweep-wide `.plan-context.json` sidecar (never trusting a
+step's own model-written values, and failing every step closed if the sidecar is missing or
+malformed, exactly like `finalize()`) — reading from that entry's own
+`<sweep_dir>/planners/<lane_dir_name>/plan/` directory and recording `planners: [<lane_dir_name>]`
+on each surviving step, rather than the fixed single-planner `PLANNER_ID`. Every validated
+proposal across every planner is then merged by `merge_steps_by_scope()` and the merged result
+replaces whatever was in `<sweep_dir>/plan/` — the one location every finder lane and the
+consolidator already read from, so nothing downstream of this function needs to know more than
+one planner ran. Zero surviving steps across every configured planner is a planning failure,
+exactly like the single-planner case: `plan/PLANNING_FAILED` is written rather than leaving an
+empty `plan/` that could be mistaken for "nothing to review."
+
+**`merge_steps_by_scope()` is a pure function, independently testable without docker.** It groups
+already-validated step dicts by a scope key (`_scope_paths()`'s normalized, de-duplicated,
+order-independent path set — so a bare-string scope and its equivalent one-element list count as
+the same scope), unions `files` and `planners` in first-seen order with de-duplication, and
+renumbers the merged output `step-001`, `step-002`, ... in first-seen-scope order, since the
+merged plan is a new numbering, not any single planner's own (two planners independently calling
+something `step-001` must never collide). Merging is idempotent: merging an already-merged list
+is a no-op.
 
 ## Log injection
 
@@ -696,9 +789,10 @@ shared schema exists to close.
 
 All seven fields are required. `step_id`/`sweep_id`/`commit_sha`/`description` are non-empty
 strings; `scope` is a non-empty string or a non-empty list of non-empty strings; `files` is a
-list of non-empty strings (may be empty); `planners` is a non-empty list of non-empty strings
-(C6's multi-planner merge — out of scope for this story — is what gives `planners` more than one
-entry; today's single planner always writes exactly one).
+list of non-empty strings (may be empty); `planners` is a non-empty list of non-empty strings —
+more than one entry is C6's multi-planner merge
+([below](#multi-planner-plan-merge-c6-issue-3937), Issue #3937); the single hardcoded planner
+(`CFGMS_SECURITY_REVIEW_PLANNERS` unset) always writes exactly one, `PLANNER_ID`.
 
 **`sweep_id`/`commit_sha`/`planners` are never sourced from the model.** `planner.py`'s prompt
 never asks the model writing `step-NNN.json` for these three fields at all — a model is not a
@@ -899,7 +993,10 @@ hardcoded three-lane path (`anthropic-opus5`/`openai-gpt56-sol`/`ollama-qwen`,
 adapters and OS-keychain credential mechanism it depended on — in the same switchover cutover
 that landed `claude_lane.py`. **The roster is now the only lane-dispatch path.**
 `CFGMS_SECURITY_REVIEW_LANES` must be set; `security-review.sh` fails closed, before creating or
-dispatching anything, if it is unset or malformed.
+dispatching anything, if it is unset or malformed. `CFGMS_SECURITY_REVIEW_PLANNERS` is the
+planner-side counterpart of this same roster shape — which model(s) *build* the plan rather than
+which model(s) *review* it — and is optional: see [Multi-planner plan merge
+(C6)](#multi-planner-plan-merge-c6-issue-3937).
 
 **`.claude/scripts/security-review/roster.py`** is the pure-function parser: `parse_roster()`
 turns the env var's value into a list of `(harness, model, lane_dir_name)` tuples —
