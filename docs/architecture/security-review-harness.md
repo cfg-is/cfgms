@@ -1196,6 +1196,34 @@ insertion, so a forged Markdown heading or table-row sequence embedded in a find
 become a real heading or an extra table row — it stays inline text inside the cell/line it was
 written into.
 
+**The `## Dispatch` section surfaces dispatch outcomes and rejected proposals (Issue #3956),
+never silently absent.** It renders ahead of `## Findings`, reading two optional artifacts —
+absent means nothing to report, not an error, matching every other optional artifact this
+module reads:
+
+- `<sweep_dir>/dispatch_report.json` (#3954) — `security-review.sh`'s per-planner and per-lane
+  requested/passed/resolved identity and `outcome` record. `consolidate()` reads it verbatim into
+  `report["dispatch"]` (`{"planners": [...], "lanes": [...]}`); `render_markdown()` lists every
+  entry whose `outcome` is not `"dispatched"`, labelled `**UNAVAILABLE**` — a planner that was
+  never launched or a lane skipped for `credential_unavailable` is exactly as visible here as a
+  finding is. Neither array carries a name field of its own, so `_dispatch_identity()`
+  reconstructs the same `<harness>-<model>` shape `roster.Lane.lane_dir_name` uses from
+  `requested_harness`/`requested_model`, falling back to the harness alone for the legacy
+  single-planner entry (whose `requested_model` is always empty).
+- `<sweep_dir>/plan/rejected_proposals.json` (#3956) — written by `planner.py`'s `finalize()`/
+  `finalize_multi_planner()` whenever they exclude at least one step-file proposal during
+  validation (the same `errors` those functions already compute and log via
+  `schema.log_event("invalid_plan_step", ...)`, persisted this time), one entry per excluded
+  filename with its validation error text. Written unconditionally whenever a proposal is
+  excluded, independent of whether the sweep otherwise succeeds — a rejection is worth surfacing
+  even when enough other steps survived to keep the sweep alive. `consolidate()` reads it
+  verbatim into `report["rejected_proposals"]`; `render_markdown()` lists every entry, labelled
+  `**REJECTED**`.
+
+An empty result for both — nothing unavailable and nothing rejected — renders `_(no dispatch or
+proposal issues recorded)_`, the same "state the empty case explicitly, don't just omit the
+section" discipline the `## Findings` empty case already applies.
+
 ## Plan-step shape
 
 The plan-step shape is defined once, by `schema.py::validate_plan_step()` (Issue #3928, epic
