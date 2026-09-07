@@ -25,6 +25,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
 | `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
 | `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
+| `lanes/codex_lane.py` | The Codex harness finder lane (Issue #3935) — see [The Codex harness lane](#the-codex-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output; `launch(..., planners=...)`/`finalize_multi_planner`/`merge_steps_by_scope` add the `CFGMS_SECURITY_REVIEW_PLANNERS` multi-planner path (C6, Issue #3937) — see [Multi-planner plan merge](#multi-planner-plan-merge-c6-issue-3937) below |
@@ -143,7 +144,8 @@ finding among otherwise-valid ones fails the whole file, it is never silently dr
 ### Shared harness lane-runner library (C4 and refusal-retry-once)
 
 `lanes/harness_runner.py` (Issue #3931) is the shared module every per-harness lane runner
-(`claude_lane.py` — Issue #3933; `codex_lane.py`/`opencode_lane.py` — STORY-7/8) calls into. It
+(`claude_lane.py` — Issue #3933; `codex_lane.py` — Issue #3935; `opencode_lane.py` — STORY-8)
+calls into. It
 implements two of the epic's contracts on top of `lanes/terminal_state.py::classify()` (C3)
 and leaves `resume.py` itself untouched, per the epic's non-goals.
 
@@ -340,12 +342,20 @@ container and sets three environment variables the container-side harness runner
 | `CFGMS_SECURITY_REVIEW_MODEL` | the `--model` value |
 | `CFGMS_SECURITY_REVIEW_LANE_ID` | the `--mode` value (the lane's own directory name under `lanes/`) |
 
-Only `claude` is wired to an actual credential mount today — `codex`/`opencode` are STORY-7/8.
-An unrecognized `--harness` value still sets the three environment variables (so the roster
-mechanism below can dispatch a lane under a harness id this file does not yet know how to hand
-credentials to — including a test's own stub harness) but gets no credential mount, which is a
-deliberate no-op rather than a hard failure at this layer; a harness's own runner script is
-responsible for failing loudly if it needed a credential that never arrived.
+`claude` and `codex` are wired to an actual credential mount — `--harness codex` mounts
+`~/.codex/auth.json` **read-only** (Issue #3935; `opencode` is STORY-8). Unlike `claude` in lane
+mode, `codex`'s mount is gated on the host file's *existence*, checked before any docker call: a
+missing `~/.codex/auth.json` (a host that has never run `codex login`) fails closed with
+`LAUNCH_FAILED:<container>:credential_unavailable:...`, a message `security-review.sh`'s
+`_is_intentional_dispatch_skip` already recognizes (the same substring
+`gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex lane
+missing its credential is recorded and skipped without blocking any other roster lane's dispatch
+or the consolidator run. An unrecognized `--harness` value still sets the three environment
+variables (so the roster mechanism below can dispatch a lane under a harness id this file does
+not yet know how to hand credentials to — including a test's own stub harness) but gets no
+credential mount, which is a deliberate no-op rather than a hard failure at this layer; a
+harness's own runner script is responsible for failing loudly if it needed a credential that
+never arrived.
 
 **Credential delivery is gated on the harness id in *both* modes, and is always read-only.**
 Multi-planner dispatch (C6, Issue #3937) made `--mode plan --harness <id>` a real call shape;
@@ -397,7 +407,7 @@ The entrypoint fails closed: it verifies after init that the `OUTPUT` policy is 
 without starting either mode if any of the three is not true. A missing `NET_ADMIN` capability
 surfaces as a container that exits immediately, not as one that runs with open egress.
 
-**Per-harness allowlist split (Issue #3932), `claude` now the only fragment (Issue #3933).** The
+**Per-harness allowlist split (Issue #3932), a second fragment landed by Issue #3935.** The
 founder chose one investigator image with the harness selected at launch, rather than an image
 per harness — credential and tool separation are already per-launch (`--harness`/`--model`,
 above), so that choice is sound on its own. Before Issue #3932, the egress allowlist was not
@@ -407,36 +417,49 @@ harness or lane it was — could resolve every provider's domain. That was the o
 cross-harness bleed the single-image model had, and splitting the allowlist is what closed it:
 
 - `.devcontainer/dnsmasq-allowlist-base.conf` — everything that is not a model provider (GitHub,
-  the Go toolchain, package registries, the security scanners).
+  the Go toolchain, package registries, the security scanners). Issue #3935 adds no domain here —
+  a base entry is reachable by every lane regardless of harness, which would undo the separation
+  this whole mechanism exists to provide.
 - `.devcontainer/dnsmasq-allowlist.d/<harness>.conf` — one fragment per harness. `claude.conf`
   holds only what the Claude Code harness itself needs (`anthropic.com`, `claude.ai`,
   `claude.com`, `sentry.io`) and is selected both when `--harness claude` sets
   `CFGMS_SECURITY_REVIEW_HARNESS=claude` **and** when no harness value is supplied at all —
   `claude` is the default (Issue #3933), because every existing dev/review/fix agent container
   and plan mode's own untouched invocation run Claude Code, so resolving exactly the Claude
-  harness's own domains is what keeps them working, not a legacy compatibility shim. Issue #3932
-  originally shipped a second fragment, `legacy.conf`, holding the union of Anthropic + OpenAI +
-  Ollama domains and selected by default so the three REST finder lanes (and every non-harness
-  launch) kept resolving what they resolved before the split existed. Issue #3933 deleted
-  `legacy.conf` outright, along with `api.openai.com`/`ollama.com` from every remaining fragment
-  and the base file — those lanes are the only reason those domains were ever allowlisted.
+  harness's own domains is what keeps them working, not a legacy compatibility shim. `codex.conf`
+  (Issue #3935) holds only `auth.openai.com` (OAuth token refresh/revoke for the session
+  `~/.codex/auth.json` holds) and `chatgpt.com` (the model-invocation backend a ChatGPT-plan login
+  actually talks to) — confirmed against the installed CLI's own compiled-in endpoints, not
+  assumed. **`api.openai.com` is deliberately absent from `codex.conf`**: that domain belongs to
+  the deleted REST `openai.py` lane's API-key HTTP calls (Issue #3933), a completely different
+  auth mechanism from the ChatGPT-subscription session `--harness codex` mounts, and adding it
+  here would silently reinstate that lane's egress under this story's name rather than serving
+  Codex's own harness-auth flow. Issue #3932 originally shipped a second fragment, `legacy.conf`,
+  holding the union of Anthropic + OpenAI + Ollama domains and selected by default so the three
+  REST finder lanes (and every non-harness launch) kept resolving what they resolved before the
+  split existed. Issue #3933 deleted `legacy.conf` outright, along with `api.openai.com`/
+  `ollama.com` from every remaining fragment and the base file — those lanes are the only reason
+  those domains were ever allowlisted.
 - `init-firewall.sh` reads `CFGMS_SECURITY_REVIEW_HARNESS` (defaulting to `claude`), validates it
   against the same strict shape `launch-investigator --mode` already enforces, and loads the base
   file plus **exactly one** fragment named by that value. An unrecognized value — a typo, or a
-  harness whose fragment doesn't exist yet (`codex`/`opencode`, STORY-7/8) — aborts the container
-  before dnsmasq ever starts: fail closed, never a fallback to loading every fragment, which would
+  harness whose fragment doesn't exist yet (`opencode`, STORY-8) — aborts the container before
+  dnsmasq ever starts: fail closed, never a fallback to loading every fragment, which would
   silently reopen the bleed this mechanism exists to close.
 - `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file, pre-#3932) is no
   longer baked into the image — kept only, unbaked, as the fixed regression fixture
   `dnsmasq-allowlist_test.sh` still exercises directly. Its domain set matches
-  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly.
+  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly; Issue #3935 leaves
+  this file untouched (the Codex domains live only in `codex.conf`, never in this shared/legacy
+  file or the base file).
 
 **Adding a lane on an existing harness** needs no new allowlist entry — it already resolves that
 harness's fragment. **Adding a new harness** means adding both a fragment file under
 `dnsmasq-allowlist.d/` and that harness's provider domain(s) to it; a harness with no fragment
 gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate — the egress set is
 enumerated per harness rather than opened wholesale — and is a step in each future harness story
-(STORY-7/8), not something a lane can work around at runtime.
+(`codex.conf` landed by this story; STORY-8 adds `opencode.conf`), not something a lane can work
+around at runtime.
 
 ## The Claude harness lane
 
@@ -504,6 +527,67 @@ switchover's central claim: a real plan step, a real stub `claude` binary on `PA
 Reverting any part of the switchover that reintroduces a zero-API-calls/zero-files-written silent
 pass (finding 1's original failure mode) makes this test fail — there is no seam left for a stub
 to paper over, since every step in the chain is a real subprocess run, not an injected fake.
+
+## The Codex harness lane
+
+`.claude/scripts/security-review/lanes/codex_lane.py` (Issue #3935) is the second lane on the
+architectural correction the epic makes, landed on top of `claude_lane.py` — proving, for the
+first time, that adding a harness to the roster is additive: no change to `security-review.sh`'s
+dispatch loop, `roster.py`'s parsing, or `investigator-entrypoint.sh`'s mode dispatch, all of
+which are already harness-id-generic (`${harness}_lane.py` by naming convention).
+
+**Invocation.** Identical shape to the Claude lane: a `codex:<model>` roster entry resolves to
+`python3 codex_lane.py <lane-id>` inside a `launch-investigator --harness codex --model <model>`
+container, which mounts `~/.codex/auth.json` **read-only** (Codex's own session credential file —
+confirmed against the CLI actually installed for this story, `@openai/codex@0.153.4`: a
+ChatGPT-subscription `codex login` stores its OAuth tokens there, under `$CODEX_HOME`, default
+`~/.codex`) and sets the same three `CFGMS_SECURITY_REVIEW_HARNESS`/`_MODEL`/`_LANE_ID` variables
+documented above. For every step `resume.py::missing_steps()` reports outstanding, the module
+invokes the `codex` binary (resolved on `PATH`) as a subprocess.
+
+**Same shared prompt and classifier as `claude_lane.py`, one different capture mechanism.** The
+prompt is built from the same `harness_runner.py` `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4)
+plus the step's own scope/description/file contents, and state is derived by the same
+`terminal_state.py::classify()` (C3). What differs is how a response is captured, because the two
+CLIs' real, confirmed non-interactive flag shapes differ:
+
+- `claude -p` has no file-output flag, so `claude_lane.py` asks the model to `Write` its findings
+  to a path named in the prompt, and denies every other tool via `--disallowedTools`.
+- `codex exec --output-last-message <FILE>` writes the harness's final turn message to `<FILE>`
+  itself, from the *outer*, unsandboxed `codex` process — not from a tool call the model makes.
+  Combined with `--sandbox read-only` (Codex's own policy: the model's turn can read but never
+  write or meaningfully execute), `codex_lane.py` needs no `Write`-tool grant and no denylist at
+  all; an allowed list of zero tools is a stronger tool-surface control than a denylist that can
+  only ever be incomplete, not a weaker substitute for `--disallowedTools`. `--skip-git-repo-check`
+  is passed because, like the Claude lane, file contents are embedded directly in the prompt —
+  Codex is never told to operate on `/workspace` as a git working tree.
+
+The raw text `--output-last-message` captures is parsed for a bare `{"findings": [...]}` shape and
+enriched with the four harness-owned identity fields exactly as `claude_lane.py` does, writing the
+result to a second, candidate path that `classify()` actually inspects. A response that isn't that
+shape leaves the candidate path unwritten, which `classify()` reads as `refused` when the harness
+exited 0 — the same row of the four-terminal-state table the Claude lane hits on a prose refusal.
+Rate-limit detection reuses the identical marker set (`"rate limit"`, `"usage limit"`, `"quota
+exceeded"`, `"429"`) over the subprocess's combined stdout+stderr, since neither CLI's plain-text
+output has a stable structured field to key on instead.
+
+**Credential-unavailable is a recorded, skippable failure, never a silent substitution.** Unlike
+`claude` in lane mode, `--harness codex`'s credential mount is gated on `~/.codex/auth.json`'s
+*existence* on the host, checked by `agent-dispatch.sh` before any docker call — a host that has
+never run `codex login` fails the launch closed with `LAUNCH_FAILED:...:credential_unavailable`,
+which `security-review.sh`'s `_is_intentional_dispatch_skip` recognizes as a documented skip. This
+is the first point C5's "never silently substituted" property is testable with more than one
+harness in the roster: `security_review_cli.test.sh` proves a codex lane's credential-unavailable
+skip is recorded (its lane directory stays empty, never populated with another lane's output)
+while the claude lane in the same roster still dispatches and the consolidator still runs.
+
+**Import isolation, testing.** Identical bootstrap pattern to `claude_lane.py` (the
+`/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a
+`__file__`-relative-only import). `codex_lane_test.py` mirrors `claude_lane_test.py`'s coverage —
+classification via an injected `call_harness_fn`, the refusal-retry-once integration,
+path-traversal containment, and a real-subprocess check against a stub `codex` binary that proves
+the real, confirmed flag names (`exec`, `--model`, `--sandbox read-only`,
+`--skip-git-repo-check`, `--output-last-message`) actually reach the invocation.
 
 ## Step plan generation (metadata-only planner)
 
