@@ -902,15 +902,45 @@ model-generated or repository-path text cannot spoof a second diagnostic record.
 
 ## Consolidation and the coverage table
 
-`consolidate.py::consolidate(sweep_dir, repo_root)` (#3904) is the last step of a sweep: a pure
-read-existing-files-and-render pass over whatever `lanes/<lane>/step-*.findings.json` and
-`step-*.status.json` files currently exist, in any state of completeness. It never calls a
-provider API and never dispatches a container, so it is safe to run — and to test — against
-fixture data before any lane (S6/S7/S8) exists. It produces two files under
-`<sweep_dir>/report/`:
+`consolidate.py::consolidate(sweep_dir, repo_root)` (#3904, denominator rewritten by #3953) is
+the last step of a sweep: a pure read-existing-files-and-render pass over the sweep's frozen plan
+plus whatever `lanes/<lane>/step-*.findings.json` and `step-*.status.json` files currently exist,
+in any state of completeness. It never calls a provider API and never dispatches a container, so
+it is safe to run — and to test — against fixture data before any lane (S6/S7/S8) exists. It
+produces two files under `<sweep_dir>/report/`:
 
 - `consolidated.json` — machine-readable, de-duplicated findings.
 - `consolidated.md` — the coverage table followed by the findings, what the PO reads.
+
+**The coverage denominator is the frozen plan, never lane output.** `_discover_plan_step_ids()`
+reads the step ids that exist as `<sweep_dir>/plan/step-*.json` files — the set `planner.py`'s
+`finalize()`/`finalize_multi_planner()` write once and `resume` never regenerates — reusing
+`planner.py`'s own `STEP_FILENAME_RE` rather than a redefined equivalent, so the two stay in
+lock-step by construction. Before #3953, the denominator was the union of
+`lanes/*/step-*.{findings,status}.json` files a lane happened to produce, which meant a step no
+lane ever touched simply disappeared from the total instead of appearing as a gap. Reading from
+`plan/` instead means a step every lane ignored is still counted — and, per the next paragraph,
+visibly counted — because the plan fixes what "supposed to be reviewed" means independently of
+what any lane actually did.
+
+**A `(lane, step_id)` pair with no file at all is `not_started`, not absent.** `build_coverage_table()`
+now produces five buckets per lane — `complete`/`parked`/`refused`/`failed` plus `not_started` —
+and they always sum to `total_steps` exactly. `not_started` is the frozen-plan step ids minus
+whatever the lane produced a `.findings.json` or `.status.json` for; it is an explicit, rendered
+gap for that lane, never simply missing from the row. `consolidated.md`'s coverage table carries a
+matching fifth "Not started" column, and `security-review.sh status` (which calls
+`load_sweep()`/`build_coverage_table()` directly rather than `render_markdown()`) renders the same
+fifth column so the two surfaces cannot drift apart on this point.
+
+**A sweep whose plan failed reports that coverage cannot be computed — never an empty "clean"
+table.** `load_sweep()` returns a `plan_failed` flag that is `True` when `plan/PLANNING_FAILED` is
+present (`finalize()`'s own marker for "zero steps survived validation") or when `plan/` simply
+contains zero `step-*.json` files. `consolidate()` carries that flag into the report dict, and
+`render_markdown()` — and `security-review.sh status`, independently — check it before rendering
+anything: when it is `True`, the Coverage section states plainly that coverage cannot be computed
+for this sweep, and no coverage table (not even a `0/0` one) is rendered. A `0/0` table is
+indistinguishable from "nothing to review, sweep clean"; a planning failure is a different fact
+and must read as one.
 
 **De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
 never a line number. Every occurrence across every lane's `step-*.findings.json` sharing this key
@@ -921,19 +951,22 @@ independently reported it, and `occurrences` keeps each lane's own `severity`/`c
 **Agreement is measured against completed steps, not configured lanes.** A consolidated
 finding's `agreement` field is `{"reported": N, "eligible": M}`, where `M` is the number of
 lanes that actually completed the step(s) the finding came from — not the number of lanes in
-the sweep. A lane that never ran that step (parked, failed, or not yet dispatched) contributes
-neither a "reported" nor a "did not find it" signal, so it must not inflate the denominator:
-counting it as silent agreement is exactly the false-confidence failure mode SEC3900's
-refusal-handling section exists to prevent, just relocated to the consolidator.
+the sweep. A lane that never ran that step (parked, failed, not yet dispatched, or simply
+`not_started` against the frozen plan) contributes neither a "reported" nor a "did not find it"
+signal, so it must not inflate the denominator: counting it as silent agreement is exactly the
+false-confidence failure mode SEC3900's refusal-handling section exists to prevent, just
+relocated to the consolidator.
 
 **The coverage table** in `consolidated.md` has one row per lane discovered under `lanes/`, with
-`complete`/`parked`/`refused`/`failed` counts (rendered as `N/M` against the total steps
-discovered across the whole sweep) derived from every lane's status/findings files. A sweep with
-zero lane output (no lane directories, or lane directories with no step files yet) renders as
-`0/0` for every state, not an error — an incomplete sweep is visibly incomplete on the first
-screen of the report rather than only inferable by counting files. This module trusts the
-`state` field in each envelope as already correctly classified by the lane that wrote it; it
-does not re-derive refusal/parked/failed from raw provider fields itself.
+`complete`/`parked`/`refused`/`failed`/`not_started` counts (rendered as `N/M` against the total
+steps discovered from the frozen plan) derived from every lane's status/findings files against
+that plan. A sweep with a valid plan but zero lane output (no lane directories, or lane
+directories with no step files yet) renders the coverage section normally, with a
+"no lane output found for this sweep" placeholder line, not an error — an incomplete sweep is
+visibly incomplete on the first screen of the report rather than only inferable by counting
+files. This module trusts the `state` field in each envelope as already correctly classified by
+the lane that wrote it; it does not re-derive refusal/parked/failed from raw provider fields
+itself.
 
 **Schema-invalid files are excluded, not crashed on.** Every file is validated through
 `schema.py`'s actual `validate_finding`/`validate_step_envelope` — never a hand-typed
