@@ -74,6 +74,7 @@ def write_plan_step(plan_dir: str, step_id: str, **overrides) -> None:
 
 def good_finding(**overrides) -> dict:
     finding = {
+        "hypothesis_id": "h1",
         "file": "pkg/example/thing.go",
         "symbol": "Thing.Do",
         "vuln_class": "injection",
@@ -333,6 +334,109 @@ def test_files_intended_vs_files_read_on_partial_read() -> None:
             "the empty findings array here is not evidence of full review",
             repr(written),
         )
+
+
+def test_dispositions_missing_hypothesis_synthesizes_not_attempted() -> None:
+    """[REQUIRED TEST] A step declares two hypotheses; the stub harness's raw
+    output addresses only one of them. The written envelope's `dispositions`
+    must have an entry for both ids, with the second marked
+    `not_attempted` -- the lane, not the planner, is the only thing allowed
+    to fill that gap."""
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(
+            plan_dir,
+            "step-001",
+            hypotheses=[
+                {"id": "h1", "objective": "o1", "required_evidence": "e1", "planner": "planner-1"},
+                {"id": "h2", "objective": "o2", "required_evidence": "e2", "planner": "planner-1"},
+            ],
+        )
+        raw = {
+            "findings": [],
+            "dispositions": [{"hypothesis_id": "h1", "disposition": "investigated", "summary": "reviewed h1"}],
+        }
+        written = codex_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_harness_stub(exit_code=0, raw_body=raw),
+        )
+        check(written[0]["state"] == "complete", "partial dispositions: state is still complete", repr(written))
+        dispositions = {d["hypothesis_id"]: d for d in written[0]["dispositions"]}
+        check(set(dispositions) == {"h1", "h2"}, "partial dispositions: an entry exists for both ids", repr(dispositions))
+        check(
+            dispositions.get("h1", {}).get("disposition") == "investigated",
+            "partial dispositions: the addressed hypothesis keeps its real disposition",
+            repr(dispositions),
+        )
+        check(
+            dispositions.get("h2", {}).get("disposition") == "not_attempted",
+            "partial dispositions: the unaddressed hypothesis is synthesized as not_attempted",
+            repr(dispositions),
+        )
+        check(
+            schema.validate_step_envelope(written[0]) == [],
+            "partial dispositions: the written envelope is schema-valid",
+            str(schema.validate_step_envelope(written[0])),
+        )
+
+
+def test_budget_split_invokes_harness_per_task_and_merges_dispositions() -> None:
+    """[REQUIRED TEST] A step's combined file_contents exceeds the budget
+    threshold (monkeypatched tiny for this test): the harness must be
+    invoked more than once for the one step, and the final written envelope
+    still carries exactly one dispositions entry per hypothesis -- no
+    duplicates from the split, no hypothesis dropped."""
+    import harness_runner
+
+    original_budget = harness_runner.MAX_BUNDLE_BYTES
+    harness_runner.MAX_BUNDLE_BYTES = 10
+    try:
+        with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+            write_plan_step(
+                plan_dir,
+                "step-001",
+                hypotheses=[
+                    {"id": "h1", "objective": "o1", "required_evidence": "e1", "planner": "planner-1"},
+                    {"id": "h2", "objective": "o2", "required_evidence": "e2", "planner": "planner-1"},
+                ],
+                files=["pkg/example/thing.go"],
+            )
+            call_count = {"n": 0}
+
+            def stub(model, prompt, output_path):
+                call_count["n"] += 1
+                dispositions = []
+                for hyp_id in ("h1", "h2"):
+                    if f"id: {hyp_id}" in prompt:
+                        dispositions.append(
+                            {"hypothesis_id": hyp_id, "disposition": "investigated", "summary": f"reviewed {hyp_id}"}
+                        )
+                with open(output_path, "w") as f:
+                    json.dump({"findings": [], "dispositions": dispositions}, f)
+                return 0, False
+
+            with tempfile.TemporaryDirectory() as repo_root:
+                pkg_dir = os.path.join(repo_root, "pkg", "example")
+                os.makedirs(pkg_dir)
+                with open(os.path.join(pkg_dir, "thing.go"), "w") as f:
+                    f.write("package example\n// enough bytes to exceed a tiny test budget\n")
+
+                written = codex_lane.run_lane(
+                    plan_dir, out_dir, repo_root, LANE_ID, MODEL, call_harness_fn=stub
+                )
+
+            check(call_count["n"] > 1, "budget split: the harness is invoked more than once for one step", str(call_count))
+            check(written[0]["state"] == "complete", "budget split: the merged step is complete", repr(written))
+            dispositions = written[0]["dispositions"]
+            ids = [d["hypothesis_id"] for d in dispositions]
+            check(sorted(ids) == ["h1", "h2"], "budget split: exactly one disposition per hypothesis, none dropped", repr(dispositions))
+            check(len(ids) == len(set(ids)), "budget split: no duplicate hypothesis_id from merging tasks", repr(dispositions))
+            check(
+                schema.validate_step_envelope(written[0]) == [],
+                "budget split: the merged envelope is schema-valid",
+                str(schema.validate_step_envelope(written[0])),
+            )
+    finally:
+        harness_runner.MAX_BUNDLE_BYTES = original_budget
 
 
 def test_call_codex_harness_reaches_the_real_subprocess() -> None:

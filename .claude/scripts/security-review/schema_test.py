@@ -37,6 +37,7 @@ def valid_finding(**overrides) -> dict:
         "commit_sha": "0541b9c8",
         "lane": "anthropic-opus5",
         "step_id": "step-007",
+        "hypothesis_id": "h1",
         "file": "pkg/example/thing.go",
         "symbol": "Thing.DoSomething",
         "vuln_class": "tenant-scoping",
@@ -119,6 +120,16 @@ def test_validate_finding_ignores_line_number_field():
     )
 
 
+def valid_disposition(**overrides) -> dict:
+    disposition = {
+        "hypothesis_id": "h1",
+        "disposition": "investigated",
+        "summary": "reviewed the code path and found no evidence of the hypothesized issue",
+    }
+    disposition.update(overrides)
+    return disposition
+
+
 def valid_step_envelope(**overrides) -> dict:
     envelope = {
         "sweep_id": "2026-09-05T0214Z-0541b9c8",
@@ -128,6 +139,7 @@ def valid_step_envelope(**overrides) -> dict:
         "state": "complete",
         "model_id": "claude-opus-5",
         "findings": [],
+        "dispositions": [valid_disposition()],
     }
     envelope.update(overrides)
     return envelope
@@ -266,6 +278,124 @@ def test_validate_step_envelope_missing_fields_distinct_errors():
     check(
         any("sweep_id" in e for e in errors) and any("model_id" in e for e in errors),
         "validate_step_envelope: missing base fields produce distinct errors",
+        str(errors),
+    )
+
+
+# --- Disposition validation (Issue #3959) -----------------------------------
+
+
+def test_validate_disposition_accepts_valid():
+    errors = schema.validate_disposition(valid_disposition())
+    check(errors == [], "validate_disposition: accepts a fully populated disposition", str(errors))
+
+
+def test_validate_disposition_rejects_non_object():
+    errors = schema.validate_disposition(["not", "an", "object"])
+    check(len(errors) == 1, "validate_disposition: a non-object payload is rejected with one error", str(errors))
+
+
+def test_validate_disposition_rejects_each_required_field_missing():
+    for field in schema.REQUIRED_DISPOSITION_FIELDS:
+        disposition = valid_disposition()
+        del disposition[field]
+        errors = schema.validate_disposition(disposition)
+        check(
+            any(field in e for e in errors),
+            f"validate_disposition: rejects a disposition missing '{field}'",
+            str(errors),
+        )
+
+
+def test_validate_disposition_rejects_bad_disposition_value():
+    errors = schema.validate_disposition(valid_disposition(disposition="maybe"))
+    check(
+        any("disposition" in e for e in errors),
+        "validate_disposition: rejects an out-of-enum disposition value",
+        str(errors),
+    )
+
+
+def test_validate_disposition_accepts_each_enum_value():
+    for value in schema.DISPOSITION_VALUES:
+        errors = schema.validate_disposition(valid_disposition(disposition=value))
+        check(errors == [], f"validate_disposition: accepts disposition value {value!r}", str(errors))
+
+
+# --- Step envelope dispositions (Issue #3959) --------------------------------
+
+
+def test_validate_step_envelope_requires_dispositions_list_not_absent():
+    envelope = valid_step_envelope()
+    del envelope["dispositions"]
+    errors = schema.validate_step_envelope(envelope)
+    check(
+        any("dispositions" in e for e in errors),
+        "validate_step_envelope: state=complete without a dispositions field is rejected",
+        str(errors),
+    )
+
+
+def test_validate_step_envelope_validates_nested_dispositions():
+    bad_disposition = valid_disposition()
+    del bad_disposition["summary"]
+    envelope = valid_step_envelope(dispositions=[bad_disposition])
+    errors = schema.validate_step_envelope(envelope)
+    check(
+        any("summary" in e for e in errors),
+        "validate_step_envelope: a schema-invalid nested disposition is surfaced",
+        str(errors),
+    )
+
+
+def test_validate_step_envelope_rejects_duplicate_hypothesis_id_in_dispositions():
+    # [REQUIRED TEST] two dispositions entries sharing the same hypothesis_id.
+    envelope = valid_step_envelope(
+        dispositions=[valid_disposition(hypothesis_id="h1"), valid_disposition(hypothesis_id="h1")]
+    )
+    errors = schema.validate_step_envelope(envelope)
+    check(
+        any("duplicate" in e and "h1" in e for e in errors),
+        "validate_step_envelope: rejects two dispositions entries sharing the same hypothesis_id",
+        str(errors),
+    )
+
+
+def test_validate_step_envelope_accepts_dispositions_covering_every_plan_hypothesis():
+    plan_step = valid_plan_step(hypotheses=[valid_hypothesis(id="h1"), valid_hypothesis(id="h2")])
+    envelope = valid_step_envelope(
+        dispositions=[valid_disposition(hypothesis_id="h1"), valid_disposition(hypothesis_id="h2")]
+    )
+    errors = schema.validate_step_envelope(envelope, plan_step)
+    check(
+        errors == [],
+        "validate_step_envelope: accepts dispositions covering every hypothesis in the plan step",
+        str(errors),
+    )
+
+
+def test_validate_step_envelope_rejects_missing_hypothesis_id_against_plan_step():
+    # [REQUIRED TEST] the plan step names two hypotheses; the envelope's
+    # dispositions array addresses only one -- the missing hypothesis_id must
+    # be named in the resulting error.
+    plan_step = valid_plan_step(hypotheses=[valid_hypothesis(id="h1"), valid_hypothesis(id="h2")])
+    envelope = valid_step_envelope(dispositions=[valid_disposition(hypothesis_id="h1")])
+    errors = schema.validate_step_envelope(envelope, plan_step)
+    check(
+        any("h2" in e for e in errors),
+        "validate_step_envelope: rejects a complete envelope missing a disposition for a plan hypothesis",
+        str(errors),
+    )
+
+
+def test_validate_step_envelope_without_plan_step_skips_the_coverage_check():
+    # No plan_step given: only structural validation applies, exactly as
+    # every pre-existing caller (resume.py, consolidate.py) invokes it today.
+    envelope = valid_step_envelope(dispositions=[valid_disposition(hypothesis_id="h1")])
+    errors = schema.validate_step_envelope(envelope)
+    check(
+        errors == [],
+        "validate_step_envelope: without a plan_step, dispositions coverage against the plan is not checked",
         str(errors),
     )
 

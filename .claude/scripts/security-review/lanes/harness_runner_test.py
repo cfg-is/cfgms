@@ -76,6 +76,7 @@ def test_output_schema_description_names_every_required_finding_field():
     # (minus the four harness-owned identity fields the model never
     # supplies) rather than letting the prose drift from the real schema.
     model_supplied_fields = (
+        "hypothesis_id",
         "file",
         "symbol",
         "vuln_class",
@@ -348,6 +349,70 @@ def test_apply_refusal_policy_omits_files_fields_when_surfaced_as_failed():
         )
 
 
+# --- dispositions passthrough (Issue #3959) ---------------------------------
+
+
+def test_build_envelope_includes_dispositions_field_on_complete():
+    dispositions = [{"hypothesis_id": "h1", "disposition": "investigated", "summary": "nothing found"}]
+    envelope = harness_runner.build_envelope(
+        make_context(), "claude-sonnet-5", terminal_state.COMPLETE, 0, findings=[], dispositions=dispositions
+    )
+    check(
+        envelope.get("dispositions") == dispositions,
+        "build_envelope: dispositions passes through on a complete envelope",
+        str(envelope),
+    )
+
+
+def test_build_envelope_defaults_dispositions_to_empty_list_when_omitted():
+    envelope = harness_runner.build_envelope(
+        make_context(), "claude-sonnet-5", terminal_state.COMPLETE, 0, findings=[]
+    )
+    check(
+        envelope.get("dispositions") == [],
+        "build_envelope: dispositions defaults to an empty list on a complete envelope "
+        "when the caller passes nothing",
+        str(envelope),
+    )
+
+
+def test_build_envelope_omits_dispositions_when_not_complete():
+    envelope = harness_runner.build_envelope(
+        make_context(),
+        "claude-sonnet-5",
+        terminal_state.REFUSED,
+        1,
+        stop_reason_raw="policy_decline",
+        dispositions=[{"hypothesis_id": "h1", "disposition": "not_attempted", "summary": "n/a"}],
+    )
+    check(
+        "dispositions" not in envelope,
+        "build_envelope: dispositions is omitted on a non-complete envelope",
+        str(envelope),
+    )
+
+
+def test_apply_refusal_policy_passes_dispositions_through_on_complete():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        step_id = "step-402"
+        context = make_context(step_id=step_id)
+        status_path = harness_runner.status_envelope_path(lane_dir, step_id)
+        dispositions = [{"hypothesis_id": "h1", "disposition": "candidate_found", "summary": "found it"}]
+        envelope = harness_runner.apply_refusal_policy(
+            terminal_state.COMPLETE,
+            status_path,
+            context,
+            "claude-sonnet-5",
+            findings=[],
+            dispositions=dispositions,
+        )
+        check(
+            envelope.get("dispositions") == dispositions,
+            "apply_refusal_policy: threads dispositions through to build_envelope",
+            str(envelope),
+        )
+
+
 # --- Envelope round-trip through real files -- REQUIRED TEST ---------------
 
 
@@ -517,6 +582,51 @@ def test_write_envelope_refuses_a_schema_invalid_envelope():
             raised and os.listdir(lane_dir) == [],
             "write_envelope: refuses to write a schema-invalid envelope, and writes nothing",
             str(os.listdir(lane_dir)),
+        )
+
+
+def test_write_envelope_validates_dispositions_against_given_plan_step():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        plan_step = {
+            "step_id": "step-500",
+            "sweep_id": "2026-09-06T0000Z-abc1234",
+            "commit_sha": "abc1234",
+            "scope": "pkg/example",
+            "hypotheses": [
+                {"id": "h1", "objective": "o1", "required_evidence": "e1", "planner": "p1"},
+                {"id": "h2", "objective": "o2", "required_evidence": "e2", "planner": "p1"},
+            ],
+            "files": [],
+            "planners": ["p1"],
+        }
+        envelope = harness_runner.build_envelope(
+            make_context(step_id="step-500"),
+            "claude-sonnet-5",
+            terminal_state.COMPLETE,
+            0,
+            findings=[],
+            dispositions=[{"hypothesis_id": "h1", "disposition": "investigated", "summary": "s"}],
+        )
+        raised = False
+        try:
+            harness_runner.write_envelope(lane_dir, "step-500", envelope, plan_step=plan_step)
+        except ValueError:
+            raised = True
+        check(
+            raised,
+            "write_envelope: refuses an envelope whose dispositions omit a hypothesis "
+            "the given plan_step names",
+            "",
+        )
+
+        envelope["dispositions"].append(
+            {"hypothesis_id": "h2", "disposition": "not_attempted", "summary": "budget exceeded"}
+        )
+        path = harness_runner.write_envelope(lane_dir, "step-500", envelope, plan_step=plan_step)
+        check(
+            os.path.isfile(path),
+            "write_envelope: accepts an envelope whose dispositions cover every plan hypothesis",
+            path,
         )
 
 
