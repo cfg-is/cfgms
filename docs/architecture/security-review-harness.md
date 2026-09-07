@@ -246,7 +246,9 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
   "state":           "<complete|parked|refused|failed>",
   "model_id":        "claude-opus-5",
   "stop_reason_raw": "<provider's raw, unmodified terminating reason>",
-  "findings":        []
+  "findings":        [],
+  "files_intended":  [],
+  "files_read":      []
 }
 ```
 
@@ -254,9 +256,23 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
 
 - When `state == "complete"`: `findings` is required as a list (`[]` is valid and distinct from
   `refused`/`failed` — a genuinely clean step is still `complete`). `stop_reason_raw` is not
-  required.
+  required. `files_intended`/`files_read` are optional, but when present must each be a list of
+  strings.
 - For every other state: `stop_reason_raw` is required and must be non-empty. `findings` is
-  not read.
+  not read. `files_intended`/`files_read` are not written — a `refused`/`failed`/`parked` step
+  never got far enough to have read anything meaningful.
+
+**`files_intended`/`files_read`** (Issue #3957): `files_intended` is the plan step's declared
+`files` list; `files_read` is the subset of those a lane actually read successfully (an entry is
+dropped when it fails the traversal/symlink-containment guard, or the read itself fails — see
+`read_step_files()` in each lane). Recording both, not only `files_read`, is what makes a step
+that skipped every declared file — all unreadable, or all rejected by the traversal guard — and
+still returned an empty findings array visibly distinguishable from a step that genuinely reviewed
+everything it declared and found nothing; `findings: []` alone cannot tell the two apart.
+`consolidate.py`'s coverage table surfaces the gap as a per-lane `files_short` count: the number
+of `complete` steps where `files_read` is a strict subset of `files_intended`. An empty
+`files_intended` (a step whose `scope` names a directory rather than concrete files) is not
+itself a gap and never counts toward `files_short`.
 
 `stop_reason_raw` is recorded **verbatim** — whatever diagnostic the lane actually derived,
 unmodified — so a new failure mode is diagnosable from the recorded envelope rather than lost to
