@@ -948,6 +948,32 @@ collapses into one consolidated entry; the entry's `lanes` field lists exactly t
 independently reported it, and `occurrences` keeps each lane's own `severity`/`confidence`/
 `title`/`evidence`/`suggested_fix` rather than discarding the disagreement.
 
+**Findings are sorted by agreement, then severity, then confidence (Issue #3960, F6).**
+`_finalize_findings()` orders `report["findings"]` -- and therefore `render_markdown()`'s
+rendered order -- primarily by `agreement.reported` descending, then by the group's
+highest-ranked occurrence `severity` descending (`critical` > `high` > `medium` > `low`), then
+by its highest-ranked occurrence `confidence` descending (`high` > `medium` > `low`), with the
+`file`/`symbol`/`vuln_class` de-duplication key retained only as the final tiebreaker between
+two findings tied on all three ranked fields. Severity/confidence are taken via `max()` over a
+group's `occurrences`, not the first occurrence in insertion order, so a group where only the
+second-listed lane called it `critical` still sorts as critical. This matches
+`.claude/skills/security-review/SKILL.md`'s "sorted by multi-lane agreement first, then
+severity, then confidence" sentence exactly, and `consolidate_test.py`'s
+`test_skill_md_ranking_sentence_matches_shipped_sort_order` is the **D7 drift-detection test for
+F6**: it reads that sentence from `SKILL.md` live off disk (never a copy-pasted literal) and
+separately asserts a synthetic `consolidate()` fixture's actual order matches it, so a future
+rewrite that deletes the sentence, or ships a different sort order without updating it, fails
+the test either way -- the same drift-detection mechanism #3955 established for F4.
+
+**A low-severity, low-confidence finding is not filtered.** No code path in
+`_group_findings()`/`_finalize_findings()` filters on `severity` or `confidence` -- a
+schema-valid finding reported by exactly one lane survives grouping and de-duplication and
+appears in `render_markdown()`'s output like any other, per the confidence policy in
+`SKILL.md` and success criterion 5 of epic #3950. `consolidate_test.py`'s
+`test_low_severity_low_confidence_single_lane_finding_survives_to_report` proves this
+end-to-end, from a written `.findings.json` through to the rendered `### ... — ... :: ...`
+heading.
+
 **Agreement is measured against completed steps, not configured lanes.** A consolidated
 finding's `agreement` field is `{"reported": N, "eligible": M}`, where `M` is the number of
 lanes that actually completed the step(s) the finding came from — not the number of lanes in
