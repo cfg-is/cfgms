@@ -630,6 +630,83 @@ else
 fi
 
 echo ""
+echo "== REQUIRED TEST evidence — a symlinked --snapshot-dir cannot redirect the"
+echo "   /workspace bind mount (Issue #3952) =="
+# Same class of attack as the plan/ escape immediately above, against the
+# --snapshot-dir guard added at agent-dispatch.sh:2792-2798: mkdir -p is never
+# called on this path (create_sweep_tree() creates it via
+# snapshot.create_snapshot() before launch-investigator ever runs), but
+# `realpath` on an attacker-planted symlink still resolves off-tree, and
+# docker still resolves the host side of a bind mount at mount time -- a
+# symlinked --snapshot-dir would redirect /workspace to an arbitrary host
+# path, including back to the live, mutable checkout this story exists to
+# stop mounting.
+check_contains "launch asserts --snapshot-dir resolves inside the sweep dir before mounting" "$launch_block" 'inv_snapshot_dir_real'
+check_contains "snapshot dir escape is refused explicitly" "$launch_block" 'INVESTIGATOR_REFUSED:snapshot_dir_escape'
+
+SNAPSHOT_ESCAPE_TARGET="${SANDBOX}/snapshot-escape-target"
+mkdir -p "$SNAPSHOT_ESCAPE_TARGET"
+SWEEP_SNAPLINK="${SANDBOX}/sweep-snaplink/2026-09-05T0000Z-snaplink"
+mkdir -p "${SWEEP_SNAPLINK}/lanes" "${SWEEP_SNAPLINK}/plan"
+ln -s "$SNAPSHOT_ESCAPE_TARGET" "${SWEEP_SNAPLINK}/snapshot"
+
+for escape_mode in plan escapelane; do
+  : > "$DOCKER_CALL_LOG"
+  set +e
+  snapshot_escape_out=$(PATH="${FAKEBIN}:${PATH}" \
+    CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+    CFGMS_TEST_CREDS_STATUS="CREDS_OK:test" \
+    CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+    HOME="${SANDBOX}/HOME" \
+    bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_SNAPLINK" --snapshot-dir "${SWEEP_SNAPLINK}/snapshot" --mode "$escape_mode" 2>&1)
+  snapshot_escape_rc=$?
+  set -e
+  check_contains "--mode '${escape_mode}' refuses a symlinked --snapshot-dir" "$snapshot_escape_out" "INVESTIGATOR_REFUSED:snapshot_dir_escape"
+  if [[ "$snapshot_escape_rc" -eq 2 ]]; then
+    ok "--mode '${escape_mode}' snapshot dir escape exits 2"
+  else
+    bad "--mode '${escape_mode}' snapshot dir escape exits 2" "actual rc: ${snapshot_escape_rc}"
+  fi
+  if grep -q '^run -d' "$DOCKER_CALL_LOG"; then
+    bad "--mode '${escape_mode}' never reaches docker run with a symlinked --snapshot-dir" "a container was launched"
+  else
+    ok "--mode '${escape_mode}' never reaches docker run with a symlinked --snapshot-dir"
+  fi
+  check_not_contains "--mode '${escape_mode}' never renders a mount of the snapshot symlink target" \
+    "$(cat "$DOCKER_CALL_LOG")" "$SNAPSHOT_ESCAPE_TARGET"
+done
+
+if find "$SNAPSHOT_ESCAPE_TARGET" -mindepth 1 2>/dev/null | grep -q .; then
+  bad "snapshot symlink target directory is untouched" "something was created under it"
+else
+  ok "snapshot symlink target directory is untouched"
+fi
+
+echo ""
+echo "== REQUIRED TEST evidence — a --snapshot-dir pointed entirely outside the"
+echo "   sweep tree (no symlink involved) is refused the same way =="
+OUTSIDE_SNAPSHOT_DIR="${SANDBOX}/outside-snapshot-dir"
+mkdir -p "$OUTSIDE_SNAPSHOT_DIR"
+: > "$DOCKER_CALL_LOG"
+set +e
+outside_snapshot_out=$(PATH="${FAKEBIN}:${PATH}" \
+  CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+  CFGMS_TEST_CREDS_STATUS="CREDS_OK:test" \
+  CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+  HOME="${SANDBOX}/HOME" \
+  bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_DIR" --snapshot-dir "$OUTSIDE_SNAPSHOT_DIR" --mode plan 2>&1)
+outside_snapshot_rc=$?
+set -e
+check_contains "a --snapshot-dir outside the sweep tree is refused" "$outside_snapshot_out" "INVESTIGATOR_REFUSED:snapshot_dir_escape"
+if [[ "$outside_snapshot_rc" -eq 2 ]]; then
+  ok "--snapshot-dir outside the sweep tree exits 2"
+else
+  bad "--snapshot-dir outside the sweep tree exits 2" "actual rc: ${outside_snapshot_rc}"
+fi
+check_not_contains "--snapshot-dir outside the sweep tree never reaches docker run" \
+  "$(cat "$DOCKER_CALL_LOG")" "run -d"
+
+echo ""
 echo "== REQUIRED TEST evidence — the API-key credential mechanism is retired in"
 echo "   full (Issue #3933): --cred-name no longer exists anywhere in launch-investigator =="
 check_not_contains "no --cred-name flag parsing remains" "$launch_block_code" '--cred-name'
