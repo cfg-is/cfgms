@@ -924,9 +924,55 @@ plan — a comma-separated `harness:model` roster in the same shape as `CFGMS_SE
 (C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case. When more
 than one is listed, each plans independently over the same metadata-only payload and the
 resulting steps merge by `scope`: one step per distinct scope, `files` the union of every
-proposal for that scope, `planners` recording every planner id that proposed it. A scope is
+proposal for that scope, `planners` recording every planner id that proposed it, and
+`hypotheses` the union of every proposal's hypotheses (Issue #3958 — see below). A scope is
 reviewed once per lane regardless of how many planners proposed it — a second planner buys wider
 coverage of *what* is worth reviewing, never a second review of the same code.
+
+**Hypotheses union, not description erasure (Issue #3958).** Before Issue #3958, a plan step's
+only defining content was a single free-text `description`, and merging two planners' proposals
+for the same scope kept only the first-seen proposal's `description` — this was C6's original,
+fixed defect: one planner's entire contribution to a shared scope silently vanished. Hypotheses
+are structured and multi-valued per step, so `merge_steps_by_scope()` unions them instead of
+picking one: every hypothesis from every planner that proposed the scope survives into the merged
+step's `hypotheses` list. `_scope_boundary()`/the bounded-scope validation rule are unchanged by
+any of this — hypothesis identity is deliberately kept out of scope identity, per the epic's
+explicit rejection of folding a hypothesis into what makes two proposals "the same scope."
+
+**Colliding hypothesis ids across planners are disambiguated, never dropped.** A hypothesis's
+`id` is unique only within the step/planner that proposed it (`schema.validate_hypothesis()`
+does not, and cannot, check cross-planner uniqueness) — two different planners proposing the
+same scope are expected to independently mint the same `id` string, e.g. both calling their
+first hypothesis `h1`. `planner._merge_hypotheses()` de-duplicates on `(planner, original id)` —
+so re-merging an already-merged list is a no-op — and, only when two or more *different* planners
+share the same `id`, renames the merged output's `id` to `<planner>:<id>` for every colliding
+entry. The original planner-issued `id` is preserved intact under `original_id` regardless,
+whether or not a collision occurred, so a hypothesis's provenance is always traceable back to
+exactly what its planner wrote. An `id` that never collides with another planner's is left
+exactly as written — namespacing is applied only where it is needed to keep two distinct
+hypotheses distinguishable.
+
+De-duplication additionally requires the two entries' remaining content to be equal: a repeated
+`(planner, id)` pair carrying the same `objective`/`required_evidence` is the same hypothesis
+seen again and is dropped, while one carrying different content is a second, distinct proposal
+that reused an id its planner is free to reuse — `validate_hypothesis()` requires ids to be
+unique only within the step that proposed them — and is kept. Nothing in the merge may silently
+drop a proposal.
+
+**`original_id` is harness-owned, exactly like `planner`.** `schema.validate_hypothesis()`
+checks only the four required fields and strips no unknown keys, so a fully schema-valid step
+file can carry a model-planted `original_id` — and that is the value de-duplication and
+cross-planner namespacing key on. `_inject_hypothesis_provenance()` therefore *deletes*
+`original_id` from every incoming hypothesis at the same point it overwrites `planner`, before
+any merge sees it; only `_merge_hypotheses()` ever writes the field, which is what keeps merging
+idempotent. `_merge_hypotheses()` additionally accepts an `original_id` (and a `planner`) only
+when it is a non-empty string, falling back to the hypothesis's own `id`, so no model-shaped
+value is ever used as a key. Left trusted, a planted `original_id` gave a planner three things
+it must not have: a non-string one raised `TypeError` out of `merge_steps_by_scope()` past
+`main()`'s `RosterError`-only handler, bypassing the fail-closed `PLANNING_FAILED` contract; a
+null one propagated into the merged step's `id` and the post-merge `validate_step()` rejection
+then discarded a *different* planner's legitimate hypotheses for that shared scope; and a
+duplicate one collapsed two of the planner's own distinct proposals into one.
 
 **The single-planner path is untouched.** `planner.finalize(sweep_dir)` — STORY-1's
 per-step-exclusion validator — and its call from `launch(sweep_dir, planners=None)` (the default)
@@ -979,8 +1025,11 @@ of `sweep_id`/`commit_sha` from the one sweep-wide `.plan-context.json` sidecar 
 step's own model-written values, and failing every step closed if the sidecar is missing or
 malformed, exactly like `finalize()`) — reading from that entry's own
 `<sweep_dir>/planners/<lane_dir_name>/plan/` directory and recording `planners: [<lane_dir_name>]`
-on each surviving step, rather than the fixed single-planner `PLANNER_ID`. Every validated
-proposal across every planner is then merged by `merge_steps_by_scope()` and the merged result
+on each surviving step, rather than the fixed single-planner `PLANNER_ID`. Since Issue #3958, it
+tags that same `<lane_dir_name>` onto the `planner` field of every hypothesis in that entry's own
+proposals (`_inject_hypothesis_provenance()`, the same function `finalize()` uses with `PLANNER_ID`).
+Every validated proposal across every planner is then merged by `merge_steps_by_scope()` and the
+merged result
 replaces whatever was in `<sweep_dir>/plan/` — the one location every finder lane and the
 consolidator already read from, so nothing downstream of this function needs to know more than
 one planner ran. Zero surviving steps across every configured planner is a planning failure,
@@ -990,11 +1039,12 @@ empty `plan/` that could be mistaken for "nothing to review."
 **`merge_steps_by_scope()` is a pure function, independently testable without docker.** It groups
 already-validated step dicts by a scope key (`_scope_paths()`'s normalized, de-duplicated,
 order-independent path set — so a bare-string scope and its equivalent one-element list count as
-the same scope), unions `files` and `planners` in first-seen order with de-duplication, and
-renumbers the merged output `step-001`, `step-002`, ... in first-seen-scope order, since the
-merged plan is a new numbering, not any single planner's own (two planners independently calling
-something `step-001` must never collide). Merging is idempotent: merging an already-merged list
-is a no-op.
+the same scope), unions `files` and `planners` in first-seen order with de-duplication, unions
+`hypotheses` via `_merge_hypotheses()` (Issue #3958 — see "Colliding hypothesis ids across
+planners" above), and renumbers the merged output `step-001`, `step-002`, ... in first-seen-scope
+order, since the merged plan is a new numbering, not any single planner's own (two planners
+independently calling something `step-001` must never collide). Merging is idempotent: merging an
+already-merged list is a no-op, true of `hypotheses` as well as `files`/`planners`.
 
 **`security-review.sh`'s `dispatch_planner()` waits for EVERY container it launched, not just
 the last one (Issue #3954, epic #3950's D2/D3).** `launch()`'s multi-planner path calls
@@ -1241,29 +1291,53 @@ shared schema exists to close.
   "sweep_id":    "2026-09-05T2312Z-9735bb32",
   "commit_sha":  "9735bb32...",
   "scope":       "pkg/storage/providers/database",
-  "description": "PostgreSQL storage provider: stores, schema migration, CAS writes",
+  "hypotheses":  [
+    {
+      "id":                "h1",
+      "objective":         "CAS writes verify the previous version before overwriting",
+      "required_evidence": "a write path that skips the compare step under any condition",
+      "planner":           "<planner-id>"
+    }
+  ],
   "files":       ["pkg/storage/providers/database/case_store.go"],
   "planners":    ["<planner-id>"]
 }
 ```
 
-All seven fields are required. `step_id`/`sweep_id`/`commit_sha`/`description` are non-empty
-strings; `scope` is a non-empty string or a non-empty list of non-empty strings; `files` is a
-list of non-empty strings (may be empty); `planners` is a non-empty list of non-empty strings —
-more than one entry is C6's multi-planner merge
+Six of the seven fields are required; `description` (not shown above) is optional. `step_id`/
+`sweep_id`/`commit_sha` are non-empty strings; `scope` is a non-empty string or a non-empty list
+of non-empty strings; `files` is a list of non-empty strings (may be empty); `planners` is a
+non-empty list of non-empty strings — more than one entry is C6's multi-planner merge
 ([below](#multi-planner-plan-merge-c6-issue-3937), Issue #3937); the single hardcoded planner
 (`CFGMS_SECURITY_REVIEW_PLANNERS` unset) always writes exactly one, `PLANNER_ID`.
 
-**`sweep_id`/`commit_sha`/`planners` are never sourced from the model.** `planner.py`'s prompt
-never asks the model writing `step-NNN.json` for these three fields at all — a model is not a
-trustworthy source for a sweep's own identity. Instead, `planner.prepare()` (which already
+**A step's defining content is `hypotheses`, not a free-text `description` (Issue #3958).**
+`hypotheses` must be a non-empty list; each entry is validated by `schema.validate_hypothesis()`
+and requires `id`, `objective`, `required_evidence`, and `planner`, all non-empty strings. `id` is
+unique only within the step/planner that proposed it, never globally — two different planners
+proposing the same scope are expected to independently mint the same `id` string (e.g. both
+calling their first hypothesis `h1`); see the multi-planner merge section below for how that
+collision is handled. `objective` names the security property or vulnerability class under
+investigation; `required_evidence` names what would confirm or refute it. `description`, where a
+planner still writes one, is kept only for backward-readability of a human summary — nothing
+downstream is load-bearing on it, unlike before this story, when it was the step's only defining
+content and epic #3927's contract C6 fixed a defect where merging two planners' proposals silently
+kept only one planner's `description` and discarded the other's entirely. `hypotheses` is what
+closes that gap: every planner's structured claims survive the merge (see below).
+
+**`sweep_id`/`commit_sha`/`planners`, and every hypothesis's own `planner` field, are never
+sourced from the model.** `planner.py`'s prompt never asks the model writing `step-NNN.json` for
+any of these fields at all — a model is not a trustworthy source for a sweep's own identity, or
+for which planner proposed one of its own hypotheses. Instead, `planner.prepare()` (which already
 receives `commit_sha` and derives `sweep_id` from the sweep directory name) writes both to a
 `<sweep_dir>/.plan-context.json` sidecar, and `planner.finalize()` injects `sweep_id`/`commit_sha`
-from that sidecar plus a fixed `planners` value onto every step before validating it — discarding
-whatever a step file already contained for those three fields, unconditionally. `scope`,
-`description`, and `files` remain the model's own output: the model has `Glob` (but not `Read`)
-in plan mode specifically so it can enumerate a scope's files by name, listed under `files`,
-without reading any file's contents.
+from that sidecar plus a fixed `planners` value onto every step before validating it, and
+overwrites every hypothesis's `planner` field — and deletes any `original_id` a step file
+carried — the same way (`_inject_hypothesis_provenance()`), discarding whatever a step file
+already contained for any of these, unconditionally. `scope`, `hypotheses`'
+`id`/`objective`/`required_evidence`, `description`, and `files` remain the model's own output:
+the model has `Glob` (but not `Read`) in plan mode specifically so it can enumerate a scope's
+files by name, listed under `files`, without reading any file's contents.
 
 **The sidecar lives in the sweep root, not in `plan/`, and its absence fails the plan closed.**
 Both properties are load-bearing, and neither is cosmetic. `agent-dispatch.sh
