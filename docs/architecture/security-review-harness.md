@@ -28,6 +28,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `lanes/codex_lane.py` | The Codex harness finder lane (Issue #3935) — see [The Codex harness lane](#the-codex-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
 | `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
+| `snapshot.py` | `create_snapshot`/`verify_snapshot` — the immutable, byte-verified snapshot every investigator container mounts at `/workspace` (Issue #3951/#3952) — see [Immutable snapshot](#immutable-snapshot) below |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output; `launch(..., planners=...)`/`finalize_multi_planner`/`merge_steps_by_scope` add the `CFGMS_SECURITY_REVIEW_PLANNERS` multi-planner path (C6, Issue #3937) — see [Multi-planner plan merge](#multi-planner-plan-merge-c6-issue-3937) below |
 | `security-review.sh` | The operator-facing `launch`/`status`/`resume` CLI (Issue #3910) — see [Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below. Lives in `.claude/scripts/`, one level up from this directory, alongside `agent-dispatch.sh` |
 
@@ -47,6 +48,12 @@ All sweep state lives outside the repository, under a base directory resolved by
 ~/.cache/cfgms-security-review/
   <sweep-id>/
     manifest.json                      sweep config: lanes, target ref, step list, status
+    snapshot/                          immutable, byte-verified copy of commit_sha's tree
+                                        (snapshot.py, Issue #3951) -- what every investigator
+                                        container actually mounts at /workspace, never REPO_ROOT
+    harness_identity.json              SHA-256 over investigator-entrypoint.sh and the
+                                        --lane-entrypoint script from the LAST launch-investigator
+                                        call (Issue #3952) -- recorded, not frozen
     plan/
       step-001.json                    step prompt + scope (generated from metadata only)
       step-002.json
@@ -307,9 +314,12 @@ sweep tree written to an unexpected in-repo path.
 
 ## Immutable snapshot
 
-`snapshot.py` is a pure, docker-free primitive (Issue #3951, epic #3950) with two functions and,
-as of this story, no callers — wiring the container launcher to mount its output instead of the
-live repository working tree is a later story under the same epic.
+`snapshot.py` is a pure, docker-free primitive (Issue #3951, epic #3950) with two functions,
+`create_snapshot()` and `verify_snapshot()`. `security-review.sh` (Issue #3952) is its caller:
+`create_sweep_tree()` calls `create_snapshot()` right after `manifest.create_sweep()` succeeds,
+and both `cmd_launch` and `cmd_resume` call `verify_snapshot()` before dispatching the planner or
+any lane — see [Investigator launch primitive](#investigator-launch-primitive) and
+[Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below for the full wiring.
 
 `create_snapshot(commit_sha, repo_root, dest_dir)` extracts `commit_sha`'s full tree into
 `dest_dir` via `git -C repo_root archive commit_sha` piped directly into `tar -x -C dest_dir` —
@@ -366,6 +376,45 @@ credential-delivery mechanics are documented at the files themselves rather than
 
 This story assumes a sweep directory already exists (story S2/#3902 owns creating that tree) and
 fails closed if it does not — it never creates the sweep tree itself.
+
+**`--snapshot-dir <DIR>` (required, Issue #3952, epic #3950's D1).** `/workspace` is mounted
+`:ro` from `--snapshot-dir`, never from `$REPO_ROOT` — the sweep's own immutable snapshot
+(`snapshot.py`, Issue #3951), not the live, mutable repository checkout that keeps moving while a
+sweep's lanes run. A missing `--snapshot-dir` is a hard failure before any `mkdir`, `docker run`,
+or mount construction — the same required-flag discipline `--sweep-dir`/`--mode` already have.
+Validated the same way `--sweep-dir` is: it must already exist (`security-review.sh`'s
+`create_sweep_tree()` creates it via `snapshot.create_snapshot()` before ever calling this
+command — this primitive never `mkdir -p`s it) and its `realpath` must resolve to **exactly**
+`<sweep-dir>/snapshot`, mirroring the `inv_plan_dir_real`/`inv_lane_dir_real` symlink-escape
+checks a few lines below for the same reason: `docker` resolves the host side of a bind mount at
+mount time, so a symlink at the passed path could redirect `/workspace` to an arbitrary host
+directory — including back to the live checkout this story exists to stop mounting.
+`security-review.sh` passes `--snapshot-dir "<sweep_dir>/snapshot"` on every call it makes
+(`dispatch_planner` and `dispatch_roster_lanes` alike); `planner.py::launch()`'s multi-planner
+branch (C6) passes each roster entry's own hardlinked `snapshot/` sub-directory instead, since its
+`--sweep-dir` is a per-lane sub-directory of the sweep root rather than the root itself — see that
+function's own docstring for why a hardlink, not a symlink, is what makes the same strict escape
+check hold for that path too.
+
+**Trusted-harness identity (Issue #3952, epic #3950's D1 correction on revision 3).** Only two
+files are ever mounted individually from the live repo checkout by this command:
+`investigator-entrypoint.sh` and, in lane mode, the `--lane-entrypoint` script. Every sibling
+module a lane runner imports (`schema.py`, `harness_runner.py`, `atomic_write.py`, `roster.py`,
+`terminal_state.py`, `resume.py`, the other lane files) has no mount of its own — in production
+the import bootstrap resolves those from `/workspace`, which after the `--snapshot-dir` cutover
+above is the frozen snapshot, not the live tree, so their identity is already implied by
+`commit_sha`. This command hashes exactly the two individually-mounted files — the entrypoint's
+bytes always, the lane entrypoint's bytes when one is passed — each preceded by its own
+`$REPO_ROOT`-relative path in the same SHA-256 digest, entrypoint first, so a rename with
+unchanged content still changes the recorded value. The result is written to
+`<sweep-dir>/harness_identity.json` (`{"algorithm": "sha256", "hash": ..., "files": [...],
+"computed_at": ...}`, overwritten on every call — this value is recorded per dispatch, never
+frozen at sweep creation the way `commit_sha` is) and injected into the container as
+`CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`, on every call, plan mode and lane mode alike. This is
+recording only: nothing compares the value against a prior dispatch, and no earlier snapshot of
+the harness code itself is taken or verified — binding this value into a per-step result envelope
+and quarantining a mismatch on resume is STORY-12 (D6), which consumes the value this command
+produces.
 
 **`--harness`/`--model` (Issue #3932, epic #3927's contract C2) — the only credential path
 (Issue #3933).** The architectural correction in epic #3927 — model access by subscription
@@ -906,6 +955,18 @@ copies the one prompt `prepare()` already wrote into each sub-sweep-dir's own `p
 dispatch — every planner reviews the same metadata regardless of which harness/model executes it,
 so one prompt, copied, is correct rather than a second call to `build_prompt()`.
 
+**Each entry also gets its own materialized `snapshot/` (Issue #3952).** `launch()` now requires
+a `snapshot_dir` argument — the sweep's one real `<sweep_dir>/snapshot/` — since
+`launch-investigator` refuses to run without `--snapshot-dir`. The single-planner call passes it
+straight through, but a multi-planner entry's own `--sweep-dir` is its
+`<sweep_dir>/planners/<lane_dir_name>/` sub-directory, and `launch-investigator`'s escape check
+requires `--snapshot-dir` to resolve to *exactly* `<that --sweep-dir>/snapshot` — so
+`_materialize_lane_snapshot()` hardlinks (never symlinks — a symlink would itself fail the same
+strict check) the sweep's one snapshot into each entry's own sub-directory before dispatch, once,
+idempotently. Hardlinking shares the same inode and disk blocks as the one extraction
+`snapshot.create_snapshot()` made read-only on the host, so no roster size multiplies the
+snapshot's disk cost.
+
 **Dispatch is independent per entry, matching `dispatch_roster_lanes`.** Every configured planner
 is attempted even if an earlier one fails to launch; `launch()` raises `PlannerError` once, after
 every entry has been attempted, naming every entry that failed — the same "one bad entry must not
@@ -1175,13 +1236,32 @@ security-review.sh status <sweep-id>   # coverage only, never re-runs anything
 the only lane-dispatch path; there is no hardcoded lane set to fall back to) and fails closed,
 before creating anything, if it is unset or fails `roster.py::parse_roster()`. Resolves the
 roster into a `lane_dir_name` list and creates the sweep tree
-(`manifest.py::create_sweep(ref, lanes=<roster-derived tuple>, ...)`), then runs `planner.py`'s
-`prepare()` → `launch()` → (`docker wait` on the plan-mode container) → `finalize()`, then
-dispatches every roster lane via `agent-dispatch.sh launch-investigator --mode <lane_dir_name>
+(`manifest.py::create_sweep(ref, lanes=<roster-derived tuple>, ...)`), then immediately
+materializes `<sweep_dir>/snapshot/` via `snapshot.create_snapshot()` (Issue #3952) and
+independently re-verifies it via `snapshot.verify_snapshot()` before dispatching anything — a
+non-empty mismatch list prints every line to stderr and exits non-zero without ever calling
+`dispatch_planner` or `dispatch_all_lanes`. Only once the snapshot is verified does it run
+`planner.py`'s `prepare()` → `launch(..., --snapshot-dir <sweep_dir>/snapshot)` → (`docker wait`
+on the plan-mode container) → `finalize()`, then dispatch every roster lane via
+`agent-dispatch.sh launch-investigator --mode <lane_dir_name> --snapshot-dir <sweep_dir>/snapshot
 --harness <harness> --model <model> --lane-entrypoint <lane script>` — one container per lane,
 same fire-and-forget `docker run -d` semantics `planner.launch()` uses for the plan-mode
-container. Once every dispatched container has exited (`docker wait`), it runs
-`consolidate.py` and prints the path to `report/consolidated.md`.
+container. Every dispatched container mounts `<sweep_dir>/snapshot/` at `/workspace`, never the
+live, mutable `$REPO_ROOT` checkout that keeps moving while a sweep's lanes run (epic #3950's D1;
+see [Investigator launch primitive](#investigator-launch-primitive)). Once every dispatched
+container has exited (`docker wait`), it runs `consolidate.py` and prints the path to
+`report/consolidated.md`.
+
+**`resume` re-verifies the snapshot too, every time (Issue #3952, epic #3950's D1: "and again on
+resume").** A sweep can sit parked for days; `cmd_resume` calls `snapshot.verify_snapshot()`
+before its own `plan_already_populated`/`dispatch_planner`/`dispatch_all_lanes` sequence, exactly
+like `cmd_launch`, so a snapshot tampered with (or otherwise corrupted) between `launch` and a
+later `resume` is caught before any container runs, not silently reviewed. [REQUIRED TEST]
+`security_review_cli.test.sh` proves this directly: it launches a real sweep, overwrites one
+tracked file's bytes inside `<sweep_dir>/snapshot/` directly (there is no real host checkout
+mutation available in this stubbed-docker test, so this simulates the tamper the verification is
+meant to catch), then asserts `resume` exits non-zero, names the tampered path, and dispatches no
+container at all — no new step file appears under any `lanes/<lane>/`.
 
 **Reap-before-relaunch (Issue #3930).** `launch-investigator`'s `docker run -d` carries no `--rm`,
 so a container's name stays taken after it exits — nothing else removes it. Before Issue #3930,
