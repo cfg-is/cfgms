@@ -289,6 +289,38 @@ There is no working-directory fallback and no `./` default. This is the actual c
 `.gitignore` entry is belt-and-braces only, since a root-anchored entry would not catch a
 sweep tree written to an unexpected in-repo path.
 
+## Immutable snapshot
+
+`snapshot.py` is a pure, docker-free primitive (Issue #3951, epic #3950) with two functions and,
+as of this story, no callers — wiring the container launcher to mount its output instead of the
+live repository working tree is a later story under the same epic.
+
+`create_snapshot(commit_sha, repo_root, dest_dir)` extracts `commit_sha`'s full tree into
+`dest_dir` via `git -C repo_root archive commit_sha` piped directly into `tar -x -C dest_dir` —
+two `subprocess` processes with the first's stdout connected to the second's stdin, never a
+`sh -c "git archive ... | tar ..."` string, matching the "Banned patterns" rule in CLAUDE.md
+against runtime shell command composition. `dest_dir` must not already exist with contents in it;
+a non-empty destination raises `SnapshotError` rather than silently reusing a possibly-stale
+snapshot. After extraction, every file and directory under `dest_dir` has its owner/group/other
+write bits stripped on the host. This is defense in depth, not the primary control — the container
+launcher's own `:ro` bind mount is what actually stops a compromised lane container from writing
+to the snapshot — but it also makes a host-side accidental write to the extracted copy, outside
+any container, fail loudly instead of silently corrupting a snapshot other lanes may still be
+reading.
+
+`verify_snapshot(dest_dir, commit_sha, repo_root)` independently re-checks that `dest_dir` still
+matches `commit_sha`'s tree byte-for-byte: it compares the sorted relative-path listing under
+`dest_dir` against `git -C repo_root ls-tree -r --name-only commit_sha` (the same call
+`consolidate.py::_tree_files` makes), then, for every path present in both, the blob sha `git
+ls-tree -r commit_sha` reports against `git hash-object` computed locally on the extracted file.
+It returns a list of human-readable mismatch descriptions — empty means verified — and **never
+raises on a mismatch**: a missing path, an extra path, or a content mismatch is exactly the
+condition the function exists to detect, so each becomes a list entry, not an exception.
+`SnapshotError` is reserved for a genuine operational failure (`git`/`tar` missing, a non-zero
+exit, a timeout, an unwritable `dest_dir`) — matching the `BaseDirError`/`ManifestError`/
+`MetadataError` exception discipline used elsewhere in this directory. Whether a non-empty
+mismatch list is fatal is left to the caller that wires this module in.
+
 ## Egress allowlist
 
 The v1 OpenAI and Ollama Cloud REST finder lanes once needed `api.openai.com`/`ollama.com`
