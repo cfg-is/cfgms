@@ -368,13 +368,17 @@ def test_import_isolation_single_file_layout() -> None:
     (the finding-2 pattern `anthropic.py`/`ollama.py` used) makes this test
     fail: copy only `claude_lane.py` to a directory with no siblings, run it
     exactly as `investigator-entrypoint.sh` does (a bare script, no PYTHONPATH
-    set), and rely solely on the real repository being mounted at
-    `/workspace` -- true both in a real investigator container and in this
-    checkout, since this repository's own root is `/workspace`.
+    set), and rely on the real repository checkout -- reached via
+    `CFGMS_SECURITY_REVIEW_REPO_ROOT`, not a hardcoded `/workspace` path. A
+    real investigator container mounts the repo at `/workspace` and this
+    checkout's root usually is `/workspace` too, but a CI runner checks the
+    repo out somewhere else entirely (e.g. `/home/runner/work/...`), so the
+    repo root is derived from this test file's own location instead of
+    assumed.
     """
-    repo_root = "/workspace"
+    repo_root = str(Path(__file__).resolve().parents[4])
     if not os.path.isfile(os.path.join(repo_root, ".claude/scripts/security-review/schema.py")):
-        check(False, "import isolation: /workspace repo checkout available for this test", repo_root)
+        check(False, "import isolation: repo checkout available for this test", repo_root)
         return
 
     with tempfile.TemporaryDirectory() as isolated_dir, tempfile.TemporaryDirectory() as plan_dir, \

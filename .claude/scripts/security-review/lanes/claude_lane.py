@@ -103,11 +103,25 @@ def _bootstrap_harness_imports() -> None:
     to a path with no siblings at all, but the *whole* repository is separately
     bind-mounted read-only at `/workspace`
     (`agent-dispatch.sh launch-investigator`), which does have them.
+
+    `CFGMS_SECURITY_REVIEW_REPO_ROOT` is consulted as an extra candidate root
+    ahead of the `/workspace` default, matching the "every path is overridable
+    via env var" convention documented at the top of this module. The real
+    launcher never sets it, so layout (2) above is unaffected in production --
+    this exists so `claude_lane_test.py`'s single-file-layout check can point
+    at wherever the checkout actually is (a GitHub Actions runner's workspace
+    is not `/workspace`) instead of assuming the container's bind-mount path.
     """
-    lane_candidates = [
-        Path(__file__).resolve().parent,
-        Path("/workspace/.claude/scripts/security-review/lanes"),
-    ]
+    env_repo_root = os.environ.get("CFGMS_SECURITY_REVIEW_REPO_ROOT")
+
+    lane_candidates = [Path(__file__).resolve().parent]
+    harness_candidates = [Path(__file__).resolve().parent.parent]
+    if env_repo_root:
+        lane_candidates.append(Path(env_repo_root) / ".claude/scripts/security-review/lanes")
+        harness_candidates.append(Path(env_repo_root) / ".claude/scripts/security-review")
+    lane_candidates.append(Path("/workspace/.claude/scripts/security-review/lanes"))
+    harness_candidates.append(Path("/workspace/.claude/scripts/security-review"))
+
     for candidate in lane_candidates:
         if (candidate / "terminal_state.py").is_file():
             candidate_str = str(candidate)
@@ -115,10 +129,6 @@ def _bootstrap_harness_imports() -> None:
                 sys.path.insert(0, candidate_str)
             break
 
-    harness_candidates = [
-        Path(__file__).resolve().parent.parent,
-        Path("/workspace/.claude/scripts/security-review"),
-    ]
     for candidate in harness_candidates:
         if (candidate / "schema.py").is_file():
             candidate_str = str(candidate)
