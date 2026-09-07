@@ -879,14 +879,33 @@ separate, explicitly out-of-scope follow-up) — never by CI.
 launch-investigator`: a stub `docker` binary renders the real, unmodified `launch-investigator`
 call (real argument parsing, real mount construction) and then, in place of a real container,
 synchronously performs the simulated container's job against the actual host paths parsed out of
-its own `docker run` argv — writing `plan/step-NNN.json` for plan mode, or a findings/status
-envelope per outstanding step for lane mode, honoring whatever steps are already resolved exactly
-as a real lane container would via `resume.py`. `docker wait` is a no-op since the work already
-happened synchronously. Every case dispatches through a roster (a small stub harness/lane
-fixture standing in for `claude_lane.py`, mirroring the real-lane proof
-`claude_lane_integration_test.py` carries separately). This exercises the CLI's real
-orchestration logic — sequencing, per-lane independence, the resume no-op check, exit codes —
-against the real `manifest.py`/`planner.py`/`consolidate.py`/`agent-dispatch.sh` entry points,
+its own `docker run` argv. `docker wait` is a no-op since the work already happened
+synchronously.
+
+Issue #3934 rewrote this test to execute **real lane code** rather than simulating it. For plan
+mode the "job" is still self-written (`plan/step-NNN.json`) — the real plan-mode container execs
+`claude -p <prompt>` directly under a `Bash`/`Glob`-only tool profile with no Python lane-runner
+module in the path, so there is nothing for a real-execution rewrite to exercise there. For lane
+mode, the docker stub's ONLY stub is the harness CLI binary (`claude` on `PATH`): it spawns the
+real, unmodified lane entrypoint (`python3 <lane-entrypoint> <lane-id>`, exactly matching
+`investigator-entrypoint.sh`'s own `exec python3 "$LANE_SCRIPT" "$MODE"`) against the real host
+paths, so `claude_lane.py` and everything it calls into — `harness_runner.py`, `terminal_state.py`,
+`resume.py`, `schema.py` — run for real, generalizing the same "stub only the binary, run the real
+lane" pattern `claude_lane_integration_test.py` (STORY-5b) proves directly, now driven through
+`security-review.sh launch`/`resume` instead of calling `claude_lane.py` directly. The roster
+fixture mounts a byte-for-byte copy of `claude_lane.py` alone in its own scratch directory (no
+siblings), matching the real container's own single-file `--lane-entrypoint` mount and proving the
+import bootstrap falls through to `CFGMS_SECURITY_REVIEW_REPO_ROOT` rather than a
+`__file__`-relative sibling that is not there in production either. The file also carries two
+targeted regression checks run outside the CLI path: a plan step missing `sweep_id`/`commit_sha`
+fails loudly (`KeyError`, before any harness call or file write) if `claude_lane.py`'s own
+`schema.validate_plan_step()` call is deliberately bypassed, rather than silently reproducing
+finding 1's "zero API calls, zero files, nothing visible"; and a structural self-check that greps
+the test file's own source, which fails if the old self-written findings/status envelope shape is
+ever reintroduced. This exercises the CLI's real orchestration logic — sequencing, per-lane
+independence, the resume no-op check, exit codes — AND the real lane code's own behavior (schema
+validation, resume-skip, terminal-state classification) against the real
+`manifest.py`/`planner.py`/`consolidate.py`/`agent-dispatch.sh`/`claude_lane.py` entry points,
 without a real docker daemon, real credentials, or real network access.
 
 ### Roster dispatch (`CFGMS_SECURITY_REVIEW_LANES`) — the only lane-dispatch path (Issue #3932/#3933)
