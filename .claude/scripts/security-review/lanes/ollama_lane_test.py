@@ -268,6 +268,37 @@ def test_prose_surrounded_findings_object_is_extracted_and_completes() -> None:
         )
 
 
+def test_json_shaped_auth_error_is_failed_not_refused() -> None:
+    """[REQUIRED TEST] jrdnr's PR review, finding 4, end to end. A real stub
+    `ollama` binary exits 0 with a JSON-shaped auth error on stdout -- no
+    `findings` or `dispositions` key anywhere. `_extract_json_object` must
+    reject it (see the unit test above), so `call_ollama_harness` folds this
+    into the same synthetic-non-zero path as the plain-text unauthenticated
+    case: the envelope must be `failed`, never `refused` (which would make
+    this step eligible for a retry that always fails the same way, per
+    `harness_runner.apply_refusal_policy`)."""
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001")
+        with stub_ollama_on_path(
+            '{"error": "unauthorized: you need to be signed in"}\n', exit_code=0
+        ):
+            written = ollama_lane.run_lane(
+                plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+                call_harness_fn=ollama_lane.call_ollama_harness,
+            )
+
+        check(len(written) == 1, "json auth error: one envelope written", repr(written))
+        state = written[0]["state"] if written else None
+        check(state == "failed", "json auth error: state is failed", repr(written))
+        check(state != "refused", "json auth error: state is never refused", repr(written))
+        check(state != "complete", "json auth error: state is never complete", repr(written))
+        check(
+            not os.path.isfile(os.path.join(out_dir, "step-001.findings.json")),
+            "json auth error: no findings.json created for this step",
+            repr(sorted(os.listdir(out_dir))),
+        )
+
+
 def test_extract_json_object_ignores_leading_and_trailing_prose() -> None:
     text = 'Sure! {"findings": [], "dispositions": []} Hope that helps.'
     extracted = ollama_lane._extract_json_object(text)
@@ -289,6 +320,42 @@ def test_extract_json_object_skips_a_literal_brace_and_finds_the_real_object() -
     check(
         extracted == {"findings": []},
         "_extract_json_object: skips a non-JSON brace and finds the real object",
+        repr(extracted),
+    )
+
+
+def test_extract_json_object_prefers_the_real_answer_over_an_illustrative_example() -> None:
+    """[REQUIRED TEST] jrdnr's PR review, finding 1. A model that echoes the
+    output shape as a `findings`/`dispositions`-shaped example before giving
+    its real answer must not have that example mistaken for the answer --
+    the real findings, which come second, must survive. Taking the *first*
+    top-level JSON object (the pre-fix behavior) silently discards the real
+    answer and writes a schema-valid `complete` envelope with an empty
+    findings array for a step that actually found something."""
+    text = (
+        'Sure! The output shape is {"findings": [], "dispositions": []}.\n\n'
+        "Here is my answer:\n"
+        '{"findings": [{"title":"REAL BUG"}], "dispositions": [{"hypothesis_id":"h1"}]}'
+    )
+    extracted = ollama_lane._extract_json_object(text)
+    check(
+        extracted == {"findings": [{"title": "REAL BUG"}], "dispositions": [{"hypothesis_id": "h1"}]},
+        "_extract_json_object: the real answer survives an earlier illustrative example",
+        repr(extracted),
+    )
+
+
+def test_extract_json_object_rejects_a_json_object_with_neither_findings_nor_dispositions() -> None:
+    """[REQUIRED TEST] jrdnr's PR review, finding 4. A JSON-shaped auth error
+    like `{"error": "unauthorized: you need to be signed in"}` extracts
+    cleanly as JSON but is not an answer -- it must be treated as an
+    extraction failure so `call_ollama_harness` folds it into the synthetic
+    non-zero path and the step is recorded `failed`, never `refused` (which
+    would make it eligible for a retry that always fails the same way)."""
+    extracted = ollama_lane._extract_json_object('{"error": "unauthorized: you need to be signed in"}')
+    check(
+        extracted is None,
+        "_extract_json_object: an object with neither findings nor dispositions is not the answer",
         repr(extracted),
     )
 

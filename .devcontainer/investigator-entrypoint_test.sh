@@ -17,7 +17,14 @@
 # firewall init/verification never runs -- that is init-firewall_test.sh's
 # own concern, not this file's) and a stub `ollama` binary, driving the REAL
 # investigator-entrypoint.sh. No root, no real docker, no real firewall, no
-# real Ollama daemon.
+# real Ollama daemon -- and no pinned resolver either: the entrypoint's
+# resolv.conf post-condition is redirected at a fixture file via
+# CFGMS_TEST_RESOLV_CONF_PATH (jrdnr's PR review, finding 2), since
+# /etc/resolv.conf is read by absolute path and cannot be intercepted via a
+# PATH-prepended stub the way sudo/iptables/pgrep are. Without that
+# redirection this suite only passes inside a container whose resolver is
+# already pinned to 127.0.0.1 and fails everywhere else for an unrelated
+# reason, before reaching any ollama-specific logic.
 #
 # The lane script path is a container-internal bind-mount destination this
 # process's own (non-root) user cannot write to directly, so this suite uses
@@ -150,10 +157,18 @@ run_entrypoint() {
     # writable HOME (the onboarding-config write needs one) and a short
     # timeout, since a bug that makes the daemon-ready loop spin its full
     # default 30s would otherwise hang this suite rather than fail fast.
+    #
+    # A pinned-resolver fixture is written fresh into WORK_HOME on every call
+    # and pointed to via CFGMS_TEST_RESOLV_CONF_PATH, so the entrypoint's
+    # resolv.conf post-condition passes regardless of the *real*
+    # /etc/resolv.conf on whatever host runs this suite (jrdnr's PR review,
+    # finding 2).
     local mode="$1"
+    echo "nameserver 127.0.0.1" > "${WORK_HOME}/resolv.conf"
     timeout 20 env HOME="$WORK_HOME" PATH="${BIN_DIR}:${FAKEBIN}:${PATH}" \
       CFGMS_SECURITY_REVIEW_HARNESS="${STUB_HARNESS:-}" \
       CFGMS_TEST_LANE_SCRIPT_PATH="${WORK_HOME}/lane_stub.py" \
+      CFGMS_TEST_RESOLV_CONF_PATH="${WORK_HOME}/resolv.conf" \
       LANE_RUN_LOG="$LANE_RUN_LOG" \
       OLLAMA_CALL_LOG="$OLLAMA_CALL_LOG" \
       STUB_OLLAMA_READY="${STUB_OLLAMA_READY:-1}" \

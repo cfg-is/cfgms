@@ -583,6 +583,34 @@ check_contains "the failure is reported as credential_unavailable (matches secur
 check_not_contains "no container is ever dispatched for the missing-credential ollama lane" "$(cat "$DOCKER_CALL_LOG" 2>/dev/null || true)" "run -d"
 
 echo ""
+echo "== REQUIRED TEST — an ollama lane with id_ed25519 present but"
+echo "   id_ed25519.pub absent also fails closed as credential_unavailable"
+echo "   (jrdnr's PR review, finding 3 -- 'docker run -v' would otherwise"
+echo "   create an empty directory at the missing host path rather than"
+echo "   failing) (Issue #3976) =="
+NO_OLLAMA_PUB_HOME="${SANDBOX}/HOME-no-ollama-pub"
+mkdir -p "${NO_OLLAMA_PUB_HOME}/.claude" "${NO_OLLAMA_PUB_HOME}/.ollama"
+echo '{}' > "${NO_OLLAMA_PUB_HOME}/.claude/.credentials.json"
+echo 'fake-ed25519-private-key' > "${NO_OLLAMA_PUB_HOME}/.ollama/id_ed25519"
+: > "$DOCKER_CALL_LOG"
+set +e
+ollama_missing_pub_out=$(PATH="${FAKEBIN}:${PATH}" \
+  CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+  CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+  HOME="$NO_OLLAMA_PUB_HOME" \
+  bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_DIR" --snapshot-dir "$SNAPSHOT_DIR" --mode ollama-missing-pub-creds \
+    --harness ollama --model glm-5.3-flash:cloud --lane-entrypoint "$LANE_ENTRYPOINT_STAND_IN" 2>&1)
+ollama_missing_pub_rc=$?
+set -e
+if [[ "$ollama_missing_pub_rc" -ne 0 ]]; then
+  ok "an ollama lane with id_ed25519.pub missing exits non-zero"
+else
+  bad "an ollama lane with id_ed25519.pub missing exits non-zero" "exited 0"
+fi
+check_contains "the pub-key-missing failure is reported as credential_unavailable" "$ollama_missing_pub_out" "credential_unavailable"
+check_not_contains "no container is ever dispatched when only id_ed25519.pub is missing" "$(cat "$DOCKER_CALL_LOG" 2>/dev/null || true)" "run -d"
+
+echo ""
 echo "== REQUIRED TEST — a claude lane still dispatches normally even though this"
 echo "   file's ollama harness has no credential on the host (C5's 'never"
 echo "   silently substituted' property, extended to a fourth harness) =="

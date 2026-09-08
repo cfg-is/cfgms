@@ -58,7 +58,14 @@ if ! sudo iptables -L OUTPUT -n 2>/dev/null | grep -q "policy DROP"; then
     echo "ERROR: egress firewall not active (OUTPUT policy is not DROP); refusing to start"
     exit 1
 fi
-if ! grep -q '^nameserver 127\.0\.0\.1$' /etc/resolv.conf; then
+# CFGMS_TEST_RESOLV_CONF_PATH lets investigator-entrypoint_test.sh point this
+# post-condition at a fixture file it controls -- /etc/resolv.conf is read by
+# absolute path below and cannot be intercepted via a PATH-prepended stub the
+# way sudo/iptables/pgrep are. Unset in every real container, where the
+# default applies. Same override-for-testability convention init-firewall.sh's
+# CFGMS_TEST_DNSMASQ_* vars already use.
+resolv_conf_path="${CFGMS_TEST_RESOLV_CONF_PATH:-/etc/resolv.conf}"
+if ! grep -q '^nameserver 127\.0\.0\.1$' "$resolv_conf_path"; then
     echo "ERROR: resolv.conf is not pinned to the filtered resolver; refusing to start"
     exit 1
 fi

@@ -3015,8 +3015,13 @@ PROMPT_EOF
           # same directory, and a directory bind mount from the host would
           # either leak that host-side state into the container or make the
           # daemon try to write through a read-only host mount.
-          if [[ ! -f "${HOME}/.ollama/id_ed25519" ]]; then
-            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no ollama session found at ${HOME}/.ollama/id_ed25519 -- run 'ollama signin' on the host"
+          # Both files are gated here, not just the private key: `docker run
+          # -v` creates a missing host path as an empty directory rather than
+          # failing, so an absent id_ed25519.pub alone would silently mount a
+          # directory at the path the daemon expects a file, rather than
+          # failing closed the same way a missing private key does.
+          if [[ ! -f "${HOME}/.ollama/id_ed25519" || ! -f "${HOME}/.ollama/id_ed25519.pub" ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no ollama session found at ${HOME}/.ollama/id_ed25519{,.pub} -- run 'ollama signin' on the host"
             exit 1
           fi
           inv_harness_creds_mount=(

@@ -45,11 +45,16 @@ here (Ollama's structured-output support is a schema-constrained generation
 feature, not a guarantee that a *plain-text* prompt like this lane's gets a
 bare-JSON answer back) and no tool use, so the prompt instructs the model to
 emit the object and nothing else, but the lane does not trust that
-instruction was followed -- `_extract_json_object` scans stdout for the
-first top-level `{...}` that parses as a JSON object, tolerating prose
-before or after it, mirroring the "extract, don't assume bare JSON" posture
-`codex_lane.py`'s `--output-last-message` capture already needs (a CLI
-turn's final message is prose-shaped too).
+instruction was followed -- `_extract_json_object` scans stdout for every
+top-level `{...}` that parses as a JSON object, tolerating prose before,
+between, or after them, mirroring the "extract, don't assume bare JSON"
+posture `codex_lane.py`'s `--output-last-message` capture already needs (a
+CLI turn's final message is prose-shaped too). A model that echoes an
+illustrative example of the output shape before giving its real answer
+produces more than one such object; the *last* one carrying a `findings` or
+`dispositions` key is treated as the answer, never the first (see
+`_extract_json_object`'s own docstring for why "first" is actively wrong
+here).
 
 **A background daemon, not this file's concern.** `ollama run` is a client
 to a local `ollama serve` daemon; reaching Ollama Cloud without one signed in
@@ -286,33 +291,63 @@ def build_prompt(step: dict, file_contents: dict, output_path: str) -> str:
 
 
 def _extract_json_object(text: str) -> "dict | None":
-    """Best-effort extraction of the first top-level JSON object embedded in
-    `text`, tolerating prose before and after it.
+    """Best-effort extraction of the answer's top-level JSON object embedded
+    in `text`, tolerating prose before, between, and after it.
 
     `ollama run` has no file-writing tool and no structured-output guarantee
     against a plain-text prompt, so unlike the other three lanes this module
-    has no assurance stdout is bare JSON. Scans for every `{` in `text` and
-    attempts `json.JSONDecoder.raw_decode` from that position, returning the
-    first result that decodes to a `dict` -- a `{` that is not the start of
-    valid JSON (a literal brace inside prose) or that decodes to something
-    other than an object (a bare number, a list) is skipped and the scan
-    continues from the next `{`. Returns `None` if no JSON object can be
-    decoded anywhere in `text`, including when `text` is empty or contains no
-    `{` at all."""
+    has no assurance stdout is bare JSON, and no assurance the model prints
+    only one JSON-shaped object -- a model asked to emit a findings object
+    will sometimes echo an illustrative example of the shape before giving
+    its real answer. Scans every `{` in `text` and attempts
+    `json.JSONDecoder.raw_decode` from that position, collecting every result
+    that decodes to a `dict` (a `{` that is not the start of valid JSON -- a
+    literal brace inside prose -- or that decodes to something other than an
+    object -- a bare number, a list -- is skipped and the scan continues from
+    the next `{`; a successful decode advances the scan past the matched
+    object's own closing brace, so braces nested inside it are never treated
+    as separate candidates).
+
+    Taking the *first* such object is wrong: it would keep an early
+    illustrative example (`{"findings": [], "dispositions": []}` in a
+    "the output shape is..." aside) and discard the real answer that follows
+    it -- a schema-valid `complete` envelope with an empty findings array for
+    a step that actually found something, reached through extraction
+    *succeeding* rather than failing, so `call_ollama_harness`'s synthetic-
+    non-zero guard (which only fires when extraction finds nothing at all)
+    never catches it.
+
+    Among the collected candidates, the **last** one that carries a
+    `findings` or `dispositions` key is returned -- the model's actual answer
+    is conventionally the last thing it says, and requiring one of those two
+    keys rejects objects that are JSON-shaped but not an answer at all (e.g.
+    `{"error": "unauthorized: you need to be signed in"}`, which must be
+    treated as an extraction failure -- see `call_ollama_harness` -- not a
+    successfully parsed answer with a `refused`-shaped absence of findings).
+    Returns `None` if no such object exists anywhere in `text`, including
+    when `text` is empty or contains no `{` at all."""
     decoder = json.JSONDecoder()
     search_from = 0
+    candidates: list = []
     while True:
         brace_index = text.find("{", search_from)
         if brace_index == -1:
-            return None
+            break
         try:
-            obj, _ = decoder.raw_decode(text, brace_index)
+            obj, end_index = decoder.raw_decode(text, brace_index)
         except json.JSONDecodeError:
             search_from = brace_index + 1
             continue
         if isinstance(obj, dict):
+            candidates.append(obj)
+            search_from = end_index
+        else:
+            search_from = brace_index + 1
+
+    for obj in reversed(candidates):
+        if "findings" in obj or "dispositions" in obj:
             return obj
-        search_from = brace_index + 1
+    return None
 
 
 def call_ollama_harness(
