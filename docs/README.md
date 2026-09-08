@@ -90,6 +90,7 @@ If you're new to the project, start with these essential documents:
 - [Zero Trust Security Analysis](security/zero_trust_security_analysis.md) - Zero-trust implementation analysis
 - [Security Configuration](security/SECURITY_CONFIGURATION.md) - Secure configuration guidelines
 - [Credential Setup](security/README.md) - Local credential management with OS keychain
+- [Security Review Methodology](security-review/methodology.md) - Threat model, vulnerability classes and severity rubric every security-review finder lane is held to
 
 ### Security Audits
 

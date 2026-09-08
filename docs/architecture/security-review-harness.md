@@ -23,7 +23,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
 | `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
-| `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
+| `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4), the review-methodology loader and per-step anchor selection (Issue #3981 — see [Review methodology](#review-methodology-compact-core-and-per-step-anchors-issue-3981)), and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
 | `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
 | `lanes/codex_lane.py` | The Codex harness finder lane (Issue #3935) — see [The Codex harness lane](#the-codex-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
@@ -205,6 +205,107 @@ shared, instead of copied into three future lane runners or never implemented at
   ever, and the envelope itself records how it got there. Every other classification
   (`complete`, `parked`, a first-pass `failed`) passes `refusal_attempts` through unchanged.
 
+### Review methodology: compact core and per-step anchors (Issue #3981)
+
+**Where it lives.** `docs/security-review/methodology.md` is the single copy of the review
+methodology every finder lane is held to: the CFGMS threat model restated for a reviewer, the
+closed vulnerability-class shortlist (CWE identifiers plus an explicit `other: <label>` escape),
+the attacker tiers, the four severity level definitions, and worked CFGMS examples ("anchors")
+calibrating each level. It is human-owned: an autonomous agent must not write or edit it, because
+a miscalibrated rubric degrades every sweep in the same direction, and cross-lane agreement — the
+signal the harness is built on — would then confirm the error rather than expose it.
+
+**Single-sourcing contract (C4, extended).** `lanes/harness_runner.py` loads the document once at
+import (`load_methodology()`, resolving the path under `CFGMS_SECURITY_REVIEW_REPO_ROOT` when set,
+else the repository root four directories above the module — `/workspace` inside an investigator
+container) and exposes it as two constants, `METHODOLOGY_CORE` and `METHODOLOGY_ANCHORS`. Every
+lane's `build_prompt` opens with `harness_runner.shared_preamble(step)` — `SYSTEM_PROMPT`, the
+core, this step's anchors, `OUTPUT_SCHEMA_DESCRIPTION` — and appends only its own delivery
+instruction and the step's content. No lane holds a copy of any of that text.
+`harness_runner_test.py` fails if `SYSTEM_PROMPT`, `OUTPUT_SCHEMA_DESCRIPTION`, `METHODOLOGY_CORE`
+or `METHODOLOGY_ANCHORS` is assigned in any module other than `harness_runner.py`, if the system
+prompt's text appears in a second module, or if any lane still interpolates the two constants
+directly instead of calling `shared_preamble`. The loader fails closed: a missing document, a
+missing or duplicated marker, a level with fewer than two anchors, or an oversized core or anchor
+raises `MethodologyError` at import, so a lane cannot start with the methodology silently absent.
+
+**Core/anchor split and the size ceiling.** A full methodology inlined into every step prompt is
+paid per step per lane — at roughly 250 planned steps and several lanes, that is the dominant
+prompt cost. Delivery is therefore split:
+
+- The **compact core** — everything between the `methodology-core:begin`/`methodology-core:end`
+  HTML comments in the document — is inlined in every step prompt. Its ceiling is
+  `METHODOLOGY_CORE_MAX_CHARS` = **8,000 characters** (about 5.6× the 1,419-character
+  `SYSTEM_PROMPT` it joins; the core measured 7,202 characters when this section was written).
+  The loader refuses a larger core; `harness_runner_test.py` asserts the ceiling against the live
+  document and asserts that the ceiling is smaller than the whole document, so an implementation
+  that inlined the entire file per step cannot pass.
+- **Anchors** — each between `anchor:begin`/`anchor:end` HTML comments, carrying an `id`, a
+  `severity` and a `tags` list — are inlined **one per severity level per step**
+  (`ANCHORS_PER_STEP` = 4), each at or under `ANCHOR_MAX_CHARS` = **1,200 characters**, so a
+  step's whole methodology payload is bounded at 12,800 characters plus the two existing
+  constants. The document must carry at least `MIN_ANCHORS_PER_LEVEL` = 2 anchors per level; it
+  ships with three per level.
+
+**Anchor selection is deterministic and testable.** `select_anchors(step)` tokenizes the step's
+own `scope`, `files`, `description` and every hypothesis's `objective`/`required_evidence`
+(lower-cased, paths and camel-case identifiers split into words, tokens under three characters
+dropped) and, for each severity level in order, picks the anchor of that level with the most tags
+present in that token set, ties broken by document order. It is a pure function of the step's
+content and the document — never a model's choice — so the same step always selects the same
+anchors, two steps about different subsystems select different ones wherever the corpus has an
+anchor tagged for each, and a step overlapping nothing gets the first anchor of each level in
+document order. `harness_runner_test.py` asserts all three properties, including that a
+certificate-handling step and a tenant-authorization step select different critical anchors —
+without that half, a fixed anchor set would pass while defeating the purpose.
+
+**`prompt_version` now covers the methodology.** `compute_prompt_version()` hashes
+`prompt_corpus()` — `SYSTEM_PROMPT`, the core, every anchor (not only a step's selection), and
+`OUTPUT_SCHEMA_DESCRIPTION` — rather than `SYSTEM_PROMPT` alone, so a rubric or anchor edit is
+visible on every envelope written after it, exactly as a system-prompt edit already was.
+
+**Decisions settled in the founder session for Issue #3981.** Each records the alternative that
+was considered and rejected, so a later reader can see it was weighed, not missed.
+
+- **D1 — Severity scale: a bespoke four-level CFGMS scale, not CVSS.** CVSS v3.1/v4 is
+  externally comparable and defensible to a client, but it needs a vector (attack vector,
+  privileges required, user interaction) that a lane with no anchors would guess — reintroducing,
+  one layer down, exactly the cross-lane variance this story exists to remove. Cross-lane
+  comparability is the harness's premise, and it comes from shared anchors, not from a shared
+  formula each lane fills in differently. The bespoke scale matches the
+  `critical`/`high`/`medium`/`low` values the finding schema already emits, and each level is
+  anchored to worked CFGMS examples. CVSS can be added later as an optional second field without
+  changing the anchors.
+- **D2 — CWE vocabulary: a closed shortlist plus an explicit `other` escape, not the full
+  corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + `vuln_class`; with an open
+  vocabulary, two lanes describing one defect under two identifiers silently fail to merge. The
+  core lists 24 CWE identifiers CFGMS actually cares about (certificate validation,
+  authentication and authorization, signature verification, secret handling, logging, injection,
+  path and link handling, deserialization, races, resource consumption) and instructs a lane to
+  set `vuln_class` to exactly one of them or to `other: <short label>`. The escape is stated
+  explicitly, not implied — it is what stops the shortlist suppressing a real finding it did not
+  anticipate. This story chooses the vocabulary and carries it in the existing `vuln_class`
+  field; a dedicated CWE field is a separate schema story.
+- **D3 — The assumed attacker per level.** Named tiers — T0, a network party with no credential;
+  T1, a compromised steward (root on one enrolled endpoint); T2, a compromised tenant admin for a
+  short window; T3, a compromised controller or root admin; P, an untrusted module publisher —
+  and a rule for each level: `critical` is T0/T1/P gaining control of the controller, of other
+  stewards or of another tenant; `high` is T2 escaping its subtree or a blast-radius bound, or T1
+  reading beyond its own host; `medium` is impact inside the attacker's own tenant or host that
+  still violates a stated control; `low` is defence-in-depth with no boundary crossing. Two
+  consequences of the CFGMS threat model are written into the tiers so lanes stop disagreeing
+  about them: root on one steward host is the attacker's starting position, not a finding, and a
+  defect that needs T3 is `low` *unless* it sits in a control whose purpose is to bound T3
+  (`module_trust.mode: strict`, trusted publishers, revocations), in which case it is judged by
+  the blast radius that control was meant to contain. The alternative — a single implied
+  attacker — was rejected because it is the reason two lanes reading one rubric still diverge:
+  they assume different attackers.
+- **One anchor per level rather than "the two or three closest".** The scoping note suggested
+  inlining the two or three examples nearest the step. The best match *per level* was chosen
+  instead: the anchors calibrate a scale, and a lane handed only the three nearest examples could
+  receive three `critical` anchors and no picture of where `medium` sits. Four anchors at or under
+  1,200 characters each stays inside the budget above.
+
 ## Writes are atomic
 
 Every artifact under the sweep tree is written via `atomic_write.py::write_json_atomic()`:
@@ -275,7 +376,7 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
   "state":            "<complete|parked|refused|failed>",
   "model_id":         "claude-opus-5",
   "plan_hash":        "<sha256 of plan_dir/<step_id>.json's own bytes>",
-  "prompt_version":   "<sha256 of harness_runner.SYSTEM_PROMPT>",
+  "prompt_version":   "<sha256 of harness_runner.prompt_corpus(): SYSTEM_PROMPT + methodology core + every anchor + OUTPUT_SCHEMA_DESCRIPTION>",
   "harness_identity": "<CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY, or 'unknown' outside a container>",
   "stop_reason_raw":  "<provider's raw, unmodified terminating reason>",
   "findings":         [],
@@ -308,8 +409,10 @@ system prompt, and harness code it was produced against:
 - **`plan_hash`** — a SHA-256 hex digest of `plan_dir/<step_id>.json`'s own raw bytes on disk
   (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization
   of the parsed JSON, so it is sensitive to any byte-level change to the plan step.
-- **`prompt_version`** — a SHA-256 hex digest of `harness_runner.SYSTEM_PROMPT`
-  (`harness_runner.compute_prompt_version()`). Recorded for provenance; `resume.py` does not
+- **`prompt_version`** — a SHA-256 hex digest of `harness_runner.prompt_corpus()` — `SYSTEM_PROMPT`,
+  the methodology core, every severity anchor, and `OUTPUT_SCHEMA_DESCRIPTION`
+  (`harness_runner.compute_prompt_version()`; widened from `SYSTEM_PROMPT` alone by Issue #3981 so
+  a rubric or worked-example edit is visible on the envelope). Recorded for provenance; `resume.py` does not
   check it against a current value the way it does the other two fields.
 - **`harness_identity`** — read verbatim from the `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`
   env var (falling back to `"unknown"` when absent, e.g. a standalone invocation outside the
@@ -733,8 +836,8 @@ subprocess — this is what "runs under a subscription agent harness" means conc
 API key.
 
 **Shared prompt and classifier, no lane-specific copies.** The prompt sent to `claude` is built
-entirely from `lanes/harness_runner.py`'s shared `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4)
-plus the step's own scope/description/file contents — never a second, differently-worded prompt.
+entirely from `lanes/harness_runner.py`'s shared `shared_preamble(step)` — `SYSTEM_PROMPT`, the review-methodology core, this step's
+severity anchors, `OUTPUT_SCHEMA_DESCRIPTION` (C4) — plus the step's own scope/description/file contents — never a second, differently-worded prompt.
 State is derived by `lanes/terminal_state.py::classify()` (C3) from the subprocess's exit code
 plus whether a findings file exists at an exact path named in the prompt and in the subprocess's
 environment (`CFGMS_SECURITY_REVIEW_STEP_OUTPUT_FILE`) — never from a provider-specific
@@ -795,7 +898,8 @@ documented above. For every step `resume.py::missing_steps()` reports outstandin
 invokes the `codex` binary (resolved on `PATH`) as a subprocess.
 
 **Same shared prompt and classifier as `claude_lane.py`, one different capture mechanism.** The
-prompt is built from the same `harness_runner.py` `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4)
+prompt is built from the same `harness_runner.py` `shared_preamble(step)` (`SYSTEM_PROMPT`, methodology core, per-step
+severity anchors, `OUTPUT_SCHEMA_DESCRIPTION` — C4)
 plus the step's own scope/description/file contents, and state is derived by the same
 `terminal_state.py::classify()` (C3). What differs is how a response is captured, because the two
 CLIs' real, confirmed non-interactive flag shapes differ:
@@ -872,7 +976,8 @@ CLI.
 
 **Same shared prompt and classifier as the other two lanes; capture mechanism matches
 `claude_lane.py`, not `codex_lane.py`, and for a documented reason.** The prompt is built from the
-same `harness_runner.py` `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4) plus the step's own
+same `harness_runner.py` `shared_preamble(step)` (`SYSTEM_PROMPT`, methodology core, per-step
+severity anchors, `OUTPUT_SCHEMA_DESCRIPTION` — C4) plus the step's own
 scope/description/file contents, and state is derived by the same `terminal_state.py::classify()`
 (C3). `opencode run` has no `codex`-style `--output-last-message` flag (confirmed via `--help`) —
 it streams a formatted transcript to stdout, not a bare final-answer string — and its raw
@@ -1004,7 +1109,7 @@ lane already runs.
 `claude_lane.py`'s `--disallowedTools` or `codex_lane.py`'s `--sandbox read-only`, this lane passes
 no tool-restriction flag, because there is nothing to deny. `build_prompt` does not name an output
 file to write to; it instructs the model to print the findings JSON object directly to standard
-output and nothing else, reusing `harness_runner.py`'s `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION`
+output and nothing else, reusing `harness_runner.py`'s `shared_preamble(step)`
 (C4) unchanged, exactly like the other three lanes.
 
 **Credential-unavailable is a recorded, skippable failure, never a silent substitution** — the
