@@ -18,7 +18,7 @@ primitives live in `.claude/scripts/security-review/`:
 | Module | Responsibility |
 |---|---|
 | `schema.py` | `validate_finding`, `validate_step_envelope`, `validate_hypothesis`, `validate_disposition`, and the injection-safe `safe_log_event`/`log_event` log formatter |
-| `atomic_write.py` | `write_json_atomic` — temp file + `os.replace`, never a partial file visible at the final path |
+| `atomic_write.py` | `write_json_atomic`/`write_text_atomic`/`write_bytes_atomic` — temp file + `os.replace`, never a partial file visible at the final path; `write_bytes_atomic` (Issue #3978) is the one write path every bundle artifact in `metadata.py::write_bundle` goes through, including verbatim byte-for-byte copies |
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
@@ -27,7 +27,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
 | `lanes/codex_lane.py` | The Codex harness finder lane (Issue #3935) — see [The Codex harness lane](#the-codex-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
-| `metadata.py` | `collect` — the metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt |
+| `metadata.py` | `collect`/`render_payload` — the flat, metadata-only repository summary (paths, package dirs, route registrar paths, `web/src/` top-level directory names) handed to the planner prompt today; `write_bundle` (Issue #3978) — the auditable bundle directory that will become the planner's only input once #WS2-2 cuts it over — see [The auditable planner bundle](#the-auditable-planner-bundle-issue-3978) below |
 | `snapshot.py` | `create_snapshot`/`verify_snapshot` — the immutable, byte-verified snapshot every investigator container mounts at `/workspace` (Issue #3951/#3952) — see [Immutable snapshot](#immutable-snapshot) below |
 | `planner.py` | `prepare`/`launch`/`finalize` — assembles the planner prompt around `metadata.collect()`'s output, launches the plan-mode investigator container, and validates its `plan/step-NNN.json` output; `launch(..., planners=...)`/`finalize_multi_planner`/`merge_steps_by_scope` add the `CFGMS_SECURITY_REVIEW_PLANNERS` multi-planner path (C6, Issue #3937) — see [Multi-planner plan merge](#multi-planner-plan-merge-c6-issue-3937) below |
 | `security-review.sh` | The operator-facing `launch`/`status`/`resume` CLI (Issue #3910) — see [Sweep orchestration CLI](#sweep-orchestration-cli-launchstatusresume) below. Lives in `.claude/scripts/`, one level up from this directory, alongside `agent-dispatch.sh` |
@@ -1363,6 +1363,240 @@ roster rather than a per-entry result (see `launch()`'s own docstring), every co
 one `dispatch_planner()` call is recorded with the same `outcome` — the finest granularity available
 without changing that contract. Finder lanes get true per-entry outcomes, since
 `dispatch_roster_lanes()`'s loop already tracks each entry's own launch result independently.
+
+## The auditable planner bundle (Issue #3978)
+
+`metadata.py::write_bundle(dest, commit_sha, repo_root=None, scope_file=None, no_scope=False)`
+writes a directory of artifacts instead of the flat in-memory payload above. It is the
+extractor's second output, not a replacement for the first: `collect()`/`render_payload()`
+keep behaving exactly as before, and `prepare()` still renders the flat payload into the
+planner prompt. This story only produces the bundle; wiring the planner to consume it instead
+of the flat payload is #WS2-2, and `--scope-file` plumbing through `security-review.sh` and the
+skill is #3979. Until both land, the bundle is written but nothing downstream reads it.
+
+**Honest scope statement (epic #3975 body, verbatim).** *"Any claim that source code does not
+leave the environment"* is out of scope for this and every harness story: *"the separation is
+built, the guarantee is not claimed. Finder lanes ship file bodies to cloud providers by design.
+No doc, comment or manifest field may state otherwise."* Nothing below should be read as a claim
+that source code never leaves the review environment — only that this one extractor's output is
+provably bounded to what its own source code can be read to produce.
+
+### Bundle layout
+
+```
+bundle/
+├── MANIFEST.json          # provenance + per-artifact sha256 + redaction log
+├── 00-scope.md             # operator-supplied prose description, copied verbatim
+├── 01-tree.tsv             # every file at the commit, with a `tier`
+├── 03-routes.tsv           # HTTP entrypoints with their declared auth guard
+├── 05-deps/                # go.mod, go.sum, web/package.json verbatim
+└── 06-config-surface.tsv   # env var NAMES and reference counts, never values
+```
+
+`02-symbols.jsonl` and `04-schema.sql` are deliberately absent — symbol names disclose internal
+domain vocabulary the three gaps this workstream targets do not need, and CFGMS storage is git +
+SOPS with SQLite caches, so there is no single authoritative DDL file to extract. Both are
+revisit-if-ever-wanted, not planned follow-ups.
+
+Every artifact is produced from one `git ls-tree -r` pass over the sweep's pinned `commit_sha`,
+with file content read via one batched `git cat-file --batch` call keyed by the blob shas that
+pass named — content-addressed, so reading a blob by the sha `git ls-tree` gave it for that
+commit is exactly equivalent to `git show <commit_sha>:<path>`, never a read of the live working
+tree. `write_bundle` and its extractors shell out to nothing but `git`; there is no network call,
+no model call, and no shelling out to an agent CLI anywhere on this path — the bundle is
+auditable specifically because a human can read `metadata.py` and know exactly what it can and
+cannot emit (`metadata_test.py`'s purity test asserts every `subprocess` call this module issues
+is `git`).
+
+### The corrected read-a-body invariant
+
+Earlier revisions of this module claimed "no function ever reads a source file's body," with
+`go.mod`'s `module` directive as the one documented exemption. Route extraction (`03-routes.tsv`,
+below) reads the bodies of `features/controller/api/*.go` files, so that claim is no longer true
+and this story corrects it rather than working around it. The honest invariant, stated in
+`metadata.py`'s own module docstring:
+
+> This module may read a file's body to derive a structured fact (a tier, a route, a config-key
+> name), and it never copies a file's body into a bundle artifact.
+
+`00-scope.md` is the one verbatim copy this module ever writes, and — as the next section
+explains — it is never a repository file in the first place.
+
+### `00-scope.md` is operator-supplied, never sourced from the repository
+
+Everything else in the bundle is metadata: it tells a planner that `pkg/cert/` exists, not that
+stewards run on hosts that may be compromised, or that admin accounts may be phished for short
+periods. That framing is what lets a planner form real hypotheses instead of restating directory
+names — genuinely valuable prose. But writing it requires reading the code, which is exactly what
+an isolation model forbids a cloud agent from doing, and a *committed* file is not the answer
+either: this framework must be portable to a target repository the reviewer has no write access
+to, and to a fully offline engagement. So the description enters from outside the repository
+entirely.
+
+`--scope-file <path>` names any readable path on the host. `write_bundle` copies its bytes
+verbatim into `00-scope.md` and records the digest in `MANIFEST.json` — it is never generated,
+summarised, or re-rendered by this module. Who wrote it is the operator's call and scales to the
+sensitivity of the target: an agent-generated summary for an open-source or low-sensitivity
+target, operator-authored prose for a highly sensitive or fully offline one. Either way, a human
+chose the exact bytes that ship — that choice, not the extractor, is the disclosure control.
+
+Consequences enforced by `write_bundle`:
+
+- **`--scope-file` is not optional by default.** Exactly one of `--scope-file <path>` or
+  `--no-scope` is required; given neither (or both), `write_bundle` raises `MetadataError` before
+  creating anything on disk. A silently absent description would degrade planning quality
+  invisibly — precisely the failure class this harness exists to prevent. `--no-scope` records
+  `"scope_provided": false` in `MANIFEST.json` so the omission is visible in the report rather
+  than inferred from a missing file.
+- **The scope file sits outside the pinned commit.** Bundle reproducibility is therefore over
+  `(commit_sha, extractor_version, scope-file digest)`, not `commit_sha` alone — `MANIFEST.json`'s
+  `scope_file.sha256` records the digest and `scope_file.from_commit: false` records the fact
+  explicitly, and the reproducibility test (below) holds the scope file fixed across both runs
+  rather than pretending the bundle is a pure function of the commit.
+- **Size is capped** at `SCOPE_FILE_MAX_BYTES` (300,000 bytes — "a few hundred KB is generous").
+  An operator pointing at the wrong file fails loudly (`MetadataError`, nothing written) rather
+  than silently blowing the planner's later context window.
+- **Delimiter safety.** A scope file containing either planner-prompt delimiter
+  (`--- REPOSITORY METADATA ---` / `--- END REPOSITORY METADATA ---`) is rejected outright, not
+  escaped — an operator-supplied file that already contains the harness's own control strings is
+  a mistake worth surfacing, and this is human-authored Markdown, so mangling it silently (the
+  way a path value is control-character-filtered elsewhere in this module) would be worse than
+  refusing it.
+
+### Tier: the highest-leverage field
+
+Today the planner is handed Go package *directory names* and defaults to one step per Go
+package — pkg/security/ and a web component get the same budget. `tier` is what lets a later
+story weight step budgets by risk. It is assigned by `_classify_tier()`, an ordered list of path
+rules (`TIER_RULES`), first match wins, matched with `fnmatch` semantics against the path and
+against `*/<pattern>` — **never by reading a file body.**
+
+| # | Tier | Patterns (first match wins) |
+|---|---|---|
+| 1 | `vendor` | `vendor/*` |
+| 2 | `generated` | `*.pb.go`, `*_generated.go`, `web/dist/*`, `*package-lock.json`, `go.sum` |
+| 3 | `test` | `*_test.go`, `test/*`, `*/testdata/*`, `*_test.sh`, `*.test.ts`, `*.test.tsx`, `*/mocks/*` |
+| 4 | `entrypoint` | `cmd/*`, `api/proto/*`, `features/controller/api/route_registry.go`, `features/controller/api/routes_*.go`, `features/controller/api/server.go`, `web/src/api/*`, `web/embed.go` |
+| 5 | `security` | `pkg/cert/*`, `pkg/secrets/*`, `pkg/security/*`, `pkg/session/*`, `pkg/registration/*`, `*/auth/*`, `*/auth*/*`, `*auth*.go`, `*permission*`, `*token*` |
+| 6 | `dataaccess` | `pkg/storage/*` |
+| 7 | `presentational` | `web/src/*` |
+| 8 | `business` | `features/*`, `internal/*`, `pkg/*` |
+| 9 | `docs` | `docs/*`, `*.md`, `LICENSE`, `LICENSE.*`, `examples/*` |
+| 10 | `tooling` | `.github/*`, `.devcontainer/*`, `.claude/*`, `.serena/*`, `scripts/*`, `build/*`, `*.sh`, `*.ps1`, `Makefile`, `Dockerfile*`, `docker-compose*.yml`, `buf.yaml`, `buf.*.yaml` |
+| 11 | `config` | `*.yaml`, `*.yml`, `*.json`, `*.toml`, `*.cfg`, `*.conf`, `*.tsv`, `*.jsonl`, `*.txt`, `templates/*`, `web/*`, `go.mod`, `CODEOWNERS`, `*.example`, `*ignore`, `*.baseline`, `.gitattributes`, `.nvmrc`, `staticcheck.conf`, `*.wxs`, `*.xml`, `*.html`, `*.js`, `postinstall` |
+
+The closed tier set (`metadata.CLOSED_TIER_SET`) is therefore `entrypoint`, `security`,
+`dataaccess`, `business`, `presentational`, `test`, `generated`, `vendor`, `docs`, `tooling`,
+`config`, plus `unknown` as the fail state. **This exact set is consumed by #3980's coverage
+gates**, whose G-2 exempt set is the six non-code tiers (`vendor`, `generated`, `test`, `docs`,
+`tooling`, `config`) — a tier must never be renamed here without updating that story.
+
+**Fail closed on an unclassifiable file.** A file matching no rule is emitted into `01-tree.tsv`
+with `tier=unknown`, counted in `MANIFEST.json`'s `redaction_log.unknown_tier_count`, and
+`write_bundle`'s caller (`main`) exits non-zero — but the bundle is still written in full. An
+unclassified file is a rules gap the operator resolves before the sweep proceeds; silently
+dropping it would leave an unreviewed file that never appears in any step, which is the exact
+failure this rule exists to prevent. Writing the bundle anyway (rather than writing nothing) lets
+the operator inspect exactly what was unclassifiable instead of debugging a blind non-zero exit.
+Validated against `origin/develop`'s 3,260-file tree: zero `unknown`.
+
+`01-tree.tsv` columns are `path`, `lang`, `loc`, `sha256_12`, `tier`. `sha256_12` is the first 12
+hex characters of the file's content sha256 — enough for a later stage to prove it read the same
+file version, not enough to leak content. `loc` is a newline count over the file's content (not a
+`tokei` dependency).
+
+### `03-routes.tsv`: routes are read from bodies, not from the registrar
+
+`_route_registrars()` (used by the flat payload above) finds exactly one file —
+`features/controller/api/route_registry.go`, 18 lines, declaring the `RouteRegistrarFunc` type
+and nothing else. Deriving a route table from that discovery, as an earlier draft of this story
+specified, produces an empty `03-routes.tsv` while every fixture test passes — the exact
+"clean report over work that did not happen" failure this epic exists to eliminate. The routes
+live in `features/controller/api/*.go` (minus `*_test.go`): 25+ `routes_*.go` files each
+registering a subrouter via `api.PathPrefix("/x").Subrouter()` and a chain of
+`sub.Handle("/path", s.requirePermission("resource","action")(http.HandlerFunc(s.handleX))).
+Methods("GET")` calls, plus `server.go`'s unguarded public surface
+(`s.router.HandleFunc("/api/v1/register", s.handleRegister)`) and `test_endpoints_enabled.go`'s
+`testOnly(...)`-wrapped integration routes.
+
+`_extract_routes_from_source()` resolves each call's effective path by tracking
+`var := base.PathPrefix("...").Subrouter()` assignments earlier in the same file (seeded with the
+convention that a `registerXxxRoutes(s *Server, api *mux.Router)` registrar's `api` parameter is
+always the `/api/v1` subrouter), then scans for `.Handle(`/`.HandleFunc(` calls joined to a
+trailing `.Methods(...)` via paren-balanced text scanning (not a naive regex, so a
+`http.HandlerFunc(...)` nested inside the outer call does not break the match). This reads a
+source file's body — the corrected invariant above exists because of this exact extractor.
+
+Columns: `method`, `path`, `handler_file`, `handler_symbol`, `auth_middleware`, `framework`.
+`auth_middleware` is `requirePermission(<resource>,<action>)` when that wrapper is present in the
+call, the literal `testOnly` for the test-only wrapper, and the literal **`(none)`** when the
+handler is passed bare. **The `(none)` rows are the point** — a route table with visible
+unguarded entries is among the most productive inputs a planner can receive. `framework` is
+always `gorilla/mux`.
+
+**Every value extracted from a file body is higher-taint than a path** — an attacker who lands a
+commit controls file *content* directly, not just its name — so each extracted value is
+constrained to a tight accepted shape before being emitted: route path
+`^[A-Za-z0-9/_{}.:*-]{1,256}$`, handler symbol `^[A-Za-z0-9_.]{1,128}$`, method `^[A-Z]{3,7}$`,
+plus the existing control-character filter on `auth_middleware`. A value failing its shape is
+dropped from the row (never emitted partially or escaped in place) and logged as
+`prompt_unsafe_route_value_dropped`. In practice this drops a handful of real routes whose path
+carries a `mux` regex suffix outside the accepted character class (e.g.
+`/api/v1/entities/{eid:.+}`, `{cidr:.+}`) — an accepted, documented gap in the current shape
+rather than a bug; a future story can widen the character class if those routes need to appear.
+
+### `06-config-surface.tsv`: names and counts, never values
+
+Extracted via a regex over `os.Getenv("NAME")`/`os.LookupEnv("NAME")` call sites across every
+non-deny-listed file in the tree. Columns: `key`, `source` (always `env`), `referenced_in_count`
+(the number of distinct files referencing the key), `has_default`, `tier` (the tier of the first,
+lexicographically, referencing file). `has_default` is always the literal `unknown`: reliably
+detecting a default-value idiom via static regex is not something this module attempts, and
+claiming `false` when the extractor simply did not look would repeat the kind of overclaim this
+story exists to correct — the column exists so a later story can fill it in without changing the
+artifact's shape. **Never a value, never a default value, and never read from a file matching the
+deny list** (see below) — `.env`, `.env.local.example`, and friends are excluded from the
+candidate file set before any content is read, not filtered after the fact.
+
+### Deny list: never read, never hashed, never in the bundle
+
+`DENY_PATTERNS` (`.env`, `.env.*`, `*.pem`, `*.key`, matched against the file's basename at any
+depth) are excluded before `write_bundle` ever reads their blob content — not filtered out of an
+already-read value. `.env.*` deliberately covers `.env.example`/`.env.local.example`, which
+routinely carries a realistic-looking value in practice despite the name suggesting otherwise.
+A denied file is counted in `MANIFEST.json`'s `redaction_log.files_excluded_by_deny` and does not
+appear in `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, or `05-deps/` — its path is not
+merely content-scrubbed, the file is absent from the bundle entirely.
+
+### `05-deps/`: dependency manifests, verbatim
+
+Whichever of `go.mod`, `go.sum`, `web/package.json` exist at the pinned commit are copied
+byte-for-byte into `05-deps/`, preserving their relative path (so `web/package.json` lands at
+`05-deps/web/package.json`). These are the one category of file this module ever copies whole —
+dependency manifests, not application source, matching the flat payload's existing `go.mod`
+exemption.
+
+### `MANIFEST.json`
+
+Sufficient on its own to answer "what is in this bundle" without opening any other file:
+`bundle_version`, `extractor_version`, `extractor_sha256` (a live hash of `metadata.py`'s own
+source, computed at run time — provenance for the extractor itself, not just its output),
+`repo`, `commit_sha`, `generated_at`, `scope_provided`, `artifacts` (per-file `bytes` + `sha256`
+for every artifact this bundle actually wrote), `redaction_log`
+(`files_excluded_by_deny`, `unknown_tier_count`), and — only when a scope file was supplied —
+`scope_file` (`sha256`, `bytes`, `from_commit: false`).
+
+### Reproducibility
+
+The same `(commit_sha, extractor_version, scope-file digest)` always produces a byte-identical
+bundle: every row-producing function sorts its output explicitly (never relies on dict/set
+iteration order), no wall-clock timestamp is hashed into any artifact, and
+`atomic_write._write_atomic` now opens its text mode with `encoding="utf-8"` explicitly rather
+than the host locale's default, so the guarantee holds regardless of the machine running the
+extractor. `generated_at` is the one manifest field allowed to vary between two runs — the
+reproducibility test in `metadata_test.py` writes two bundles from the same commit and scope file
+into separate destinations, diffs every artifact byte-for-byte, and compares both manifests with
+`generated_at` excluded.
 
 ## Log injection
 
