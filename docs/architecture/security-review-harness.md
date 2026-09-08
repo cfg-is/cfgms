@@ -17,7 +17,7 @@ primitives live in `.claude/scripts/security-review/`:
 
 | Module | Responsibility |
 |---|---|
-| `schema.py` | `validate_finding`, `validate_step_envelope`, and the injection-safe `safe_log_event`/`log_event` log formatter |
+| `schema.py` | `validate_finding`, `validate_step_envelope`, `validate_hypothesis`, `validate_disposition`, and the injection-safe `safe_log_event`/`log_event` log formatter |
 | `atomic_write.py` | `write_json_atomic` — temp file + `os.replace`, never a partial file visible at the final path |
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
@@ -102,6 +102,16 @@ schema validation is treated as **not complete** — it is returned by `missing_
 reattempt or human inspection, never silently dropped (this is what "a lane emitting a
 schema-invalid finding marks that step `failed`, and does not silently drop it" means in
 practice: the resume scanner is the mechanism that keeps it visible).
+
+**A schema-valid `complete` envelope is not automatically coverage-complete (Issue #3959).**
+Since epic #3950's per-hypothesis disposition contract, a `complete` envelope also carries a
+`dispositions` entry for every hypothesis the step proposed (see [Disposition](#disposition)
+below). `resume.py::missing_steps()` still treats any schema-valid `complete` envelope as done —
+resume is about the envelope's own validity, not about what it resolved. It is `consolidate.py`
+that draws the finer line: a `complete` envelope containing any `not_attempted` disposition is
+counted `failed` in the coverage table, never `complete`, so a bundle that finished silently
+short of its hypotheses is visible in the report even though nothing about it fails resume or
+schema validation.
 
 `<step_id>.status.json` carries the envelope for the three non-terminal outcomes. A `refused`
 step is returned as missing on every scan; distinguishing a first-refusal-retry from a
@@ -216,6 +226,7 @@ Every lane emits the same shape (`schema.py::validate_finding`):
   "commit_sha":    "0541b9c8",
   "lane":          "claude-sonnet-5",
   "step_id":       "step-007",
+  "hypothesis_id": "h1",
   "file":          "pkg/example/thing.go",
   "symbol":        "Thing.DoSomething",
   "vuln_class":    "<taxonomy value>",
@@ -227,8 +238,11 @@ Every lane emits the same shape (`schema.py::validate_finding`):
 }
 ```
 
-All twelve fields are required. `severity` and `confidence` are validated against their enum;
-every other field must be a non-empty string.
+All thirteen fields are required. `severity` and `confidence` are validated against their enum;
+every other field must be a non-empty string. `hypothesis_id` (Issue #3959) names which of the
+step's `hypotheses` this finding resulted from — a finding is how a `candidate_found` disposition
+(see [Disposition](#disposition) below) shows its work, so every finding traces back to the
+hypothesis that produced it, exactly like a disposition does.
 
 **The de-duplication key is `file` + `symbol` + `vuln_class` — never a line number.** Line
 ranges rot as `develop` advances; symbol names survive. `schema.py` does not define or read a
@@ -254,6 +268,7 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
   "model_id":        "claude-opus-5",
   "stop_reason_raw": "<provider's raw, unmodified terminating reason>",
   "findings":        [],
+  "dispositions":    [],
   "files_intended":  [],
   "files_read":      []
 }
@@ -262,12 +277,75 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
 `sweep_id`, `commit_sha`, `lane`, `step_id`, `state`, and `model_id` are always required.
 
 - When `state == "complete"`: `findings` is required as a list (`[]` is valid and distinct from
-  `refused`/`failed` — a genuinely clean step is still `complete`). `stop_reason_raw` is not
-  required. `files_intended`/`files_read` are optional, but when present must each be a list of
-  strings.
-- For every other state: `stop_reason_raw` is required and must be non-empty. `findings` is
-  not read. `files_intended`/`files_read` are not written — a `refused`/`failed`/`parked` step
-  never got far enough to have read anything meaningful.
+  `refused`/`failed` — a genuinely clean step is still `complete`). `dispositions` (Issue #3959)
+  is likewise required as a list, with exactly one entry per hypothesis in the step's own plan —
+  see [Disposition](#disposition) below. `stop_reason_raw` is not required. `files_intended`/
+  `files_read` are optional, but when present must each be a list of strings.
+- For every other state: `stop_reason_raw` is required and must be non-empty. `findings` and
+  `dispositions` are not read. `files_intended`/`files_read` are not written — a
+  `refused`/`failed`/`parked` step never got far enough to have read anything meaningful or to
+  have addressed any hypothesis.
+
+### Disposition
+
+The record a finder lane writes per hypothesis it was handed, carried in a `complete` step
+envelope's `dispositions` array (Issue #3959, epic #3950). Validated by
+`schema.py::validate_disposition()`:
+
+```json
+{
+  "hypothesis_id": "h1",
+  "disposition":   "<investigated|candidate_found|inconclusive|not_attempted>",
+  "summary":       "what the lane found, or why it could not investigate"
+}
+```
+
+All three fields are required non-empty strings, and `disposition` is validated against its
+enum. `validate_step_envelope()` additionally requires, on a `complete` envelope: exactly one
+`dispositions` entry per `hypothesis_id` (a duplicate `hypothesis_id` is rejected outright,
+independent of any plan step), and — when the originating plan step is available to the
+validating caller — one entry for every hypothesis `id` the plan step actually proposed, never
+fewer. A bundle can therefore never complete silently short of the hypotheses it was asked to
+address: `harness_runner.write_envelope()` passes the originating plan step through to this
+check as belt-and-braces on top of each lane's own synthesis (below), so a bug in that synthesis
+fails loudly at write time rather than shipping a short envelope.
+
+**A rejected envelope fails one step, never the lane.** `write_envelope()` raises rather than
+writing an envelope this validator would reject, so the duplicate-`hypothesis_id` rule above is
+reachable as an exception on the write path. Three independent controls keep that from costing
+more than the step it belongs to: `validate_plan_step()` rejects a step whose hypotheses share an
+`id` before a lane ever loads it; `harness_runner.dedupe_dispositions()` — applied inside
+`build_envelope()`, so every lane and every split task passes through it — collapses a repeated
+`hypothesis_id` to its first entry; and each lane's `run_lane()` wraps every step's body in its
+own guard, recording a step that raises as `failed` via
+`harness_runner.write_step_failure_envelope()` and continuing the sweep. Before that guard
+existed, one malformed step's `ValueError` unwound out of `run_lane()` and `main()`, so every step
+behind it in the same lane produced no envelope at all.
+
+**Only the lane may mark a disposition `not_attempted`, never the planner.** Each of
+`claude_lane.py`/`codex_lane.py`/`opencode_lane.py` reads back the harness's raw output for a
+`dispositions` array alongside `findings`, and for any hypothesis id the raw output did not
+address, synthesizes a `not_attempted` entry itself (logged via `schema.log_event`) rather than
+letting the step complete with a gap. The planner never fabricates hypotheses to paper over this
+— the prohibition is structural, not a convention: the planner has no visibility into what a
+finder lane's harness call actually returned.
+
+**`not_attempted` is schema-valid but never coverage-complete.** `consolidate.py` treats a
+schema-valid `complete` envelope whose `dispositions` contains any `not_attempted` entry exactly
+like a schema-invalid envelope: excluded from findings, logged, and counted `failed` in the
+coverage table — never `complete`. A bundle that completed silently short of its hypotheses must
+never read as full coverage, even though the envelope that produced it validates.
+
+**Execution-task splitting for large bundles.** A step whose combined `file_contents` (the same
+dict `read_step_files()` builds) exceeds `harness_runner.MAX_BUNDLE_BYTES` is split by
+`harness_runner.split_hypotheses_for_budget()` into multiple sequential harness invocations for
+that same step — each addressing a subset of the step's hypotheses, but still reading the full
+file content, since the files a step declares do not shrink because fewer hypotheses are being
+investigated in one call. Every split task retains the step's original identity (`step_id`,
+`sweep_id`, `commit_sha`); each lane's `run_lane()` merges the tasks' `findings` and
+`dispositions` back into exactly one envelope for that `step_id` before writing it — the split is
+invisible to `consolidate.py`, which never sees more than one envelope per step, and no new
+step-id numbering scheme is invented for the split tasks.
 
 **`files_intended`/`files_read`** (Issue #3957): `files_intended` is the plan step's declared
 `files` list; `files_read` is the subset of those a lane actually read successfully (an entry is
@@ -955,9 +1033,21 @@ hypotheses distinguishable.
 De-duplication additionally requires the two entries' remaining content to be equal: a repeated
 `(planner, id)` pair carrying the same `objective`/`required_evidence` is the same hypothesis
 seen again and is dropped, while one carrying different content is a second, distinct proposal
-that reused an id its planner is free to reuse — `validate_hypothesis()` requires ids to be
-unique only within the step that proposed them — and is kept. Nothing in the merge may silently
-drop a proposal.
+that reused an id its planner already used, and is kept — under a *distinct* id (`<id>#2`,
+`<id>#3`, … in first-seen order), never under the colliding one. Nothing in the merge may
+silently drop a proposal, and nothing in the merge may emit a step whose ids collide: a finder
+lane writes exactly one disposition per hypothesis, so two hypotheses sharing an `id` produce two
+dispositions sharing a `hypothesis_id`, which `validate_step_envelope()` rejects. A final pass
+guarantees distinctness even where a planner itself minted the literal id the suffix scheme would
+produce (an `h1#2` alongside two `h1`s), and the suffixes derive from the preserved `original_id`
+rather than the possibly-suffixed `id`, so re-merging an already-merged list is still a no-op.
+
+**Within-step hypothesis-id uniqueness is enforced at the contract boundary.**
+`schema.validate_plan_step()` rejects a step carrying two hypotheses with the same `id`, so a
+plan step that cannot produce a writable envelope is excluded by `finalize()` /
+`finalize_multi_planner()` (and recorded in `REJECTED_PROPOSALS`) rather than reaching a lane.
+Cross-planner collisions are still expected and still legal — they are resolved by the
+namespacing above, before this rule sees the merged step.
 
 **`original_id` is harness-owned, exactly like `planner`.** `schema.validate_hypothesis()`
 checks only the four required fields and strips no unknown keys, so a fully schema-valid step
