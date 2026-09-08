@@ -226,8 +226,11 @@ instruction and the step's content. No lane holds a copy of any of that text.
 or `METHODOLOGY_ANCHORS` is assigned in any module other than `harness_runner.py`, if the system
 prompt's text appears in a second module, or if any lane still interpolates the two constants
 directly instead of calling `shared_preamble`. The loader fails closed: a missing document, a
-missing or duplicated marker, a level with fewer than two anchors, or an oversized core or anchor
-raises `MethodologyError` at import, so a lane cannot start with the methodology silently absent.
+missing or duplicated core marker, an anchor marker that does not pair up (misspelled, orphaned, or
+nested inside another anchor — the raw begin/end marker counts must both equal the number of
+well-formed anchors), a level with fewer than two anchors, or an oversized core or anchor raises
+`MethodologyError` at import, so a lane cannot start with the methodology silently absent or
+silently short one example.
 
 **Core/anchor split and the size ceiling.** A full methodology inlined into every step prompt is
 paid per step per lane — at roughly 250 planned steps and several lanes, that is the dominant
@@ -236,7 +239,7 @@ prompt cost. Delivery is therefore split:
 - The **compact core** — everything between the `methodology-core:begin`/`methodology-core:end`
   HTML comments in the document — is inlined in every step prompt. Its ceiling is
   `METHODOLOGY_CORE_MAX_CHARS` = **8,000 characters** (about 5.6× the 1,419-character
-  `SYSTEM_PROMPT` it joins; the core measured 7,202 characters when this section was written).
+  `SYSTEM_PROMPT` it joins; the core measured 7,592 characters when this section was written).
   The loader refuses a larger core; `harness_runner_test.py` asserts the ceiling against the live
   document and asserts that the ceiling is smaller than the whole document, so an implementation
   that inlined the entire file per step cannot pass.
@@ -255,14 +258,19 @@ present in that token set, ties broken by document order. It is a pure function 
 content and the document — never a model's choice — so the same step always selects the same
 anchors, two steps about different subsystems select different ones wherever the corpus has an
 anchor tagged for each, and a step overlapping nothing gets the first anchor of each level in
-document order. `harness_runner_test.py` asserts all three properties, including that a
+document order — under a heading that says so ("General severity calibration examples"), never
+one claiming the examples were chosen for that step's subject. `harness_runner_test.py` asserts
+all three properties, including that a
 certificate-handling step and a tenant-authorization step select different critical anchors —
 without that half, a fixed anchor set would pass while defeating the purpose.
 
 **`prompt_version` now covers the methodology.** `compute_prompt_version()` hashes
-`prompt_corpus()` — `SYSTEM_PROMPT`, the core, every anchor (not only a step's selection), and
-`OUTPUT_SCHEMA_DESCRIPTION` — rather than `SYSTEM_PROMPT` alone, so a rubric or anchor edit is
-visible on every envelope written after it, exactly as a system-prompt edit already was.
+`prompt_corpus()` — `SYSTEM_PROMPT`, the core, the fixed anchor-section wording (both the
+step-specific and the general-fallback variants), and for every anchor (not only a step's
+selection) its id, severity, sorted tags and text, then `OUTPUT_SCHEMA_DESCRIPTION` — rather than
+`SYSTEM_PROMPT` alone. Tags are version material because they drive selection: a tag edit changes
+which examples a step's prompt carries even when no example's text changed, and that must not
+hide under an unchanged `prompt_version`.
 
 **Decisions settled in the founder session for Issue #3981.** Each records the alternative that
 was considered and rejected, so a later reader can see it was weighed, not missed.
@@ -289,10 +297,14 @@ was considered and rejected, so a later reader can see it was weighed, not misse
 - **D3 — The assumed attacker per level.** Named tiers — T0, a network party with no credential;
   T1, a compromised steward (root on one enrolled endpoint); T2, a compromised tenant admin for a
   short window; T3, a compromised controller or root admin; P, an untrusted module publisher —
-  and a rule for each level: `critical` is T0/T1/P gaining control of the controller, of other
-  stewards or of another tenant; `high` is T2 escaping its subtree or a blast-radius bound, or T1
-  reading beyond its own host; `medium` is impact inside the attacker's own tenant or host that
-  still violates a stated control; `low` is defence-in-depth with no boundary crossing. Two
+  and a rule for each level: `critical` is any tier below T3 gaining control of the controller, of
+  other stewards, or of another tenant's configuration — a cross-tenant *write* is critical from
+  any tier, T2 included; `high` is a cross-tenant *read* from any tier, T2 weakening a blast-radius
+  bound inside its own tenant, T1 reading beyond its own host or outliving revocation, or T0
+  reading fleet data; `medium` is impact inside the attacker's own tenant or host that still
+  violates a stated control; `low` is defence-in-depth with no boundary crossing. Level moves are
+  per factor (one level per tier drop, scope growth, or blocking control), and anything reachable
+  only under the development-only `bypass` mode is `low` regardless of impact. Two
   consequences of the CFGMS threat model are written into the tiers so lanes stop disagreeing
   about them: root on one steward host is the attacker's starting position, not a finding, and a
   defect that needs T3 is `low` *unless* it sits in a control whose purpose is to bound T3
@@ -410,7 +422,8 @@ system prompt, and harness code it was produced against:
   (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization
   of the parsed JSON, so it is sensitive to any byte-level change to the plan step.
 - **`prompt_version`** — a SHA-256 hex digest of `harness_runner.prompt_corpus()` — `SYSTEM_PROMPT`,
-  the methodology core, every severity anchor, and `OUTPUT_SCHEMA_DESCRIPTION`
+  the methodology core, the anchor-section wording, every anchor's id/severity/tags/text, and
+  `OUTPUT_SCHEMA_DESCRIPTION`
   (`harness_runner.compute_prompt_version()`; widened from `SYSTEM_PROMPT` alone by Issue #3981 so
   a rubric or worked-example edit is visible on the envelope). Recorded for provenance; `resume.py` does not
   check it against a current value the way it does the other two fields.

@@ -150,16 +150,18 @@ Attacker tiers:
 
 Levels:
 
-- **critical.** T0, T1 or P gains control of the controller, of stewards other than
-  their own, or of another tenant: an unauthenticated or steward-credential path to
-  admin capability; code execution on other endpoints; a cross-tenant write; an mTLS or
-  signature verification bypass on the control path; unknown-publisher code running on
-  an endpoint. Fleet-wide or cross-tenant, no user interaction, no precondition beyond
-  the tier's starting position.
-- **high.** T2 escapes the tenant subtree or one of the blast-radius bounds; T1 reads
-  other stewards' or other tenants' secrets or configuration, or keeps access past
-  revocation or expiry; T0 reads sensitive fleet data or cheaply takes the controller
-  down. A cross-tenant read, or tenant-wide control beyond what the role grants.
+- **critical.** An attacker below T3 gains control of the controller, of stewards other
+  than their own, or of another tenant's configuration: an unauthenticated or
+  steward-credential path to admin capability; code execution on other endpoints; a
+  cross-tenant write, from any tier including T2; an mTLS or signature verification
+  bypass on the control path; unknown-publisher code running on an endpoint. Also a
+  T3-bounding control that fails, judged by the blast radius it was meant to contain.
+  No user interaction, no precondition beyond the tier's starting position.
+- **high.** A cross-tenant read, from any tier; T2 weakening or bypassing a blast-radius
+  bound inside its own tenant; T1 reading other stewards' secrets or configuration in
+  its own tenant, or keeping access past revocation or expiry; T0 reading sensitive
+  fleet data, or cheaply taking the controller down. Control or visibility beyond what
+  the tier's position grants, short of controlling another party's endpoints.
 - **medium.** Impact stays inside the attacker's own tenant or own host, but a stated
   control is violated: a privileged action without audit; a rarely-touched setting
   weakened without its designed friction; false state reported to the controller; a
@@ -169,11 +171,13 @@ Levels:
   where every caller is already T3; weak randomness behind another control;
   non-sensitive internals exposed; hardening misses. Report it anyway.
 
-Moving a level. **Up one** if the required tier drops (T2 to T1, T1 to T0) or the scope
-grows (own host, to own tenant, to cross-tenant, to fleet). **Down one** if it needs a
-non-default insecure setting (`module_trust.mode: bypass` is development-only), or a
-second independent control blocks it today; still report the finding, and name that
-control.
+Moving a level. Each factor moves one level; two factors move two. **Up one per factor:**
+the required tier drops (T2 to T1, T1 to T0), or the scope grows (own host, to own
+tenant, to cross-tenant, to fleet). **Down one per factor:** a second independent control
+blocks it today (report the finding and name that control), or it needs a non-default
+setting. A defect reachable only under a development-only setting
+(`module_trust.mode: bypass`) is `low` regardless of impact: the operator disabled the
+control, so no bound was violated.
 <!-- methodology-core:end -->
 
 ## Worked examples (severity anchors)
@@ -193,22 +197,24 @@ callback that returns success without checking the presented chain against the
 controller CA. Attacker: T0, on the network path. Level: critical, because a network
 party with no credential impersonates the controller and pushes configuration or module
 bundles to every steward that connects through it, with no user interaction. Down to
-high if the unchecked connection is a metrics or liveness probe that carries no
-configuration and accepts no commands. It cannot move up; record the fleet-wide scope
-in `evidence`.
+high if the unchecked connection only carries telemetry outbound and accepts no
+commands or configuration: a network party then reads fleet inventory data, a T0 read
+of sensitive fleet data, but pushes nothing. It cannot move up; record the fleet-wide
+scope in `evidence`.
 <!-- anchor:end -->
 
 <!-- anchor:begin id=crit-strict-mode-bypass severity=critical tags=module,modules,bundle,bundles,publisher,publishers,signature,signing,trust,trusted,strict,staging,cache,manifest,verify,approval -->
-**`module_trust.mode: strict` trusts the bundle's own publisher list.** Steward-side
-verification in strict mode reads the set of trusted publishers from the metadata of the
-bundle it is verifying, instead of from the publisher identity baked into the steward
-binary plus the steward's local additional-publishers setting. Attacker: T3 (a
-compromised controller) together with P (any publisher). Level: critical. T3 would
-normally lower severity, but strict mode exists exactly to bound a compromised
-controller; when that bound fails, unknown-publisher code runs on every strict-mode
-endpoint, which is the blast radius the setting was meant to contain. Down to high if
-the defect affects only `controller` mode, where the steward delegates verification by
-design. Down to low if it is reachable only under `bypass`.
+**Publisher trust check reads the trusted-publisher list from the bundle itself.** The
+signature verifier takes the set of trusted publishers from the metadata of the bundle
+it is verifying, instead of from the publisher identity baked into the steward binary
+plus the operator's additional-publishers setting. Attacker: P alone if the defect is in
+the controller's verifier, since any publisher's bundle then passes and reaches every
+endpoint in `controller` mode; T3 together with P if it is in the steward's `strict`
+check, since strict mode exists exactly to bound a compromised controller. Level:
+critical either way: unknown-publisher code runs on endpoints, and in the strict case
+the T3-bounding control has failed. Down to high if staging still requires an explicit
+admin approval of the bundle, so P also needs T2 (a phished admin approving it). Down to
+low if it is reachable only under `bypass`: the operator disabled the control.
 <!-- anchor:end -->
 
 <!-- anchor:begin id=crit-tenant-from-path severity=critical tags=tenant,tenants,path,subtree,inheritance,scope,principal,rest,api,handler,http,authorization,authz,admin,write,config -->
@@ -217,8 +223,9 @@ REST handler resolves the target tenant from a client-supplied path segment and 
 checks that it sits under the authenticated admin's own tenant subtree. Attacker: T2.
 Level: critical: this is a cross-tenant write, so a phished admin of one client alters
 configuration that deploys to another client's fleet. Down to high if the handler is
-read-only, making it a cross-tenant read. Down to medium if a downstream store check
-refuses the write today; report it and name that check.
+read-only, making it a cross-tenant read. Down to high if a downstream store check
+refuses the write today, since one remaining control stands between T2 and another
+tenant's fleet; report it and name that check.
 <!-- anchor:end -->
 
 ### High
@@ -239,8 +246,10 @@ is issued.
 secret distribution endpoint returns every secret in the caller's tenant rather than only
 the secrets targeted at the calling device. Attacker: T1. Level: high: a compromised
 steward reads secrets meant for sibling stewards, so one host's compromise becomes
-tenant-wide credential exposure. Up to critical if the filter also fails across tenants.
-Down to medium if the values are non-privileged configuration rather than credentials.
+tenant-wide credential exposure. Up to critical if the exposed set includes a credential
+that grants control of the controller or of other stewards, such as a registration token
+or an admin bundle; a cross-tenant read of ordinary secrets stays high. Down to medium
+if the values are non-privileged configuration rather than credentials.
 <!-- anchor:end -->
 
 <!-- anchor:begin id=high-signer-revocation severity=high tags=signing,signer,signature,revocation,revoke,revoked,rotation,rotate,command,commands,payload,marker,cursor,lifecycle,cert,certificate,mtls -->
@@ -286,8 +295,10 @@ checks a path's state, then writes through it without a no-follow flag, so a loc
 who controls a parent directory redirects the write. Attacker: a local non-root user on
 one endpoint. Level: medium: local escalation to root on a single host through a
 CFGMS-owned path, bounded to that host and needing a local foothold. Up to high if the
-managed path is user-writable by default, or if T1 on one host can trigger the write on
-another host. Down to low if the path is under a steward-owned, root-only directory.
+managed path is user-writable by default, so no foothold beyond an ordinary account is
+needed. Up to critical if T1 on one host can trigger the redirected root write on
+another host, since that is control of another steward. Down to low if the path is
+under a steward-owned, root-only directory.
 <!-- anchor:end -->
 
 ### Low
@@ -303,19 +314,25 @@ T0 caller.
 
 <!-- anchor:begin id=low-internal-validation severity=low tags=parse,parser,validation,validate,internal,helper,loader,config,unmarshal,decode,inheritance -->
 **A controller-internal parser trusts its input.** A helper that parses stored
-configuration accepts malformed values without validation, but every caller is
-controller code reading controller-written storage. Attacker: T3 only. Level: low: a
-defence-in-depth gap with no lower-tier path to the function. Up to medium if a T1 or T2
-input reaches the helper through any route, including a stored value they can write.
+configuration accepts a malformed value, and that value makes the loader panic at the
+next controller start, so whoever can write that storage can wedge the controller.
+Every caller is controller code reading controller-written storage. Attacker: T3 only,
+who can already stop the controller directly. Level: low: a defence-in-depth gap with
+no lower-tier path to the function. Up to medium if a T1 or T2 input reaches the helper
+through any route, including a stored value they can write, since a lower tier then
+gains a controller-wide availability effect.
 <!-- anchor:end -->
 
-<!-- anchor:begin id=low-weak-random-id severity=low tags=rand,random,randomness,entropy,identifier,uuid,nonce,job,jobs,generator,math -->
-**A non-cryptographic random source for a job identifier.** A job id is generated with a
-non-cryptographic source. It is unique enough for logging, is never used as a bearer
-credential, and every operation on it is authorized by the caller's mTLS identity.
-Attacker: any tier. Level: low: predictability buys nothing, because a second control
-authorizes every use. Up to high if the same generator produces a token whose knowledge
-alone grants access.
+<!-- anchor:begin id=low-weak-random-id severity=low tags=rand,random,randomness,entropy,identifier,uuid,nonce,job,jobs,generator,math,correlation,audit -->
+**A non-cryptographic random source for an audit correlation id.** The id that ties a
+request's audit log lines together is generated with a non-cryptographic source, so a
+caller who observes a few ids can predict the next ones and issue requests whose lines
+interleave with, and read as part of, another request's audit trail. Attacker: T1 or
+T2, anyone who can issue requests. Level: low: no configuration, secret or control is
+crossed; incident reconstruction from the audit log becomes unreliable, which is a
+weakened control, not a broken one. Up to medium if any follow-up operation accepts the
+id as proof of ownership, since predictability then yields another caller's data within
+the tenant.
 <!-- anchor:end -->
 
 ## What this document does not cover

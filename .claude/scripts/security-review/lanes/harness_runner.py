@@ -187,6 +187,8 @@ MIN_TERM_LENGTH = 3
 
 _CORE_BEGIN = "<!-- methodology-core:begin -->"
 _CORE_END = "<!-- methodology-core:end -->"
+_ANCHOR_BEGIN_PREFIX = "<!-- anchor:begin"
+_ANCHOR_END = "<!-- anchor:end -->"
 _ANCHOR_RE = re.compile(
     r"<!-- anchor:begin id=(?P<id>\S+) severity=(?P<severity>\S+) tags=(?P<tags>\S+) -->"
     r"\s*(?P<text>.*?)\s*<!-- anchor:end -->",
@@ -264,6 +266,21 @@ def parse_methodology(text: str) -> tuple:
             raise MethodologyError(f"anchor {anchor_id!r} has no tags")
         seen_ids.add(anchor_id)
         anchors.append({"id": anchor_id, "severity": severity, "tags": tags, "text": body})
+
+    # Every marker in the document must belong to exactly one well-formed
+    # anchor. `finditer` alone silently skips a begin marker with a missing
+    # or misspelled attribute, an orphaned end marker, or a begin nested
+    # inside another anchor's body -- each of which would drop or merge an
+    # example without any error. Counting the raw markers against the
+    # matched pairs closes that: the counts agree only when every marker
+    # was consumed by a complete, non-nested pair.
+    begin_count = text.count(_ANCHOR_BEGIN_PREFIX)
+    end_count = text.count(_ANCHOR_END)
+    if begin_count != len(anchors) or end_count != len(anchors):
+        raise MethodologyError(
+            f"anchor markers do not pair up: {begin_count} begin marker(s), "
+            f"{end_count} end marker(s), {len(anchors)} well-formed anchor(s)"
+        )
 
     for level in SEVERITY_LEVELS:
         count = sum(1 for anchor in anchors if anchor["severity"] == level)
@@ -347,17 +364,35 @@ def select_anchors(step: dict, anchors: tuple | None = None) -> list:
     return selected
 
 
-def render_anchors(selected: list) -> str:
-    """Render selected anchors as the prompt section that follows the
-    core."""
-    lines = [
-        "## Severity calibration examples for this step",
-        "",
-        "Illustrative CFGMS-shaped defects chosen for this step's subject matter, one per "
-        "level. Rate each finding against them, and say in `evidence` which example it is "
-        "nearest and why it sits above or below that example.",
-        "",
-    ]
+# The fixed text `render_anchors` wraps around a step's anchors. Two
+# variants: one for a step whose subject matter matched at least one anchor's
+# tags, one for a step that matched nothing and therefore received the first
+# anchor of each level -- labelled as such, so a lane is never told that a
+# general example was "chosen for this step's subject" when it was not.
+ANCHOR_SECTION_HEADING_MATCHED = "## Severity calibration examples for this step"
+ANCHOR_SECTION_INSTRUCTION_MATCHED = (
+    "Illustrative CFGMS-shaped defects chosen for this step's subject matter, one per "
+    "level. Rate each finding against them, and say in `evidence` which example it is "
+    "nearest and why it sits above or below that example."
+)
+ANCHOR_SECTION_HEADING_FALLBACK = "## General severity calibration examples"
+ANCHOR_SECTION_INSTRUCTION_FALLBACK = (
+    "This step's subject matter matched none of the worked examples, so these are the "
+    "first example of each level: they calibrate the scale, not this step's subsystem. "
+    "Rate each finding against them, and say in `evidence` which example it is nearest "
+    "and why it sits above or below that example."
+)
+
+
+def render_anchors(selected: list, subject_matched: bool = True) -> str:
+    """Render selected anchors as the prompt section that follows the core.
+    `subject_matched` is False when the step overlapped no anchor's tags and
+    the selection is the document-order fallback."""
+    if subject_matched:
+        heading, instruction = ANCHOR_SECTION_HEADING_MATCHED, ANCHOR_SECTION_INSTRUCTION_MATCHED
+    else:
+        heading, instruction = ANCHOR_SECTION_HEADING_FALLBACK, ANCHOR_SECTION_INSTRUCTION_FALLBACK
+    lines = [heading, "", instruction, ""]
     for anchor in selected:
         lines.append(f"### {anchor['severity']}: {anchor['id']}")
         lines.append("")
@@ -371,18 +406,49 @@ def shared_preamble(step: dict) -> str:
     with (C4): `SYSTEM_PROMPT`, the methodology core, this step's selected
     anchors, then `OUTPUT_SCHEMA_DESCRIPTION`. A lane appends only its own
     delivery instruction (where its output goes) and the step's content."""
+    selected = select_anchors(step)
+    terms = step_terms(step)
+    subject_matched = any(anchor["tags"] & terms for anchor in selected)
     return "\n\n".join(
-        [SYSTEM_PROMPT, METHODOLOGY_CORE, render_anchors(select_anchors(step)), OUTPUT_SCHEMA_DESCRIPTION]
+        [
+            SYSTEM_PROMPT,
+            METHODOLOGY_CORE,
+            render_anchors(selected, subject_matched),
+            OUTPUT_SCHEMA_DESCRIPTION,
+        ]
     )
 
 
-def prompt_corpus() -> str:
-    """Every byte of shared prompt text any step of any lane can receive:
-    `SYSTEM_PROMPT`, the methodology core, every anchor (not only the ones a
-    given step selects), and `OUTPUT_SCHEMA_DESCRIPTION`. This is what
-    `compute_prompt_version()` hashes."""
+def anchor_identity(anchor: dict) -> str:
+    """The version-material line for one anchor: its id, severity and sorted
+    tags, then its text. Tags are part of it because they drive
+    `select_anchors()` -- a tag edit changes which examples a step's prompt
+    carries, so it must change `prompt_version` even when no example's text
+    changed."""
+    tags = ",".join(sorted(anchor["tags"]))
+    return f"{anchor['id']}|{anchor['severity']}|{tags}\n{anchor['text']}"
+
+
+def prompt_corpus(anchors: tuple | None = None) -> str:
+    """Every byte of shared prompt material any step of any lane can receive,
+    in a fixed order: `SYSTEM_PROMPT`, the methodology core, the fixed text
+    `render_anchors` wraps around a selection (both variants), every anchor's
+    identity line and text (not only the ones a given step selects), and
+    `OUTPUT_SCHEMA_DESCRIPTION`. This is what `compute_prompt_version()`
+    hashes; `anchors` exists so a test can show the hash moves when only an
+    anchor's tags, id or severity move."""
+    corpus = METHODOLOGY_ANCHORS if anchors is None else tuple(anchors)
     return "\n\n".join(
-        [SYSTEM_PROMPT, METHODOLOGY_CORE, *(a["text"] for a in METHODOLOGY_ANCHORS), OUTPUT_SCHEMA_DESCRIPTION]
+        [
+            SYSTEM_PROMPT,
+            METHODOLOGY_CORE,
+            ANCHOR_SECTION_HEADING_MATCHED,
+            ANCHOR_SECTION_INSTRUCTION_MATCHED,
+            ANCHOR_SECTION_HEADING_FALLBACK,
+            ANCHOR_SECTION_INSTRUCTION_FALLBACK,
+            *(anchor_identity(anchor) for anchor in corpus),
+            OUTPUT_SCHEMA_DESCRIPTION,
+        ]
     )
 
 
@@ -405,9 +471,10 @@ def compute_plan_hash(plan_dir: str, step_id: str) -> str:
 def compute_prompt_version() -> str:
     """SHA-256 hex digest of `prompt_corpus()`'s UTF-8 bytes (Issue #3962;
     widened by Issue #3981 from `SYSTEM_PROMPT` alone to the whole shared
-    corpus -- system prompt, methodology core, every anchor, output-schema
-    description) -- recorded on every envelope so a changed prompt, rubric or
-    worked example is visible directly on the envelope, without a human
+    corpus -- system prompt, methodology core, anchor-section wording, every
+    anchor's id/severity/tags/text, output-schema description) -- recorded
+    on every envelope so a changed prompt, rubric, worked example or
+    selection tag is visible directly on the envelope, without a human
     needing to diff two envelopes' worth of embedded prompt text. Unlike `plan_hash`/`harness_identity`,
     `resume.missing_steps()` does not check this value against a current
     one -- it is provenance recorded on the envelope, not a third

@@ -1240,6 +1240,120 @@ def test_skill_md_points_at_the_methodology():
     )
 
 
+# --- Review-pass regressions (Codex review of 1de0fcf0) ------------------------
+
+
+def _three_per_level_doc() -> str:
+    anchors = "".join(
+        f"<!-- anchor:begin id=a{i} severity={level} tags=t{i},alpha -->\nbody {i}\n<!-- anchor:end -->\n"
+        for i, level in enumerate(level for level in harness_runner.SEVERITY_LEVELS for _ in range(3))
+    )
+    return f"intro\n<!-- methodology-core:begin -->\ncore text\n<!-- methodology-core:end -->\n{anchors}"
+
+
+def test_parse_methodology_rejects_malformed_orphaned_or_nested_anchor_markers():
+    # Three anchors per level, so the minimum-count check cannot mask a
+    # silently dropped anchor -- the marker-pairing check must catch it.
+    good = _three_per_level_doc()
+    _core, anchors = harness_runner.parse_methodology(good)
+    check(len(anchors) == 12, "a well-formed three-per-level document parses to twelve anchors", str(len(anchors)))
+    check(
+        _raises_methodology_error(
+            lambda: harness_runner.parse_methodology(good.replace("<!-- anchor:begin", "<!-- broken:begin", 1))
+        ),
+        "a misspelled begin marker is rejected even though every level still has >= 2 anchors",
+    )
+    check(
+        _raises_methodology_error(lambda: harness_runner.parse_methodology(good + "<!-- anchor:end -->\n")),
+        "an orphaned end marker is rejected",
+    )
+    missing_tags = good.replace(
+        "<!-- anchor:begin id=a0 severity=critical tags=t0,alpha -->",
+        "<!-- anchor:begin id=a0 severity=critical -->",
+        1,
+    )
+    check(
+        _raises_methodology_error(lambda: harness_runner.parse_methodology(missing_tags)),
+        "a begin marker missing its tags attribute is rejected",
+    )
+    nested = good.replace(
+        "body 0\n", "body 0\n<!-- anchor:begin id=inner severity=critical tags=x -->\ninner\n", 1
+    )
+    check(
+        _raises_methodology_error(lambda: harness_runner.parse_methodology(nested)),
+        "a begin marker nested inside another anchor's body is rejected",
+    )
+    live = METHODOLOGY_MD_PATH.read_text()
+    check(
+        live.count("<!-- anchor:begin") == len(harness_runner.METHODOLOGY_ANCHORS) == live.count("<!-- anchor:end -->"),
+        "every anchor marker in the live document belongs to exactly one well-formed anchor",
+    )
+
+
+def test_prompt_version_material_covers_anchor_identity_tags_and_render_text():
+    corpus = harness_runner.prompt_corpus()
+    for anchor in harness_runner.METHODOLOGY_ANCHORS:
+        identity = f"{anchor['id']}|{anchor['severity']}|{','.join(sorted(anchor['tags']))}"
+        check(identity in corpus, f"prompt_corpus carries the id, severity and sorted tags of {anchor['id']}")
+    for text in (
+        harness_runner.ANCHOR_SECTION_HEADING_MATCHED,
+        harness_runner.ANCHOR_SECTION_INSTRUCTION_MATCHED,
+        harness_runner.ANCHOR_SECTION_HEADING_FALLBACK,
+        harness_runner.ANCHOR_SECTION_INSTRUCTION_FALLBACK,
+    ):
+        check(text in corpus, f"prompt_corpus carries the anchor-section wording: {text[:40]!r}")
+
+    base = list(harness_runner.METHODOLOGY_ANCHORS)
+
+    def mutated(**changes) -> tuple:
+        first = dict(base[0])
+        first.update(changes)
+        return tuple([first] + base[1:])
+
+    check(
+        harness_runner.prompt_corpus(mutated(tags=frozenset(base[0]["tags"] | {"zz-new-tag"}))) != corpus,
+        "a tag-only change (which changes selection) moves the version material",
+    )
+    check(harness_runner.prompt_corpus(mutated(id="renamed")) != corpus, "an id-only change moves the version material")
+    check(
+        harness_runner.prompt_corpus(mutated(severity="low")) != corpus,
+        "a severity-only change moves the version material",
+    )
+
+
+def test_fallback_selection_is_labelled_general_not_step_specific():
+    fallback = harness_runner.shared_preamble({"scope": "zzz"})
+    check(
+        harness_runner.ANCHOR_SECTION_HEADING_FALLBACK in fallback
+        and harness_runner.ANCHOR_SECTION_HEADING_MATCHED not in fallback,
+        "a step matching no anchor tags is told its examples are general, not chosen for its subject",
+    )
+    matched = harness_runner.shared_preamble(_cert_step())
+    check(
+        harness_runner.ANCHOR_SECTION_HEADING_MATCHED in matched
+        and harness_runner.ANCHOR_SECTION_HEADING_FALLBACK not in matched,
+        "a step matching anchor tags gets the step-specific heading",
+    )
+
+
+def test_rubric_and_anchors_agree_on_cross_tenant_write_and_read():
+    # Calibration-consistency guard: the core and the anchors must put the
+    # same attacker/impact pair at the same level, or selecting a different
+    # anchor changes the scale instead of calibrating it.
+    core = harness_runner.METHODOLOGY_CORE
+    check("cross-tenant write, from any tier including T2" in core, "core: a cross-tenant write is critical from any tier")
+    check("A cross-tenant read, from any tier" in core, "core: a cross-tenant read is high from any tier")
+    check("Each factor moves one level" in core, "core: the movement rule is per factor")
+    by_id = {anchor["id"]: anchor for anchor in harness_runner.METHODOLOGY_ANCHORS}
+    tenant = by_id["crit-tenant-from-path"]
+    check(
+        tenant["severity"] == "critical" and "cross-tenant write" in tenant["text"],
+        "anchor crit-tenant-from-path: T2 cross-tenant write rated critical, matching the core",
+    )
+    secrets = by_id["high-secrets-device-filter"]
+    check("stays high" in secrets["text"], "anchor high-secrets-device-filter: a cross-tenant read stays high, matching the core")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
