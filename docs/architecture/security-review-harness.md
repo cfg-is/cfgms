@@ -214,6 +214,14 @@ serialize to `<path>.tmp` in the same directory, `fsync` the file descriptor, th
 killed mid-write can never leave a truncated file that looks complete: the final path is
 either the previous complete version or does not exist yet, never a partial write.
 
+**A quarantined envelope is a rename, not an atomic write (Issue #3962).** `resume.py`'s
+binding check (below) moves a stale `<step_id>.findings.json` aside via a plain `os.rename` to
+`<step_id>.findings.json.quarantined-<timestamp>` — there is no concurrent writer racing that
+path the way there can be for a fresh write, so the atomicity `write_json_atomic()` buys has
+nothing to protect here. The quarantined file is never deleted and never left in place under its
+original name: a later `resume` sees no `.findings.json` at the expected path and treats the step
+as outstanding, while the stale envelope itself stays on disk for inspection.
+
 ## Schemas
 
 ### Finding
@@ -260,21 +268,27 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
 
 ```json
 {
-  "sweep_id":        "2026-09-05T0214Z-0541b9c8",
-  "commit_sha":      "0541b9c8",
-  "lane":            "claude-sonnet-5",
-  "step_id":         "step-007",
-  "state":           "<complete|parked|refused|failed>",
-  "model_id":        "claude-opus-5",
-  "stop_reason_raw": "<provider's raw, unmodified terminating reason>",
-  "findings":        [],
-  "dispositions":    [],
-  "files_intended":  [],
-  "files_read":      []
+  "sweep_id":         "2026-09-05T0214Z-0541b9c8",
+  "commit_sha":       "0541b9c8",
+  "lane":             "claude-sonnet-5",
+  "step_id":          "step-007",
+  "state":            "<complete|parked|refused|failed>",
+  "model_id":         "claude-opus-5",
+  "plan_hash":        "<sha256 of plan_dir/<step_id>.json's own bytes>",
+  "prompt_version":   "<sha256 of harness_runner.SYSTEM_PROMPT>",
+  "harness_identity": "<CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY, or 'unknown' outside a container>",
+  "stop_reason_raw":  "<provider's raw, unmodified terminating reason>",
+  "findings":         [],
+  "dispositions":     [],
+  "files_intended":   [],
+  "files_read":       []
 }
 ```
 
-`sweep_id`, `commit_sha`, `lane`, `step_id`, `state`, and `model_id` are always required.
+`sweep_id`, `commit_sha`, `lane`, `step_id`, `state`, `model_id`, `plan_hash`, `prompt_version`,
+and `harness_identity` are always required, regardless of `state` — a `refused`/`failed`/`parked`
+step still ran against a specific frozen plan step, system prompt, and harness code, so that
+binding stays visible on the envelope exactly like `refusal_attempts` does.
 
 - When `state == "complete"`: `findings` is required as a list (`[]` is valid and distinct from
   `refused`/`failed` — a genuinely clean step is still `complete`). `dispositions` (Issue #3959)
@@ -285,6 +299,36 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
   `dispositions` are not read. `files_intended`/`files_read` are not written — a
   `refused`/`failed`/`parked` step never got far enough to have read anything meaningful or to
   have addressed any hypothesis.
+
+#### Binding fields and quarantine on resume (Issue #3962)
+
+`plan_hash`, `prompt_version`, and `harness_identity` bind an envelope to the exact plan step,
+system prompt, and harness code it was produced against:
+
+- **`plan_hash`** — a SHA-256 hex digest of `plan_dir/<step_id>.json`'s own raw bytes on disk
+  (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization
+  of the parsed JSON, so it is sensitive to any byte-level change to the plan step.
+- **`prompt_version`** — a SHA-256 hex digest of `harness_runner.SYSTEM_PROMPT`
+  (`harness_runner.compute_prompt_version()`). Recorded for provenance; `resume.py` does not
+  check it against a current value the way it does the other two fields.
+- **`harness_identity`** — read verbatim from the `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`
+  env var (falling back to `"unknown"` when absent, e.g. a standalone invocation outside the
+  investigator container) — the trusted-harness identity [`launch-investigator`
+  computes and injects](#investigator-launch-primitive) (Issue #3952).
+
+`resume.py::missing_steps()` takes two additional optional parameters, `plan_dir` and
+`current_harness_identity`, both defaulting to `None` (skipping this check entirely — the
+pre-#3962 behavior, preserved for any caller that has not been updated). Every real caller —
+`claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — always passes both. When
+given, an otherwise schema-valid `complete` envelope is additionally checked: its `plan_hash`
+must equal a fresh hash of the current `plan_dir/<step_id>.json`, and its `harness_identity` must
+equal `current_harness_identity`. Either mismatch alone is sufficient — the two are independent
+bindings, since the plan can change between sweep runs without the harness code changing, and
+vice versa. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
+(see [Writes are atomic](#writes-are-atomic)) and the step is returned as outstanding, exactly
+like a schema-invalid envelope — never silently treated as `complete` for a task whose plan or
+harness code has since changed shape. The log event recording the quarantine names which
+binding(s) mismatched.
 
 ### Disposition
 
