@@ -310,6 +310,18 @@ address: `harness_runner.write_envelope()` passes the originating plan step thro
 check as belt-and-braces on top of each lane's own synthesis (below), so a bug in that synthesis
 fails loudly at write time rather than shipping a short envelope.
 
+**A rejected envelope fails one step, never the lane.** `write_envelope()` raises rather than
+writing an envelope this validator would reject, so the duplicate-`hypothesis_id` rule above is
+reachable as an exception on the write path. Three independent controls keep that from costing
+more than the step it belongs to: `validate_plan_step()` rejects a step whose hypotheses share an
+`id` before a lane ever loads it; `harness_runner.dedupe_dispositions()` — applied inside
+`build_envelope()`, so every lane and every split task passes through it — collapses a repeated
+`hypothesis_id` to its first entry; and each lane's `run_lane()` wraps every step's body in its
+own guard, recording a step that raises as `failed` via
+`harness_runner.write_step_failure_envelope()` and continuing the sweep. Before that guard
+existed, one malformed step's `ValueError` unwound out of `run_lane()` and `main()`, so every step
+behind it in the same lane produced no envelope at all.
+
 **Only the lane may mark a disposition `not_attempted`, never the planner.** Each of
 `claude_lane.py`/`codex_lane.py`/`opencode_lane.py` reads back the harness's raw output for a
 `dispositions` array alongside `findings`, and for any hypothesis id the raw output did not
@@ -1021,9 +1033,21 @@ hypotheses distinguishable.
 De-duplication additionally requires the two entries' remaining content to be equal: a repeated
 `(planner, id)` pair carrying the same `objective`/`required_evidence` is the same hypothesis
 seen again and is dropped, while one carrying different content is a second, distinct proposal
-that reused an id its planner is free to reuse — `validate_hypothesis()` requires ids to be
-unique only within the step that proposed them — and is kept. Nothing in the merge may silently
-drop a proposal.
+that reused an id its planner already used, and is kept — under a *distinct* id (`<id>#2`,
+`<id>#3`, … in first-seen order), never under the colliding one. Nothing in the merge may
+silently drop a proposal, and nothing in the merge may emit a step whose ids collide: a finder
+lane writes exactly one disposition per hypothesis, so two hypotheses sharing an `id` produce two
+dispositions sharing a `hypothesis_id`, which `validate_step_envelope()` rejects. A final pass
+guarantees distinctness even where a planner itself minted the literal id the suffix scheme would
+produce (an `h1#2` alongside two `h1`s), and the suffixes derive from the preserved `original_id`
+rather than the possibly-suffixed `id`, so re-merging an already-merged list is still a no-op.
+
+**Within-step hypothesis-id uniqueness is enforced at the contract boundary.**
+`schema.validate_plan_step()` rejects a step carrying two hypotheses with the same `id`, so a
+plan step that cannot produce a writable envelope is excluded by `finalize()` /
+`finalize_multi_planner()` (and recorded in `REJECTED_PROPOSALS`) rather than reaching a lane.
+Cross-planner collisions are still expected and still legal — they are resolved by the
+namespacing above, before this rule sees the merged step.
 
 **`original_id` is harness-owned, exactly like `planner`.** `schema.validate_hypothesis()`
 checks only the four required fields and strips no unknown keys, so a fully schema-valid step

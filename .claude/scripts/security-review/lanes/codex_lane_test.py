@@ -541,6 +541,108 @@ def test_import_isolation_single_file_layout() -> None:
         )
 
 
+def test_duplicate_hypothesis_ids_do_not_kill_the_lane() -> None:
+    """[REQUIRED TEST] A plan step carrying two hypotheses with the same `id`
+    is reachable from model output -- a planner mints ids, and an `id` is only
+    ever unique within its own step. It used to be fatal: the lane emitted one
+    disposition per hypothesis, so the duplicate produced two dispositions
+    sharing a `hypothesis_id`, `schema.validate_step_envelope` rejected it,
+    and `harness_runner.write_envelope`'s `ValueError` propagated out of
+    `run_lane` and `main()` -- killing the lane process, so step-002 (which
+    was perfectly reviewable) produced no envelope at all. The malformed step
+    must be rejected as an invalid plan step, and every step behind it must
+    still be reviewed."""
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(
+            plan_dir,
+            "step-001",
+            hypotheses=[
+                {"id": "h1", "objective": "o1", "required_evidence": "e1", "planner": "planner-1"},
+                {"id": "h1", "objective": "o2", "required_evidence": "e2", "planner": "planner-1"},
+            ],
+        )
+        write_plan_step(plan_dir, "step-002")
+        raw = {
+            "findings": [],
+            "dispositions": [
+                {"hypothesis_id": "h1", "disposition": "investigated", "summary": "reviewed h1"}
+            ],
+        }
+        written = codex_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_harness_stub(exit_code=0, raw_body=raw),
+        )
+        by_step = {e["step_id"]: e for e in written}
+        check(
+            by_step.get("step-002", {}).get("state") == "complete",
+            "duplicate hypothesis ids: the step behind the malformed one is still reviewed",
+            repr(written),
+        )
+        check(
+            os.path.isfile(os.path.join(out_dir, "step-002.findings.json")),
+            "duplicate hypothesis ids: step-002's envelope reached disk",
+            repr(sorted(os.listdir(out_dir))),
+        )
+        check(
+            not os.path.exists(os.path.join(out_dir, "step-001.findings.json")),
+            "duplicate hypothesis ids: the malformed step is never written complete",
+            repr(sorted(os.listdir(out_dir))),
+        )
+
+
+def test_unhandled_step_error_is_failed_and_the_lane_continues() -> None:
+    """[REQUIRED TEST] Anything raising inside a step's body must cost exactly
+    that step. The fault is injected through the real filesystem: a directory
+    sits where step-001's candidate file has to be written, so the atomic
+    `os.replace` onto it raises `OSError` from inside the step body. step-001 must be recorded `failed` (a state
+    `resume.missing_steps` never retries, so a deterministically-broken step
+    cannot loop forever) and step-002 must still be reviewed."""
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001")
+        write_plan_step(plan_dir, "step-002")
+        os.mkdir(codex_lane._candidate_path(out_dir, "step-001"))
+
+        written = codex_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_harness_stub(exit_code=0, raw_body={"findings": []}),
+        )
+        by_step = {e["step_id"]: e for e in written}
+        check(
+            by_step.get("step-001", {}).get("state") == terminal_state.FAILED,
+            "unhandled step error: the raising step is recorded failed",
+            repr(written),
+        )
+        check(
+            str(by_step.get("step-001", {}).get("stop_reason_raw", "")).startswith(
+                "unhandled_step_error:"
+            ),
+            "unhandled step error: the envelope records the raw reason it failed",
+            repr(by_step.get("step-001")),
+        )
+        check(
+            schema.validate_step_envelope(by_step.get("step-001", {})) == [],
+            "unhandled step error: the failure envelope is itself schema-valid",
+            str(schema.validate_step_envelope(by_step.get("step-001", {}))),
+        )
+        check(
+            os.path.isfile(os.path.join(out_dir, "step-001.status.json")),
+            "unhandled step error: the failure envelope reached disk",
+            repr(sorted(os.listdir(out_dir))),
+        )
+        check(
+            by_step.get("step-002", {}).get("state") == "complete",
+            "unhandled step error: the step behind the raising one is still reviewed",
+            repr(written),
+        )
+        leftovers = [n for n in os.listdir(out_dir) if n.startswith(".step-001.") and
+                     os.path.isfile(os.path.join(out_dir, n))]
+        check(
+            leftovers == [],
+            "unhandled step error: the failing step leaves no temp artifacts behind",
+            repr(leftovers),
+        )
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -44,9 +44,10 @@ Three shapes are validated here:
 - A **hypothesis** (`validate_hypothesis`): one structured, planner-originated
   claim a later review pass should investigate, carried in a plan step's
   `hypotheses` array (Issue #3958, epic #3950). Requires `id` (unique within
-  the step that proposed it, not globally — two different planners are
-  expected to independently mint the same `id` string, e.g. both calling
-  their first hypothesis `h1`), `objective` (what security property is being
+  the step that proposed it — enforced by `validate_plan_step`, which is the
+  only validator that sees the whole array — but not globally: two different
+  planners are expected to independently mint the same `id` string, e.g. both
+  calling their first hypothesis `h1`), `objective` (what security property is being
   investigated), `required_evidence` (what would confirm or refute it), and
   `planner` (which planner proposed it — injected from the sweep's own
   authoritative context by `planner.finalize()`/`finalize_multi_planner()`,
@@ -282,10 +283,12 @@ def validate_hypothesis(hypothesis: object) -> list[str]:
 
     All four required fields (`id`, `objective`, `required_evidence`,
     `planner`) must be non-empty strings. `id` is unique only within the
-    step that proposed the hypothesis, not globally -- this function does
-    not, and cannot, check cross-step or cross-planner uniqueness; that is
-    `planner.merge_steps_by_scope()`'s job when two planners' proposals for
-    the same scope are unioned.
+    step that proposed the hypothesis, not globally -- this function
+    validates one hypothesis in isolation and so checks no uniqueness at all:
+    within-step uniqueness is `validate_plan_step()`'s job (it is the only
+    caller that sees the whole array), and cross-planner disambiguation is
+    `planner.merge_steps_by_scope()`'s when two planners' proposals for the
+    same scope are unioned.
     """
     if not isinstance(hypothesis, dict):
         return ["hypothesis must be a JSON object"]
@@ -349,9 +352,16 @@ def validate_plan_step(step: object) -> list[str]:
     legitimately name zero concrete files while still describing a scope).
     `planners` must be a non-empty list of non-empty strings: a step always
     has at least one planner that proposed it. `hypotheses` must be a
-    non-empty list, each entry validated via `validate_hypothesis` -- a plan
+    non-empty list, each entry validated via `validate_hypothesis`, with every
+    entry's `id` distinct within the step -- a plan
     step's defining content since Issue #3958 is what it proposes to
-    investigate, not a single free-text sentence. `description`, if present,
+    investigate, not a single free-text sentence. Within-step `id` uniqueness
+    is enforced here, at the contract boundary, because it is not a cosmetic
+    property: a finder lane emits exactly one disposition per hypothesis it is
+    handed, so two hypotheses sharing an `id` produce two dispositions sharing
+    a `hypothesis_id`, which `validate_step_envelope` rejects -- a step that
+    cannot produce a writable envelope is malformed, and the only place that
+    can be caught before a lane runs it is here. `description`, if present,
     is not validated: it is optional, backward-readable human context only,
     never load-bearing for anything downstream.
 
@@ -398,9 +408,21 @@ def validate_plan_step(step: object) -> list[str]:
                     f"field hypotheses must be a non-empty list, got {value!r}"
                 )
             else:
+                seen_ids: set = set()
                 for index, hypothesis in enumerate(value):
                     for hyp_error in validate_hypothesis(hypothesis):
                         errors.append(f"hypotheses[{index}]: {hyp_error}")
+                    if not isinstance(hypothesis, dict):
+                        continue
+                    hypothesis_id = hypothesis.get("id")
+                    if not (isinstance(hypothesis_id, str) and hypothesis_id):
+                        continue
+                    if hypothesis_id in seen_ids:
+                        errors.append(
+                            f"hypotheses[{index}]: duplicate hypothesis id {hypothesis_id!r}"
+                        )
+                    else:
+                        seen_ids.add(hypothesis_id)
 
     return errors
 

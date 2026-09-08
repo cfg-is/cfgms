@@ -209,6 +209,11 @@ def build_envelope(
     does not itself guarantee full coverage of a step's hypotheses; that
     guarantee lives in the caller and is independently checked by
     `write_envelope` below via `schema.validate_step_envelope`.
+
+    `dispositions` is passed through `dedupe_dispositions()` before being
+    attached, so no caller can build an envelope carrying two entries for one
+    `hypothesis_id` -- see that function for why a duplicate is a plan-level
+    defect that must not be able to reach `write_envelope`.
     """
     envelope = {
         "sweep_id": context["sweep_id"],
@@ -223,10 +228,51 @@ def build_envelope(
         envelope["findings"] = findings if findings is not None else []
         envelope["files_intended"] = files_intended if files_intended is not None else []
         envelope["files_read"] = files_read if files_read is not None else []
-        envelope["dispositions"] = dispositions if dispositions is not None else []
+        envelope["dispositions"] = dedupe_dispositions(dispositions)
     else:
         envelope["stop_reason_raw"] = stop_reason_raw or state
     return envelope
+
+
+def dedupe_dispositions(dispositions: list | None) -> list:
+    """Return `dispositions` with at most one entry per `hypothesis_id`,
+    first-seen winning, order otherwise preserved. `None` and a non-list both
+    become `[]`.
+
+    A step whose plan carries two hypotheses with the same `id` makes every
+    lane emit two dispositions with the same `hypothesis_id` -- one per
+    hypothesis, as required -- which `schema.validate_step_envelope` rejects
+    as a duplicate, which `write_envelope` turns into a `ValueError`. That
+    combination once meant a single malformed plan step (an `id` a model is
+    free to repeat, since `id` is only ever unique within its own step) killed
+    the whole lane process mid-sweep, destroying the envelopes of every step
+    that had not run yet.
+
+    The primary fix is upstream: `schema.validate_plan_step` now rejects a
+    step with duplicate hypothesis ids and `planner._merge_hypotheses`
+    suffixes rather than repeats an id. This function is the independent
+    second control, at the one point every lane's dispositions pass through,
+    so no future path back to a duplicate can reach `write_envelope` -- a
+    collapsed pair is a strictly better outcome than an unwritable envelope,
+    and the plan step that caused it was already rejected before a lane saw
+    it.
+    """
+    if not isinstance(dispositions, list):
+        return []
+    seen: set = set()
+    result: list = []
+    for disposition in dispositions:
+        if isinstance(disposition, dict):
+            hypothesis_id = disposition.get("hypothesis_id")
+            if isinstance(hypothesis_id, str) and hypothesis_id:
+                if hypothesis_id in seen:
+                    schema.log_event(
+                        "duplicate_disposition_collapsed", hypothesis_id=hypothesis_id
+                    )
+                    continue
+                seen.add(hypothesis_id)
+        result.append(disposition)
+    return result
 
 
 # Execution-task budget (Issue #3959). A step's `file_contents` dict -- the
@@ -372,3 +418,82 @@ def write_envelope(lane_dir: str, step_id: str, envelope: dict, plan_step: dict 
     path = os.path.join(lane_dir, f"{step_id}.{suffix}.json")
     atomic_write.write_json_atomic(path, envelope)
     return path
+
+
+# Cap on the raw reason text carried into a fallback failure envelope. The
+# text is an exception string, so it can quote model-supplied content of any
+# length (a `write_envelope` rejection quotes the offending hypothesis ids);
+# the envelope records why a step failed, not an unbounded transcript.
+MAX_STOP_REASON_CHARS = 500
+
+
+def remove_step_temp_artifacts(lane_dir: str, step_id: str) -> None:
+    """Best-effort removal of every intermediate dotfile a step left in
+    `lane_dir`.
+
+    Each lane writes its per-step scratch files (the harness's raw output, the
+    enriched candidate, and their `.taskN.` variants when a step is split)
+    as dotfiles prefixed `.<step_id>`, and removes them itself on every path
+    it completes normally. This is the same cleanup for the path where a step
+    raised part-way through, so the "no temp artifacts left behind"
+    invariant holds on the failure path too. Never raises: a directory that
+    has vanished, or an entry that cannot be removed, is skipped.
+    """
+    try:
+        names = os.listdir(lane_dir)
+    except OSError:
+        return
+    prefix = f".{step_id}"
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        try:
+            os.remove(os.path.join(lane_dir, name))
+        except OSError:
+            pass
+
+
+def write_step_failure_envelope(
+    lane_dir: str, context: dict, model_id: str, stop_reason_raw: str
+) -> dict | None:
+    """Write a minimal `failed` envelope for a step whose normal envelope
+    could not be produced, and return it -- or `None` if even this could not
+    be written.
+
+    This is the fallback each lane's `run_lane` uses when anything in a step's
+    body raises: the step is recorded `failed` (a state `resume.missing_steps`
+    never retries, so a deterministically-unwritable step cannot loop forever)
+    and the sweep goes on to the next step. Before this existed, one raising
+    step -- e.g. `write_envelope` refusing a schema-invalid envelope --
+    propagated out of `run_lane` and out of `main()`, killing the lane process
+    mid-sweep: every step after it produced no envelope at all, so a defect in
+    one step's plan silently cost the coverage of every step behind it.
+
+    Deliberately minimal: no `plan_step` is passed to `write_envelope`, and no
+    `findings`/`dispositions`/`files_*` are attached (a non-`complete`
+    envelope carries none of them anyway), so this envelope's validity depends
+    only on the four identity strings in `context` plus `model_id` -- never on
+    whatever was malformed about the step. `refusal_attempts` still carries
+    over from whatever is on disk, so a step that refused once and then hit an
+    unhandled error keeps its history.
+
+    Never raises: a failure to write the fallback is logged and reported as
+    `None`, because the caller's whole reason for calling it is to keep the
+    loop alive.
+    """
+    step_id = context.get("step_id")
+    try:
+        envelope = build_envelope(
+            context,
+            model_id,
+            terminal_state.FAILED,
+            read_refusal_attempts(status_envelope_path(lane_dir, str(step_id))),
+            stop_reason_raw=str(stop_reason_raw)[:MAX_STOP_REASON_CHARS] or terminal_state.FAILED,
+        )
+        write_envelope(lane_dir, str(step_id), envelope)
+        return envelope
+    except Exception as exc:  # noqa: BLE001 -- the fallback itself must never kill the lane
+        schema.log_event(
+            "step_failure_envelope_unwritable", step_id=step_id, error=str(exc)
+        )
+        return None

@@ -630,6 +630,144 @@ def test_write_envelope_validates_dispositions_against_given_plan_step():
         )
 
 
+def test_dedupe_dispositions_collapses_a_duplicate_hypothesis_id():
+    dispositions = [
+        {"hypothesis_id": "h1", "disposition": "investigated", "summary": "first"},
+        {"hypothesis_id": "h2", "disposition": "investigated", "summary": "other"},
+        {"hypothesis_id": "h1", "disposition": "not_attempted", "summary": "second"},
+    ]
+    result = harness_runner.dedupe_dispositions(dispositions)
+    check(
+        [d["hypothesis_id"] for d in result] == ["h1", "h2"],
+        "dedupe_dispositions: a repeated hypothesis_id is collapsed, order otherwise preserved",
+        str(result),
+    )
+    check(
+        result[0]["summary"] == "first",
+        "dedupe_dispositions: the first entry for an id wins",
+        str(result),
+    )
+    check(
+        harness_runner.dedupe_dispositions(None) == []
+        and harness_runner.dedupe_dispositions("nope") == [],
+        "dedupe_dispositions: None and a non-list both become an empty list",
+    )
+
+
+def test_build_envelope_cannot_produce_duplicate_dispositions():
+    # [REQUIRED TEST] The independent second control on the crash this story
+    # closes: a plan step carrying two hypotheses with the same `id` makes a
+    # lane build one disposition per hypothesis -- two entries sharing a
+    # hypothesis_id -- which schema.validate_step_envelope rejects and
+    # write_envelope raises on, killing the lane process mid-sweep. No
+    # envelope built here may carry that shape, whatever the caller passes.
+    with tempfile.TemporaryDirectory() as lane_dir:
+        envelope = harness_runner.build_envelope(
+            make_context(),
+            "claude-sonnet-5",
+            terminal_state.COMPLETE,
+            0,
+            findings=[],
+            dispositions=[
+                {"hypothesis_id": "h1", "disposition": "investigated", "summary": "a"},
+                {"hypothesis_id": "h1", "disposition": "not_attempted", "summary": "b"},
+            ],
+        )
+        check(
+            len(envelope["dispositions"]) == 1,
+            "build_envelope: two dispositions sharing a hypothesis_id collapse to one",
+            str(envelope["dispositions"]),
+        )
+        path = harness_runner.write_envelope(lane_dir, "step-001", envelope)
+        check(
+            os.path.isfile(path),
+            "build_envelope: the resulting envelope is writable rather than raising",
+            path,
+        )
+
+
+def test_write_step_failure_envelope_records_failed_and_never_raises():
+    # [REQUIRED TEST] The fallback each lane's run_lane uses when a step's
+    # body raises. It must produce a valid `failed` envelope on disk -- a
+    # state resume.missing_steps never retries -- so the sweep can move to
+    # the next step instead of the exception killing the lane process.
+    import schema  # local import: matches the round-trip test's own convention
+
+    with tempfile.TemporaryDirectory() as lane_dir:
+        envelope = harness_runner.write_step_failure_envelope(
+            lane_dir, make_context(), "claude-sonnet-5", "unhandled_step_error:boom"
+        )
+        check(
+            envelope is not None and envelope["state"] == terminal_state.FAILED,
+            "write_step_failure_envelope: the returned envelope is failed",
+            str(envelope),
+        )
+        path = os.path.join(lane_dir, "step-001.status.json")
+        check(os.path.isfile(path), "write_step_failure_envelope: the envelope reached disk", path)
+        with open(path, "r") as f:
+            on_disk = json.load(f)
+        check(
+            schema.validate_step_envelope(on_disk) == [],
+            "write_step_failure_envelope: what reached disk is schema-valid",
+            str(schema.validate_step_envelope(on_disk)),
+        )
+        check(
+            on_disk["stop_reason_raw"] == "unhandled_step_error:boom",
+            "write_step_failure_envelope: the raw reason is recorded verbatim",
+            str(on_disk),
+        )
+
+        long_reason = "x" * (harness_runner.MAX_STOP_REASON_CHARS + 500)
+        capped = harness_runner.write_step_failure_envelope(
+            lane_dir, make_context(step_id="step-002"), "claude-sonnet-5", long_reason
+        )
+        check(
+            capped is not None
+            and len(capped["stop_reason_raw"]) == harness_runner.MAX_STOP_REASON_CHARS,
+            "write_step_failure_envelope: an unbounded reason (it quotes model text) is capped",
+            str(capped),
+        )
+
+        # An unwritable target must be reported, not raised: the caller's
+        # whole reason for calling this is to keep its loop alive.
+        missing = harness_runner.write_step_failure_envelope(
+            os.path.join(lane_dir, "does", "not", "exist"),
+            make_context(step_id="step-003"),
+            "claude-sonnet-5",
+            "boom",
+        )
+        check(
+            missing is None,
+            "write_step_failure_envelope: an unwritable lane dir returns None instead of raising",
+            str(missing),
+        )
+
+
+def test_remove_step_temp_artifacts_clears_only_that_steps_dotfiles():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        keep = os.path.join(lane_dir, "step-001.status.json")
+        other = os.path.join(lane_dir, ".step-002.claude-raw.json")
+        for path in (keep, other):
+            with open(path, "w") as f:
+                f.write("{}")
+        for name in (".step-001.claude-raw.json", ".step-001.task0.claude-candidate.json"):
+            with open(os.path.join(lane_dir, name), "w") as f:
+                f.write("{}")
+
+        harness_runner.remove_step_temp_artifacts(lane_dir, "step-001")
+
+        check(
+            sorted(os.listdir(lane_dir)) == [".step-002.claude-raw.json", "step-001.status.json"],
+            "remove_step_temp_artifacts: only the step's own dotfiles are removed",
+            str(sorted(os.listdir(lane_dir))),
+        )
+        harness_runner.remove_step_temp_artifacts(os.path.join(lane_dir, "gone"), "step-001")
+        check(
+            True,
+            "remove_step_temp_artifacts: a missing directory is not an error",
+        )
+
+
 def test_written_envelope_round_trips_through_schema_validate():
     # Belt-and-braces: everything build_envelope/write_envelope produces for
     # a real state must itself validate, including the added

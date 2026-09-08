@@ -553,6 +553,53 @@ def test_validate_plan_step_surfaces_nested_hypothesis_errors():
     )
 
 
+def test_validate_plan_step_rejects_duplicate_hypothesis_ids():
+    # [REQUIRED TEST] Two hypotheses sharing an `id` inside one step is
+    # model-reachable (a planner mints ids, and an `id` is only ever unique
+    # within its own step) and used to be fatal downstream: a finder lane
+    # emits one disposition per hypothesis, so the duplicate id produced a
+    # duplicate `hypothesis_id`, which `validate_step_envelope` rejects and
+    # `harness_runner.write_envelope` turns into an uncaught `ValueError`
+    # that killed the whole lane process mid-sweep. The step is malformed and
+    # must be rejected here, at the contract boundary, before a lane runs it.
+    duplicate = valid_hypothesis(id="h1", objective="a second, different objective")
+    errors = schema.validate_plan_step(
+        valid_plan_step(hypotheses=[valid_hypothesis(id="h1"), duplicate])
+    )
+    check(
+        any("hypotheses[1]" in e and "duplicate" in e and "h1" in e for e in errors),
+        "validate_plan_step: rejects two hypotheses sharing an id, naming the index and the id",
+        str(errors),
+    )
+
+
+def test_validate_plan_step_accepts_distinct_hypothesis_ids():
+    errors = schema.validate_plan_step(
+        hypotheses_step := valid_plan_step(
+            hypotheses=[valid_hypothesis(id="h1"), valid_hypothesis(id="h2")]
+        )
+    )
+    check(
+        errors == [],
+        "validate_plan_step: two hypotheses with distinct ids remain valid",
+        f"{errors} for {hypotheses_step}",
+    )
+
+
+def test_validate_plan_step_duplicate_id_check_ignores_malformed_entries():
+    # A hypothesis with no usable `id` is rejected by validate_hypothesis on
+    # its own terms; it must never also be counted as a duplicate of another
+    # malformed entry, which would report a second, misleading error.
+    errors = schema.validate_plan_step(
+        valid_plan_step(hypotheses=[{"objective": "o"}, {"objective": "o2"}])
+    )
+    check(
+        not any("duplicate" in e for e in errors),
+        "validate_plan_step: entries with no usable id are not reported as duplicates",
+        str(errors),
+    )
+
+
 def test_validate_plan_step_does_not_require_description():
     step = valid_plan_step()
     step.pop("description", None)
