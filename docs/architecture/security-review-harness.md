@@ -557,19 +557,23 @@ container and sets three environment variables the container-side harness runner
 
 | Variable | Set to |
 |---|---|
-| `CFGMS_SECURITY_REVIEW_HARNESS` | the `--harness` value (`claude` / `codex` / `opencode`) |
+| `CFGMS_SECURITY_REVIEW_HARNESS` | the `--harness` value (`claude` / `codex` / `opencode` / `ollama`) |
 | `CFGMS_SECURITY_REVIEW_MODEL` | the `--model` value |
 | `CFGMS_SECURITY_REVIEW_LANE_ID` | the `--mode` value (the lane's own directory name under `lanes/`) |
 
-`claude`, `codex`, and `opencode` are all wired to an actual credential mount — `--harness codex`
-mounts `~/.codex/auth.json` **read-only** (Issue #3935) and `--harness opencode` mounts
-`~/.local/share/opencode/auth.json` **read-only** (Issue #3936). Unlike `claude` in lane mode, both
-`codex` and `opencode`'s mounts are gated on the host file's *existence*, checked before any docker
-call: a missing credential file (a host that has never run `codex login` / `opencode auth login`)
-fails closed with `LAUNCH_FAILED:<container>:credential_unavailable:...`, a message
-`security-review.sh`'s `_is_intentional_dispatch_skip` already recognizes (the same substring
-`gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex or opencode
-lane missing its credential is recorded and skipped without blocking any other roster lane's
+`claude`, `codex`, `opencode`, and `ollama` are all wired to an actual credential mount —
+`--harness codex` mounts `~/.codex/auth.json` **read-only** (Issue #3935), `--harness opencode`
+mounts `~/.local/share/opencode/auth.json` **read-only** (Issue #3936), and `--harness ollama`
+mounts `~/.ollama/id_ed25519` and `~/.ollama/id_ed25519.pub` **read-only**, as two individual file
+mounts, never the directory itself (Issue #3976) — the `ollama signin` session keypair the local
+daemon uses to sign Ollama Cloud requests; `~/.ollama/config.json` holds no token. Unlike `claude`
+in lane mode, `codex`, `opencode`, and `ollama`'s mounts are all gated on the host file's
+*existence*, checked before any docker call: a missing credential file (a host that has never run
+`codex login` / `opencode auth login` / `ollama signin`) fails closed with
+`LAUNCH_FAILED:<container>:credential_unavailable:...`, a message `security-review.sh`'s
+`_is_intentional_dispatch_skip` already recognizes (the same substring
+`gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex, opencode, or
+ollama lane missing its credential is recorded and skipped without blocking any other roster lane's
 dispatch or the consolidator run. An unrecognized `--harness` value still sets the three environment
 variables (so the roster mechanism below can dispatch a lane under a harness id this file does
 not yet know how to hand credentials to — including a test's own stub harness) but gets no
@@ -666,7 +670,19 @@ cross-harness bleed the single-image model had, and splitting the allowlist is w
   `opencode.conf`**: those serve a user configuring a third-party provider directly with their own
   API key, a different auth mechanism from the single OpenCode Zen account session `--harness
   opencode` mounts, and this harness's roster entries are always bare Zen model ids, never a
-  `provider/model` string naming one of those other providers. Issue #3932 originally shipped a
+  `provider/model` string naming one of those other providers. `ollama.conf` (Issue #3976) holds
+  two separate apexes: `ollama.com` (the Cloud/account apex — `ollama signin`'s device flow, the
+  Cloud model-invocation API, and the exact "You need to be signed in to Ollama to run Cloud
+  models." unauthenticated-call response `ollama_lane.py` treats as a failure) and
+  `registry.ollama.ai` (a `:cloud` model pull still resolves its manifest through the registry even
+  though inference runs on Ollama's Cloud backend). Both were confirmed by static inspection of the
+  pinned CLI binary's own compiled-in strings, not a live authenticated call — no `ollama signin`
+  session or docker daemon is available to a dev agent container. `registry.ollama.ai` needs its
+  own entry rather than being assumed covered by the `ollama.com` line: it is a genuinely different
+  registrable domain, and dnsmasq's `server=/<domain>/` directive matches only a domain's own
+  subdomains, never a different apex. This lane is Cloud-only (see the Ollama harness lane section
+  below) — local model files, GPU runner libraries, and the `ollama serve` HTTP API are all
+  loopback-only and need no allowlist entry at all. Issue #3932 originally shipped a
   second fragment, `legacy.conf`, holding the union of Anthropic + OpenAI + Ollama domains and
   selected by default so the three REST finder lanes (and every non-harness launch) kept resolving
   what they resolved before the split existed. Issue #3933 deleted `legacy.conf` outright, along
@@ -681,17 +697,18 @@ cross-harness bleed the single-image model had, and splitting the allowlist is w
 - `.devcontainer/dnsmasq-allowlist.conf` (the original single combined file, pre-#3932) is no
   longer baked into the image — kept only, unbaked, as the fixed regression fixture
   `dnsmasq-allowlist_test.sh` still exercises directly. Its domain set matches
-  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly; Issues #3935/#3936
-  leave this file untouched (the Codex and OpenCode domains live only in their own fragments,
-  never in this shared/legacy file or the base file).
+  `dnsmasq-allowlist-base.conf` + `dnsmasq-allowlist.d/claude.conf` exactly; Issues
+  #3935/#3936/#3976 leave this file untouched (the Codex, OpenCode, and Ollama domains live only
+  in their own fragments, never in this shared/legacy file or the base file — that suite's own
+  `assert_blocked "ollama.com"` line is correct and must stay that way).
 
 **Adding a lane on an existing harness** needs no new allowlist entry — it already resolves that
 harness's fragment. **Adding a new harness** means adding both a fragment file under
 `dnsmasq-allowlist.d/` and that harness's provider domain(s) to it; a harness with no fragment
 gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate — the egress set is
 enumerated per harness rather than opened wholesale — and is a step in each future harness story
-(`codex.conf` landed by Issue #3935; `opencode.conf` by this story) not something a lane can work
-around at runtime.
+(`codex.conf` landed by Issue #3935; `opencode.conf` by Issue #3936; `ollama.conf` by this story)
+not something a lane can work around at runtime.
 
 ## The Claude harness lane
 
@@ -915,6 +932,101 @@ refusal-retry-once integration, path-traversal containment, a real-subprocess ch
 `--dir <out_dir>`) and the `opencode.json` permission file actually reach/precede the invocation,
 and a dedicated same-script-two-models test proving one imported module instance handles two
 distinct model ids with no per-model branch.
+
+## The Ollama harness lane
+
+`.claude/scripts/security-review/lanes/ollama_lane.py` (Issue #3976, epic #3975) is the fourth
+lane on the architectural correction the epic makes, landed on top of `opencode_lane.py`. It is
+the first lane whose harness needs a background daemon running inside the investigator container,
+and the first that parses findings from stdout rather than from a written file — both forced by
+what the real, installed CLI (`ollama` v0.33.3, pinned in `.devcontainer/Dockerfile`'s `ARG
+OLLAMA_CLI_VERSION`) actually is: a plain stdin/stdout text completion client with no tool loop at
+all, not an agentic harness like the other three.
+
+**Scope: Ollama Cloud only.** A local (non-`:cloud`) Ollama model runs inference on the host GPU,
+which would need either the ~4.5GB GPU runner library set in the image or a hole in the
+container's default-DROP egress firewall pointing at the host's own daemon — the second is a
+security decision this story does not make as a side effect of adding a harness. This lane's
+egress fragment (`dnsmasq-allowlist.d/ollama.conf`, see [Egress containment](#egress-containment)
+above) reaches Ollama's own Cloud domains only, exactly as the other three lanes reach their own
+provider's domain.
+
+**Invocation.** An `ollama:<model>:cloud` roster entry resolves to `python3 ollama_lane.py
+<lane-id>` inside a `launch-investigator --harness ollama --model <model>` container, which mounts
+`~/.ollama/id_ed25519` and `~/.ollama/id_ed25519.pub` **read-only**, as two individual file
+mounts, never the `~/.ollama` directory itself — the `ollama signin` session keypair the local
+daemon uses to sign Cloud requests (`~/.ollama/config.json` holds no token). Mounting the
+directory would either leak other host-side daemon state into the container or make the daemon
+try to write through a read-only host mount, since `ollama serve` also writes its models
+directory and `config.json` into that same path. `agent-dispatch.sh` sets the same three
+`CFGMS_SECURITY_REVIEW_HARNESS`/`_MODEL`/`_LANE_ID` variables documented above.
+
+**Roster parsing: a bounded relaxation, not an unbounded one.** Ollama model ids carry a mandatory
+tag (`glm-5.3-flash:cloud`), so `roster.py::parse_roster()` splits `harness:model` on the *first*
+colon only, and validates the model half against a shape allowing *at most one* additional colon
+— `claude:sonnet:5` (one extra colon) is now a legitimate parse (model `sonnet:5`), but
+`claude:sonnet:5:extra` (two extra colons) still raises `RosterError`. Widening to an unbounded
+`split(":", 1)` alone was rejected: it would have turned off the existing typo guard entirely.
+`lane_dir_name` sanitizes `:` to `-` (`ollama-glm-5.3-flash-cloud`) — still a valid `--mode` shape
+— and `parse_roster()` additionally rejects a roster whose entries produce two identical
+`lane_dir_name` values, since two lanes sharing one output directory would silently overwrite each
+other's findings.
+
+**A background daemon is required, and its absence must fail closed, not silently.**
+`ollama run <model>` is a client to a *local* daemon; reaching Ollama Cloud without one signed in
+returns an unauthenticated response regardless of what `OLLAMA_HOST` points at (confirmed while
+writing this story — `OLLAMA_HOST=https://ollama.com ollama run <model>` returns `401
+Unauthorized`/"You need to be signed in" and exits 0). `investigator-entrypoint.sh` starts `ollama
+serve` in the background exactly when `CFGMS_SECURITY_REVIEW_HARNESS=ollama`, polls (`ollama
+list`) until it reports ready, and exits non-zero — never falling through to `exec`ing the lane
+script — if it does not come up in time. Every other harness's behavior is completely unchanged:
+the daemon-start block is gated on the harness id, and the same `exec python3 "$LANE_SCRIPT"
+"$MODE"` every other lane already uses still runs for every lane, ollama included, once the daemon
+is confirmed ready.
+
+**The exit-0-but-unauthenticated case is the failure mode this lane exists to catch.** An
+unauthenticated Cloud call exits `0` with a "not signed in" message on stdout — exactly the
+zero-work-silent-pass failure class this whole harness exists to prevent: a lane that trusted the
+exit code would record that step `complete` with an empty findings array, and an unreviewed
+package would read as clean. `ollama_lane.py::call_ollama_harness` never hands
+`terminal_state.classify()` a bare "exit 0, nothing extracted" pair: it extracts a JSON object out
+of stdout itself (`_extract_json_object`, tolerating prose before/after it — `ollama run` has no
+tool use and no `--format json` guarantee against a plain-text prompt, so the response is not
+assumed to be bare JSON), and when extraction fails for any reason, whatever the real exit code
+was, it reports a *synthetic* non-zero exit code and leaves the findings path unwritten — so
+`classify()` reaches `failed`, never `complete` and never `refused`. When extraction succeeds, the
+extracted object is written to the same raw-output path the other lanes' harness process itself
+would have written, and the real exit code is passed through — the rest of the pipeline
+(enrichment, `classify()`, `apply_refusal_policy()`) is byte-for-byte the same code every other
+lane already runs.
+
+**No file-writing tool, no denylist.** `ollama run` has no tool loop at all — unlike
+`claude_lane.py`'s `--disallowedTools` or `codex_lane.py`'s `--sandbox read-only`, this lane passes
+no tool-restriction flag, because there is nothing to deny. `build_prompt` does not name an output
+file to write to; it instructs the model to print the findings JSON object directly to standard
+output and nothing else, reusing `harness_runner.py`'s `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION`
+(C4) unchanged, exactly like the other three lanes.
+
+**Credential-unavailable is a recorded, skippable failure, never a silent substitution** — the
+identical shape `codex_lane.py`/`opencode_lane.py` established: `--harness ollama`'s credential
+mount is gated on `~/.ollama/id_ed25519`'s *existence* on the host, checked by `agent-dispatch.sh`
+before any docker call, failing the launch closed with `LAUNCH_FAILED:...:credential_unavailable`
+on a host that has never run `ollama signin`.
+
+**Import isolation, testing.** Identical bootstrap pattern to the other three lanes (the
+`/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a
+`__file__`-relative-only import) and the same duplicated (never imported cross-module)
+traversal/symlink containment guard for `files` every other lane carries. `ollama_lane_test.py`
+mirrors the other three lanes' coverage — classification via an injected `call_harness_fn`, the
+refusal-retry-once integration, path-traversal containment — plus two lane-specific proofs: a real
+stub `ollama` binary on `PATH` returning exit 0 with the literal unauthenticated-Cloud-call message
+and no JSON, asserted `failed` (never `complete`, never `refused`) with no findings file created;
+and a real stub `ollama` binary returning a findings object surrounded by prose, asserted
+extracted and validated through `schema.validate_step_envelope`.
+`.devcontainer/investigator-entrypoint_test.sh` is the first test file for
+`investigator-entrypoint.sh` at all, covering the daemon-start/poll/fail-closed behavior with a
+stub `ollama serve`/`ollama list` pair: the lane script runs once the daemon reports ready, never
+runs if it does not, and is unaffected (no daemon start attempted) for every non-ollama harness.
 
 ## Step plan generation (metadata-only planner)
 
