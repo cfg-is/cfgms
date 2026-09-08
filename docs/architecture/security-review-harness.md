@@ -1263,6 +1263,27 @@ for this sweep, and no coverage table (not even a `0/0` one) is rendered. A `0/0
 indistinguishable from "nothing to review, sweep clean"; a planning failure is a different fact
 and must read as one.
 
+**An empty `report["findings"]` means "no candidates reported in the tasks that completed," never
+"clean" (Issue #3961).** Those two statements only coincide when the sweep is actually complete,
+and `render_markdown()` never assumes that in the absence of evidence. `_sweep_complete()` computes
+one `bool`, `False` whenever `plan_failed` is set or `steps_discovered` is empty (the same two
+cases the previous paragraph covers, routed through this one flag rather than re-checked), no lane
+has produced any output at all (a valid plan with zero dispatched lanes has reviewed nothing — the
+same "unreviewed package looks clean" failure mode `SKILL.md` warns about), any lane's coverage row
+shows `not_started > 0` or `files_short > 0`, any lane's row shows `failed > 0` (folding in both a
+schema-invalid envelope and the #3959 incomplete-hypothesis-bundle exclusion — either way the step
+never became usable coverage), any lane's row shows `parked > 0` or `refused > 0` (a rate-limited
+or model-declined step "never got far enough to have read anything meaningful", exactly like a
+failed one — without this, a sweep where every step was parked or refused, with zero code read,
+would render as a clean full sweep), any `dispatch_report.json` entry recorded an outcome other
+than `dispatched`, or `plan/rejected_proposals.json` recorded anything at all. When
+`False`, the report's opening sentence says the sweep is incomplete, a dedicated `## Incomplete`
+section — placed directly after `## Coverage`, before `## Dispatch` — lists every one of those
+gaps by lane name (or points at `## Dispatch` for a dispatch/rejection gap, so the identity detail
+is not printed twice), and the `## Findings` section's empty case reads "No candidates reported in
+the tasks that completed." instead of the unconditional "_No findings after de-duplication and
+validation._" that renders only when `_sweep_complete()` is `True`.
+
 **De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
 never a line number. Every occurrence across every lane's `step-*.findings.json` sharing this key
 collapses into one consolidated entry; the entry's `lanes` field lists exactly the lanes that
