@@ -1340,10 +1340,15 @@ def test_rubric_and_anchors_agree_on_cross_tenant_write_and_read():
     # Calibration-consistency guard: the core and the anchors must put the
     # same attacker/impact pair at the same level, or selecting a different
     # anchor changes the scale instead of calibrating it.
-    core = harness_runner.METHODOLOGY_CORE
+    # Markdown wraps paragraphs across source lines, so normalize whitespace
+    # before phrase checks -- a harmless re-wrap must not read as drift.
+    core = re.sub(r"\s+", " ", harness_runner.METHODOLOGY_CORE)
     check("cross-tenant write, from any tier including T2" in core, "core: a cross-tenant write is critical from any tier")
     check("A cross-tenant read, from any tier" in core, "core: a cross-tenant read is high from any tier")
-    check("Each factor moves one level" in core, "core: the movement rule is per factor")
+    check(
+        "The level definitions take precedence" in core and "never lowers severity" in core,
+        "core: level definitions take precedence over movement heuristics; protective settings never lower severity",
+    )
     by_id = {anchor["id"]: anchor for anchor in harness_runner.METHODOLOGY_ANCHORS}
     tenant = by_id["crit-tenant-from-path"]
     check(

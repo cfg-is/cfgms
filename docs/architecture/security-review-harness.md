@@ -239,7 +239,7 @@ prompt cost. Delivery is therefore split:
 - The **compact core** — everything between the `methodology-core:begin`/`methodology-core:end`
   HTML comments in the document — is inlined in every step prompt. Its ceiling is
   `METHODOLOGY_CORE_MAX_CHARS` = **8,000 characters** (about 5.6× the 1,419-character
-  `SYSTEM_PROMPT` it joins; the core measured 7,592 characters when this section was written).
+  `SYSTEM_PROMPT` it joins; the core measured 7,893 characters when this section was written).
   The loader refuses a larger core; `harness_runner_test.py` asserts the ceiling against the live
   document and asserts that the ceiling is smaller than the whole document, so an implementation
   that inlined the entire file per step cannot pass.
@@ -287,7 +287,7 @@ was considered and rejected, so a later reader can see it was weighed, not misse
 - **D2 — CWE vocabulary: a closed shortlist plus an explicit `other` escape, not the full
   corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + `vuln_class`; with an open
   vocabulary, two lanes describing one defect under two identifiers silently fail to merge. The
-  core lists 24 CWE identifiers CFGMS actually cares about (certificate validation,
+  core lists 25 CWE identifiers CFGMS actually cares about (certificate validation,
   authentication and authorization, signature verification, secret handling, logging, injection,
   path and link handling, deserialization, races, resource consumption) and instructs a lane to
   set `vuln_class` to exactly one of them or to `other: <short label>`. The escape is stated
@@ -302,9 +302,13 @@ was considered and rejected, so a later reader can see it was weighed, not misse
   any tier, T2 included; `high` is a cross-tenant *read* from any tier, T2 weakening a blast-radius
   bound inside its own tenant, T1 reading beyond its own host or outliving revocation, or T0
   reading fleet data; `medium` is impact inside the attacker's own tenant or host that still
-  violates a stated control; `low` is defence-in-depth with no boundary crossing. Level moves are
-  per factor (one level per tier drop, scope growth, or blocking control), and anything reachable
-  only under the development-only `bypass` mode is `low` regardless of impact. Two
+  violates a stated control; `low` is defence-in-depth with no boundary crossing. A change of
+  attacker tier, scope, or blocking control triggers a reassessment against those definitions, which
+  take precedence over any movement heuristic — there is deliberately no per-factor arithmetic, since
+  arithmetic produced results the definitions contradict (a T1 cross-tenant read is `high` by
+  definition, not `critical` by one tier-drop). Only an insecure non-default prerequisite lowers
+  severity (a development-only one such as `bypass` makes it `low`); a protective mode such as
+  `strict` never does. Two
   consequences of the CFGMS threat model are written into the tiers so lanes stop disagreeing
   about them: root on one steward host is the attacker's starting position, not a finding, and a
   defect that needs T3 is `low` *unless* it sits in a control whose purpose is to bound T3

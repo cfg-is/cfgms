@@ -114,6 +114,7 @@ nearest identifier, and never drop a finding because no identifier fits.
 | CWE-345 | Insufficient data authenticity | unsigned or stale configuration accepted |
 | CWE-613 | Insufficient session or credential expiration | tokens, leases, certificates accepted past their window |
 | CWE-330 | Insufficiently random values | tokens, identifiers, nonces |
+| CWE-208 | Observable timing discrepancy | non-constant-time comparison of tokens or signatures |
 | CWE-798 | Hard-coded credentials | any credential in source or fixtures |
 | CWE-312 | Cleartext storage of sensitive information | secrets on disk, in caches, in temp files |
 | CWE-532 | Sensitive information in log | secrets or tokens logged |
@@ -156,28 +157,31 @@ Levels:
   cross-tenant write, from any tier including T2; an mTLS or signature verification
   bypass on the control path; unknown-publisher code running on an endpoint. Also a
   T3-bounding control that fails, judged by the blast radius it was meant to contain.
-  No user interaction, no precondition beyond the tier's starting position.
-- **high.** A cross-tenant read, from any tier; T2 weakening or bypassing a blast-radius
-  bound inside its own tenant; T1 reading other stewards' secrets or configuration in
-  its own tenant, or keeping access past revocation or expiry; T0 reading sensitive
-  fleet data, or cheaply taking the controller down. Control or visibility beyond what
-  the tier's position grants, short of controlling another party's endpoints.
-- **medium.** Impact stays inside the attacker's own tenant or own host, but a stated
-  control is violated: a privileged action without audit; a rarely-touched setting
-  weakened without its designed friction; false state reported to the controller; a
-  cleartext secret on the attacker's own disk; log injection from a T1 input; local
-  user to root on one endpoint through a CFGMS-owned path.
+- **high.** A cross-tenant read, from any tier; T2 bypassing or weakening a blast-radius
+  bound inside its own tenant so that its reach grows to what the bound was meant to
+  deny (adding a trusted publisher, moving stewards out of `strict`); T1 reading other
+  stewards' secrets or configuration in its own tenant, or keeping access past
+  revocation or expiry; T0 reading sensitive fleet data, or cheaply taking the
+  controller down.
+- **medium.** Impact stays inside the attacker's own tenant or own host, and the bounds
+  still hold, but a stated control is violated: a privileged action without audit; a
+  rarely-touched setting changeable without its designed friction while the change stays
+  authorized, recorded and reversible; false state reported to the controller; a
+  cleartext secret on the attacker's own disk; log injection from a T1 input; local user
+  to root on one endpoint through a CFGMS-owned path.
 - **low.** A defence-in-depth gap with no boundary crossing shown: validation missing
   where every caller is already T3; weak randomness behind another control;
   non-sensitive internals exposed; hardening misses. Report it anyway.
 
-Moving a level. Each factor moves one level; two factors move two. **Up one per factor:**
-the required tier drops (T2 to T1, T1 to T0), or the scope grows (own host, to own
-tenant, to cross-tenant, to fleet). **Down one per factor:** a second independent control
-blocks it today (report the finding and name that control), or it needs a non-default
-setting. A defect reachable only under a development-only setting
-(`module_trust.mode: bypass`) is `low` regardless of impact: the operator disabled the
-control, so no bound was violated.
+Moving a level. The level definitions take precedence; there is no arithmetic. Reassess
+against them, and say so in `evidence`, when the required tier changes (T2 to T1, T1 to
+T0), the scope changes (own host, own tenant, cross-tenant, fleet), a second independent
+control blocks the path today (name it; usually one level down), or the path needs an
+insecure non-default prerequisite such as a disabled verification setting (usually one
+level down). A development-only prerequisite (`module_trust.mode: bypass`) makes it
+`low`: the operator disabled the control. A protective setting such as `strict` never
+lowers severity; a defect in the control it enables is judged by the blast radius that
+control bounds.
 <!-- methodology-core:end -->
 
 ## Worked examples (severity anchors)
@@ -323,16 +327,18 @@ through any route, including a stored value they can write, since a lower tier t
 gains a controller-wide availability effect.
 <!-- anchor:end -->
 
-<!-- anchor:begin id=low-weak-random-id severity=low tags=rand,random,randomness,entropy,identifier,uuid,nonce,job,jobs,generator,math,correlation,audit -->
-**A non-cryptographic random source for an audit correlation id.** The id that ties a
-request's audit log lines together is generated with a non-cryptographic source, so a
-caller who observes a few ids can predict the next ones and issue requests whose lines
-interleave with, and read as part of, another request's audit trail. Attacker: T1 or
-T2, anyone who can issue requests. Level: low: no configuration, secret or control is
-crossed; incident reconstruction from the audit log becomes unreliable, which is a
-weakened control, not a broken one. Up to medium if any follow-up operation accepts the
-id as proof of ownership, since predictability then yields another caller's data within
-the tenant.
+<!-- anchor:begin id=low-timing-compare severity=low tags=compare,comparison,timing,constant,equal,equals,bytes,subtle,hmac,token,tokens,registration,verify -->
+**A registration token is compared with an ordinary equality check.** The token a
+device presents at enrolment is compared to the stored value byte by byte with an
+early-exit equality, not a constant-time comparison, so response timing leaks how many
+leading bytes matched. Attacker: T0, who can reach the enrolment endpoint. Level: low:
+the leak is real but bounded. Each token is single-use and expires in minutes, the
+timing signal is a few nanoseconds under network jitter, and recovering one token needs
+thousands of attempts per byte inside that window, so no enrolment has been shown to be
+forgeable; the residual weakness is that the endpoint's security rests on the token's
+lifetime rather than on the comparison. Up to medium if the same comparison guards a
+long-lived secret, or the endpoint imposes no rate limit, since the attempts then fit
+inside the secret's lifetime.
 <!-- anchor:end -->
 
 ## What this document does not cover
