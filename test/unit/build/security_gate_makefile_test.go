@@ -341,11 +341,24 @@ func TestBinaryArtifactCheckPassesOnSourceOnlyTreeWithoutFileUtility(t *testing.
 }
 
 func TestScriptSuiteRequiresOptInForLiveProjectMutations(t *testing.T) {
+	const guard = `if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]`
+
 	scriptPath := filepath.Join(repoRoot(t), "scripts", "test-scripts.sh")
 	content, err := os.ReadFile(scriptPath)
 	require.NoError(t, err)
 
-	const guard = `if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]`
 	assert.Equal(t, 2, strings.Count(string(content), guard),
 		"both live GitHub project integration tests must require explicit opt-in")
+
+	// The Phase 2 lifecycle smoke test creates, promotes, leases and deletes an
+	// item on the shared production cfgms-pipeline board. It is a live project
+	// mutation and is bound by the same opt-in rule; without the guard it ran on
+	// every `make test`, so any Projects API transient or concurrent dispatcher
+	// cycle failed an unrelated story's gate and stranded fixture items in Draft.
+	trustBoundaryPath := filepath.Join(repoRoot(t), "test", "security", "trust_boundary_test.sh")
+	trustBoundary, err := os.ReadFile(trustBoundaryPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, strings.Count(string(trustBoundary), guard),
+		"test_phase2_lifecycle mutates the live project board and must require explicit opt-in")
 }

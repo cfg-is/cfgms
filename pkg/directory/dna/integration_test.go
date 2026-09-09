@@ -5,6 +5,7 @@ package dna
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -309,6 +310,23 @@ func TestEndToEndDriftScenario(t *testing.T) {
 	})
 }
 
+// percentileDuration returns the p-th percentile (0-100) of the supplied
+// durations using nearest-rank on a sorted copy. The input slice is left
+// untouched so callers can keep measuring against it.
+func percentileDuration(samples []time.Duration, p int) time.Duration {
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+
+	idx := (p * (len(sorted) - 1)) / 100
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
 func TestScalabilityScenario(t *testing.T) {
 	// Test system behavior with larger datasets
 	provider := NewMockDirectoryProvider()
@@ -359,19 +377,54 @@ func TestScalabilityScenario(t *testing.T) {
 		// Should complete within reasonable time
 		assert.Less(t, collectionDuration, 30*time.Second, "Collection took too long for large dataset")
 
-		// Test storage performance
-		start = time.Now()
+		// Test storage scaling.
+		//
+		// The property under test is that the cost of a single write does not grow
+		// as the dataset grows: a per-write cost that climbs with table size (an
+		// unindexed version lookup, a full-table dedup scan) is the scalability
+		// regression this test exists to catch. That is asserted by comparing an
+		// early cohort of writes against a late cohort of the same run.
+		//
+		// A total wall-clock ceiling cannot express it. This package runs inside
+		// `go test -race ./...`, where up to NumCPU package binaries compete for the
+		// machine: these same writes measured 6.16s for the subtest on an idle
+		// 16-core machine and 1m13s during a full-suite run, so an absolute ceiling
+		// records how much spare CPU the run had, not how the storage path behaved.
+		// Contention inflates both cohorts, so the comparison between them survives
+		// it while still failing on real per-write growth.
+		storeLatencies := make([]time.Duration, 0, len(allDNA))
 		storedCount := 0
 		for _, dna := range allDNA {
+			opStart := time.Now()
 			err := storage.StoreDirectoryDNA(ctx, dna)
+			opDuration := time.Since(opStart)
 			if err == nil {
 				storedCount++
+				storeLatencies = append(storeLatencies, opDuration)
 			}
 		}
-		storageDuration := time.Since(start)
 
 		assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
-		assert.Less(t, storageDuration, 60*time.Second, "Storage took too long for large dataset")
+		require.GreaterOrEqual(t, len(storeLatencies), 200,
+			"need enough successful writes to compare early and late cohorts")
+
+		// Compare the p1 latency of each half rather than the mean or median: the
+		// low percentile is the least-descheduled sample in its cohort, so it
+		// tracks the intrinsic cost of a write while the upper percentiles absorb
+		// scheduling noise. Measured on this machine (16 cores, -race): idle p1 is
+		// 2.75ms in both halves; with 24 CPU burners running for the whole subtest
+		// it rises to 7.7ms early and 9.1ms late. The worst case the bound has to
+		// tolerate is load arriving mid-run — an idle first half (2.75ms) against a
+		// saturated second half (9.1ms), a ratio of 3.3 — so the bound is set at 8x,
+		// which leaves headroom over observed noise while still failing the
+		// order-of-magnitude per-write growth that a scan-per-write regression
+		// produces at this dataset size.
+		half := len(storeLatencies) / 2
+		earlyFloor := percentileDuration(storeLatencies[:half], 1)
+		lateFloor := percentileDuration(storeLatencies[half:], 1)
+		require.Positive(t, earlyFloor, "no measurable per-write cost to compare against")
+		assert.Less(t, lateFloor, 8*earlyFloor,
+			"per-write cost grew with dataset size: first-half p1 %v, second-half p1 %v", earlyFloor, lateFloor)
 
 		// Test query performance
 		start = time.Now()
