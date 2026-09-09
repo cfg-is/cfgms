@@ -191,6 +191,98 @@ def test_group_members_travel_together_with_their_reports():
     check(sum(len(b["findings"]) for b in batches) == 45, "groups: no finding is lost or duplicated by the reordering")
 
 
+def _rich_finding(index: int, n_reports: int) -> dict:
+    f = _finding(index, severities=tuple(["low"] * n_reports))
+    f["severity_range"]["by_lane"] = {f"lane{i}": "low" for i in range(n_reports)}
+    for i, report in enumerate(f["reports"]):
+        report["lane"] = f"lane{i % 5}"
+        report["step_id"] = f"step-{i // 5:03d}"
+        report["evidence"] = "e" * adjudicator.EVIDENCE_MAX_CHARS
+        report["suggested_fix"] = "f" * 600
+        report["title"] = "t" * 300
+    return f
+
+
+def test_oversized_single_finding_is_shrunk_to_the_budget_never_sent_over_it():
+    """Re-review finding on 74490cd6: one finding with fifty capped reports
+    rendered to ~150 KB and was accepted as a singleton. The ceiling must
+    hold for a single finding too."""
+    f = _rich_finding(0, 50)
+    f["reports"][37]["severity"] = "critical"
+    f["reports"][37]["title"] = "THE-CRITICAL-ONE"
+    data = {"sweep_id": SWEEP_ID, "commit_sha": COMMIT_SHA, "findings": [f], "cross_step_groups": []}
+    whole = {**data, "findings": [f]}
+    check(adjudicator.prompt_bytes(whole, "claude") > adjudicator.MAX_PROMPT_BYTES, "singleton: fifty capped reports on one finding exceed the budget unshrunk")
+    plan = adjudicator.plan_batches(data, "claude")
+    check(len(plan["batches"]) == 1 and plan["unsent_findings"] == [], "singleton: the finding is sent, in one batch", str(plan))
+    batch = plan["batches"][0]
+    check(adjudicator.prompt_bytes(batch, "claude") <= adjudicator.MAX_PROMPT_BYTES, "singleton: the batch prompt is within the budget", str(adjudicator.prompt_bytes(batch, "claude")))
+    sent = batch["findings"][0]
+    check(len(sent["reports"]) == adjudicator.MAX_REPORTS_PER_FINDING and sent["reports_omitted"] == 40, "singleton: reports are capped to MAX_REPORTS_PER_FINDING with the omitted count recorded", str((len(sent["reports"]), sent.get("reports_omitted"))))
+    check(sent["reports"][0]["title"] == "THE-CRITICAL-ONE", "singleton: the highest-severity report is kept first")
+    prompt = adjudicator.build_prompt(batch, "/o.json")
+    check("40 further finder report(s) on this finding were omitted for prompt size" in prompt, "singleton: the prompt states what was omitted")
+    check(sent["_text_cap"] <= adjudicator.EVIDENCE_MAX_CHARS, "singleton: a text cap is recorded on the shrunk copy")
+    check("reports_omitted" not in f and "_text_cap" not in f, "singleton: the original input finding is not mutated")
+
+
+def test_finding_that_cannot_fit_is_unsent_not_rendered():
+    huge = _finding(0)
+    huge["symbol"] = "S" * (adjudicator.MAX_PROMPT_BYTES + 10)
+    small = _finding(1)
+    data = {"sweep_id": SWEEP_ID, "commit_sha": COMMIT_SHA, "findings": [huge, small], "cross_step_groups": []}
+    plan = adjudicator.plan_batches(data, "claude")
+    check(plan["unsent_findings"] == [[huge["file"], huge["symbol"], huge["vuln_class"]]], "unsent: a finding whose identifier alone exceeds the budget is listed unsent", str(plan["unsent_findings"])[:120])
+    check([adjudicator._key(f) for b in plan["batches"] for f in b["findings"]] == [adjudicator._key(small)], "unsent: the other finding is still sent")
+    check(all(adjudicator.prompt_bytes(b, "claude") <= adjudicator.MAX_PROMPT_BYTES for b in plan["batches"]), "unsent: every emitted prompt is within budget")
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        _write_input(plan_dir, data)
+        prompts = []
+
+        def call(model, prompt, output_path):
+            prompts.append(prompt)
+            with open(output_path, "w") as fh:
+                json.dump({"adjudications": _adjudications_for({"findings": [small]}), "group_assessments": []}, fh)
+            return 0, False
+
+        envelope = adjudicator.run_adjudication(plan_dir, out_dir, "claude", "m", call_harness_fn=call)
+        check(envelope["state"] == terminal_state.COMPLETE and envelope["unsent_findings"] == plan["unsent_findings"], "unsent: the envelope lists the unsent finding so the consolidator can say why it has no verdict", str(envelope.get("unsent_findings"))[:120])
+        check(len(prompts) == 1 and "S" * 1000 not in prompts[0], "unsent: the oversized finding never reaches a prompt")
+        check(schema.validate_adjudication_envelope(envelope) == [], "unsent: the envelope still validates")
+
+
+def test_group_that_cannot_share_one_batch_is_unassessed_never_partially_assessed():
+    """Re-review finding on 74490cd6: a 41-member group was split 40/1 and
+    its assessment solicited from the batch missing member 41's evidence."""
+    n = adjudicator.BATCH_SIZE + 1
+    members = [{"file": f"pkg/example/f{i}.go", "symbol": f"Sym{i}", "vuln_class": "tenant-scoping"} for i in range(n)]
+    data = _input(n, groups=[{"group_id": "group-001", "defect_class": "tenant-scoping", "step_ids": ["step-001", "step-002"], "members": members}])
+    plan = adjudicator.plan_batches(data, "claude")
+    check(plan["unassessed_groups"] == ["group-001"], "groups: a group larger than one batch is listed unassessed", str(plan["unassessed_groups"]))
+    check(all(not b["cross_step_groups"] for b in plan["batches"]), "groups: the group rides in NO batch -- no partial-evidence verdict is solicited")
+    check(sum(len(b["findings"]) for b in plan["batches"]) == n, "groups: every member finding is still adjudicated individually")
+    for batch in plan["batches"]:
+        for group in batch["cross_step_groups"]:
+            keys = {adjudicator._key(f) for f in batch["findings"]}
+            check({adjudicator._key(m) for m in group["members"]} <= keys, "groups: invariant -- every attached group's members are all in its batch")
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        _write_input(plan_dir, data)
+        call, _ = _complete_call(_adjudications_for(data), [])
+        envelope = adjudicator.run_adjudication(plan_dir, out_dir, "claude", "m", call_harness_fn=call)
+        check(envelope["unassessed_groups"] == ["group-001"], "groups: the envelope records the unassessed group")
+
+    # A rich group whose members fit the count cap but not the byte budget
+    # together is the same case, triggered by size rather than count.
+    rich = [_rich_finding(i, 12) for i in range(6)]
+    rich_members = [{"file": f["file"], "symbol": f["symbol"], "vuln_class": f["vuln_class"]} for f in rich]
+    data = {"sweep_id": SWEEP_ID, "commit_sha": COMMIT_SHA, "findings": rich, "cross_step_groups": [{"group_id": "group-001", "defect_class": "c", "step_ids": ["step-000", "step-001"], "members": rich_members}]}
+    plan = adjudicator.plan_batches(data, "claude")
+    if len(plan["batches"]) > 1:
+        check(plan["unassessed_groups"] == ["group-001"] and all(not b["cross_step_groups"] for b in plan["batches"]), "groups: a byte-split group is unassessed too", str((len(plan["batches"]), plan["unassessed_groups"])))
+    else:
+        check(plan["unassessed_groups"] == [] and plan["batches"][0]["cross_step_groups"], "groups: a rich group that fits one batch is assessed there")
+
+
 def test_input_hash_is_over_the_bytes_that_were_parsed():
     with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
         original = _input(1)

@@ -679,6 +679,8 @@ def load_adjudication(
         "unmatched": 0,
         "groups_assessed": 0,
         "groups_omitted": 0,
+        "unsent": 0,
+        "groups_unsent": 0,
         "errors": [],
     }
     path = adjudication_output_path(sweep_dir)
@@ -758,6 +760,13 @@ def _apply_adjudication(findings: list[dict], groups: list[dict], envelope: dict
     matches nothing is dropped, logged and counted `unmatched`. `occurrences`
     and `severity_range` are not touched.
     """
+    # What the lane itself declined to send (over its prompt-size budget),
+    # so the report can say why a finding or group has no verdict.
+    unsent = envelope.get("unsent_findings")
+    unassessed = envelope.get("unassessed_groups")
+    record["unsent"] = len(unsent) if isinstance(unsent, list) else 0
+    record["groups_unsent"] = len(unassessed) if isinstance(unassessed, list) else 0
+
     by_key = {}
     for adjudication in envelope.get("adjudications") or []:
         by_key[(adjudication["file"], adjudication["symbol"], adjudication["vuln_class"])] = adjudication
@@ -1094,15 +1103,28 @@ def _adjudication_incomplete_lines(adjudication: dict) -> list[str]:
         )
     else:
         if adjudication.get("omitted", 0) > 0:
+            unsent = adjudication.get("unsent", 0)
+            why = (
+                f" ({unsent} of them never sent: over the adjudicator's prompt-size budget)"
+                if unsent
+                else ""
+            )
             lines.append(
-                f"- **Adjudicator omitted {adjudication['omitted']} finding(s)** it was handed; "
+                f"- **Adjudicator omitted {adjudication['omitted']} finding(s)** it was handed{why}; "
                 "each is still listed under `## Findings`, marked *not adjudicated*, with its raw "
                 "lane severities."
             )
         if adjudication.get("groups_omitted", 0) > 0:
+            groups_unsent = adjudication.get("groups_unsent", 0)
+            why = (
+                f" ({groups_unsent} of them never sent: the members could not share one "
+                "prompt, and a group is never assessed on partial evidence)"
+                if groups_unsent
+                else ""
+            )
             lines.append(
                 f"- **Adjudicator did not assess {adjudication['groups_omitted']} cross-step "
-                "group(s)** it was handed; each is still listed under `## Cross-step groups` "
+                f"group(s)** it was handed{why}; each is still listed under `## Cross-step groups` "
                 "with no assessment."
             )
     return lines

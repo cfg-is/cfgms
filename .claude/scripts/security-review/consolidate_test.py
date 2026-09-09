@@ -1833,6 +1833,34 @@ def test_malformed_nested_json_types_are_excluded_not_crashed_on():
         check(report["adjudication"]["status"] == "invalid", "consolidate: an adjudication envelope with an array state is invalid, not a crash", str(report["adjudication"]))
 
 
+def test_unsent_findings_and_groups_are_explained_in_incomplete():
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/a/a.go": "a", "pkg/b/b.go": "b"})
+        write_plan_step(sweep, "step-001", sha)
+        write_plan_step(sweep, "step-002", sha)
+        write(os.path.join(sweep, ".plan-context.json"), {"sweep_id": os.path.basename(sweep), "commit_sha": sha})
+        write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), complete_envelope(sha, "laneA", "step-001", [finding(sha, "laneA", "step-001", file="pkg/a/a.go", symbol="A")]))
+        write(os.path.join(sweep, "lanes", "laneA", "step-002.findings.json"), complete_envelope(sha, "laneA", "step-002", [finding(sha, "laneA", "step-002", file="pkg/b/b.go", symbol="B")]))
+        _record_adjudicator_dispatch(sweep)
+        path = _write_adjudication_envelope(
+            sweep, repo, sha,
+            [{"file": "pkg/a/a.go", "symbol": "A", "vuln_class": "tenant-scoping", "severity": "high", "rationale": "r"}],
+            group_assessments=[],
+        )
+        with open(path) as fh:
+            envelope = json.load(fh)
+        envelope["unsent_findings"] = [["pkg/b/b.go", "B", "tenant-scoping"]]
+        envelope["unassessed_groups"] = ["group-001"]
+        write(path, envelope)
+        report = consolidate.consolidate(sweep, repo)
+        md = consolidate.render_markdown(report)
+        adj = report["adjudication"]
+        check(adj["status"] == "complete" and adj["omitted"] == 1 and adj["unsent"] == 1 and adj["groups_omitted"] == 1 and adj["groups_unsent"] == 1, "consolidate: unsent findings/groups are counted beside omitted ones", str(adj))
+        check("(1 of them never sent: over the adjudicator's prompt-size budget)" in md, "consolidate.md: an unsent finding's reason is stated", md)
+        check("never assessed on partial evidence" in md, "consolidate.md: an unsent group's reason is stated", md)
+        check("## Incomplete" in md, "consolidate.md: unsent items make the sweep incomplete")
+
+
 def test_adjudication_cannot_delete_a_finding():
     """REQUIRED TEST (Issue #3984, A2): an adjudication envelope that omits a
     finding present in the deterministic set -- the finding still appears

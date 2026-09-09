@@ -2172,7 +2172,9 @@ re-checked against real data rather than re-argued.
   deterministic set and looks each finding up in the envelope — never the reverse. A finding the
   adjudicator omitted keeps `adjudication: null`, renders as `Severity (raw): ... not adjudicated
   (the adjudicator omitted this finding)`, and is counted (`omitted`) and named in `## Incomplete`;
-  a cross-step group it did not assess is counted (`groups_omitted`) and named there the same way.
+  a cross-step group it did not assess is counted (`groups_omitted`) and named there the same way,
+  and when the lane itself withheld a finding or group for prompt size (`unsent_findings` /
+  `unassessed_groups` on the envelope) the `## Incomplete` line says so.
   An adjudication whose key matches no finding is dropped, logged and counted (`unmatched`) — a
   model cannot add findings either. `consolidate_test.py::test_adjudication_cannot_delete_a_finding`
   is the required A2 test.
@@ -2248,9 +2250,15 @@ re-checked against real data rather than re-argued.
    rendered losslessly as JSON string literals (the model must copy them back exactly), and the
    cross-step groups whose members are in the batch. Batches are bounded by measured prompt
    bytes (`MAX_PROMPT_BYTES`, under Linux's 131072-byte single-argument cap that `claude` and
-   `codex` prompts hit as one argv element) and secondarily by count (forty), and are
-   group-aware: a group's members travel together so the model assessing it sees every
-   member's reports. The call goes through the finder lane's own `call_<harness>_harness`, so
+   `codex` prompts hit as one argv element) and secondarily by count (forty). The byte ceiling
+   is absolute: a single finding too large to send whole has its reports capped to the ten
+   highest-severity ones and its text caps halved until it fits, each reduction stated in the
+   prompt, and one that still does not fit is recorded on the envelope as `unsent_findings`
+   and never rendered — the report counts it omitted and says why. Batching is group-aware: a
+   group's members are placed together, and a group is sent only in a batch that holds every
+   one of its members; a group that cannot share one batch is recorded as
+   `unassessed_groups` and never sent, so a verdict is never solicited on partial evidence.
+   The call goes through the finder lane's own `call_<harness>_harness`, so
    the `claude` adjudicator runs under the same disallowed-tools profile as a `claude` finder:
    it can write its output file and nothing else. The lane merges the batches, de-duplicates
    on key, and writes the envelope.

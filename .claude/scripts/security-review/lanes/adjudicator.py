@@ -43,9 +43,16 @@ adjudication is detectable), `prompt_version`, and `harness_identity`.
 prompt is measured to stay under `MAX_PROMPT_BYTES` (a single argv argument
 on Linux caps at 131072 bytes) and whose count stays at or under
 `BATCH_SIZE`, one harness call per batch; every batch must complete for the
-envelope to be `complete`. Batching is group-aware: a cross-step group's
-members are placed together and the group rides in that batch, so the model
-assessing it sees every member's reports.
+envelope to be `complete`. The ceiling is absolute: a single finding too
+large to send whole has its reports capped to the strongest
+`MAX_REPORTS_PER_FINDING` and its text caps halved until it fits (each
+reduction stated in the prompt), and one that still does not fit is listed
+on the envelope as `unsent_findings` and never rendered -- the consolidator
+counts it omitted. Batching is group-aware: a cross-step group's members
+are placed together, and a group is sent ONLY in a batch holding every one
+of its members; one that cannot share a batch is listed as
+`unassessed_groups` and never sent, so no verdict is ever solicited on
+partial evidence.
 
 Every path is overridable via env var, matching every other lane, so the
 lane can run in a checkout under test with nothing mounted.
@@ -295,18 +302,29 @@ def _render_finding(index: int, finding: dict) -> str:
         f"finder severities: lowest={severity_range.get('lowest')} highest={severity_range.get('highest')}"
         f" disagreement={'yes' if severity_range.get('disagreement') else 'no'}",
     ]
+    # `_text_cap` / `reports_omitted` are set only by `_shrink_to_budget` on a
+    # finding too large to send whole; every other finding renders at the
+    # full caps.
+    text_cap = int(finding.get("_text_cap") or EVIDENCE_MAX_CHARS)
     for report in finding.get("reports") or []:
         lines.append("")
         lines.append(
             f"- finder `{_clip(report.get('lane'), 100)}` (step {_clip(report.get('step_id'), 50)}) "
             f"rated {_clip(report.get('severity'), 20)} at confidence {_clip(report.get('confidence'), 20)}"
         )
-        lines.append(f"  title: <<<report-text>>>{_clip(report.get('title'), 300)}<<<end report-text>>>")
+        lines.append(f"  title: <<<report-text>>>{_clip(report.get('title'), min(300, text_cap))}<<<end report-text>>>")
         lines.append(
-            f"  evidence: <<<report-text>>>{_clip(report.get('evidence'), EVIDENCE_MAX_CHARS)}<<<end report-text>>>"
+            f"  evidence: <<<report-text>>>{_clip(report.get('evidence'), text_cap)}<<<end report-text>>>"
         )
         lines.append(
-            f"  suggested fix: <<<report-text>>>{_clip(report.get('suggested_fix'), 600)}<<<end report-text>>>"
+            f"  suggested fix: <<<report-text>>>{_clip(report.get('suggested_fix'), min(600, text_cap))}<<<end report-text>>>"
+        )
+    omitted = finding.get("reports_omitted")
+    if isinstance(omitted, int) and omitted > 0:
+        lines.append("")
+        lines.append(
+            f"({omitted} further finder report(s) on this finding were omitted for prompt size; "
+            "the reports shown are the highest-severity ones)"
         )
     return "\n".join(lines)
 
@@ -392,6 +410,11 @@ def _validate_raw_output(data: dict) -> list[str]:
     return errors
 
 
+MAX_REPORTS_PER_FINDING = 10
+TEXT_CAP_FLOOR = 100
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
 def _key(finding: dict) -> tuple:
     return (finding.get("file"), finding.get("symbol"), finding.get("vuln_class"))
 
@@ -403,38 +426,77 @@ def prompt_bytes(batch: dict, harness: str) -> int:
     return len(build_prompt(batch, PROBE_OUTPUT_PATH, harness).encode("utf-8"))
 
 
-def make_batches(
+def _shrink_to_budget(finding: dict, harness: str, max_prompt_bytes: int, base: dict) -> "dict | None":
+    """A copy of `finding` whose prompt, alone in an empty batch, fits the
+    byte budget -- or `None` if no honest reduction gets it there.
+
+    Per-report text caps bound one report, not a finding: five lanes across
+    ten overlapping steps is fifty reports on one key. Reduction is
+    deterministic and visible in the prompt: reports beyond
+    `MAX_REPORTS_PER_FINDING` are dropped (highest severity first, then lane
+    and step, so what remains is the strongest case) and their count is
+    stated; then the per-report text cap halves until the finding fits or
+    reaches `TEXT_CAP_FLOOR`. A finding that still does not fit -- an
+    identifier alone can exceed the budget -- is not sent at all; the
+    caller records it as unsent, and the consolidator renders it with its
+    raw severities and counts it omitted, so the reader sees a gap rather
+    than a verdict the model never made."""
+    shrunk = dict(finding)
+    reports = sorted(
+        finding.get("reports") or [],
+        key=lambda r: (_SEVERITY_ORDER.get(r.get("severity"), 9), str(r.get("lane")), str(r.get("step_id"))),
+    )
+    if len(reports) > MAX_REPORTS_PER_FINDING:
+        shrunk["reports"] = reports[:MAX_REPORTS_PER_FINDING]
+        shrunk["reports_omitted"] = len(reports) - MAX_REPORTS_PER_FINDING
+    cap = EVIDENCE_MAX_CHARS
+    while True:
+        shrunk["_text_cap"] = cap
+        if prompt_bytes({**base, "findings": [shrunk], "cross_step_groups": []}, harness) <= max_prompt_bytes:
+            return shrunk
+        if cap <= TEXT_CAP_FLOOR:
+            return None
+        cap //= 2
+
+
+def plan_batches(
     adjudication_input: dict,
     harness: str = "claude",
     max_prompt_bytes: int = MAX_PROMPT_BYTES,
     batch_size: int = BATCH_SIZE,
-) -> list[dict]:
+) -> dict:
     """Split the input into batches whose rendered prompt stays under
     `max_prompt_bytes` (measured, rubric and group overhead included) and
-    whose finding count stays at or under `batch_size`.
+    whose finding count stays at or under `batch_size`. Returns
+    `{"batches": [...], "unsent_findings": [keys], "unassessed_groups": [ids]}`.
+
+    The byte ceiling is absolute: a single finding that does not fit even
+    after `_shrink_to_budget` is listed in `unsent_findings` and never
+    rendered, so no prompt this lane emits can exceed the budget.
 
     Group-aware: a cross-step group's member findings are placed together,
-    ahead of ungrouped findings, and the group rides in the batch that holds
-    them -- so the model assessing a group has every member's reports in
-    front of it, not one member and a list of keys. A finding that belongs to
-    two groups travels with the first; the second group is attached to the
-    batch holding its first member (its other members' reports may then be
-    elsewhere -- an accepted limit for overlapping groups, which are rare and
-    still assessed with at least one member present). A group whose members
-    alone exceed the budget is split across batches and attached to the batch
-    holding its first member.
+    ahead of ungrouped findings, and a group is attached to a batch ONLY
+    when every one of its members is in that batch -- the prompt tells the
+    model each member's reports are present, and that must be literally
+    true. A group whose members cannot share one batch (too many, too
+    large, or claimed by an earlier overlapping group and placed elsewhere)
+    is listed in `unassessed_groups` and never sent; the consolidator counts
+    it as not assessed. A partial-evidence verdict is never solicited.
     """
     findings = list(adjudication_input.get("findings") or [])
     groups = list(adjudication_input.get("cross_step_groups") or [])
+    empty = {
+        "sweep_id": adjudication_input.get("sweep_id"),
+        "commit_sha": adjudication_input.get("commit_sha"),
+        "findings": [],
+        "cross_step_groups": [],
+    }
     if not findings:
-        return []
+        return {"batches": [], "unsent_findings": [], "unassessed_groups": [g.get("group_id") for g in groups]}
 
     by_key = {_key(f): f for f in findings}
     placed: set = set()
-    # Units: (member findings, group-or-None). Group units first, then
-    # every finding no group claimed, each on its own.
     units: list = []
-    unit_group_ids: set = set()
     for group in groups:
         members = []
         for member in group.get("members") or []:
@@ -443,66 +505,73 @@ def make_batches(
                 members.append(by_key[key])
                 placed.add(key)
         if members:
-            units.append((members, group))
-            unit_group_ids.add(group.get("group_id"))
+            units.append(members)
     for finding in findings:
         if _key(finding) not in placed:
-            units.append(([finding], None))
+            units.append([finding])
             placed.add(_key(finding))
-
-    def new_batch() -> dict:
-        return {
-            "sweep_id": adjudication_input.get("sweep_id"),
-            "commit_sha": adjudication_input.get("commit_sha"),
-            "findings": [],
-            "cross_step_groups": [],
-        }
 
     def fits(batch: dict) -> bool:
         return len(batch["findings"]) <= batch_size and prompt_bytes(batch, harness) <= max_prompt_bytes
 
     batches: list[dict] = []
-    current = new_batch()
+    unsent: list = []
+    current = dict(empty)
     queue = list(units)
     while queue:
-        members, group = queue.pop(0)
-        candidate = {
-            **current,
-            "findings": current["findings"] + members,
-            "cross_step_groups": current["cross_step_groups"] + ([group] if group else []),
-        }
+        members = queue.pop(0)
+        candidate = {**current, "findings": current["findings"] + members}
         if fits(candidate):
             current = candidate
             continue
         if current["findings"]:
-            # Close the current batch and retry this unit on a fresh one.
             batches.append(current)
-            current = new_batch()
-            queue.insert(0, (members, group))
+            current = dict(empty)
+            queue.insert(0, members)
             continue
-        # The unit alone does not fit an empty batch. A multi-member group is
-        # split into singles, its group riding with the first; a single
-        # finding is taken as-is (its reports are already capped).
         if len(members) > 1:
-            singles = [([m], group if i == 0 else None) for i, m in enumerate(members)]
-            queue[0:0] = singles
+            queue[0:0] = [[m] for m in members]
             continue
-        current = candidate
+        shrunk = _shrink_to_budget(members[0], harness, max_prompt_bytes, empty)
+        if shrunk is None:
+            unsent.append(list(_key(members[0])))
+            schema.log_event(
+                "adjudication_finding_unsent_over_budget",
+                file=members[0].get("file"),
+                symbol=members[0].get("symbol"),
+                vuln_class=members[0].get("vuln_class"),
+            )
+            continue
+        current = {**current, "findings": current["findings"] + [shrunk]}
     if current["findings"]:
         batches.append(current)
 
-    # Groups every member of which had already been claimed by an earlier
-    # group: attach to the batch holding the group's first member.
+    unassessed: list = []
     for group in groups:
-        if group.get("group_id") in unit_group_ids:
-            continue
-        member_keys = [_key(m) for m in group.get("members") or []]
+        member_keys = {_key(m) for m in group.get("members") or []}
+        attached = False
         for batch in batches:
             batch_keys = {_key(f) for f in batch["findings"]}
-            if any(k in batch_keys for k in member_keys):
-                batch["cross_step_groups"].append(group)
+            if member_keys and member_keys <= batch_keys:
+                candidate = {**batch, "cross_step_groups": batch["cross_step_groups"] + [group]}
+                if fits(candidate):
+                    batch["cross_step_groups"] = candidate["cross_step_groups"]
+                    attached = True
                 break
-    return batches
+        if not attached:
+            unassessed.append(group.get("group_id"))
+            schema.log_event("adjudication_group_unassessed", group_id=group.get("group_id"))
+    return {"batches": batches, "unsent_findings": unsent, "unassessed_groups": unassessed}
+
+
+def make_batches(
+    adjudication_input: dict,
+    harness: str = "claude",
+    max_prompt_bytes: int = MAX_PROMPT_BYTES,
+    batch_size: int = BATCH_SIZE,
+) -> list[dict]:
+    """The batches of `plan_batches()` alone."""
+    return plan_batches(adjudication_input, harness, max_prompt_bytes, batch_size)["batches"]
 
 
 def _write_envelope(out_dir: str, envelope: dict) -> str:
@@ -549,10 +618,23 @@ def run_adjudication(
         "harness_identity": harness_identity,
     }
 
-    def finish(state: str, stop_reason: "str | None" = None, adjudications=None, assessments=None, batches=0) -> dict:
+    def finish(
+        state: str,
+        stop_reason: "str | None" = None,
+        adjudications=None,
+        assessments=None,
+        batches=0,
+        unsent_findings=None,
+        unassessed_groups=None,
+    ) -> dict:
         envelope = dict(context)
         envelope["state"] = state
         envelope["batches"] = batches
+        # What this lane deliberately did NOT send, so the consolidator can
+        # say "not sent: over the prompt size budget" rather than only
+        # "omitted by the adjudicator".
+        envelope["unsent_findings"] = list(unsent_findings or [])
+        envelope["unassessed_groups"] = list(unassessed_groups or [])
         if state == terminal_state.COMPLETE:
             envelope["adjudications"] = adjudications or []
             envelope["group_assessments"] = assessments or []
@@ -596,7 +678,10 @@ def run_adjudication(
         except (KeyError, ImportError, AttributeError) as exc:
             return finish(terminal_state.FAILED, f"unknown_harness:{harness}:{exc}")
 
-    batches = make_batches(adjudication_input, harness=harness)
+    plan = plan_batches(adjudication_input, harness=harness)
+    batches = plan["batches"]
+    unsent_findings = plan["unsent_findings"]
+    unassessed_groups = plan["unassessed_groups"]
     all_adjudications: list[dict] = []
     all_assessments: list[dict] = []
     seen_keys: set = set()
@@ -610,24 +695,26 @@ def run_adjudication(
             exit_code, rate_limited = call_harness_fn(model, prompt, raw_path)
         except Exception as exc:  # noqa: BLE001 -- a launch failure is a failed stage, never a crash
             _remove(raw_path)
-            return finish(terminal_state.FAILED, f"launch_exception:{exc}", batches=len(batches))
+            return finish(terminal_state.FAILED, f"launch_exception:{exc}", batches=len(batches), unsent_findings=unsent_findings, unassessed_groups=unassessed_groups)
 
         if rate_limited:
             _remove(raw_path)
-            return finish(terminal_state.PARKED, "rate_limited", batches=len(batches))
+            return finish(terminal_state.PARKED, "rate_limited", batches=len(batches), unsent_findings=unsent_findings, unassessed_groups=unassessed_groups)
         if exit_code != 0:
             _remove(raw_path)
-            return finish(terminal_state.FAILED, f"harness_exit_{exit_code}", batches=len(batches))
+            return finish(terminal_state.FAILED, f"harness_exit_{exit_code}", batches=len(batches), unsent_findings=unsent_findings, unassessed_groups=unassessed_groups)
         data = _parse_raw_output(raw_path)
         _remove(raw_path)
         if data is None:
-            return finish(terminal_state.REFUSED, "no_valid_adjudication_file", batches=len(batches))
+            return finish(terminal_state.REFUSED, "no_valid_adjudication_file", batches=len(batches), unsent_findings=unsent_findings, unassessed_groups=unassessed_groups)
         errors = _validate_raw_output(data)
         if errors:
             return finish(
                 terminal_state.FAILED,
                 "invalid_adjudication_schema:" + "; ".join(errors),
                 batches=len(batches),
+                unsent_findings=unsent_findings,
+                unassessed_groups=unassessed_groups,
             )
         for entry in data["adjudications"]:
             key = (entry["file"], entry["symbol"], entry["vuln_class"])
@@ -650,6 +737,8 @@ def run_adjudication(
         adjudications=all_adjudications,
         assessments=all_assessments,
         batches=len(batches),
+        unsent_findings=unsent_findings,
+        unassessed_groups=unassessed_groups,
     )
 
 

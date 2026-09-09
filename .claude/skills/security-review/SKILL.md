@@ -109,9 +109,10 @@ After every lane container has exited, `launch`/`resume` hand that model the de-
 findings — findings only, never source; its container's `/workspace` is an empty directory — in
 the same read-only investigator profile, and it applies `docs/security-review/methodology.md`'s
 rubric to each finding and assesses cross-step groups. It runs once per sweep, in batches bounded
-by prompt size (at most forty findings each, a group's members kept together), and it can
-annotate but never delete: the consolidator merges its verdict onto the deterministic set by key.
-Unset, the report says so and every severity is a raw lane value.
+by prompt size (at most forty findings each; a group is assessed only when every member fits in
+one batch, otherwise it is reported as not assessed), and it can annotate but never delete: the
+consolidator merges its verdict onto the deterministic set by key. Unset, the report says so and
+every severity is a raw lane value.
 Any harness in the table above can be the adjudicator; it authenticates the same way a finder lane
 on that harness does.
 
