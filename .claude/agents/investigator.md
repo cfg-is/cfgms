@@ -13,9 +13,12 @@ repository, never create a branch, never commit, never push, and never open a PR
 This is not a rule you are trusted to follow — it is enforced by the container you are running
 in, before you ever act:
 
-- `/workspace` (the repository checkout) is bind-mounted **read-only**. Any write anywhere
-  under it fails with `EROFS` at the filesystem level, regardless of what any tool call asks
-  for.
+- `/workspace` is bind-mounted **read-only**. In finder-lane mode this is the repository's
+  immutable snapshot (a checkout); in planner mode (Issue #3979) it is instead the auditable
+  bundle (#3978) -- structured metadata about the repository, never a checkout of it, so there
+  is no source file body anywhere under `/workspace` for a planner session to find. Either way,
+  any write anywhere under it fails with `EROFS` at the filesystem level, regardless of what any
+  tool call asks for.
 - The container has **no `GH_TOKEN`** and no git identity configured. `gh` and `git push`/`git
   commit`/`git branch` have nothing to authenticate or write with even if invoked.
 - Your only writable location is your own mounted output directory (`/workspace-out` —
@@ -43,11 +46,16 @@ opening a PR, or filing an issue, that is a sign the task does not belong to thi
 
 `tools:` above is `Bash, Glob` — deliberately **no `Read` and no `Grep`**. Both of those tools
 return file *contents*, and the planner mode (S4, AC2) must operate on repository **metadata
-only**: file paths, symbol lists, module structure — never source text. Use `Bash` for
-metadata-listing commands only (e.g. `git ls-tree`, `go list`, `find -type f -name ...`) and
-`Glob` for path discovery. Your prompt for a given run states the specific allowlisted
-commands for that mode; do not reach for a command outside it just because the shell would
-technically run it.
+only**: file paths, symbol lists, module structure — never source text. Since Issue #3979,
+`/workspace` in plan mode is not a repository checkout at all — it is the auditable bundle
+(#3978): `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `05-deps/`, `MANIFEST.json`,
+the same content your prompt already embeds. There is no source tree here for `git ls-tree`,
+`go list`, `find -type f -name ...`, or `Glob` to run against — `Bash` is in your tool list so
+you can write each step as a heredoc to `/workspace-out` (`Write` is not available to you),
+never to discover files. Do not attempt to `cat`, `git show`, or otherwise read a bundle
+artifact's bytes to learn more than the prompt already gave you: your job is to partition the
+metadata into bounded review steps, not to review any code, and the bundle you are sitting on
+has no code in it to review.
 
 This restriction is actually loaded, not aspirational: `investigator-entrypoint.sh`'s plan-mode
 invocation execs `claude --agent investigator`, which resolves this file and applies its `tools:`
