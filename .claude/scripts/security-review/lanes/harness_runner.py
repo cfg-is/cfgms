@@ -218,7 +218,18 @@ def methodology_path() -> Path:
     container, where the whole repository is bind-mounted at `/workspace`
     and this module is imported from
     `/workspace/.claude/scripts/security-review/lanes/`."""
+    # Issue #3982: the methodology is review POLICY, so inside the investigator
+    # container it comes from the trusted harness mount (`launch-investigator`
+    # bind-mounts the host's docs/security-review at
+    # /opt/cfgms-harness/docs/security-review beside the harness tree), never
+    # from the audited snapshot. An explicit CFGMS_SECURITY_REVIEW_METHODOLOGY
+    # file path wins; then the trusted mount; then the checkout/test roots.
+    explicit = os.environ.get("CFGMS_SECURITY_REVIEW_METHODOLOGY")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
     roots = []
+    harness_dir = os.environ.get("CFGMS_SECURITY_REVIEW_HARNESS_DIR") or "/opt/cfgms-harness/security-review"
+    roots.append(Path(harness_dir).parent)
     env_root = os.environ.get("CFGMS_SECURITY_REVIEW_REPO_ROOT")
     if env_root:
         roots.append(Path(env_root))
@@ -1036,7 +1047,12 @@ def _killpg(proc: subprocess.Popen) -> None:
         pass
 
 
-def _read_bounded(stream, limit: int, sink: dict, on_overflow) -> None:
+def _read_bounded(stream, limit: int, sink: dict, on_overflow, drain: bool = False) -> None:
+    """Read `stream` into `sink` keeping at most `limit` bytes. On overflow
+    call `on_overflow` (stdout: kill the child) and then either stop
+    (`drain=False`) or keep reading and DISCARDING until EOF (`drain=True`,
+    stderr): a child left with an unread pipe blocks on its next write and
+    would sit there until the timeout instead of finishing."""
     chunks: list[bytes] = []
     total = 0
     try:
@@ -1050,6 +1066,10 @@ def _read_bounded(stream, limit: int, sink: dict, on_overflow) -> None:
                 total = limit
                 sink["truncated"] = True
                 on_overflow()
+                if not drain:
+                    break
+                while stream.read1(65536):
+                    pass
                 break
             chunks.append(chunk)
             total += len(chunk)
@@ -1103,7 +1123,7 @@ def run_bounded(argv: list[str], cwd: str, env: dict, timeout_s: float, max_outp
     out_sink: dict = {"data": b"", "truncated": False}
     err_sink: dict = {"data": b"", "truncated": False}
     assert proc.stdout is not None and proc.stderr is not None
-    err_thread = threading.Thread(target=_read_bounded, args=(proc.stderr, SCAN_STDERR_MAX_BYTES, err_sink, lambda: None), daemon=True)
+    err_thread = threading.Thread(target=_read_bounded, args=(proc.stderr, SCAN_STDERR_MAX_BYTES, err_sink, lambda: None, True), daemon=True)
     err_thread.start()
     try:
         _read_bounded(proc.stdout, max_output_bytes, out_sink, lambda: _killpg(proc))
@@ -1155,6 +1175,9 @@ def _find_go_module_root(repo_root_real: str, dir_real: str) -> str | None:
         current = os.path.dirname(current)
 
 
+_GO_MOD_MODULE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~\-/]*[ \t]+v[0-9][A-Za-z0-9.+\-]*$")
+
+
 def _go_mod_local_replace(go_mod_path: str) -> str | None:
     """The first `replace` directive whose target is a filesystem path (one
     token after `=>`, no version) -- Go would read that directory, which can be
@@ -1184,9 +1207,13 @@ def _go_mod_local_replace(go_mod_path: str) -> str | None:
             continue
         if "=>" not in candidate:
             continue
-        rhs = candidate.split("=>", 1)[1].split()
-        if len(rhs) == 1:
-            return f"go.mod replace directive points at a filesystem path: {candidate[:120]}"
+        # Fail closed: the ONLY accepted target is `<module path> <version>`
+        # in plain (unquoted) tokens. A single token is a filesystem path; a
+        # quoted or interpreted string, a path with spaces, or anything
+        # else Go would still parse is treated as a filesystem replace too.
+        rhs = candidate.split("=>", 1)[1].strip()
+        if not _GO_MOD_MODULE_VERSION_RE.match(rhs):
+            return f"go.mod replace directive does not name a plain module path plus version (treated as a filesystem replace): {candidate[:120]}"
     return None
 
 
@@ -1467,8 +1494,11 @@ def analyse_tool_output(check: scan_profiles.Check, tool: scan_profiles.Tool, st
     """
     text = stdout_text.strip()
     if not text:
-        if tool.silent_on_clean:
+        diagnostics = stderr_text.strip()
+        if exit_code in tool.clean_empty_exit_codes and not diagnostics:
             return SCAN_STATUS_OK, f"exit {exit_code}, no output: 0 findings (this tool prints nothing when clean)", 0
+        if diagnostics:
+            return SCAN_STATUS_FAILED, f"exit {exit_code} with no stdout but diagnostics on stderr (tool did not complete its analysis): {diagnostics[:200]!r}", 0
         return SCAN_STATUS_EMPTY, f"exit {exit_code} with no output -- no evidence either way, not a clean result", 0
     if not check.json_output:
         return SCAN_STATUS_OK, "", text.count("\n") + 1
@@ -1640,7 +1670,7 @@ def collect_scan_evidence(
                     record["reason"] = reason
                     record["findings"] = findings
                 evidence["records"].append(record)
-                if record["status"] in (SCAN_STATUS_OK, SCAN_STATUS_EMPTY) and not record["truncated"]:
+                if record["status"] == SCAN_STATUS_OK and not record["truncated"]:
                     _store_cached(cache_path, record)
         evidence["checks_run"] = count
     except Exception as exc:  # noqa: BLE001 -- a scanner-runner bug is a gap, never a failed step
@@ -1685,7 +1715,7 @@ def scan_summary(evidence: dict | None) -> list[dict]:
         summary.append({"gap": gap.get("kind"), **{k: v for k, v in gap.items() if k != "kind"}})
     omitted = int(evidence.get("prompt_omitted_records") or 0)
     if omitted:
-        summary.append({"gap": "prompt_budget_omitted", "records": omitted, "reason": f"{omitted} scanner record(s) were omitted from the prompt by the {SCAN_EVIDENCE_MAX_BYTES}-byte evidence budget"})
+        summary.append({"gap": "prompt_budget_omitted", "records": omitted, "reason": f"{omitted} scanner record(s) were omitted from or cut in the prompt by the {SCAN_EVIDENCE_MAX_BYTES}-byte evidence budget; the model did not receive all scanner evidence"})
     return summary
 
 
@@ -1756,7 +1786,7 @@ def render_scan_evidence(evidence: dict | None, budget: int = SCAN_EVIDENCE_MAX_
         shown_gaps += 1
     lines.append("")
     rendered = "\n".join(lines)
-    omission_notice = f"\n[{{n}} scanner record(s) omitted: step scanner-evidence budget of {budget} bytes exhausted; see the step envelope]\n"
+    omission_notice = f"\n[{{n}} scanner record(s) omitted or cut: step scanner-evidence budget of {budget} bytes exhausted; see the step envelope]\n"
     reserve = _nbytes(omission_notice.format(n=len(evidence.get("records", [])))) + 16
     if _nbytes(rendered) > budget - reserve:
         # Even the gap list overflowed: keep the heading, state the omission.
@@ -1790,9 +1820,9 @@ def render_scan_evidence(evidence: dict | None, budget: int = SCAN_EVIDENCE_MAX_
                 encoded = body.encode("utf-8")[:room]
                 cut = encoded.decode("utf-8", errors="ignore") + "\n[... output cut here: step scanner-evidence budget exhausted ...]"
                 rendered += f"\n{head}{_SCAN_OUTPUT_BEGIN}\n{cut}\n{_SCAN_OUTPUT_END}\n"
-                omitted = len(records) - index - 1
-            else:
-                omitted = len(records) - index
+            # The cut record counts as not fully delivered, exactly like the
+            # records after it: the model did not receive all of its evidence.
+            omitted = len(records) - index
             break
         rendered += block
     if omitted:

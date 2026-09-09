@@ -755,7 +755,10 @@ def render_markdown(report: dict) -> str:
             "Fixed, harness-owned tool profiles (Issue #3982) ran over each step's files; "
             "a non-`ok` check or a step without scans is code the tools did not cover, "
             "listed below. These gaps do not make the sweep incomplete -- the model still "
-            "reviewed the source -- but a bare empty tool result is never treated as clean."
+            "reviewed the source -- but a bare empty tool result is never treated as clean. "
+            "Known suppression gap: staticcheck honours `//lint:ignore` directives in the audited "
+            "code (it has no switch to ignore them); semgrep `nosemgrep` and gosec `#nosec` "
+            "suppressions are disabled, and eslint inline config is disabled."
         )
         lines.append("")
         lines.append("| Lane | Checks | Ok | Partial | Empty | Failed | Timeout | Rejected | Unavailable | Skipped | Truncated | Cached | Steps without scans |")

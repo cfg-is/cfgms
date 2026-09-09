@@ -158,6 +158,9 @@ def test_trusted_config_and_offline_flags_are_present() -> None:
                 check("--disable-nosem" in c.args, f"{language}/semgrep ignores // nosemgrep suppressions in the audited snapshot")
             if c.tool == "gosec":
                 check("-nosec" in c.args, f"{language}/gosec ignores #nosec suppressions in the audited snapshot")
+            if c.tool == "staticcheck":
+                i = c.args.index("-checks") if "-checks" in c.args else -1
+                check(i >= 0 and c.args[i + 1] == sp.STATICCHECK_CHECKS and "all" in c.args[i + 1], f"{language}/staticcheck carries a harness-owned -checks set so a snapshot staticcheck.conf cannot narrow it")
             if c.tool in ("gosec", "staticcheck", "semgrep", "eslint"):
                 check(c.json_output, f"{language}/{c.tool} declares json_output so error text cannot pass as findings")
     go_tools = {c.tool for c in sp.PROFILES["go"]}

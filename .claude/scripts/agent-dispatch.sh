@@ -3058,6 +3058,15 @@ PROMPT_EOF
       fi
       inv_lane_entrypoint_mount+=(-v "${inv_harness_dir_host}:/opt/cfgms-harness/security-review:ro")
       inv_lane_entrypoint_mount+=(-e "CFGMS_SECURITY_REVIEW_HARNESS_DIR=/opt/cfgms-harness/security-review")
+      # The review methodology (docs/security-review/methodology.md) is
+      # review POLICY and is loaded by harness_runner at import; it comes from
+      # the same trusted host tree, beside the harness, never from /workspace.
+      inv_methodology_dir_host="${REPO_ROOT}/docs/security-review"
+      if [[ ! -f "${inv_methodology_dir_host}/methodology.md" ]]; then
+        echo "ERROR: trusted methodology not found: ${inv_methodology_dir_host}/methodology.md"
+        exit 1
+      fi
+      inv_lane_entrypoint_mount+=(-v "${inv_methodology_dir_host}:/opt/cfgms-harness/docs/security-review:ro")
     fi
 
     # Trusted-harness identity (Issue #3952, epic #3950's D1 correction on
@@ -3099,6 +3108,7 @@ paths = [entrypoint_path, lane_entrypoint_path]
 # /opt/cfgms-harness/security-review), not just its entrypoint file, so
 # every Python module in it is part of the harness identity a resume checks.
 if lane_entrypoint_path:
+    paths.append(os.path.join(repo_root, "docs", "security-review", "methodology.md"))
     harness_dir = os.path.join(repo_root, ".claude", "scripts", "security-review")
     for dirpath, dirnames, filenames in os.walk(harness_dir):
         dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")

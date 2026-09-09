@@ -147,7 +147,8 @@ per check with its `status` (`ok`, `partial`, `empty`, `failed`, `timeout`, `rej
 `runner_error`, `prompt_budget_omitted`). `partial` means the tool reported findings AND analysis
 errors (a package that failed to compile or import), so its coverage is incomplete.
 `go_module_unscannable` means the Go module tree held a symlink, a `vendor/` directory or a
-filesystem `replace`, so no Go tool was allowed to open it. `empty` means the tool completed and printed
+`replace` that is not a plain module-plus-version, so no Go tool was allowed to open it.
+`prompt_budget_omitted` means the model did not receive every scanner record in full. `empty` means the tool completed and printed
 nothing — that is "no evidence", not "clean". A `rejected` check means a registry entry failed
 its shape check at runtime; that is a code defect to fix, not a finding to triage.
 

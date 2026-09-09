@@ -917,6 +917,8 @@ HARNESS_ID_REPO="${SANDBOX}/harness-id-repo"
 mkdir -p "${HARNESS_ID_REPO}/.devcontainer/scripts" "${HARNESS_ID_REPO}/.claude/scripts/security-review"
 ENTRYPOINT_FIXTURE="${HARNESS_ID_REPO}/.devcontainer/scripts/investigator-entrypoint.sh"
 SIBLING_FIXTURE="${HARNESS_ID_REPO}/.claude/scripts/security-review/schema.py"
+mkdir -p "${HARNESS_ID_REPO}/docs/security-review"
+printf 'methodology v1\n' > "${HARNESS_ID_REPO}/docs/security-review/methodology.md"
 LANE_ENTRYPOINT_A="${SANDBOX}/lane-entrypoint-a.py"
 LANE_ENTRYPOINT_B="${SANDBOX}/lane-entrypoint-b.py"
 printf 'lane entrypoint content A\n' > "$LANE_ENTRYPOINT_A"
@@ -1032,6 +1034,15 @@ check_contains "lane launch bind-mounts the trusted harness tree read-only at /o
   "$(cat "$DOCKER_CALL_LOG")" "${HARNESS_ID_REPO}/.claude/scripts/security-review:/opt/cfgms-harness/security-review:ro"
 check_contains "lane launch exports CFGMS_SECURITY_REVIEW_HARNESS_DIR" \
   "$(cat "$DOCKER_CALL_LOG")" "CFGMS_SECURITY_REVIEW_HARNESS_DIR=/opt/cfgms-harness/security-review"
+check_contains "lane launch bind-mounts the trusted methodology beside the harness" \
+  "$(cat "$DOCKER_CALL_LOG")" "${HARNESS_ID_REPO}/docs/security-review:/opt/cfgms-harness/docs/security-review:ro"
+printf 'methodology v2 CHANGED\n' > "${HARNESS_ID_REPO}/docs/security-review/methodology.md"
+hash_method_after="$(run_hid_launch hid-lane "$LANE_ENTRYPOINT_A")"
+if [[ -n "$hash_sibling_after" && -n "$hash_method_after" && "$hash_sibling_after" != "$hash_method_after" ]]; then
+  ok "changing the mounted methodology changes the recorded hash"
+else
+  bad "changing the mounted methodology changes the recorded hash" "before=${hash_sibling_after} after=${hash_method_after}"
+fi
 hash_plan="$(run_hid_launch plan "")"
 if grep -q "/opt/cfgms-harness/security-review" "$DOCKER_CALL_LOG"; then
   bad "plan-mode launch does not mount the harness tree" "$(grep -o '/opt/cfgms-harness[^ ]*' "$DOCKER_CALL_LOG" | head -1)"

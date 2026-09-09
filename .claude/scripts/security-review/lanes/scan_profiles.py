@@ -80,11 +80,13 @@ class Tool:
     version_args: tuple[str, ...]
     ok_exit_codes: frozenset[int]
     leading_args: tuple[str, ...] = ()
-    # True for a tool that prints NOTHING when it finds nothing (staticcheck's
-    # JSON mode, ripgrep's exit-1-no-match). For those, an empty stdout with a
-    # completed-run exit is "0 findings"; for every other tool it stays
-    # `empty` -- "no evidence either way", never a clean result.
-    silent_on_clean: bool = False
+    # Exit codes that mean "completed, found nothing, printed nothing" for a
+    # tool that prints NOTHING when clean (staticcheck's JSON mode exits 0;
+    # ripgrep's no-match is exit 1). Only that exact exit WITH an empty stderr
+    # is "0 findings"; the same tool exiting differently, or writing
+    # diagnostics, with no stdout is a failure (a toolchain refusal, a load
+    # error) and never a clean result. Empty for every other tool.
+    clean_empty_exit_codes: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -111,8 +113,8 @@ TOOLS: dict[str, Tool] = {
     # Already in cfg-agent:latest at pinned versions (.devcontainer/Dockerfile);
     # this story reinstalls none of them.
     "gosec": Tool("gosec", ("-version",), frozenset({0, 1})),
-    "staticcheck": Tool("staticcheck", ("-version",), frozenset({0, 1}), silent_on_clean=True),
-    "rg": Tool("rg", ("--version",), frozenset({0, 1}), silent_on_clean=True),
+    "staticcheck": Tool("staticcheck", ("-version",), frozenset({0, 1}), clean_empty_exit_codes=frozenset({0})),
+    "rg": Tool("rg", ("--version",), frozenset({0, 1}), clean_empty_exit_codes=frozenset({1})),
     # Installed by this story into the image-owned scanner home. semgrep from
     # a hash-pinned virtualenv; eslint run as `node <entry.js>` -- a direct
     # executable, never `npm run`, never a repo-provided binary.
@@ -178,6 +180,11 @@ _SEMGREP_COMMON = (
     "1024",
 )
 
+# staticcheck's default check set, spelled out (staticcheck's `-checks`
+# default is `inherit`, i.e. whatever a staticcheck.conf in the scanned tree
+# says). Harness-owned so the snapshot cannot narrow it.
+STATICCHECK_CHECKS = "all,-ST1000,-ST1003,-ST1016,-ST1020,-ST1021,-ST1022"
+
 # Runtime code-composition patterns CLAUDE.md bans repo-wide. Scanned as
 # fixed literals with ripgrep across shell / PowerShell / Python files, the
 # languages no other profile covers.
@@ -206,7 +213,11 @@ PROFILES: dict[str, tuple[Check, ...]] = {
         # No `-quiet`: gosec's JSON carries a "Golang errors" section that is
         # the only evidence a package failed to load.
         Check("gosec", ("-fmt", "json", "-nosec", "-exclude-generated", SCOPE_DIR), 120, 16_000, json_output=True),
-        Check("staticcheck", ("-f", "json", SCOPE_DIR), 180, 16_000, json_output=True),
+        # `-checks` is passed explicitly so a `staticcheck.conf` in the audited
+        # snapshot (`checks = ["-all"]` would switch the scanner off) cannot
+        # change the check set: the CLI flag overrides the config file. The
+        # value is upstream's own default set spelled out.
+        Check("staticcheck", ("-f", "json", "-checks", STATICCHECK_CHECKS, SCOPE_DIR), 180, 16_000, json_output=True),
         Check(
             "semgrep",
             _SEMGREP_COMMON

@@ -1822,6 +1822,120 @@ def test_scan_cache_keys_package_checks_by_package_not_declared_files():
         check(files2["cached"] is False, "the per-file check is not reused for different files")
 
 
+# --- Issue #3982 review round 3 -----------------------------------------------
+
+
+def test_go_mod_replace_parsing_fails_closed_on_quoted_or_odd_targets():
+    with tempfile.TemporaryDirectory() as tmp:
+        def problem(text):
+            path = os.path.join(tmp, "go.mod")
+            with open(path, "w") as f:
+                f.write(text)
+            return harness_runner._go_mod_local_replace(path)
+        check(problem('module a\n\ngo 1.24\n\nreplace example.com/dep => "/tmp/outside dir"\n') is not None, "a quoted filesystem path with spaces is rejected")
+        check(problem("module a\n\ngo 1.24\n\nreplace example.com/dep => ../elsewhere\n") is not None, "a relative path is rejected")
+        check(problem("module a\n\ngo 1.24\n\nreplace (\n\texample.com/dep => example.com/fork v1.0.0\n\texample.com/other =>\t/abs/path\n)\n") is not None, "a block-form path with a tab is rejected")
+        check(problem("module a\n\ngo 1.24\n\nreplace example.com/dep v1.0.0 => example.com/fork v1.2.3 // comment\n") is None, "a plain module path plus version is allowed")
+        check(problem("module a\n\ngo 1.24\n\nreplace example.com/dep => example.com/fork \"v1.2.3\"\n") is not None, "a quoted version token is rejected (fail closed)")
+        check(problem("module a\n\ngo 1.24\n\nreplace example.com/dep => example.com/fork v1.2.3 extra\n") is not None, "extra tokens are rejected (fail closed)")
+
+
+def test_empty_stdout_with_diagnostics_or_wrong_exit_is_a_failure():
+    T = scan_profiles.TOOLS
+    sc = scan_profiles.Check("staticcheck", ("-f", "json", scan_profiles.SCOPE_DIR), 10, 1000, json_output=True)
+    st, reason, n = harness_runner.analyse_tool_output(sc, T["staticcheck"], "", "go: go.mod requires go >= 1.999 (running go 1.27.1; GOTOOLCHAIN=local)\n", 1)
+    check(st == "failed" and "GOTOOLCHAIN" in reason, "staticcheck exit 1, no stdout, stderr diagnostics -> failed", f"{st} {reason}")
+    st, reason, n = harness_runner.analyse_tool_output(sc, T["staticcheck"], "", "", 1)
+    check(st == "empty", "staticcheck exit 1 with nothing at all is `empty`, never 0 findings", st)
+    st, reason, n = harness_runner.analyse_tool_output(sc, T["staticcheck"], "", "", 0)
+    check(st == "ok" and n == 0, "staticcheck exit 0 silent -> 0 findings")
+    rg = scan_profiles.Check("rg", ("-n", "--", scan_profiles.FILES), 10, 1000)
+    st, reason, n = harness_runner.analyse_tool_output(rg, T["rg"], "", "", 0)
+    check(st == "empty", "rg exit 0 with no output is not a clean-empty exit for rg", st)
+    st, reason, n = harness_runner.analyse_tool_output(rg, T["rg"], "", "rg: some error\n", 1)
+    check(st == "failed", "rg exit 1 with stderr is a failure, not 0 matches", st)
+
+
+def test_real_staticcheck_toolchain_refusal_and_decoy_conf():
+    """[REQUIRED TEST] Against the real staticcheck (skipped with reason where
+    absent): (a) a go.mod demanding a Go newer than the toolchain makes
+    staticcheck exit 1 with stderr only -- must be `failed`, never ok;
+    (b) a snapshot staticcheck.conf that disables every check must not
+    change the harness-owned check set."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "repo")
+        out = os.path.join(tmp, "out")
+        os.makedirs(out)
+        registry = {"go": tuple(c for c in scan_profiles.PROFILES["go"] if c.tool == "staticcheck")}
+        _write(repo, "go.mod", "module refusal\n\ngo 1.999\n")
+        _write(repo, "pkg/r/r.go", "package r\n")
+        harness_runner._MODULE_TREE_CACHE.clear()
+        ev = harness_runner.collect_scan_evidence(_step(["pkg/r/r.go"]), repo, out, registry=registry)
+        r = ev["records"][0]
+        if r["status"] == harness_runner.SCAN_STATUS_UNAVAILABLE:
+            print("  [SKIP] real staticcheck cases: tool not installed here")
+            return
+        check(r["status"] == "failed" and "1.999" in (r["reason"] + r["diagnostics"]), "real staticcheck toolchain refusal is failed with the diagnostic quoted", json.dumps({k: r[k] for k in ('status', 'reason')})[:300])
+        check(any(g.get("tool") == "staticcheck" for g in ev["gaps"]), "the refusal is a recorded gap")
+        repo2 = os.path.join(tmp, "repo2")
+        out2 = os.path.join(tmp, "out2")
+        os.makedirs(out2)
+        _write(repo2, "go.mod", "module decoy\n\ngo 1.24\n")
+        _write(repo2, "staticcheck.conf", 'checks = ["-all"]\n')
+        _write(repo2, "pkg/d/d.go", 'package d\n\nimport "strings"\n\nfunc D(s string) {\n\tstrings.TrimSpace(s)\n}\n')
+        harness_runner._MODULE_TREE_CACHE.clear()
+        ev = harness_runner.collect_scan_evidence(_step(["pkg/d/d.go"]), repo2, out2, registry=registry)
+        r = ev["records"][0]
+        check(r["status"] == "ok" and "SA4017" in r["output"], "a snapshot staticcheck.conf disabling all checks does not silence the harness-owned check set", json.dumps({k: r[k] for k in ('status', 'reason')})[:300] + r["output"][:200])
+
+
+def test_stderr_flood_does_not_block_the_child():
+    with tempfile.TemporaryDirectory() as tmp:
+        flood = "import sys\nsys.stderr.write('e' * 200000)\nsys.stderr.flush()\nsys.stdout.write('[]')\n"
+        repo, out, tools = _scan_fixture(tmp, {"flood": flood})
+        _write(repo, "scripts/a.sh")
+        started = __import__("time").monotonic()
+        ev = harness_runner.collect_scan_evidence(_step(["scripts/a.sh"]), repo, out, registry=_registry("flood", timeout_s=20), tools=tools)
+        elapsed = __import__("time").monotonic() - started
+        r = ev["records"][0]
+        check(elapsed < 10, "a child flooding stderr finishes instead of blocking until the timeout", f"{elapsed:.1f}s status={r['status']}")
+        check(r["output"] == "[]" and r["status"] != "timeout", "its stdout still arrives", json.dumps({k: r[k] for k in ('status', 'output', 'reason')})[:300])
+        check("[stderr truncated]" in r["diagnostics"], "the stderr truncation is recorded")
+
+
+def test_partially_cut_last_record_counts_as_omitted():
+    recs = [dict(harness_runner._record(scan_profiles.Check("rg", ("--", scan_profiles.FILES), 1, 1), {"language": "script", "scope": f"s{i}", "kind": "files"}, status="ok", output="x" * 16000, tool_version="v")) for i in range(3)]
+    evidence = {"records": recs, "gaps": [], "prompt_omitted_records": 0}
+    rendered = harness_runner.render_scan_evidence(evidence)
+    check(len(rendered.encode("utf-8")) <= harness_runner.SCAN_EVIDENCE_MAX_BYTES, "default budget holds")
+    check("cut here" in rendered, "the last record was partially cut")
+    check(evidence["prompt_omitted_records"] >= 1, "a partially cut record is counted as not delivered", str(evidence["prompt_omitted_records"]))
+    check(any(e.get("gap") == "prompt_budget_omitted" for e in harness_runner.scan_summary(evidence)), "the envelope summary records the cut as a gap")
+
+
+def test_methodology_resolves_from_the_trusted_harness_mount_first():
+    with tempfile.TemporaryDirectory() as tmp:
+        trusted = os.path.join(tmp, "trusted")
+        os.makedirs(os.path.join(trusted, "security-review"))
+        os.makedirs(os.path.join(trusted, "docs", "security-review"))
+        with open(os.path.join(trusted, "docs", "security-review", "methodology.md"), "w") as f:
+            f.write("trusted\n")
+        old = {k: os.environ.get(k) for k in ("CFGMS_SECURITY_REVIEW_HARNESS_DIR", "CFGMS_SECURITY_REVIEW_REPO_ROOT", "CFGMS_SECURITY_REVIEW_METHODOLOGY")}
+        try:
+            os.environ["CFGMS_SECURITY_REVIEW_HARNESS_DIR"] = os.path.join(trusted, "security-review")
+            os.environ["CFGMS_SECURITY_REVIEW_REPO_ROOT"] = str(REPO_ROOT)
+            os.environ.pop("CFGMS_SECURITY_REVIEW_METHODOLOGY", None)
+            check(str(harness_runner.methodology_path()).startswith(trusted), "the trusted mount wins over the repo root", str(harness_runner.methodology_path()))
+            os.environ["CFGMS_SECURITY_REVIEW_HARNESS_DIR"] = os.path.join(tmp, "absent")
+            check(str(harness_runner.methodology_path()) == str(REPO_ROOT / harness_runner.METHODOLOGY_RELATIVE_PATH), "falls back to the repo root when no trusted mount exists")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

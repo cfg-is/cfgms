@@ -261,8 +261,12 @@ replaced the registry or run code on import beside the lane credential. `launch-
 now bind-mounts the host's own `.claude/scripts/security-review` read-only at
 `/opt/cfgms-harness/security-review` for every lane launch (never in plan mode), exports
 `CFGMS_SECURITY_REVIEW_HARNESS_DIR`, and each lane's import bootstrap consults that path ahead of
-any `/workspace` fallback. Every non-test `.py` in that tree is hashed into
-`harness_identity.json`, so a resume after a harness change re-runs its steps. Verified in the
+any `/workspace` fallback. The review methodology is policy too, so `docs/security-review` is mounted beside it at
+`/opt/cfgms-harness/docs/security-review` and `methodology_path()` resolves there first (an
+explicit `CFGMS_SECURITY_REVIEW_METHODOLOGY` path wins; the checkout root is the fallback for
+tests). Every non-test `.py` in the harness tree plus `methodology.md` is hashed into
+`harness_identity.json`, so a resume after a harness or policy change re-runs its steps. Lane
+startup is verified with exactly the production mounts and environment (no repo-root override). Verified in the
 rebuilt image: with a `scan_profiles.py` planted in the snapshot that raises on import, the lane
 imported both modules from `/opt/cfgms-harness/security-review`.
 
@@ -286,8 +290,11 @@ sibling file in the package, every imported package in the module, `go.mod` and 
 confining the declared files alone confines nothing (an undeclared sibling symlink to a file
 outside the snapshot was read by gosec and staticcheck in the rebuilt image and its content
 reached the prompt). `module_tree_problem()` therefore refuses to run Go tools in a module whose
-tree contains any symlink, a `vendor/` directory, or a `replace` directive naming a filesystem
-path; the scope becomes a `go_module_unscannable` gap naming the offending entry. The walk is
+tree contains any symlink, a `vendor/` directory, or a `replace` directive whose target is
+anything but a plain `<module path> <version>` pair — a single token, a quoted or
+space-containing path, a quoted version or extra tokens all fail closed, since Go's own parser
+accepts forms a whitespace split does not; the scope becomes a `go_module_unscannable` gap
+naming the offending entry. The walk is
 cached per module root for the process. Rule-of-thumb for other package-scoped languages added
 later: the same tree rule applies before any tool that resolves imports may run.
 
@@ -325,11 +332,13 @@ defence in depth, not the control.
 
 **Bounded, in bytes.** Per-check timeout (registry ceiling 300 s), stdout cap (ceiling 24 000
 bytes; the process is killed once the cap is read, output is never buffered whole) and a
-16 000-byte stderr cap, a per-step check-count cap (`MAX_CHECKS_PER_STEP = 12`), and a per-step
+16 000-byte stderr cap beyond which stderr is drained and discarded so a diagnostics flood
+cannot leave the child blocked on an unread pipe until the timeout, a per-step check-count cap (`MAX_CHECKS_PER_STEP = 12`), and a per-step
 rendered budget of `SCAN_EVIDENCE_MAX_BYTES = 40 000` UTF-8 bytes for the WHOLE section —
 headings, gap lines (at most 40, file lists at most 20 names each) and the omission notice
 included — on top of the existing 200 000-byte bundle budget. Records that do not fit are
-omitted with one visible notice and counted into the envelope as a `prompt_budget_omitted` gap.
+omitted, a record cut mid-body counts as not delivered, and both are stated in one visible
+notice and counted into the envelope as a `prompt_budget_omitted` gap.
 A version probe is bounded too.
 
 **Tool output is parsed in its own format; an analysis failure is never "findings".** stdout
@@ -339,14 +348,20 @@ entries, semgrep's `errors`, eslint's `fatal` messages — and classifies a comp
 `partial` (findings kept, but analysis errors mean coverage is incomplete) or `failed` (errors
 and no usable findings, or unparseable output). A package importing a module absent from the
 offline cache is therefore a recorded gap from both Go tools (tested against the real
-binaries), not two exit-1 "findings". An empty stdout is `ok` with 0 findings only for tools
-that print nothing when clean (`silent_on_clean`: staticcheck's JSON mode, ripgrep); for every
-other tool it stays `empty`.
+binaries), not two exit-1 "findings". An empty stdout is `ok` with 0 findings only when the tool
+exited with one of its `clean_empty_exit_codes` (staticcheck 0, ripgrep's no-match 1) AND wrote
+nothing to stderr; empty stdout with diagnostics on stderr (a toolchain refusal such as
+`go.mod requires go >= 1.999`, a load error) is `failed` with the diagnostic quoted, and any
+other empty completion stays `empty`. Only `ok` results are cached.
 
-**Source-level suppressions in the snapshot are ignored.** semgrep runs `--disable-nosem` and
-gosec `-nosec`, so a `// nosemgrep` or `#nosec` comment in the audited code cannot hide evidence
-from the reviewing model; eslint already runs `--no-inline-config`. staticcheck offers no switch
-for `//lint:ignore` directives — a documented gap.
+**Snapshot configuration and suppressions cannot change what a scanner does.** semgrep runs
+`--disable-nosem` and gosec `-nosec`, so a `// nosemgrep` or `#nosec` comment in the audited
+code cannot hide evidence from the reviewing model; eslint runs `--no-config-lookup
+--no-inline-config`; staticcheck is given its check set explicitly (`-checks` with upstream's
+default set spelled out), so a `staticcheck.conf` in the snapshot saying `checks = ["-all"]`
+cannot switch the scanner off (tested against the real binary with a decoy config). staticcheck
+offers no switch for `//lint:ignore` directives — a documented gap that the consolidated
+report's `## Scanner coverage` section states to the reader.
 
 **Every non-`ok` outcome is an explicit coverage gap, in three places.** Statuses are `ok`
 (completed, parsed, no analysis errors), `partial`, `empty`, `failed` (exit code outside the
