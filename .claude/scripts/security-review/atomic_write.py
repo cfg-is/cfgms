@@ -78,7 +78,7 @@ def _write_atomic(path: str, write_body: Callable[[IO], None], mode: str = "w") 
 
 
 def write_json_atomic(path: str, data: object) -> None:
-    def _write(f: TextIO) -> None:
+    def _write(f: IO) -> None:
         json.dump(data, f, indent=2, sort_keys=True)
         f.write("\n")
 
