@@ -2179,6 +2179,86 @@ stage's status, always stated, never blank) and `## Cross-step groups` — and e
 opens with one `Severity (adjudicated): ...` or `Severity (raw): ...` line naming exactly where its
 severity came from; see the next section.
 
+## Coverage gates: G-2 and G-3 (Issue #3980)
+
+Metadata-only planning partitions the file inventory blind — the planner never reads a file's
+body, only its path and `tier` (#3978). Nothing before this story stopped a plan from leaving a
+file out of every step entirely, or from reviewing a `pkg/security/` file exactly once despite it
+being the highest-value target in the tree. `finalize()`/`finalize_multi_planner()`
+(`planner.evaluate_coverage()`) run two gates over the finalized plan — after per-step validation,
+never instead of it — and write the result to `<sweep_dir>/plan/coverage.json`, a sidecar
+`consolidate.py` reads back exactly like `rejected_proposals.json` or `dispatch_report.json`.
+
+**G-2 — every code-tier file appears in at least one step.** The code tiers are `entrypoint`,
+`security`, `dataaccess`, `business` and `presentational`; the exempt tiers are `vendor`,
+`generated`, `test`, `docs`, `tooling` and `config` (`planner.CODE_TIERS`, the complement of
+`metadata.CLOSED_TIER_SET`'s six non-code tiers). Demanding a review step for `README.md` or
+`.github/workflows/ci.yml` would make G-2 fail on every real sweep and turn a genuine signal into
+noise the harness would learn to ignore — the exempt set exists specifically so G-2 measures code
+that could carry a vulnerability, not every byte in the tree. On `origin/develop`'s tree the
+non-exempt population is 1,383 files against 576 exempt ones.
+
+**G-3 — every `entrypoint`/`security` file appears in at least two steps that ask different
+questions.** `planner.HIGH_RISK_TIERS` is `{entrypoint, security}` — the two tiers a compromised
+controller admin or an attacker landing a commit can do the most damage through. Counting steps
+alone is not enough: a planner told "cover every security file twice" can satisfy the letter by
+emitting a duplicate step with the same scope under a fresh `step_id` — the same partition
+reviewed twice, buying nothing. G-3 instead compares each pair of covering steps' hypothesis
+`objective` text (never `id` — an `id` is only unique within the step that proposed it, so
+comparing ids across steps is meaningless): each objective is casefolded, its whitespace runs
+collapsed to one space, and stripped (`planner._normalize_objective()`), and a file passes only
+when at least one pair of its covering steps has **neither** step's normalised objective set a
+subset of the other's (`planner._objectives_differ()`) — i.e. each step asks at least one question
+the other does not. Two steps with identical objectives fail this, and so, deliberately, does one
+step whose objectives are a strict subset of the other's: reviewing a subset of an already-asked
+set of questions is not independent overlap either. Where a file appears in three or more steps,
+G-3 passes if any pair among them satisfies the rule.
+
+**Why G-3 earns its keep.** Metadata-only decomposition partitions blind: the planner cannot see a
+data flow that crosses two files it happened to place in different steps, so that flow falls
+between step boundaries and is reviewed by nobody — while the coverage table still reads 100%,
+because both files were covered, just never together. Deliberate objective overlap on the
+highest-risk tiers is the cheapest available mitigation for that blind spot, and costs far less
+than running a second planner. `consolidate.build_cross_step_groups()`'s adjudicated cross-step
+re-aggregation (below) is complementary, not redundant: G-3 forces overlap on high-risk tiers by
+construction, ahead of time; cross-step grouping recovers a shared-defect-class flow after the
+fact, across *any* tiers a finding's evidence happened to span, not only the overlapped ones.
+
+**A gate result is visibility, never a sweep-aborting failure.** This harness's governing invariant
+is that a clean-looking report over work that did not happen is unacceptable, and the remedy is
+always visibility, never aborting a sweep that already ran — the same principle behind
+`rejected_proposals.json` and a `not_attempted` disposition. A plan short on coverage still runs in
+full; `coverage.json` records the shortfall by exact path (never only a count — "G-3: 4 files
+short" tells a reader nothing they can act on), and `consolidate.py` folds it into the same
+`## Incomplete` section and the same `sweep_complete` flag every other gap already drives.
+
+**`coverage.json`'s shape:**
+
+```json
+{
+  "evaluated": true,
+  "g2": {"passed": false, "unassigned_files": ["pkg/orphan/orphan.go"]},
+  "g3": {"passed": false, "short_files": ["pkg/security/auth.go"]}
+}
+```
+
+**A missing or unparseable bundle tree listing is never a silent pass.** `evaluate_coverage()`
+reads `<sweep_dir>/bundle/01-tree.tsv` for the `tier` column; when that file cannot be read, or
+does not start with `metadata.TREE_HEADER`, the sidecar instead records
+`{"evaluated": false, "reason": "..."}` — no `g2`/`g3` keys at all, so nothing downstream can
+mistake an unevaluated gate for a passing one. `consolidate.py` treats `evaluated: false` exactly
+like a failed gate: it folds into `## Incomplete` with the recorded reason, stated plainly as "the
+coverage gates could not be evaluated," never omitted. An old sweep, or one produced before this
+story, has no `coverage.json` at all; that absence carries no signal and is judged on every other
+completeness check alone — it is not itself an incompleteness gap, unlike an *evaluated: false*
+sidecar that a sweep on this codebase actually wrote.
+
+**Reading a shortfall.** `security-review.sh status <sweep-id>` prints the gate result alongside
+the per-lane coverage table — `PASS`, or `FAIL (<N> file(s) unassigned/short)` — and
+`consolidated.md`'s `## Incomplete` section lists the exact paths a human should look at by hand:
+a G-2 path was never planned into any step at all; a G-3 path was reviewed, but only from one
+angle, or from two angles that turned out to ask the same question.
+
 ## Severity adjudication and cross-step re-aggregation (Issue #3984)
 
 Consolidation used to be pure de-duplication: two lanes reporting the same defect at `low` and
