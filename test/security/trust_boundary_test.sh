@@ -812,6 +812,73 @@ _check_phase2_privacy_boundary() {
 }
 
 # ===========================================================================
+# Helper: poll `project-queue.sh list-by-status <status>` until <item_id> is
+# visible, or the retry budget is exhausted.
+#
+# Separates the two failure modes the previous inline loops conflated:
+#   - rc != 0 — the GraphQL call itself failed (secondary rate limit, 5xx,
+#     expired token). The stderr text IS the diagnosis and must survive into
+#     the failure message.
+#   - rc == 0 — the board answered and the item is genuinely not there yet.
+#     Only this case is eventual consistency.
+# The old loops discarded both rc and stderr and slept a flat 1s, so an API
+# outage was reported as "item not found" (a misleading diagnosis on a live
+# gate) inside a 4s total window that a ~60s secondary-rate-limit penalty
+# outlives. `list-by-status` paginates the whole board — 12 GraphQL requests
+# over 1124 items at time of writing — so three polls per run put real
+# pressure on the shared pipeline token's per-minute point budget.
+# Backoff is 1,2,4,8s (15s of sleep across 5 attempts, plus ~16s per list
+# call) so the budget spans a rate-limit penalty window.
+#
+# Args: <status> <item_id> <require_null_issue: true|false>
+# Prints a diagnostic to stdout on failure; returns 0 on success, 1 otherwise.
+# ===========================================================================
+_phase2_poll_for_item() {
+    local status="$1" item_id="$2" require_null_issue="$3"
+    local pq_script="$REPO_ROOT/scripts/project-queue.sh"
+    local err_file out attempt rc=0 delay=1 last_rc=0 last_err="" last_count="n/a"
+
+    err_file=$(mktemp)
+    for attempt in 1 2 3 4 5; do
+        rc=0
+        out=$(bash "$pq_script" list-by-status "$status" 2>"$err_file") || rc=$?
+        last_rc=$rc
+        if [[ $rc -eq 0 ]]; then
+            last_err=""
+            last_count=$(printf '%s' "$out" | python3 -c \
+                'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || printf 'unparseable')
+            if printf '%s' "$out" | ITEM_ID="$item_id" REQUIRE_NULL_ISSUE="$require_null_issue" python3 -c '
+import json, os, sys
+items = json.load(sys.stdin)
+target = os.environ["ITEM_ID"]
+require_null = os.environ["REQUIRE_NULL_ISSUE"] == "true"
+for it in items:
+    if it.get("item_id") != target:
+        continue
+    if require_null and it.get("issue_num") is not None:
+        continue
+    sys.exit(0)
+sys.exit(1)
+' 2>/dev/null; then
+                rm -f "$err_file"
+                return 0
+            fi
+        else
+            last_err=$(tr '\n' ' ' < "$err_file" | cut -c1-200)
+        fi
+        if [[ $attempt -lt 5 ]]; then
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+    done
+
+    rm -f "$err_file"
+    printf 'last_rc=%s items_listed_in_%s=%s last_stderr=%s' \
+        "$last_rc" "$status" "$last_count" "${last_err:-<none>}"
+    return 1
+}
+
+# ===========================================================================
 # INTEGRATION TEST: Phase 2 full no-issue project item lifecycle E2E smoke
 #
 # Agent-container launch is NOT tested here. Docker runtime is unavailable
@@ -822,11 +889,29 @@ _check_phase2_privacy_boundary() {
 #   3. After the agent creates a PR, run project-queue.sh get-item <item_id>
 #      and verify .fields.PR == <pr_num>.
 #
-# Skipped if `gh auth status` fails, matching the guard in
+# This test WRITES to the shared production cfgms-pipeline board: it creates a
+# draft item, moves it through Ready/Done, holds a dispatch lease, and deletes
+# the fixture. It therefore requires the same explicit opt-in every other live
+# project-board mutation test in this repo requires
+# (scripts/test-scripts.sh:test_project_queue_integration, whose guard is
+# enforced by TestScriptSuiteRequiresOptInForLiveProjectMutations). Running it
+# unconditionally from `make test` meant any GitHub Projects transient, a
+# concurrent dispatcher cycle, or secondary rate limiting turned an unrelated
+# story's local gate red, and an interrupted run stranded fixture items in
+# Draft on the live board.
+#
+# Run it with:  CFGMS_RUN_LIVE_PROJECT_TESTS=1 bash test/security/trust_boundary_test.sh
+#
+# Also skipped if `gh auth status` fails, matching the guard in
 # test_project_queue_integration.
 # ===========================================================================
 test_phase2_lifecycle() {
     log_test "Integration: Phase 2 full no-issue project item lifecycle (E2E smoke)"
+
+    if [[ "${CFGMS_RUN_LIVE_PROJECT_TESTS:-}" != "1" ]]; then
+        log_skip "phase2 lifecycle: set CFGMS_RUN_LIVE_PROJECT_TESTS=1 to allow live project mutations"
+        return 0
+    fi
 
     if ! gh auth status >/dev/null 2>&1; then
         log_skip "gh auth status failed — skipping Phase 2 lifecycle test (requires GitHub credentials)"
@@ -835,7 +920,7 @@ test_phase2_lifecycle() {
 
     local pq_script="$REPO_ROOT/scripts/project-queue.sh"
     local ph_script="$REPO_ROOT/scripts/pipeline-helper.sh"
-    local item_id="" body_file timestamp title attempt
+    local item_id="" body_file timestamp title
     body_file=$(mktemp)
     timestamp=$(date +%s)
     title="phase2-lifecycle-smoke-${timestamp}"
@@ -898,27 +983,11 @@ test_phase2_lifecycle() {
     esac
 
     # --- Step b: list-by-status Draft, item_id present with issue_num=null --
-    local found_in_draft=false
-    for attempt in 1 2 3 4 5; do
-        local list_draft_out list_draft_rc=0
-        list_draft_out=$(bash "$pq_script" list-by-status Draft 2>&1) || list_draft_rc=$?
-        if [[ $list_draft_rc -eq 0 ]] && printf '%s' "$list_draft_out" | ITEM_ID="$item_id" python3 -c '
-import json,sys,os
-items=json.load(sys.stdin)
-t=os.environ["ITEM_ID"]
-for it in items:
-    if it.get("item_id")==t and it.get("issue_num") is None:
-        sys.exit(0)
-sys.exit(1)
-' 2>/dev/null; then
-            found_in_draft=true; break
-        fi
-        sleep 1
-    done
-    if $found_in_draft; then
+    local poll_diag=""
+    if poll_diag=$(_phase2_poll_for_item Draft "$item_id" true); then
         _pass "phase2 step b: item in Draft list with issue_num=null"
     else
-        _fail "phase2 step b: item not found in Draft list with issue_num=null after 5 retries"
+        _fail "phase2 step b: item not found in Draft list with issue_num=null after 5 attempts — ${poll_diag}"
         return
     fi
 
@@ -933,24 +1002,10 @@ sys.exit(1)
     fi
 
     # --- Step d: list-by-status Ready, item_id present ----------------------
-    local found_ready=false
-    for attempt in 1 2 3 4 5; do
-        local list_ready_out list_ready_rc=0
-        list_ready_out=$(bash "$pq_script" list-by-status Ready 2>&1) || list_ready_rc=$?
-        if [[ $list_ready_rc -eq 0 ]] && printf '%s' "$list_ready_out" | ITEM_ID="$item_id" python3 -c '
-import json,sys,os
-items=json.load(sys.stdin)
-t=os.environ["ITEM_ID"]
-sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
-' 2>/dev/null; then
-            found_ready=true; break
-        fi
-        sleep 1
-    done
-    if $found_ready; then
+    if poll_diag=$(_phase2_poll_for_item Ready "$item_id" false); then
         _pass "phase2 step d: item appears in Ready list"
     else
-        _fail "phase2 step d: item not found in Ready list after 5 retries"
+        _fail "phase2 step d: item not found in Ready list after 5 attempts — ${poll_diag}"
         return
     fi
 
@@ -991,24 +1046,10 @@ sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
     fi
 
     # --- Step h: list-by-status Done, item_id present -----------------------
-    local found_done=false
-    for attempt in 1 2 3 4 5; do
-        local list_done_out list_done_rc=0
-        list_done_out=$(bash "$pq_script" list-by-status Done 2>&1) || list_done_rc=$?
-        if [[ $list_done_rc -eq 0 ]] && printf '%s' "$list_done_out" | ITEM_ID="$item_id" python3 -c '
-import json,sys,os
-items=json.load(sys.stdin)
-t=os.environ["ITEM_ID"]
-sys.exit(0 if any(it.get("item_id")==t for it in items) else 1)
-' 2>/dev/null; then
-            found_done=true; break
-        fi
-        sleep 1
-    done
-    if $found_done; then
+    if poll_diag=$(_phase2_poll_for_item Done "$item_id" false); then
         _pass "phase2 step h: item appears in Done list"
     else
-        _fail "phase2 step h: item not found in Done list after 5 retries"
+        _fail "phase2 step h: item not found in Done list after 5 attempts — ${poll_diag}"
         return
     fi
 
