@@ -283,6 +283,37 @@ def test_group_that_cannot_share_one_batch_is_unassessed_never_partially_assesse
         check(plan["unassessed_groups"] == [] and plan["batches"][0]["cross_step_groups"], "groups: a rich group that fits one batch is assessed there")
 
 
+def test_unsolicited_verdicts_are_dropped_by_the_lane():
+    """Re-review finding on ee8c9731: a model answering for a group it was
+    never sent (or a finding not in its batch) must not reach the envelope
+    -- the lane knows what it sent."""
+    n = adjudicator.BATCH_SIZE + 1
+    members = [{"file": f"pkg/example/f{i}.go", "symbol": f"Sym{i}", "vuln_class": "tenant-scoping"} for i in range(n)]
+    data = _input(n, groups=[{"group_id": "group-001", "defect_class": "tenant-scoping", "step_ids": ["step-001", "step-002"], "members": members}])
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        _write_input(plan_dir, data)
+        batches = adjudicator.plan_batches(data)["batches"]
+        calls = {"n": 0}
+
+        def call(model, prompt, output_path):
+            chunk = batches[calls["n"]]["findings"]
+            calls["n"] += 1
+            adjudications = _adjudications_for({"findings": chunk})
+            # Guess a verdict for a finding in ANOTHER batch and for the
+            # group that was never sent.
+            other = data["findings"][0] if chunk[0] is not data["findings"][0] else data["findings"][-1]
+            adjudications.append({"file": other["file"], "symbol": other["symbol"], "vuln_class": other["vuln_class"], "severity": "critical", "rationale": "guess"})
+            with open(output_path, "w") as fh:
+                json.dump({"adjudications": adjudications, "group_assessments": [{"group_id": "group-001", "assessment": "same_defect", "rationale": "guess"}]}, fh)
+            return 0, False
+
+        envelope = adjudicator.run_adjudication(plan_dir, out_dir, "claude", "m", call_harness_fn=call)
+        check(envelope["state"] == terminal_state.COMPLETE, "unsolicited: the stage still completes")
+        check(envelope["group_assessments"] == [] and envelope["unassessed_groups"] == ["group-001"], "unsolicited: a verdict for the unassessed group never reaches the envelope", str(envelope.get("group_assessments")))
+        check(len(envelope["adjudications"]) == n, "unsolicited: exactly one verdict per sent finding, the cross-batch guesses dropped rather than double-counted", str(len(envelope["adjudications"])))
+        check(envelope["unsolicited_verdicts"] == 2 * len(batches), "unsolicited: every dropped verdict is counted (one finding guess and one group guess per batch)", str(envelope.get("unsolicited_verdicts")))
+
+
 def test_input_hash_is_over_the_bytes_that_were_parsed():
     with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
         original = _input(1)

@@ -1860,6 +1860,22 @@ def test_unsent_findings_and_groups_are_explained_in_incomplete():
         check("never assessed on partial evidence" in md, "consolidate.md: an unsent group's reason is stated", md)
         check("## Incomplete" in md, "consolidate.md: unsent items make the sweep incomplete")
 
+        # Defence in depth (re-review of ee8c9731): even if a lane bug let a
+        # verdict for an unsent finding or an unassessed group onto the
+        # envelope, the consolidator must not merge it.
+        envelope["adjudications"].append({"file": "pkg/b/b.go", "symbol": "B", "vuln_class": "tenant-scoping", "severity": "critical", "rationale": "guess"})
+        envelope["group_assessments"] = [{"group_id": "group-001", "assessment": "same_defect", "rationale": "guess"}]
+        write(path, envelope)
+        with redirect_stderr(io.StringIO()):
+            report = consolidate.consolidate(sweep, repo)
+        md = consolidate.render_markdown(report)
+        adj = report["adjudication"]
+        b = next(f for f in report["findings"] if f["symbol"] == "B")
+        check(b["adjudication"] is None and report["cross_step_groups"][0]["assessment"] is None, "consolidate: verdicts for an unsent finding and an unassessed group are never merged", str((b["adjudication"], report["cross_step_groups"][0]["assessment"])))
+        check(adj["unsolicited"] == 2 and adj["groups_omitted"] == 1 and adj["groups_assessed"] == 0 and adj["omitted"] == 1, "consolidate: the dropped verdicts are counted as unsolicited and the gaps still stand", str(adj))
+        check(not consolidate._sweep_complete(report) and "## Incomplete" in md, "consolidate: an unsolicited verdict cannot turn an incomplete sweep complete")
+        check("verdicts for items never sent (dropped): 2" in md, "consolidate.md: unsolicited verdicts are stated in the Adjudication section", md)
+
 
 def test_adjudication_cannot_delete_a_finding():
     """REQUIRED TEST (Issue #3984, A2): an adjudication envelope that omits a

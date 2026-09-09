@@ -681,6 +681,7 @@ def load_adjudication(
         "groups_omitted": 0,
         "unsent": 0,
         "groups_unsent": 0,
+        "unsolicited": 0,
         "errors": [],
     }
     path = adjudication_output_path(sweep_dir)
@@ -767,9 +768,22 @@ def _apply_adjudication(findings: list[dict], groups: list[dict], envelope: dict
     record["unsent"] = len(unsent) if isinstance(unsent, list) else 0
     record["groups_unsent"] = len(unassessed) if isinstance(unassessed, list) else 0
 
+    # Defence in depth on the lane's own rule: a verdict for a finding the
+    # lane says it never sent, or a group it says it never assessed, is a
+    # verdict the model was never asked for. It is dropped here too, even if
+    # a lane bug let it onto the envelope, and counted as `unsolicited`.
+    unsent_keys = {tuple(k) for k in unsent if isinstance(k, list) and len(k) == 3} if isinstance(unsent, list) else set()
+    unassessed_ids = set(unassessed) if isinstance(unassessed, list) else set()
+    record["unsolicited"] = 0
+
     by_key = {}
     for adjudication in envelope.get("adjudications") or []:
-        by_key[(adjudication["file"], adjudication["symbol"], adjudication["vuln_class"])] = adjudication
+        key = (adjudication["file"], adjudication["symbol"], adjudication["vuln_class"])
+        if key in unsent_keys:
+            record["unsolicited"] += 1
+            schema.log_event("adjudication_verdict_for_unsent_finding", file=key[0], symbol=key[1], vuln_class=key[2])
+            continue
+        by_key[key] = adjudication
     matched_keys: set = set()
     for finding in findings:
         key = _finding_key(finding)
@@ -797,10 +811,13 @@ def _apply_adjudication(findings: list[dict], groups: list[dict], envelope: dict
                 vuln_class=key[2],
             )
 
-    assessments = {
-        assessment["group_id"]: assessment
-        for assessment in envelope.get("group_assessments") or []
-    }
+    assessments = {}
+    for assessment in envelope.get("group_assessments") or []:
+        if assessment["group_id"] in unassessed_ids:
+            record["unsolicited"] += 1
+            schema.log_event("adjudication_verdict_for_unassessed_group", group_id=assessment["group_id"])
+            continue
+        assessments[assessment["group_id"]] = assessment
     for group in groups:
         assessment = assessments.get(group["group_id"])
         if assessment is None:
@@ -1387,7 +1404,8 @@ def _adjudication_lines(adjudication: dict) -> list[str]:
             f"adjudicator: {adjudication.get('omitted', 0)}; adjudications matching no "
             f"finding (dropped): {adjudication.get('unmatched', 0)}; cross-step groups "
             f"assessed: {adjudication.get('groups_assessed', 0)}; groups not assessed: "
-            f"{adjudication.get('groups_omitted', 0)}. An adjudicated severity "
+            f"{adjudication.get('groups_omitted', 0)}; verdicts for items never sent "
+            f"(dropped): {adjudication.get('unsolicited', 0)}. An adjudicated severity "
             "is rendered as **Severity (adjudicated)** with the lanes' raw values beside it; "
             "a finding without one is rendered as **Severity (raw)**."
         ]

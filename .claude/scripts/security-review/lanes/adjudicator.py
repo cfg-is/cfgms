@@ -626,6 +626,7 @@ def run_adjudication(
         batches=0,
         unsent_findings=None,
         unassessed_groups=None,
+        unsolicited=0,
     ) -> dict:
         envelope = dict(context)
         envelope["state"] = state
@@ -635,6 +636,9 @@ def run_adjudication(
         # "omitted by the adjudicator".
         envelope["unsent_findings"] = list(unsent_findings or [])
         envelope["unassessed_groups"] = list(unassessed_groups or [])
+        # Verdicts the model returned for items the batch never carried;
+        # dropped before they reach the envelope, counted for the record.
+        envelope["unsolicited_verdicts"] = int(unsolicited)
         if state == terminal_state.COMPLETE:
             envelope["adjudications"] = adjudications or []
             envelope["group_assessments"] = assessments or []
@@ -686,6 +690,7 @@ def run_adjudication(
     all_assessments: list[dict] = []
     seen_keys: set = set()
     seen_groups: set = set()
+    unsolicited = 0
 
     for index, batch in enumerate(batches):
         raw_path = os.path.join(out_dir, f"{RAW_OUTPUT_PREFIX}.batch{index}.json")
@@ -716,8 +721,20 @@ def run_adjudication(
                 unsent_findings=unsent_findings,
                 unassessed_groups=unassessed_groups,
             )
+        # A verdict is accepted only for a finding or group THIS batch
+        # actually carried. The model cannot be allowed to answer for an
+        # unsent finding, an unassessed group, or anything it was never
+        # shown: the lane knows what it sent, and model output never
+        # overrides that fact. Unsolicited verdicts are dropped, logged and
+        # counted.
+        batch_keys = {_key(f) for f in batch["findings"]}
+        batch_groups = {g.get("group_id") for g in batch["cross_step_groups"]}
         for entry in data["adjudications"]:
             key = (entry["file"], entry["symbol"], entry["vuln_class"])
+            if key not in batch_keys:
+                unsolicited += 1
+                schema.log_event("adjudication_unsolicited_verdict", file=key[0], symbol=key[1], vuln_class=key[2])
+                continue
             if key in seen_keys:
                 continue
             seen_keys.add(key)
@@ -725,6 +742,10 @@ def run_adjudication(
                 {field: entry[field] for field in schema.REQUIRED_ADJUDICATION_FIELDS}
             )
         for entry in data.get("group_assessments", []):
+            if entry["group_id"] not in batch_groups:
+                unsolicited += 1
+                schema.log_event("adjudication_unsolicited_group_assessment", group_id=entry["group_id"])
+                continue
             if entry["group_id"] in seen_groups:
                 continue
             seen_groups.add(entry["group_id"])
@@ -739,6 +760,7 @@ def run_adjudication(
         batches=len(batches),
         unsent_findings=unsent_findings,
         unassessed_groups=unassessed_groups,
+        unsolicited=unsolicited,
     )
 
 

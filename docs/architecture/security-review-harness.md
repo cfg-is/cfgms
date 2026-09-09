@@ -2174,7 +2174,12 @@ re-checked against real data rather than re-argued.
   (the adjudicator omitted this finding)`, and is counted (`omitted`) and named in `## Incomplete`;
   a cross-step group it did not assess is counted (`groups_omitted`) and named there the same way,
   and when the lane itself withheld a finding or group for prompt size (`unsent_findings` /
-  `unassessed_groups` on the envelope) the `## Incomplete` line says so.
+  `unassessed_groups` on the envelope) the `## Incomplete` line says so. A verdict is accepted
+  only for what was actually sent: the lane keeps a verdict only for a finding or group in the
+  batch that produced it (anything else is dropped, logged and counted as
+  `unsolicited_verdicts`), and the consolidator independently refuses a verdict for any key in
+  `unsent_findings` or id in `unassessed_groups` — a model guessing an answer for a group it was
+  never shown cannot turn that gap into a `same_defect`.
   An adjudication whose key matches no finding is dropped, logged and counted (`unmatched`) — a
   model cannot add findings either. `consolidate_test.py::test_adjudication_cannot_delete_a_finding`
   is the required A2 test.
