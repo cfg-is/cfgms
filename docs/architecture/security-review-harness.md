@@ -21,7 +21,9 @@ primitives live in `.claude/scripts/security-review/`:
 | `atomic_write.py` | `write_json_atomic`/`write_text_atomic`/`write_bytes_atomic` — temp file + `os.replace`, never a partial file visible at the final path; `write_bytes_atomic` (Issue #3978) is the one write path every bundle artifact in `metadata.py::write_bundle` goes through, including verbatim byte-for-byte copies |
 | `resume.py` | `missing_steps` — resolves outstanding steps under the four-terminal-state rule below |
 | `basedir.py` | `resolve_base_dir` — fail-closed resolution of the sweep base directory; its `detect_repo_root()` is the single shared repo-root detector `planner.py` and `consolidate.py` also call (each wraps it in its own `try/except BaseDirError: return None` since only `basedir.py` wants the raising contract) |
-| `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
+| `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, records each finding's deterministic `severity_range`, groups findings across step boundaries (`build_cross_step_groups`), merges the adjudication stage's envelope onto that set when one is present and current (Issue #3984), and renders `report/consolidated.json` / `report/consolidated.md`. Pure: never calls a provider API, never dispatches a container — enforced by `consolidate_test.py` |
+| `adjudicate.py` | `prepare`/`launch` — the host side of the severity-adjudication stage (Issue #3984): builds the findings-only input and a source-free sub-sweep directory, and dispatches one adjudicator container through `launch-investigator` — see [Severity adjudication and cross-step re-aggregation](#severity-adjudication-and-cross-step-re-aggregation-issue-3984) below |
+| `lanes/adjudicator.py` | The in-container adjudicator (Issue #3984): applies the methodology's severity rubric to each finding and assesses cross-step groups, driving whichever harness `CFGMS_SECURITY_REVIEW_ADJUDICATOR` names through that finder lane's own `call_<harness>_harness`; writes one lane-shaped envelope, `adjudication.json` |
 | `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
 | `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4), the review-methodology loader and per-step anchor selection (Issue #3981 — see [Review methodology](#review-methodology-compact-core-and-per-step-anchors-issue-3981)), and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
 | `lanes/scan_profiles.py` | The trusted scanner profile registry (Issue #3982) — the constant, harness-owned allowlist of tool argv templates per language; the shared runner in `harness_runner.py` executes it — see [Scanner profiles and tool evidence](#scanner-profiles-and-tool-evidence-issue-3982) below |
@@ -67,8 +69,17 @@ All sweep state lives outside the repository, under a base directory resolved by
       claude-opus-5/
         step-001.findings.json
         ...
+    adjudication/                      the adjudication stage's own sub-sweep dir (Issue #3984),
+                                        present only when CFGMS_SECURITY_REVIEW_ADJUDICATOR is set
+      snapshot/                        EMPTY -- the adjudicator's /workspace:ro; findings, never source
+      plan/
+        adjudication-input.json        the deterministic findings + cross-step groups, canonical JSON
+      lanes/
+        adjudicator/
+          adjudication.json            one lane-shaped envelope: the adjudicator's verdicts
     report/
-      consolidated.json                machine-readable, de-duplicated
+      consolidated.json                machine-readable, de-duplicated; adjudication merged beside
+                                        the raw lane values, never instead of them
       consolidated.md                  what the PO reads
 ```
 
@@ -2104,6 +2115,176 @@ An empty result for both — nothing unavailable and nothing rejected — render
 proposal issues recorded)_`, the same "state the empty case explicitly, don't just omit the
 section" discipline the `## Findings` empty case already applies.
 
+**Every finding carries a deterministic `severity_range`, and the sort key honours an
+adjudicated severity once one exists (Issue #3984).** `_finalize_findings()` records, per
+consolidated finding, `{"lowest", "highest", "disagreement", "by_lane"}` computed from its
+occurrences alone — never rewritten by anything downstream. `_group_rank_key()` sorts on the
+adjudicated severity when the finding carries one and on the highest raw occurrence severity
+otherwise, so the report's order follows the severity a reader is meant to act on. The rendered
+report gained two sections between `## Dispatch` and `## Findings` — `## Adjudication` (the
+stage's status, always stated, never blank) and `## Cross-step groups` — and every finding now
+opens with one `Severity (adjudicated): ...` or `Severity (raw): ...` line naming exactly where its
+severity came from; see the next section.
+
+## Severity adjudication and cross-step re-aggregation (Issue #3984)
+
+Consolidation used to be pure de-duplication: two lanes reporting the same defect at `low` and
+`critical` rendered as one finding with two conflicting severities and no resolution, and a
+defect whose evidence the planner had split across two steps was never re-joined. The reference
+pipeline this harness follows records both failures — one model rating an unauthenticated
+endpoint `Low` where another rated it `Critical`, and a logged-identifier trace missed "across
+step boundaries (the file was in one step, the console audit in another)" — and names
+re-aggregation at consolidation as a mitigation for the second. This section records the
+decision that closes both, the alternative rejected, and the evidence available when it was made.
+
+### Decision A: a model adjudication pass, strictly additive (A2)
+
+**Chosen: A2.** A separate stage after the deterministic consolidation, running in the same
+read-only investigator container profile every finder lane uses (`cfg-agent:latest`,
+`/workspace:ro`, `--memory=2g --cpus=2`, egress default-deny, per-harness read-only credential
+mount, the disallowed-tools profile), whose output annotates the deterministic record and can
+never delete from it. The operating model it serves is deliberate: small, cheap finder lanes do
+discovery in volume, and one frontier model — configured by `CFGMS_SECURITY_REVIEW_ADJUDICATOR`,
+exactly one `harness:model` pair through the same `roster.py` parser the lane roster uses — is
+spent only on the judgement calls, over findings rather than source.
+
+**Rejected: A1, deterministic-only.** Keep the consolidator pure and handle disagreement by rule
+(show the range, take the highest) and re-aggregation by mechanical grouping for human attention.
+Cheaper, auditable, no new credential surface, but it buys no judgement: a `low`-versus-`critical`
+disagreement is exactly the case a rule cannot resolve, and "take the highest" turns every
+inflated rating into the report's headline. A1's mechanics were not discarded, though — they are
+the deterministic layer A2 sits on, and they are what the report falls back to whenever the
+adjudicator is unset or does not complete: `severity_range` on every finding, an explicit
+`DISAGREEMENT low → critical` line with each lane's value, and mechanical cross-step groups.
+
+**Evidence at decision time: none from a live sweep.** The story's own tie-breaker was a number
+from #3985's first end-to-end sweep — how many findings lanes disagree on, and how far apart.
+#3985 had not run when this was decided (2026-09-09), so the decision rests on the reference
+pipeline's recorded disagreements and on the founder's operating model (cheap finders, one
+expensive judge), not on a measured CFGMS disagreement rate. When #3985 runs, `consolidated.json`
+now records exactly the numbers that would have decided it — `severity_range.disagreement` per
+finding, and `adjudication.adjudicated`/`omitted`/`unmatched` per sweep — so the choice can be
+re-checked against real data rather than re-argued.
+
+### The non-negotiables, and where each is enforced
+
+- **It may never remove a finding.** `consolidate._apply_adjudication()` iterates the
+  deterministic set and looks each finding up in the envelope — never the reverse. A finding the
+  adjudicator omitted keeps `adjudication: null`, renders as `Severity (raw): ... not adjudicated
+  (the adjudicator omitted this finding)`, and is counted (`omitted`) and named in `## Incomplete`;
+  a cross-step group it did not assess is counted (`groups_omitted`) and named there the same way.
+  An adjudication whose key matches no finding is dropped, logged and counted (`unmatched`) — a
+  model cannot add findings either. `consolidate_test.py::test_adjudication_cannot_delete_a_finding`
+  is the required A2 test.
+- **Its input is findings, never source.** `adjudicate.prepare()` writes only what
+  `consolidate.build_adjudication_input()` builds — each finding's key, the lanes' own
+  severities, confidences, titles, evidence and suggested fixes, its `severity_range`, and the
+  cross-step groups; no file body, nothing read from the tree. The container's `/workspace` is
+  the sub-sweep's `snapshot/`, which is empty: `launch-investigator` mounts `--snapshot-dir` at
+  `/workspace:ro` unconditionally and requires it to be `<--sweep-dir>/snapshot`, so an empty
+  directory there is how the stage satisfies the launcher's contract while giving the model no
+  source at all. `prepare()` and `launch()` both refuse to proceed if that directory holds
+  anything. `security_review_cli.test.sh` asserts, on a real dispatch through the real launcher,
+  that the mounted directory is empty and the input carries no file body.
+- **It is a lane-shaped citizen.** `lanes/adjudicator.py` writes one envelope with the same
+  four terminal states, classified the same way: a rate-limit signal is `parked`, a non-zero
+  harness exit is `failed`, no output file is `refused`, unparseable or schema-invalid output is
+  `failed`. A non-`complete` envelope carries no adjudications at all (all-or-nothing across
+  batches — partial adjudication would leave a reader unable to tell which severities were
+  judged). `consolidate.load_adjudication()` treats an envelope that is missing after a recorded
+  dispatch, schema-invalid, non-`complete`, from another sweep, or `stale` exactly like a failed
+  lane: raw severities render, the status and reason land in `## Incomplete`, and the opening
+  sentence says the sweep is incomplete. "No parseable output means it did not run" holds here as
+  it does for every lane.
+- **Determinism is lost, so record provenance.** Every envelope carries `harness`, `model_id`,
+  `prompt_version` (a digest over the adjudicator's system prompt, the methodology core, every
+  anchor, and the output shape), `harness_identity`, and `input_hash` — the SHA-256 of the exact
+  input bytes the lane read. `consolidate()` recomputes that hash over the current deterministic
+  set (`canonical_adjudication_input()` is the one serialisation all three sides use, and its
+  findings are emitted in key order so the hash is identical before and after the report
+  re-sorts) and refuses a mismatch as `stale` — the lanes re-ran on resume, or a finding was added
+  or excluded, after the adjudicator saw its input. On each finding, `adjudication` records the
+  adjudicated `severity`, the `rationale`, `harness`/`model_id`, and `changed`; `occurrences` and
+  `severity_range` are never rewritten, so what the lanes actually said is always recoverable.
+- **The docstring purity claim.** Preserved, and still true: the model lives in `adjudicate.py`
+  and `lanes/adjudicator.py`; `consolidate.py` only reads the envelope they leave, exactly as
+  it reads a finder lane's. `consolidate_test.py::test_consolidate_issues_no_provider_call_and_dispatches_no_container`
+  spies every subprocess the module spawns during a run that merges an adjudication envelope
+  (every one is `git`) and checks its source imports no network module and never names the
+  launcher or docker. The story listed that test as A1-only; it is implemented under A2 because
+  the claim it guards is still made and still relied on.
+
+### The stage, end to end
+
+1. `security-review.sh` (`launch` and `resume` alike) runs `dispatch_adjudicator` after every
+   lane container has exited and before `run_consolidation`. Unset variable: return, nothing
+   recorded, the report says "not configured". Malformed or multi-entry variable: fail closed with
+   a named error, no dispatch, and a recorded `launch_failed` outcome — a configured stage that
+   cannot run is a failed stage in the report, never an unconfigured one.
+2. `adjudicate.py prepare` runs the pure consolidation in-process, builds the input, removes any
+   previous `adjudication.json` (so a stage that then fails to write reads as `missing`, not as an
+   earlier run's verdict), lays out `adjudication/{snapshot,plan,lanes/adjudicator}`, and prints
+   `NOTHING_TO_ADJUDICATE` for an empty finding set — recorded as `skipped_no_findings`, not a gap.
+3. `adjudicate.py launch` dispatches `launch-investigator --sweep-dir <sweep>/adjudication
+   --snapshot-dir <sweep>/adjudication/snapshot --mode adjudicator --harness <h> --model <m>
+   --lane-entrypoint lanes/adjudicator.py`. The container name is therefore
+   `cfg-agent-investigator-adjudication-adjudicator` for every sweep, the same per-basename naming
+   the multi-planner sub-directories have; an exited one is reaped before launch, a running one is
+   refused, so a second sweep's adjudication waits on a first's.
+4. `security-review.sh` waits on the container and records `dispatch_report.json`'s
+   `adjudicator` entry: `dispatched`, `credential_unavailable` (a logged skip; exit code
+   unaffected, the report names the gap), or `launch_failed` (recorded, and the final exit code is
+   non-zero exactly as for a lane). A stage that dispatched and then ended `failed`/`refused`/
+   `parked` is a recorded lane-shaped failure, not a dispatch failure: `launch` still exits 0 and
+   the report carries the gap.
+5. Inside the container the lane reads `/workspace-plan/adjudication-input.json` once (the
+   bytes it parses are the bytes it hashes — a second read would let an atomic replacement of
+   the plan file bind a new input's hash to verdicts over the old one), and hands the harness
+   one prompt per batch — system prompt, the methodology core, every worked example (no
+   per-step subject to select by), the output shape, the harness's own delivery sentence
+   (`claude`/`opencode` write the output file; `codex`'s final message and `ollama`'s stdout
+   are captured by their finder lanes' call functions), then each finding with its lanes'
+   reports wrapped in `<<<report-text>>>` delimiters and length-capped, its key identifiers
+   rendered losslessly as JSON string literals (the model must copy them back exactly), and the
+   cross-step groups whose members are in the batch. Batches are bounded by measured prompt
+   bytes (`MAX_PROMPT_BYTES`, under Linux's 131072-byte single-argument cap that `claude` and
+   `codex` prompts hit as one argv element) and secondarily by count (forty), and are
+   group-aware: a group's members travel together so the model assessing it sees every
+   member's reports. The call goes through the finder lane's own `call_<harness>_harness`, so
+   the `claude` adjudicator runs under the same disallowed-tools profile as a `claude` finder:
+   it can write its output file and nothing else. The lane merges the batches, de-duplicates
+   on key, and writes the envelope.
+6. `consolidate.py` merges: `adjudication` on each finding, `assessment` on each group, the
+   `adjudication` status block on the report, and a re-sort on the adjudicated severity.
+
+### Cross-step re-aggregation
+
+`consolidate.build_cross_step_groups()` is deterministic and runs whether or not an adjudicator
+is configured: two or more consolidated findings sharing a defect class whose combined `step_ids`
+span two or more distinct plan steps form one group, id'd `group-NNN` in class order so the id an
+adjudicator's `group_assessments` refers back to is stable. The class is the first non-empty `cwe`
+any occurrence carries — #3983's normalised identifier, threaded through occurrences as soon as a
+finding supplies it — else the de-duplication key's own `vuln_class`; prose labels vary across
+lanes, so grouping tightens as #3983 lands without a change here. Grouping is over-inclusive by
+design: a false group costs a reader a glance, a missed cross-step defect is the failure this
+exists to catch. The adjudicator's assessment of a group is `same_defect`, `distinct` or `unsure`
+with a rationale, rendered on the group; #3980's tier overlap and this pass are complementary,
+and only this one recovers a flow that crosses more than the overlapped tiers.
+
+### Reading an adjudicated report
+
+`## Adjudication` always states the stage's status in one sentence: not configured (every
+severity is raw), skipped for no findings, complete (with counts of adjudicated, omitted,
+unmatched, and groups assessed), or did not complete (with the state and reason, cross-referenced
+from `## Incomplete`). Every finding's first line is one of exactly two shapes:
+
+- `Severity (adjudicated): **high** — by `claude` / `opus-5`; lanes reported lane-a=low,
+  lane-b=critical. Rationale: ...` — act on `high`; the lanes' own values are right there.
+- `Severity (raw): **DISAGREEMENT** low → critical — lanes reported ...; not adjudicated (why)`
+  or `Severity (raw): **high** — lanes reported ...; not adjudicated (why)` — nothing judged this;
+  the report says why, and for a disagreement tells you to treat the highest value as the working
+  severity until a human resolves it.
+
 ## Plan-step shape
 
 The plan-step shape is defined once, by `schema.py::validate_plan_step()` (Issue #3928, epic
@@ -2253,8 +2434,12 @@ same fire-and-forget `docker run -d` semantics `planner.launch()` uses for the p
 container. Every dispatched container mounts `<sweep_dir>/snapshot/` at `/workspace`, never the
 live, mutable `$REPO_ROOT` checkout that keeps moving while a sweep's lanes run (epic #3950's D1;
 see [Investigator launch primitive](#investigator-launch-primitive)). Once every dispatched
-container has exited (`docker wait`), it runs `consolidate.py` and prints the path to
-`report/consolidated.md`.
+container has exited (`docker wait`), it runs the adjudication stage if
+`CFGMS_SECURITY_REVIEW_ADJUDICATOR` is set (`dispatch_adjudicator` → `adjudicate.py prepare` →
+`adjudicate.py launch` → `docker wait` → a recorded `adjudicator` dispatch outcome; Issue #3984 —
+see [Severity adjudication](#severity-adjudication-and-cross-step-re-aggregation-issue-3984)),
+then runs `consolidate.py` and prints the path to `report/consolidated.md`. `resume` runs the
+same stage after its lanes, so an adjudication is always over the lanes' current output.
 
 **`resume` re-verifies the snapshot too, every time (Issue #3952, epic #3950's D1: "and again on
 resume").** A sweep can sit parked for days; `cmd_resume` calls `snapshot.verify_snapshot()`
@@ -2333,7 +2518,12 @@ skips; any other failure — a stale container that could not be reaped, a conta
 with a still-running container, or anything else `launch-investigator` can fail on — still lets
 every other lane dispatch and the consolidator still run against whatever succeeded, but
 `launch`/`resume` exit non-zero and never print the bare `report/consolidated.md` success line for
-that sweep. The consolidator itself failing to run at all (only possible if the repository root
+that sweep. The adjudicator's dispatch (Issue #3984) follows the same rule: a
+credential-unavailable skip is logged and recorded; a malformed `CFGMS_SECURITY_REVIEW_ADJUDICATOR`
+or any other launch failure is recorded as `launch_failed` and makes the final exit non-zero —
+while an adjudicator that dispatched and then ended `failed`/`refused`/`parked` is a recorded,
+report-visible gap and not an exit-code failure, exactly like a lane whose steps failed. The
+consolidator itself failing to run at all (only possible if the repository root
 cannot be determined) is the other non-zero case — `launch`/`resume` exit non-zero rather than
 reporting success for a sweep that produced no report.
 
