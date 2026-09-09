@@ -5,7 +5,6 @@ package dna
 import (
 	"context"
 	"fmt"
-	"slices"
 	"testing"
 	"time"
 
@@ -310,23 +309,6 @@ func TestEndToEndDriftScenario(t *testing.T) {
 	})
 }
 
-// percentileDuration returns the p-th percentile (0-100) of the supplied
-// durations using nearest-rank on a sorted copy. The input slice is left
-// untouched so callers can keep measuring against it.
-func percentileDuration(samples []time.Duration, p int) time.Duration {
-	sorted := slices.Clone(samples)
-	slices.Sort(sorted)
-
-	idx := (p * (len(sorted) - 1)) / 100
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
-	}
-	return sorted[idx]
-}
-
 func TestScalabilityScenario(t *testing.T) {
 	// Test system behavior with larger datasets
 	provider := NewMockDirectoryProvider()
@@ -392,39 +374,53 @@ func TestScalabilityScenario(t *testing.T) {
 		// records how much spare CPU the run had, not how the storage path behaved.
 		// Contention inflates both cohorts, so the comparison between them survives
 		// it while still failing on real per-write growth.
-		storeLatencies := make([]time.Duration, 0, len(allDNA))
-		storedCount := 0
-		for _, dna := range allDNA {
-			opStart := time.Now()
-			err := storage.StoreDirectoryDNA(ctx, dna)
-			opDuration := time.Since(opStart)
-			if err == nil {
-				storedCount++
-				storeLatencies = append(storeLatencies, opDuration)
+		//
+		// Each cohort is timed as a single block spanning its writes, not per write.
+		// A per-write measurement collapses on a coarse wall clock: CI's Windows
+		// runners have been observed with ~15.6ms timer granularity, so an individual
+		// fast write reads exactly 0s, which starved a per-write minimum (the earlier
+		// p1-based version of this comparison) down to zero and tripped the "no
+		// measurable cost" guard below. A block spanning hundreds of writes
+		// accumulates real elapsed time well past one tick regardless of any single
+		// write's resolution, so the average per-write cost derived from it stays
+		// meaningful on any clock.
+		half := len(allDNA) / 2
+		firstHalf := allDNA[:half]
+		secondHalf := allDNA[half:]
+
+		storeCohort := func(items []*DirectoryDNA) (successCount int, blockDuration time.Duration) {
+			start := time.Now()
+			for _, dna := range items {
+				if err := storage.StoreDirectoryDNA(ctx, dna); err == nil {
+					successCount++
+				}
 			}
+			return successCount, time.Since(start)
 		}
 
-		assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
-		require.GreaterOrEqual(t, len(storeLatencies), 200,
-			"need enough successful writes to compare early and late cohorts")
+		firstCount, firstDuration := storeCohort(firstHalf)
+		secondCount, secondDuration := storeCohort(secondHalf)
+		storedCount := firstCount + secondCount
 
-		// Compare the p1 latency of each half rather than the mean or median: the
-		// low percentile is the least-descheduled sample in its cohort, so it
-		// tracks the intrinsic cost of a write while the upper percentiles absorb
-		// scheduling noise. Measured on this machine (16 cores, -race): idle p1 is
-		// 2.75ms in both halves; with 24 CPU burners running for the whole subtest
-		// it rises to 7.7ms early and 9.1ms late. The worst case the bound has to
-		// tolerate is load arriving mid-run — an idle first half (2.75ms) against a
-		// saturated second half (9.1ms), a ratio of 3.3 — so the bound is set at 8x,
-		// which leaves headroom over observed noise while still failing the
-		// order-of-magnitude per-write growth that a scan-per-write regression
-		// produces at this dataset size.
-		half := len(storeLatencies) / 2
-		earlyFloor := percentileDuration(storeLatencies[:half], 1)
-		lateFloor := percentileDuration(storeLatencies[half:], 1)
-		require.Positive(t, earlyFloor, "no measurable per-write cost to compare against")
-		assert.Less(t, lateFloor, 8*earlyFloor,
-			"per-write cost grew with dataset size: first-half p1 %v, second-half p1 %v", earlyFloor, lateFloor)
+		assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
+		require.GreaterOrEqual(t, firstCount, 100,
+			"need enough successful writes in the early cohort to average")
+		require.GreaterOrEqual(t, secondCount, 100,
+			"need enough successful writes in the late cohort to average")
+
+		// Compare the average per-write cost of each cohort. The bound is set at 8x:
+		// measured on this machine (16 cores, -race) with 24 CPU burners running for
+		// the whole subtest, load arriving mid-run produced an idle first half against
+		// a saturated second half at a ratio of 3.3x, so 8x leaves headroom over
+		// observed contention noise while still failing the order-of-magnitude
+		// per-write growth that a scan-per-write regression produces at this dataset
+		// size.
+		earlyPerWrite := firstDuration / time.Duration(firstCount)
+		latePerWrite := secondDuration / time.Duration(secondCount)
+		require.Positive(t, earlyPerWrite, "no measurable per-write cost to compare against")
+		assert.Less(t, latePerWrite, 8*earlyPerWrite,
+			"per-write cost grew with dataset size: first-half avg %v, second-half avg %v",
+			earlyPerWrite, latePerWrite)
 
 		// Test query performance
 		start = time.Now()
