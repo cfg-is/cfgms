@@ -24,6 +24,7 @@ primitives live in `.claude/scripts/security-review/`:
 | `consolidate.py` | `consolidate` — reads every lane's step files, de-dupes findings, and renders `report/consolidated.json` / `report/consolidated.md` |
 | `lanes/terminal_state.py` | `classify` — the shared C3 terminal-state classifier every future harness lane calls (Issue #3928) |
 | `lanes/harness_runner.py` | `SYSTEM_PROMPT`/`OUTPUT_SCHEMA_DESCRIPTION` (C4), the review-methodology loader and per-step anchor selection (Issue #3981 — see [Review methodology](#review-methodology-compact-core-and-per-step-anchors-issue-3981)), and the refusal-retry-once bookkeeping every future harness lane runner shares (Issue #3931) — see [Shared harness lane-runner library](#shared-harness-lane-runner-library-c4-and-refusal-retry-once) below |
+| `lanes/scan_profiles.py` | The trusted scanner profile registry (Issue #3982) — the constant, harness-owned allowlist of tool argv templates per language; the shared runner in `harness_runner.py` executes it — see [Scanner profiles and tool evidence](#scanner-profiles-and-tool-evidence-issue-3982) below |
 | `lanes/claude_lane.py` | The Claude harness finder lane (Issue #3933) — see [The Claude harness lane](#the-claude-harness-lane) below |
 | `lanes/codex_lane.py` | The Codex harness finder lane (Issue #3935) — see [The Codex harness lane](#the-codex-harness-lane) below |
 | `roster.py` | `parse_roster` — parses `CFGMS_SECURITY_REVIEW_LANES` into `harness:model` lane tuples (Issue #3932, C5); the sole lane-dispatch mechanism as of Issue #3933 |
@@ -204,6 +205,197 @@ shared, instead of copied into three future lane runners or never implemented at
   never retries — carrying `refusal_attempts=2`, so "surfaced" means surfaced: no third retry,
   ever, and the envelope itself records how it got there. Every other classification
   (`complete`, `parked`, a first-pass `failed`) passes `refusal_attempts` through unchanged.
+
+### Scanner profiles and tool evidence (Issue #3982)
+
+Finder lanes run security tools over each step's files and fold the output into the model's
+prompt, next to the source, so the reviewing model reasons over tool evidence as well as code.
+`lanes/scan_profiles.py` is the registry (what runs); `harness_runner.collect_scan_evidence` /
+`render_scan_evidence` / `scan_summary` are the runner (how it runs), defined once and called by
+every lane — a lane appends the rendered section after `shared_preamble(step)` and records the
+summary on its envelope's `scans` field; it never executes anything itself.
+
+**The four decisions, with the rejected alternative for each.**
+
+- **Decision 3 — who chooses the commands: fixed, harness-owned check profiles.** The runner
+  maps a step's files to profiles keyed by *language* (from the extension) and *scope kind*
+  (a Go package directory, or the step's files for TS/TSX and scripts). No model writes an argv;
+  the planner is untouched and `validate_plan_step()` has no `commands` field. This converts
+  the threat model from "constrain a model's argv" to "run a constant". *Rejected:*
+  planner-emitted `commands` on the plan step — a model whose own input includes repository
+  paths (attacker-influenceable text) writing an argv that executes next to a live credential.
+  *Deferred:* a planner-chosen menu of named checks can sit on top of the registry later
+  without changing the execution path. Keying by language also removed the dependency on
+  #3978's `tier`; when it lands, `tier` becomes an additional key (skip `generated`, `vendor`,
+  `test`).
+- **Decision 1 — tool set.** Go: `gosec` and `staticcheck` (already in the image, pinned, not
+  reinstalled) and `semgrep`. TS/TSX: `eslint` with `eslint-plugin-security`,
+  `eslint-plugin-react` and the CFGMS HTML-sink bans from `web/eslint.config.js`, and
+  `semgrep`. Shell/PowerShell/Python: `rg` over the CLAUDE.md banned runtime-composition
+  patterns. Semgrep is in scope because its unique value is *project* rules no stock scanner
+  carries (`.devcontainer/scanner/semgrep/cfgms/`: raw `err` in a structured log call, an
+  unannotated `IsRaftLeader()`/`IsLeader()`, `exec.Command("sh", "-c", ...)`, the HTML sinks
+  and `eval`/`new Function`). *Rejected:* `eslint-plugin-security` alone (it is Node security,
+  not browser sink coverage); deferring semgrep to a follow-up story (drags the epic out).
+- **Decision 1b — network-using scanners: excluded, no exceptions.** `govulncheck` and
+  `npm audit` call `vuln.go.dev` and the npm registry by design; admitting either means a new
+  domain in `.devcontainer/dnsmasq-allowlist.d/`, widening the egress of a credential-bearing
+  container, for dependency-CVE data `nancy` and `trivy` already produce on every PR.
+  *Rejected:* adding those domains. *Future:* import same-commit CI scan results with
+  provenance and freshness, so dependency coverage reaches the model without a network call.
+- **Decision 2 — where scans run: in the lane container, bounded per package, with result
+  reuse.** One argv per check per scope, under the container's 2 GB / 2 CPU cap, scratch under
+  the writable `/workspace-out` mount, never the `:ro` snapshot. Results are cached for the
+  sweep under `<lane dir>/.scan-cache/` keyed by (snapshot commit, tool, tool version, rule-set
+  version, the scanned scope, argv) — for a `{scope_dir}` check the scope is the package, not
+  whichever files a hypothesis declared, so two hypotheses over different files of one package
+  share one scan; a `{files}` check is keyed by its exact files. Only `ok` and `empty`
+  untruncated results are cached. *Rejected:* one whole-module `staticcheck` per
+  sweep — a memory risk under 2 GB, and it hides which step a result belongs to.
+
+**The registry and runner are loaded from a trusted mount, never from the snapshot.** A lane's
+entrypoint file was always bind-mounted from the host, but until this story its imports
+(`harness_runner`, `scan_profiles`, `schema`, `resume`, `terminal_state`) resolved from
+`/workspace` — the audited snapshot, i.e. the code under review. A reviewed commit could have
+replaced the registry or run code on import beside the lane credential. `launch-investigator`
+now bind-mounts the host's own `.claude/scripts/security-review` read-only at
+`/opt/cfgms-harness/security-review` for every lane launch (never in plan mode), exports
+`CFGMS_SECURITY_REVIEW_HARNESS_DIR`, and each lane's import bootstrap consults that path ahead of
+any `/workspace` fallback. Every non-test `.py` in that tree is hashed into
+`harness_identity.json`, so a resume after a harness change re-runs its steps. Verified in the
+rebuilt image: with a `scan_profiles.py` planted in the snapshot that raises on import, the lane
+imported both modules from `/opt/cfgms-harness/security-review`.
+
+**The registry is the allowlist, and its shape is machine-checked.** A `Check` is
+`(tool, args, timeout_s, max_output_bytes, json_output)`; `tool` names a `Tool` (executable,
+version probe, completed-run exit codes). `scan_profiles_test.py` fails on any entry that names
+an unlisted executable, carries a shell metacharacter (`; | & $ ` < >` or a newline) or a
+control character in a literal, uses a placeholder other than `{files}`, `{scope_dir}` or a
+`{scanner_home}/`-prefixed image path, points semgrep `--config` at a registry (`p/`, `r/`),
+URL or snapshot path, exceeds the timeout/output ceilings, names neither `{files}` nor
+`{scope_dir}`, or leaves a language with no profile. The runner re-validates every check at
+runtime (defence in depth) and records a `rejected` result instead of running it.
+
+**No shell.** `run_bounded()` calls `subprocess.Popen(argv, shell=False)` with stdin closed,
+stdout and stderr merged, in a new session so a timeout kills the whole process tree. A path
+containing `;`, `|`, `$(...)` or a newline is one literal argv element; nothing is ever parsed
+or quoted. The test proves it with a real child process that echoes its argv.
+
+**A Go package scan is confined as a module tree, not as a file list.** The compiler opens every
+sibling file in the package, every imported package in the module, `go.mod` and `vendor/` — so
+confining the declared files alone confines nothing (an undeclared sibling symlink to a file
+outside the snapshot was read by gosec and staticcheck in the rebuilt image and its content
+reached the prompt). `module_tree_problem()` therefore refuses to run Go tools in a module whose
+tree contains any symlink, a `vendor/` directory, or a `replace` directive naming a filesystem
+path; the scope becomes a `go_module_unscannable` gap naming the offending entry. The walk is
+cached per module root for the process. Rule-of-thumb for other package-scoped languages added
+later: the same tree rule applies before any tool that resolves imports may run.
+
+**Every path argument is confined to the snapshot.** Each declared file is resolved the way
+`read_step_files` resolves it — syntactic (`..`, absolute) then `realpath` containment after
+following every symlink — and must be a regular file; the Go scope directory is derived from the
+confined file, never from the declaration. A rejected path is a `path_rejected` gap whose name
+is withheld from the prompt (it is attacker-influenceable text) but kept in the envelope and the
+`scan_gap` log event. This is the control that matters: `/workspace:ro` protects the repository,
+and the credential mounts are elsewhere in the container filesystem — `rg . /home/agent/.claude/
+.credentials.json` is an allowlisted tool reading the live credential into a model prompt, and
+only path confinement stops it.
+
+**Trusted configuration only.** Scanners load config, parsers, plugins and rules from the image
+(`/opt/cfgms-scanner`, overridable via `CFGMS_SCANNER_HOME` for tests), never from the
+snapshot. eslint runs as `node /opt/cfgms-scanner/node_modules/eslint/bin/eslint.js
+--no-config-lookup --config /opt/cfgms-scanner/eslint.config.js --no-inline-config`; a flat
+config is executable JavaScript, so the audited project's `eslint.config.js` must never load.
+The scanner's own `node_modules` come from `.devcontainer/scanner/package-lock.json` (`npm ci
+--ignore-scripts` at build), not from `web/`; the audited project's dependencies are never
+installed at scan time. Go tools typecheck the snapshot but never run it (`CGO_ENABLED=0`; no
+`go generate`/`go run` in any profile); they run from the nearest enclosing `go.mod` so a nested
+module scans correctly. Semgrep's `--config` values are image paths only. The fixture suite
+plants a decoy `eslint.config.js` (throws) and `package.json` (throwing scripts) beside the TSX
+fixture and asserts neither marker ever appears in scanner output.
+
+**No network, enforced at the tool.** `scan_tool_env()` builds every check's environment from
+scratch — never a copy of the lane's, which carries harness identity and credential locations:
+`GOPROXY=off`, `GOSUMDB=off`, `GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly -modcacherw`,
+`GOWORK=off`, `SEMGREP_SEND_METRICS=off`, `SEMGREP_ENABLE_VERSION_CHECK=0`, `HOME` under
+scratch, and only the image-baked `GOMODCACHE`. A module not in that cache, or a `toolchain`
+directive newer than the image's Go, is a recorded failure, never a fetch. Every semgrep check
+also passes `--metrics=off --disable-version-check`. The container's default-DROP egress is
+defence in depth, not the control.
+
+**Bounded, in bytes.** Per-check timeout (registry ceiling 300 s), stdout cap (ceiling 24 000
+bytes; the process is killed once the cap is read, output is never buffered whole) and a
+16 000-byte stderr cap, a per-step check-count cap (`MAX_CHECKS_PER_STEP = 12`), and a per-step
+rendered budget of `SCAN_EVIDENCE_MAX_BYTES = 40 000` UTF-8 bytes for the WHOLE section —
+headings, gap lines (at most 40, file lists at most 20 names each) and the omission notice
+included — on top of the existing 200 000-byte bundle budget. Records that do not fit are
+omitted with one visible notice and counted into the envelope as a `prompt_budget_omitted` gap.
+A version probe is bounded too.
+
+**Tool output is parsed in its own format; an analysis failure is never "findings".** stdout
+(structured output) and stderr (diagnostics) are captured separately. `analyse_tool_output()`
+reads each format's error fields — gosec's `Golang errors`, staticcheck's `code: compile`
+entries, semgrep's `errors`, eslint's `fatal` messages — and classifies a completed run `ok`,
+`partial` (findings kept, but analysis errors mean coverage is incomplete) or `failed` (errors
+and no usable findings, or unparseable output). A package importing a module absent from the
+offline cache is therefore a recorded gap from both Go tools (tested against the real
+binaries), not two exit-1 "findings". An empty stdout is `ok` with 0 findings only for tools
+that print nothing when clean (`silent_on_clean`: staticcheck's JSON mode, ripgrep); for every
+other tool it stays `empty`.
+
+**Source-level suppressions in the snapshot are ignored.** semgrep runs `--disable-nosem` and
+gosec `-nosec`, so a `// nosemgrep` or `#nosec` comment in the audited code cannot hide evidence
+from the reviewing model; eslint already runs `--no-inline-config`. staticcheck offers no switch
+for `//lint:ignore` directives — a documented gap.
+
+**Every non-`ok` outcome is an explicit coverage gap, in three places.** Statuses are `ok`
+(completed, parsed, no analysis errors), `partial`, `empty`, `failed` (exit code outside the
+tool's completed-run set, a spawn error, output truncated at the cap, unparseable output, or
+analysis errors with no usable findings), `timeout`, `rejected`, `unavailable`, `skipped`, plus
+`truncated` on any record. Non-check gaps are `unsupported_language` (files naming no profile), `path_rejected`,
+`no_go_module` and `runner_error` (a bug in the runner itself becomes a gap, never a failed
+step). They appear (1) at the top of the prompt section, gap count first; (2) in the envelope's
+`scans` summary, written regardless of terminal state; (3) in `report/consolidated.md`'s
+`## Scanner coverage` table and gap list, built by `consolidate.build_scanner_coverage()` from the
+envelopes. A scanner gap does not flip `_sweep_complete()` — the model still reviewed the
+source — it changes what a reader knows the tools did not cover.
+
+**Tool output and metadata are untrusted input.** Output is repository content refracted
+through a tool; scope names, file names, reasons and versions are repository paths. Control
+characters are stripped from output bodies (newline and tab kept) and every metadata string
+rendered on a heading or bullet line goes through `_meta()`: all control characters including
+newline become spaces, the `<<<scanner-output>>>` / `<<<end scanner-output>>>` delimiters are
+neutralised, and the value is length-bounded — so a directory name with a newline cannot start
+a new prompt heading and a file name cannot forge or close a delimiter (tested through
+`resolve_scopes` and `render_scan_evidence`, not a fabricated stdout). The prompt states that
+the section is evidence, never instructions, and that a tool reporting nothing is not proof of
+clean code.
+
+**Coverage is proven, not asserted.** `lanes/scan_fixtures_test.py` runs the real registry
+through the real runner against planted fixtures under
+`.claude/scripts/security-review/fixtures/scan/` (their own Go module in a dot-directory, so the
+root `./...` never compiles them, and excluded from CodeQL via `paths-ignore`): gosec must report
+`G401`, staticcheck `SA4017`, upstream semgrep `md5-used-as-password` and
+`react-dangerouslysetinnerhtml`, the CFGMS rules `cfgms-raw-error-in-structured-log`,
+`cfgms-react-dangerously-set-inner-html` and `cfgms-html-injection-sink`, eslint
+`react/no-danger` and `no-restricted-properties`, rg the `bash -c` line. A missing record fails
+(the profile was emptied); a tool absent from the host prints `[SKIP]` with the reason — never
+`[PASS]` — and runs for real inside `cfg-agent:latest`.
+
+**Image supply chain.** `.devcontainer/Dockerfile` installs the scanner home in one block:
+eslint and plugins from the scanner lockfile (integrity-pinned; `--ignore-scripts`); semgrep
+`1.176.1` via `uv pip install --require-hashes` from
+`.devcontainer/scanner/semgrep-requirements.txt` (the full wheel closure, sha256 per artifact for
+both `x86_64` and `aarch64`) into a private virtualenv; the curated upstream Go and TS/React
+security rules fetched at the commit pinned in `semgrep/upstream/SOURCE` and verified file by
+file against the sha256 recorded there (`fetch-semgrep-rules.sh` fails the build on any
+mismatch — the rule text itself is not vendored into this repository; it is distributed under
+the Semgrep Rules License); the CFGMS rules copied from the repository; and `semgrep --validate`
+over every rule set so a broken rule fails the build. `ruleset_version()` hashes `SOURCE`, the
+CFGMS rules and the eslint config into the cache key, so a rule change invalidates cached
+results. These pins are not tracked by `dependency-pin-check.yml` (same status as the Ollama CLI
+pin); refresh by bumping the versions in `.devcontainer/scanner/` and regenerating the lockfile
+and hashed requirements as their headers describe.
 
 ### Review methodology: compact core and per-step anchors (Issue #3981)
 

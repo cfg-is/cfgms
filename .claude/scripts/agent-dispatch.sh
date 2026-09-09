@@ -3044,6 +3044,20 @@ PROMPT_EOF
         exit 1
       fi
       inv_lane_entrypoint_mount=(-v "${inv_lane_entrypoint}:/usr/local/bin/investigator-lane-entrypoint.py:ro")
+      # Issue #3982: the lane entrypoint imports the shared harness modules
+      # (harness_runner, scan_profiles -- the scanner allowlist -- schema,
+      # resume, terminal_state). They must come from the HOST's harness tree,
+      # the same trusted code that is running this launcher, never from the
+      # audited snapshot at /workspace. Mounted read-only at a fixed trusted
+      # path; the lane bootstraps consult CFGMS_SECURITY_REVIEW_HARNESS_DIR
+      # ahead of any /workspace fallback.
+      inv_harness_dir_host="${REPO_ROOT}/.claude/scripts/security-review"
+      if [[ ! -d "$inv_harness_dir_host" ]]; then
+        echo "ERROR: trusted harness directory not found: ${inv_harness_dir_host}"
+        exit 1
+      fi
+      inv_lane_entrypoint_mount+=(-v "${inv_harness_dir_host}:/opt/cfgms-harness/security-review:ro")
+      inv_lane_entrypoint_mount+=(-e "CFGMS_SECURITY_REVIEW_HARNESS_DIR=/opt/cfgms-harness/security-review")
     fi
 
     # Trusted-harness identity (Issue #3952, epic #3950's D1 correction on
@@ -3080,7 +3094,18 @@ repo_root, entrypoint_path, lane_entrypoint_path, dest_path = sys.argv[1:5]
 
 digest = hashlib.sha256()
 files = []
-for path in (entrypoint_path, lane_entrypoint_path):
+paths = [entrypoint_path, lane_entrypoint_path]
+# Issue #3982: a lane runs the whole trusted harness tree (mounted at
+# /opt/cfgms-harness/security-review), not just its entrypoint file, so
+# every Python module in it is part of the harness identity a resume checks.
+if lane_entrypoint_path:
+    harness_dir = os.path.join(repo_root, ".claude", "scripts", "security-review")
+    for dirpath, dirnames, filenames in os.walk(harness_dir):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if name.endswith(".py") and not name.endswith("_test.py"):
+                paths.append(os.path.join(dirpath, name))
+for path in paths:
     if not path:
         continue
     rel = os.path.relpath(path, repo_root)

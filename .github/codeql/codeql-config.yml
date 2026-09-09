@@ -12,3 +12,9 @@ queries:
 packs:
   go:
     - cfg-is/cfgms-go-extensions
+
+# Planted-vulnerability fixtures for the security-review scanner profiles
+# (Issue #3982): deliberately weak code the profiles must detect. Excluded so
+# CodeQL does not report the plants as findings against the repository.
+paths-ignore:
+  - .claude/scripts/security-review/fixtures/scan
