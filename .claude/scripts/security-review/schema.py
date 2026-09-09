@@ -579,6 +579,38 @@ def validate_adjudication_envelope(envelope: object) -> list[str]:
     if "state" in envelope and not _is_member(state, STEP_STATES):
         errors.append(f"state must be one of {sorted(STEP_STATES)}, got {state!r}")
 
+    # Optional bookkeeping the lane records on every state. Optional does
+    # not mean unvalidated: the consolidator builds sets from these, so a
+    # malformed nested value here must be a validation error, never a
+    # TypeError that aborts consolidation (Issue #3984 review).
+    if "unsent_findings" in envelope:
+        unsent = envelope["unsent_findings"]
+        if not isinstance(unsent, list):
+            errors.append(f"unsent_findings must be a list when present, got {unsent!r}")
+        else:
+            for index, key in enumerate(unsent):
+                if not (
+                    isinstance(key, list)
+                    and len(key) == 3
+                    and all(isinstance(part, str) and part for part in key)
+                ):
+                    errors.append(
+                        f"unsent_findings[{index}]: must be a [file, symbol, vuln_class] list of "
+                        f"non-empty strings, got {key!r}"
+                    )
+    if "unassessed_groups" in envelope:
+        unassessed = envelope["unassessed_groups"]
+        if not _non_empty_string_list(unassessed):
+            errors.append(
+                f"unassessed_groups must be a list of non-empty strings when present, got {unassessed!r}"
+            )
+    if "unsolicited_verdicts" in envelope:
+        unsolicited = envelope["unsolicited_verdicts"]
+        if not isinstance(unsolicited, int) or isinstance(unsolicited, bool) or unsolicited < 0:
+            errors.append(
+                f"unsolicited_verdicts must be a non-negative integer when present, got {unsolicited!r}"
+            )
+
     if state == "complete":
         adjudications = envelope.get("adjudications")
         if not isinstance(adjudications, list):

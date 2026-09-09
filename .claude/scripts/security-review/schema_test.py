@@ -760,6 +760,42 @@ def test_adjudication_envelope_rejects_bad_shapes():
     check(schema.validate_group_assessment(7) == ["group assessment must be a JSON object"], "adjudication: non-object assessment rejected")
 
 
+def test_adjudication_envelope_optional_bookkeeping_is_validated_when_present():
+    """Re-review finding on 78bbbe84: the consolidator builds sets from
+    these optional fields, so a malformed nested value must be a validation
+    error here, never a TypeError there."""
+    good = _adjudication_envelope(unsent_findings=[["pkg/a.go", "A", "x"]], unassessed_groups=["group-001"], unsolicited_verdicts=2)
+    check(schema.validate_adjudication_envelope(good) == [], "bookkeeping: well-formed optional fields validate")
+    check(schema.validate_adjudication_envelope(_adjudication_envelope(unsent_findings=[], unassessed_groups=[], unsolicited_verdicts=0)) == [], "bookkeeping: empty lists and zero validate")
+    bad_cases = [
+        ("unassessed_groups", [{}]),
+        ("unassessed_groups", [[]]),
+        ("unassessed_groups", [""]),
+        ("unassessed_groups", "group-001"),
+        ("unassessed_groups", {"a": 1}),
+        ("unsent_findings", [[[], "F", "tenant-scoping"]]),
+        ("unsent_findings", [["only", "two"]]),
+        ("unsent_findings", [{"file": "a"}]),
+        ("unsent_findings", [["", "b", "c"]]),
+        ("unsent_findings", "pkg/a.go"),
+        ("unsolicited_verdicts", "2"),
+        ("unsolicited_verdicts", -1),
+        ("unsolicited_verdicts", True),
+        ("unsolicited_verdicts", []),
+    ]
+    for field, value in bad_cases:
+        try:
+            errors = schema.validate_adjudication_envelope(_adjudication_envelope(**{field: value}))
+            ok = any(field in e for e in errors)
+            detail = str(errors)
+        except TypeError as exc:
+            ok = False
+            detail = f"raised TypeError: {exc}"
+        check(ok, f"bookkeeping: {field}={value!r} is a validation error naming the field, never an exception", detail)
+    errors = schema.validate_adjudication_envelope(_adjudication_envelope(state="failed", stop_reason_raw="x", unassessed_groups=[{}]))
+    check(any("unassessed_groups" in e for e in errors), "bookkeeping: validated on non-complete states too")
+
+
 def test_enum_fields_holding_json_arrays_or_objects_are_errors_not_exceptions():
     """Review finding on Issue #3984: `value in frozenset` raises TypeError on
     an unhashable JSON array/object, which turned a malformed envelope into

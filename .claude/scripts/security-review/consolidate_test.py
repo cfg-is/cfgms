@@ -1832,6 +1832,26 @@ def test_malformed_nested_json_types_are_excluded_not_crashed_on():
             report = consolidate.consolidate(sweep, repo)
         check(report["adjudication"]["status"] == "invalid", "consolidate: an adjudication envelope with an array state is invalid, not a crash", str(report["adjudication"]))
 
+        # Re-review finding on 78bbbe84: the optional bookkeeping lists feed
+        # set construction in the merge; malformed nested values must reach
+        # the invalid-envelope fallback, never a TypeError.
+        for field, value in (("unassessed_groups", [{}]), ("unsent_findings", [[[], "F", "tenant-scoping"]]), ("unsolicited_verdicts", [])):
+            _write_adjudication_envelope(sweep, repo, sha, [_thing_adjudication()])
+            with open(path) as fh:
+                envelope = json.load(fh)
+            envelope[field] = value
+            write(path, envelope)
+            try:
+                with redirect_stderr(io.StringIO()):
+                    report = consolidate.consolidate(sweep, repo)
+                    md = consolidate.render_markdown(report)
+                ok = report["adjudication"]["status"] == "invalid" and len(report["findings"]) == 1 and "Severity (raw): **DISAGREEMENT**" in md and "## Incomplete" in md
+                detail = str(report["adjudication"])
+            except TypeError as exc:
+                ok = False
+                detail = f"raised TypeError: {exc}"
+            check(ok, f"consolidate: a malformed {field} on the envelope renders the raw-findings fallback with an invalid-envelope gap, never a crash", detail)
+
 
 def test_unsent_findings_and_groups_are_explained_in_incomplete():
     with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
