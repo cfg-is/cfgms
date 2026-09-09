@@ -575,7 +575,10 @@ Every lane emits the same shape (`schema.py::validate_finding`):
   "hypothesis_id": "h1",
   "file":          "pkg/example/thing.go",
   "symbol":        "Thing.DoSomething",
+  "line":          42,
+  "end_line":      47,
   "vuln_class":    "<taxonomy value>",
+  "cwe":           "CWE-863",
   "severity":      "<low|medium|high|critical>",
   "confidence":    "<low|medium|high>",
   "title":         "...",
@@ -584,17 +587,31 @@ Every lane emits the same shape (`schema.py::validate_finding`):
 }
 ```
 
-All thirteen fields are required. `severity` and `confidence` are validated against their enum;
-every other field must be a non-empty string. `hypothesis_id` (Issue #3959) names which of the
-step's `hypotheses` this finding resulted from — a finding is how a `candidate_found` disposition
-(see [Disposition](#disposition) below) shows its work, so every finding traces back to the
-hypothesis that produced it, exactly like a disposition does.
+Fifteen fields are required; `end_line` is the sole optional field (sixteen total). `severity`
+and `confidence` are validated against their enum; `cwe` (Issue #3983) is validated and
+normalised against the closed CWE identifier list `docs/security-review/methodology.md` (#3981)
+defines, or its `other: <label>` escape, by `schema.normalize_cwe` — case and minor formatting
+variation (`cwe-295`, `CWE-295: ...`) normalise to the same canonical value, never pass through as
+distinct ones; `line` must be a positive integer, and `end_line`, when present, must be an integer
+`>= line`; every other required field must be a non-empty string. `hypothesis_id` (Issue #3959)
+names which of the step's `hypotheses` this finding resulted from — a finding is how a
+`candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
+finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
-**The de-duplication key is `file` + `symbol` + `vuln_class` — never a line number.** Line
-ranges rot as `develop` advances; symbol names survive. `schema.py` does not define or read a
-line-number field of any kind. A caller-supplied line-shaped field (`line`, `line_number`,
-`line_range`, ...) is silently ignored, not rejected and not validated, so nothing downstream
-can key on it by accident.
+**The de-duplication key is still `file` + `symbol` + `vuln_class` — never the location.** Line
+ranges rot as `develop` advances while symbol names survive, so keying on `line`/`end_line` would
+split one defect two lanes report at two slightly different line numbers into two findings,
+destroying the cross-lane agreement signal the harness is built on. Before Issue #3983, that
+correct decision about the *key* was implemented as "don't record a location at all" -- a
+different and overly strong decision, since a finding naming a file and a symbol but no location
+still makes a human open the file and search. #3983 separates the two: the key is unchanged, and
+every finding now also carries `cwe` (a normalised, closed-vocabulary defect classification) and
+`line`/`end_line` (a model-generated hint at where in `file` to look, never verified as a real
+offset — neither this module nor `consolidate.py` reads file bodies). Both `cwe` and `line` are
+required, not optional-and-ignored: the harness has never been run end to end (epic #3975), so
+there is no corpus of prior sweeps a required field could silently invalidate, and a validation
+failure here is loud and diagnosable rather than a lane quietly omitting a field a later reader
+assumed was always there.
 
 `confidence` is recorded per finding but is not used to filter at the finder stage — filtering
 during discovery measurably depresses recall. Coverage is the finder's job; ranking is the
@@ -2068,10 +2085,16 @@ the tasks that completed." instead of the unconditional "_No findings after de-d
 validation._" that renders only when `_sweep_complete()` is `True`.
 
 **De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
-never a line number. Every occurrence across every lane's `step-*.findings.json` sharing this key
-collapses into one consolidated entry; the entry's `lanes` field lists exactly the lanes that
-independently reported it, and `occurrences` keeps each lane's own `severity`/`confidence`/
-`title`/`evidence`/`suggested_fix` rather than discarding the disagreement.
+never the `line`/`end_line` location Issue #3983 added. Every occurrence across every lane's
+`step-*.findings.json` sharing this key collapses into one consolidated entry; the entry's `lanes`
+field lists exactly the lanes that independently reported it, and `occurrences` keeps each lane's
+own `severity`/`confidence`/`title`/`evidence`/`suggested_fix`/`cwe`/`line`/`end_line` rather than
+discarding the disagreement. The consolidated finding's own top-level `cwe`/`line`/`end_line`
+(`consolidate.py::_first_occurrence_field`) are taken from the first occurrence in `(lane,
+step_id)` order — a deterministic pick, never a merge — since these are a reader's hint, not part
+of what makes two findings the same finding; `consolidated.md` renders the picked location
+immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` beside
+`vuln_class`.
 
 **Findings are sorted by agreement, then severity, then confidence (Issue #3960, F6).**
 `_finalize_findings()` orders `report["findings"]` -- and therefore `render_markdown()`'s
@@ -2408,10 +2431,12 @@ re-checked against real data rather than re-argued.
 `consolidate.build_cross_step_groups()` is deterministic and runs whether or not an adjudicator
 is configured: two or more consolidated findings sharing a defect class whose combined `step_ids`
 span two or more distinct plan steps form one group, id'd `group-NNN` in class order so the id an
-adjudicator's `group_assessments` refers back to is stable. The class is the first non-empty `cwe`
-any occurrence carries — #3983's normalised identifier, threaded through occurrences as soon as a
-finding supplies it — else the de-duplication key's own `vuln_class`; prose labels vary across
-lanes, so grouping tightens as #3983 lands without a change here. Grouping is over-inclusive by
+adjudicator's `group_assessments` refers back to is stable. The class is `finding["cwe"]` — #3983's
+normalised, closed-vocabulary identifier, required on every finding since that story landed, so
+present on every finding a current lane writes — else the de-duplication key's own `vuln_class`,
+for a finding from a sweep written before #3983 whose envelope predates the required field; prose
+labels vary across lanes, so grouping is tighter now that `cwe` is universal. Grouping is
+over-inclusive by
 design: a false group costs a reader a glance, a missed cross-step defect is the failure this
 exists to catch. The adjudicator's assessment of a group is `same_defect`, `distinct` or `unsure`
 with a rationale, rendered on the group; #3980's tier overlap and this pass are complementary,
