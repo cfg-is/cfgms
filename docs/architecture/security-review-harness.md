@@ -1966,8 +1966,8 @@ cleanly.
 
 ## The auditable planner bundle (Issue #3978)
 
-`metadata.py::write_bundle(dest, commit_sha, repo_root=None, scope_file=None, no_scope=False)`
-writes a directory of artifacts instead of the flat in-memory payload above. It is the
+`metadata.py::write_bundle(dest, commit_sha, repo_root=None, scope_file=None, no_scope=False,
+paths=None)` writes a directory of artifacts instead of the flat in-memory payload above. It is the
 extractor's second output, not a replacement for the first: `collect()`/`render_payload()` are
 kept, unchanged, as their own independently tested unit — but as of Issue #3979 nothing in the
 planner path calls them anymore (`grep -n render_payload
@@ -2065,6 +2065,71 @@ Consequences enforced by `write_bundle`:
   a mistake worth surfacing, and this is human-authored Markdown, so mangling it silently (the
   way a path value is control-character-filtered elsewhere in this module) would be worse than
   refusing it.
+
+### Scope filter (`--path`, Issue #4012)
+
+Before this story, `security-review.sh launch <ref>` always planned the whole repository:
+`metadata.collect()`/`write_bundle()` took a commit sha and nothing else, and the planner prompt
+listed every file. The first end-to-end run (Issue #3985) hit this directly: the planner
+(`claude-opus-5`, the legacy default) produced about one step per minute over 3283 inventory files,
+so a sweep meant to cover three packages still paid the full-repository planning cost, and the plan
+had to be pruned by hand (deleting step files) before lanes dispatched — a workaround
+`docs/security-review/first-run-report.md` records as "the coverage denominator is the pruned
+plan, not the repository." A bounded sweep needed to be a first-class operation, not a full plan an
+operator edits after the fact.
+
+`--path <subtree>` (repeatable) on `launch` is that operation. It is an **independent axis from
+`--scope-file`**: `--path` bounds *which files the extractor reads at all*; `--scope-file` is
+operator prose describing *what to look for* within whatever is read. A sweep can use either,
+both, or neither, and `--scope-file` stays exactly as before this story — prose only, it does not
+bound anything.
+
+`metadata._normalize_scope_paths()` validates and normalizes the raw `--path` values before
+anything else runs: each must be non-empty, repository-relative (never absolute), and free of a
+`.`/`..` component — a trailing slash is stripped (`pkg/cert/` and `pkg/cert` name the same
+subtree). A path failing this raises `MetadataError` before any git call or bundle write, matching
+`--scope-file`'s own fail-before-writing posture. `collect()`/`write_bundle()` both accept the
+normalized list as `paths`; `None` or empty means the full repository, unchanged from before this
+story.
+
+**The filter applies once, upstream of every extractor.** `write_bundle()`'s
+`_assemble_bundle_contents()` filters the `git ls-tree` entry list against the scope (a path
+qualifies when it equals a scope entry exactly, or starts with `<entry>/` — never a bare string
+prefix, so `--path pkg/cert` does not also match a sibling `pkg/certutil`) before tier
+classification, route extraction, or config-surface scanning ever run. `01-tree.tsv` therefore
+carries only in-scope rows, and `03-routes.tsv`/`06-config-surface.tsv` narrow for free, since both
+walk the same already-filtered file list rather than re-deriving their own scope check.
+`MANIFEST.json` records the filter verbatim as `scope_paths` (a list, or `null` when unscoped) —
+the same self-describing-artifact principle `scope_provided`/`scope_file` already follow for
+`--scope-file`.
+
+**The prompt says so explicitly.** `planner.build_prompt()` reads the bundle's own `MANIFEST.json`
+back (`_read_bundle_scope_paths()`, tolerant of a missing or malformed manifest — falls back to
+"unscoped" rather than raising, since a wording choice must never be allowed to break plan
+generation) and opens with either *"This is a BOUNDED sweep, not a full-repository review: the
+inventory below is scoped to `pkg/cert`, `pkg/session` only..."* or *"This sweep covers the full
+repository..."*. A planner that is not told its inventory is already bounded has no way to tell "a
+naturally small repository" apart from "an operator-chosen slice," and the two call for different
+partitioning judgment.
+
+**The coverage denominator narrows with it, not just the prompt.** The G-2/G-3 coverage gates
+(`planner.evaluate_coverage()`, below) read tier data from the same, already-scoped
+`01-tree.tsv`, so a scoped sweep's gates are evaluated only against the named subtree(s) — there is
+no separate scoping step for the gates to fall out of sync with. `consolidate.py` reads the sweep's
+own `manifest.json` `scope_paths` (never a per-planner bundle manifest — a multi-planner sweep has
+one bundle per roster entry, all filtered identically by the one `--path` set passed to every
+`planner.py prepare` call, so the sweep-root manifest is the one place this fact is recorded once
+rather than N times) and `render_markdown()` opens `## Coverage` with a `**Scope:**` line naming the
+subtree(s) and stating that the table below is relative to that scope, not the full repository —
+see [Consolidation and the coverage table](#consolidation-and-the-coverage-table).
+
+**`resume` keeps the scope without the operator re-passing it.** `manifest.create_sweep()` records
+`paths` verbatim as `manifest.json`'s `scope_paths` field at sweep creation time (Issue #4012's
+`paths` parameter, threaded from `security-review.sh launch`'s own `--path` flags via
+`create_sweep_tree`). `cmd_resume` reads that field back (`read_scope_paths()`) and forwards it to
+`dispatch_planner` exactly as `cmd_launch` forwards the CLI flags — there is no `--path` flag on
+`resume` at all, and none is needed: the manifest, not the command line, is a sweep's durable
+record of what it was bounded to.
 
 ### Tier: the highest-leverage field
 
@@ -2236,6 +2301,15 @@ lane ever touched simply disappeared from the total instead of appearing as a ga
 `plan/` instead means a step every lane ignored is still counted — and, per the next paragraph,
 visibly counted — because the plan fixes what "supposed to be reviewed" means independently of
 what any lane actually did.
+
+**The coverage table names its own scope (Issue #4012).** `consolidate()` reads the sweep's
+`manifest.json` `scope_paths` (`_sweep_scope_paths()`) and carries it into the report as
+`report["scope_paths"]`; `render_markdown()` opens `## Coverage` with a `**Scope:**` line — either
+naming every bounded subtree and stating the table is relative to that scope, or `full repository`
+when unscoped (including every sweep from before this story, which has no `scope_paths` field at
+all). This exists so a small step count for a scoped sweep reads as "this scope is small," never as
+"coverage looks incomplete" — see [Scope filter](#scope-filter---path-issue-4012) for how the same
+`--path` filter that produced this denominator also bounded the bundle and the planner prompt.
 
 **A `(lane, step_id)` pair with no file at all is `not_started`, not absent.** `build_coverage_table()`
 now produces five buckets per lane — `complete`/`parked`/`refused`/`failed` plus `not_started` —
@@ -2844,9 +2918,9 @@ into one workflow. It is a thin CLI: it adds no classification, schema, or crede
 its own, only calling each dependency's existing entry point in sequence.
 
 ```
-security-review.sh launch <ref> [--scope-file <path>]        # start a new sweep
-security-review.sh resume <sweep-id> [--scope-file <path>]    # continue an interrupted or parked sweep
-security-review.sh status <sweep-id>                          # coverage only, never re-runs anything
+security-review.sh launch <ref> [--scope-file <path>] [--path <subtree>]...  # start a new sweep
+security-review.sh resume <sweep-id> [--scope-file <path>]                    # continue an interrupted or parked sweep
+security-review.sh status <sweep-id>                                          # coverage only, never re-runs anything
 ```
 
 **`launch <ref>`.** Requires `CFGMS_SECURITY_REVIEW_LANES` to be set (Issue #3933 — the roster is
@@ -2877,6 +2951,13 @@ stage if `CFGMS_SECURITY_REVIEW_ADJUDICATOR` is set (`dispatch_adjudicator` → 
 see [Severity adjudication](#severity-adjudication-and-cross-step-re-aggregation-issue-3984)),
 then runs `consolidate.py` and prints the path to `report/consolidated.md`. `resume` runs the
 same stage after its lanes, so an adjudication is always over the lanes' current output.
+
+**`--path <subtree>` (repeatable, `launch` only, Issue #4012).** Forwarded to `dispatch_planner`,
+which passes one `--path` per entry to `planner.py prepare` (and, through it,
+`metadata.write_bundle()`); also recorded verbatim in `manifest.json`'s `scope_paths` field by
+`create_sweep_tree` so `resume` recovers it automatically — see [Scope filter](#scope-filter---path-issue-4012)
+above for the full plumbing (bundle filtering, the planner prompt, and the coverage table's
+`**Scope:**` line). Omitted entirely, a sweep is unscoped, unchanged from before this story.
 
 **Honest scope statement, restated for this cutover.** What Issue #3979 makes true is narrower
 than "source code does not leave the environment": it is that *the planner* cannot read source,
