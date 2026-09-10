@@ -633,6 +633,7 @@ The record a lane writes per step, regardless of outcome (`schema.py::validate_s
   "prompt_version":   "<sha256 of harness_runner.prompt_corpus(): SYSTEM_PROMPT + methodology core + every anchor + OUTPUT_SCHEMA_DESCRIPTION>",
   "harness_identity": "<CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY, or 'unknown' outside a container>",
   "stop_reason_raw":  "<provider's raw, unmodified terminating reason>",
+  "harness_output_tail": "<bounded, control-character-free tail of the harness's own stdout+stderr>",
   "findings":         [],
   "dispositions":     [],
   "files_intended":   [],
@@ -649,7 +650,9 @@ binding stays visible on the envelope exactly like `refusal_attempts` does.
   `refused`/`failed` — a genuinely clean step is still `complete`). `dispositions` (Issue #3959)
   is likewise required as a list, with exactly one entry per hypothesis in the step's own plan —
   see [Disposition](#disposition) below. `stop_reason_raw` is not required. `files_intended`/
-  `files_read` are optional, but when present must each be a list of strings.
+  `files_read` are optional, but when present must each be a list of strings. `harness_output_tail`
+  must not be present at all — a successful harness call's incidental stdout/stderr is not a
+  diagnostic worth keeping.
 - For every other state: `stop_reason_raw` is required and must be non-empty. `findings` and
   `dispositions` are not read. `files_intended`/`files_read` are not written — a
   `refused`/`failed`/`parked` step never got far enough to have read anything meaningful or to
@@ -768,6 +771,25 @@ populates `stop_reason_raw` from its own harness's artifact (`claude_lane.py` re
 `no_valid_findings_file`, `invalid_findings_schema`, or `harness_exit_<code>` — see
 [The Claude harness lane](#the-claude-harness-lane)) — that mapping is a lane concern, not this
 one.
+
+**`harness_output_tail`** (Issue #4008): before this, a step whose harness process exited
+non-zero carried only `stop_reason_raw: "harness_exit_1"` — no auth failure, no "unrecognised
+model id", no crash text, nothing an operator could read without re-running the harness call by
+hand (which is exactly what the first end-to-end run, Issue #3985, had to do to discover that
+`--model sonnet-5` was an unrecognised model id). Each lane's `call_<harness>_harness` now returns
+a third element alongside `(exit_code, rate_limited)` — the harness subprocess's own combined
+stdout+stderr, run through `harness_runner.sanitize_harness_output_tail()`: control characters
+other than newline/tab stripped, then bounded to the LAST `harness_runner.HARNESS_OUTPUT_TAIL_MAX_CHARS`
+characters, since the text that actually explains a failure is almost always at the end of a
+harness's output, not the beginning. `run_lane()` carries it exactly like `stop_reason_raw` — the
+first non-`complete` task's tail wins when a step was split across multiple execution tasks — and
+`harness_runner.build_envelope()`/`apply_refusal_policy()` attach it to the envelope only when
+`state != complete` and the tail is non-empty; a `complete` envelope never carries it, matching
+`findings`'s own conditional. `consolidate.py`'s `## Incomplete` section renders it per failed
+step, not just the aggregate per-lane counts `stop_reason_raw` already drives — see
+[Consolidation and the coverage table](#consolidation-and-the-coverage-table) below. This is
+diagnostic text beside a step's status, never the model's full transcript — persisting that is
+explicitly out of scope.
 
 ## Fail-closed base directory
 
@@ -2119,6 +2141,17 @@ gaps by lane name (or points at `## Dispatch` for a dispatch/rejection gap, so t
 is not printed twice), and the `## Findings` section's empty case reads "No candidates reported in
 the tasks that completed." instead of the unconditional "_No findings after de-duplication and
 validation._" that renders only when `_sweep_complete()` is `True`.
+
+**`## Incomplete` shows the harness output tail per failed step, not just the per-lane counts**
+(Issue #4008). `load_sweep()` also returns `lane_step_tail` — `{lane: {step_id:
+harness_output_tail}}`, populated only when a non-`complete` envelope actually carries that field
+— and `consolidate()` reduces it to `report["failed_step_tails"]`: one entry per `(lane, step_id)`
+with a recorded tail, `{"lane", "step_id", "state", "harness_output_tail"}`, in deterministic
+lane/step order. `_incomplete_lines()` renders one bullet per entry underneath the existing
+per-lane failed/parked/refused counts, so a reader sees not just "laneA: 1/5 step(s) failed" but
+the actual diagnostic text (an unrecognised model id, an auth error) beside it — the whole point
+of recording the tail in the first place. A step with no tail on disk (an envelope predating this
+story, or a state that genuinely had nothing to show) contributes no entry.
 
 **De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
 never the `line`/`end_line` location Issue #3983 added. Every occurrence across every lane's
