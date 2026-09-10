@@ -1129,6 +1129,55 @@ enumerated per harness rather than opened wholesale — and is a step in each fu
 (`codex.conf` landed by Issue #3935; `opencode.conf` by Issue #3936; `ollama.conf` by this story)
 not something a lane can work around at runtime.
 
+## Prompt transport: stdin, never argv (Issue #4002)
+
+Every prompt this harness sends to a `claude` or `codex` subprocess — the plan prompt in
+`investigator-entrypoint.sh`, and a finder step's prompt in `claude_lane.py`/`codex_lane.py` — is
+piped on the child's stdin. None of it is ever passed as a single argv element, because Linux caps
+one argv string at `MAX_ARG_STRLEN` (131072 bytes) and this harness routinely builds prompts larger
+than that: the plan prompt for `develop` at `61bba9b8` was 156037 bytes (3283 inventory paths), and
+a finder step bundling the planner's default ~25 files regularly exceeds it too (a real
+`pkg/session` step measured 166842 bytes). A prompt over the limit made the child process's own
+`execve` fail with `E2BIG` before the model ever ran — bash surfaces this as `Argument list too
+long` for `investigator-entrypoint.sh`'s `exec claude ...`, and `subprocess.run` raises
+`OSError(E2BIG)` for the lanes, which each lane's own launch-failure handling folded into a
+synthetic non-zero exit code. Both looked exactly like an ordinary harness failure — nothing
+distinguished "the model refused" from "the model never started" — until the first end-to-end run
+against this repository (Issue #3985) hit the plan-mode case, and the same run's `pkg/session` step
+showed every lane over the file-count default failing the same way.
+
+**The fix, verified against the installed CLIs in the same image, is the same for both harnesses:**
+a prompt of at least 200000 bytes on stdin starts the child and is answered correctly, with no
+temp file needed for either.
+
+- `investigator-entrypoint.sh`'s plan-mode `case` arm execs `claude ... -p < "$PROMPT_FILE"` —
+  `-p` with no following argv value, and the prompt file redirected onto stdin — in both branches
+  of the mode (with and without `CFGMS_SECURITY_REVIEW_MODEL`), never
+  `-p "$(cat "$PROMPT_FILE")"`. `CFGMS_TEST_PROMPT_FILE_PATH`/`CFGMS_TEST_PLAN_RESULT_PATH` let
+  `investigator-entrypoint_test.sh` point plan mode at fixture paths it controls, since
+  `/workspace-out` is a container-internal bind-mount destination the test's own user cannot
+  create directly — the same override-for-testability convention `CFGMS_TEST_LANE_SCRIPT_PATH`
+  already uses in that file.
+- `claude_lane.py::call_claude_harness` passes `subprocess.run(..., input=prompt, ...)` with `-p`
+  as the invocation's last argv element (no value following it) — the prompt reaches `claude`
+  exactly the way it does for the entrypoint's plan-mode call above.
+- `codex_lane.py::call_codex_harness` passes `subprocess.run(..., input=prompt, ...)` with `-` as
+  the positional prompt argument, telling `codex exec` explicitly to read the prompt from stdin,
+  and keeps `--output-last-message <path>` unchanged for capturing the response.
+- `lanes/adjudicator.py` needs no code change to reach this: it drives a step's `call_<harness>_harness`
+  by name (`resolve_harness_call`), never its own subprocess invocation, so fixing the two functions
+  above closes the adjudicator's own exposure automatically. Its `MAX_PROMPT_BYTES = 100_000`
+  batching threshold (see [Severity adjudication](#severity-adjudication-and-cross-step-re-aggregation-issue-3984))
+  is no longer load-bearing against the argv cap — there is no argv cap on this transport for either
+  harness — and is kept purely as a conservative, independent ceiling on one batch's rendered size,
+  so it can be tuned without reference to `MAX_ARG_STRLEN`.
+
+`claude_lane_test.py`/`codex_lane_test.py` each prove this against a real stub binary on `PATH`
+(never only the injected `call_harness_fn` seam): the stub records both its own argv and everything
+it reads from stdin, and a 200000-byte prompt is asserted to reach stdin byte for byte while never
+appearing in argv at all. `investigator-entrypoint_test.sh` proves the same property for both
+plan-mode branches with a real 200000-byte prompt file.
+
 ## The Claude harness lane
 
 `.claude/scripts/security-review/lanes/claude_lane.py` (Issue #3933, epic #3927's switchover
@@ -2518,8 +2567,10 @@ re-checked against real data rather than re-argued.
    reports wrapped in `<<<report-text>>>` delimiters and length-capped, its key identifiers
    rendered losslessly as JSON string literals (the model must copy them back exactly), and the
    cross-step groups whose members are in the batch. Batches are bounded by measured prompt
-   bytes (`MAX_PROMPT_BYTES`, under Linux's 131072-byte single-argument cap that `claude` and
-   `codex` prompts hit as one argv element) and secondarily by count (forty). The byte ceiling
+   bytes (`MAX_PROMPT_BYTES`, a conservative ceiling on one batch's rendered size — since Issue
+   #4002 moved both `claude` and `codex` prompts onto stdin, there is no OS argv cap for this
+   transport to stay under; see [Prompt transport](#prompt-transport-stdin-never-argv-issue-4002))
+   and secondarily by count (forty). The byte ceiling
    is absolute: a single finding too large to send whole has its reports capped to the ten
    highest-severity ones and its text caps halved until it fits, each reduction stated in the
    prompt, and one that still does not fit is recorded on the envelope as `unsent_findings`
