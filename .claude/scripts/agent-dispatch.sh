@@ -3110,10 +3110,28 @@ PROMPT_EOF
           # than silently mounting the operator's own (wrong, but
           # frequently still *present*) key -- a present-but-wrong key
           # would otherwise slip past the plain existence check below and
-          # only surface as a 401 deep inside the container.
+          # only surface as a 401 deep inside the container. A loaded unit
+          # with no explicit `User=` also prints an empty value here --
+          # indistinguishable from "no such unit" by that query alone --
+          # but systemd runs that unit as root, not as the invoking
+          # operator, so it gets the same fail-closed treatment rather
+          # than falling through to ~/.ollama unchecked.
           ollama_key_dir="${CFGMS_OLLAMA_KEY_DIR:-}"
           if [[ -z "$ollama_key_dir" ]]; then
             ollama_service_user="$(systemctl show -p User --value ollama.service 2>/dev/null || true)"
+            if [[ -z "$ollama_service_user" ]]; then
+              # `User=` prints empty both for "no such unit" and for a
+              # loaded unit with no explicit `User=` directive -- and
+              # systemd defaults the latter to root, not to whoever
+              # invoked this script. Query LoadState to tell the two
+              # apart: only a loaded unit gets the root default: an
+              # absent/masked/not-found unit falls through unchanged to
+              # the ~/.ollama default below.
+              ollama_service_load_state="$(systemctl show -p LoadState --value ollama.service 2>/dev/null || true)"
+              if [[ "$ollama_service_load_state" == "loaded" ]]; then
+                ollama_service_user="root"
+              fi
+            fi
             if [[ -n "$ollama_service_user" && "$ollama_service_user" != "$(id -un)" ]]; then
               ollama_daemon_home="$(getent passwd "$ollama_service_user" 2>/dev/null | cut -d: -f6 || true)"
               ollama_daemon_home="${ollama_daemon_home:-/usr/share/ollama}"

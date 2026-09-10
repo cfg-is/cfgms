@@ -770,8 +770,44 @@ check_contains "the override mounts the named directory's id_ed25519 read-only" 
 check_contains "the override mounts the named directory's id_ed25519.pub read-only" "$ollama_override_run_call" "${OLLAMA_DAEMON_KEY_DIR}/id_ed25519.pub:/home/agent/.ollama/id_ed25519.pub:ro"
 check_not_contains "the override never mounts the operator's own \$HOME/.ollama key" "$ollama_override_run_call" "${SANDBOX}/HOME/.ollama/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
 
+echo ""
+echo "== REQUIRED TEST — an ollama.service loaded with no explicit User= (the"
+echo "   systemd default: the unit runs as root) fails closed the same way,"
+echo "   instead of reading the empty User= as 'not a service host' and"
+echo "   silently falling through to the operator's own \$HOME/.ollama key"
+echo "   (Finding 1 / Issue #4005) =="
+cat > "${FAKEBIN}/systemctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"-p User "*ollama.service*) echo "" ;;
+  *"-p LoadState "*ollama.service*) echo "loaded" ;;
+  *ollama.service*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "${FAKEBIN}/systemctl"
+: > "$DOCKER_CALL_LOG"
+set +e
+ollama_root_default_out=$(PATH="${FAKEBIN}:${PATH}" \
+  CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+  CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+  HOME="${SANDBOX}/HOME" \
+  bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_DIR" --snapshot-dir "$SNAPSHOT_DIR" --bundle-dir "$BUNDLE_DIR" --mode ollama-root-default \
+    --harness ollama --model glm-5.3-flash:cloud --lane-entrypoint "$LANE_ENTRYPOINT_STAND_IN" 2>&1)
+ollama_root_default_rc=$?
+set -e
+if [[ "$ollama_root_default_rc" -ne 0 ]]; then
+  ok "an ollama lane on a loaded-but-User=-unset service host exits non-zero"
+else
+  bad "an ollama lane on a loaded-but-User=-unset service host exits non-zero" "exited 0"
+fi
+check_contains "the failure is reported as credential_unavailable" "$ollama_root_default_out" "credential_unavailable"
+check_contains "the empty User= on a loaded unit is treated as root, not as a non-service host" "$ollama_root_default_out" "User=root"
+check_contains "the failure names root's actual home, not the /usr/share/ollama fallback" "$ollama_root_default_out" "/root/.ollama/id_ed25519"
+check_not_contains "no container is ever dispatched when User= is empty on a loaded unit" "$(cat "$DOCKER_CALL_LOG" 2>/dev/null || true)" "run -d"
+
 # Restore the baseline "unit not found" systemctl stub for every test after
-# this point, so the two overrides above stay local to this scenario.
+# this point, so the three overrides above stay local to this scenario.
 cat > "${FAKEBIN}/systemctl" <<'STUB'
 #!/usr/bin/env bash
 exit 1
