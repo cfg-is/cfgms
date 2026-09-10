@@ -80,7 +80,7 @@ Which lanes run, and against which models, is controlled entirely by one environ
 `.env.local.example`:
 
 ```bash
-CFGMS_SECURITY_REVIEW_LANES=claude:sonnet-5,codex:gpt-5-codex,opencode:qwen3-coder,opencode:glm-4.6,ollama:glm-5.3-flash:cloud
+CFGMS_SECURITY_REVIEW_LANES=claude:claude-sonnet-5,codex:gpt-5.6-terra,opencode:qwen3-coder,opencode:glm-4.6,ollama:glm-5.3-flash:cloud
 ```
 
 A comma-separated list of `harness:model` pairs. Every entry runs at every step (fan-out, not a
@@ -96,8 +96,8 @@ read-only credential mount, never an OS-keychain API key):
 
 | Harness | Model examples | Landed by |
 |---|---|---|
-| `claude` | `sonnet-5` | switchover cutover (#3933/#3934) |
-| `codex` | `gpt-5-codex` | Codex lane runner (#3935) |
+| `claude` | `claude-sonnet-5` (the full id; the short `sonnet-5` is not in the pinned CLI's catalog) | switchover cutover (#3933/#3934) |
+| `codex` | `gpt-5.6-terra` (list the account's ids with `codex debug models`; `gpt-5-codex` is rejected for a ChatGPT-account session) | Codex lane runner (#3935) |
 | `opencode` | `qwen3-coder`, `glm-4.6` (OpenCode Zen catalog) | OpenCode lane runner (#3936) |
 | `ollama` | `glm-5.3-flash:cloud` (Ollama Cloud only — never a local/GPU model) | Ollama Cloud lane runner (#3976) |
 
@@ -129,7 +129,7 @@ variable naming exactly one `harness:model` pair — the frontier model that jud
 the finder lanes are done:
 
 ```bash
-CFGMS_SECURITY_REVIEW_ADJUDICATOR=claude:opus-5
+CFGMS_SECURITY_REVIEW_ADJUDICATOR=claude:claude-opus-5
 ```
 
 After every lane container has exited, `launch`/`resume` hand that model the de-duplicated
@@ -242,7 +242,7 @@ whether the adjudicator ran: not configured, skipped (no findings), complete (wi
 not complete (with the state and reason, also listed under `## Incomplete`). Then every finding's
 first line is one of two shapes, and the word in the parentheses is the whole distinction:
 
-- `Severity (adjudicated): **high** — by `claude` / `opus-5`; lanes reported lane-a=low,
+- `Severity (adjudicated): **high** — by `claude` / `claude-opus-5`; lanes reported lane-a=low,
   lane-b=critical. Rationale: ...` — a frontier model applied the rubric to the lanes' reports and
   this is its call. Act on it, and use the lane values beside it to see what it overruled.
 - `Severity (raw): **DISAGREEMENT** low → critical — lanes reported ...; not adjudicated (why)`,
