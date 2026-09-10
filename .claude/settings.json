@@ -55,6 +55,8 @@
       "Bash(./scripts/pipeline-helper.sh materialize-issue *)",
       "Bash(./scripts/pipeline-helper.sh link-child *)",
       "Bash(./scripts/project-queue.sh *)",
+      "Bash(./scripts/project-queue.sh delete-item *)",
+      "Bash(bash ./scripts/project-queue.sh delete-item *)",
       "SlashCommand(/po)",
       "SlashCommand(/po:*)",
       "Skill(po)",
