@@ -850,6 +850,7 @@ credential-delivery mechanics are documented at the files themselves rather than
 | In-container mode dispatch (`plan` execs `claude -p`; a lane id execs that lane's own script) and the egress-firewall init that precedes both | `.devcontainer/scripts/investigator-entrypoint.sh` |
 | Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist-base.conf` + `.devcontainer/dnsmasq-allowlist.d/` |
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
+| Plan-mode-only mount of that same file at `/home/agent/.claude/agents/investigator.md:ro`, so `claude --agent investigator` resolves it (Issue #4003) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm, plan branch) |
 | Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
@@ -901,25 +902,38 @@ claim: there is no source file body anywhere in the plan-mode container's filesy
 or `git show` inside it has nothing to find regardless of what the model's `Bash` access would
 otherwise permit.
 
-**Trusted-harness identity (Issue #3952, epic #3950's D1 correction on revision 3).** Only two
-files are ever mounted individually from the live repo checkout by this command:
-`investigator-entrypoint.sh` and, in lane mode, the `--lane-entrypoint` script. Every sibling
-module a lane runner imports (`schema.py`, `harness_runner.py`, `atomic_write.py`, `roster.py`,
-`terminal_state.py`, `resume.py`, the other lane files) has no mount of its own — in production
-the import bootstrap resolves those from `/workspace`, which after the `--snapshot-dir` cutover
-above is the frozen snapshot, not the live tree, so their identity is already implied by
-`commit_sha`. This command hashes exactly the two individually-mounted files — the entrypoint's
-bytes always, the lane entrypoint's bytes when one is passed — each preceded by its own
-`$REPO_ROOT`-relative path in the same SHA-256 digest, entrypoint first, so a rename with
-unchanged content still changes the recorded value. The result is written to
-`<sweep-dir>/harness_identity.json` (`{"algorithm": "sha256", "hash": ..., "files": [...],
-"computed_at": ...}`, overwritten on every call — this value is recorded per dispatch, never
-frozen at sweep creation the way `commit_sha` is) and injected into the container as
-`CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`, on every call, plan mode and lane mode alike. This is
-recording only: nothing compares the value against a prior dispatch, and no earlier snapshot of
-the harness code itself is taken or verified — binding this value into a per-step result envelope
-and quarantining a mismatch on resume is STORY-12 (D6), which consumes the value this command
-produces.
+**Plan-mode agent profile mount (Issue #4003).** Since Issue #3979 moved the plan-mode
+`/workspace` from a repo checkout to the read-only bundle, `.claude/agents/` is no longer
+reachable from inside the container at all, so entrypoint's `claude --agent investigator`
+(Issue #3938) failed closed with `--agent 'investigator' not found` and the container exited 1
+before the planner ever ran — found by the first end-to-end run (Issue #3985). `launch-investigator`
+now mounts `.claude/agents/investigator.md` individually, read-only, at the user-level agents path
+`claude` reads regardless of cwd: `/home/agent/.claude/agents/investigator.md:ro`. Plan-mode-only:
+lane mode never passes `--agent` (`claude_lane.py`) and its `/workspace` is the snapshot, which
+already contains the file, so no mount of this command's own is needed there. Read-only for the
+same reason the bundle and snapshot mounts are — the profile is a trust boundary (AC2 of #3938),
+never planner output.
+
+**Trusted-harness identity (Issue #3952, epic #3950's D1 correction on revision 3; extended by
+Issue #4003).** Three files are ever mounted individually from the live repo checkout by this
+command: `investigator-entrypoint.sh` always, the `--lane-entrypoint` script in lane mode, and
+`.claude/agents/investigator.md` in plan mode. Every sibling module a lane runner imports
+(`schema.py`, `harness_runner.py`, `atomic_write.py`, `roster.py`, `terminal_state.py`,
+`resume.py`, the other lane files) has no mount of its own — in production the import bootstrap
+resolves those from `/workspace`, which after the `--snapshot-dir` cutover above is the frozen
+snapshot, not the live tree, so their identity is already implied by `commit_sha`. This command
+hashes exactly the individually-mounted files for the mode in play — the entrypoint's bytes
+always, the lane entrypoint's bytes when one is passed, the agent profile's bytes when one is
+passed — each preceded by its own `$REPO_ROOT`-relative path in the same SHA-256 digest,
+entrypoint first, then lane entrypoint, then agent profile, so a rename with unchanged content
+still changes the recorded value. The result is written to `<sweep-dir>/harness_identity.json`
+(`{"algorithm": "sha256", "hash": ..., "files": [...], "computed_at": ...}`, overwritten on every
+call — this value is recorded per dispatch, never frozen at sweep creation the way `commit_sha`
+is) and injected into the container as `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`, on every call,
+plan mode and lane mode alike. This is recording only: nothing compares the value against a prior
+dispatch, and no earlier snapshot of the harness code itself is taken or verified — binding this
+value into a per-step result envelope and quarantining a mismatch on resume is STORY-12 (D6),
+which consumes the value this command produces.
 
 **`--harness`/`--model` (Issue #3932, epic #3927's contract C2) — the only credential path
 (Issue #3933).** The architectural correction in epic #3927 — model access by subscription
