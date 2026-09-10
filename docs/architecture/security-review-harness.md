@@ -1513,13 +1513,16 @@ shared per-step schema.
 
 **Bounded scope.** Every step's `scope` must resolve to exactly one top-level subtree — never a
 scope spanning two different top-level directories, and never a scope spanning two different
-second-level directories under the same one. `planner.validate_step()` enforces this
-mechanically over whatever the model actually writes; the default heuristic (one step per Go
-package) is prompt guidance only; the model may combine small packages or split a large area
-into more than one step, but a scope that violates the bounded-scope rule fails validation
-regardless. As of Issue #3928, this is a **denylist**, not an allowlist of four named subtrees —
-see [Plan-step shape](#plan-step-shape) below for the full rule and why the old allowlist was a
-defect, not a simplification.
+second-level directories under the same one, with one exception: a file with no directory
+component at all — one that sits directly in the repository root, such as `Makefile`, `go.mod`,
+or `.gitleaks.toml` — belongs to a single shared repository-root subtree, so any number of
+root-level files may be grouped into one step (Issue #4011; see below). `planner.validate_step()`
+enforces this mechanically over whatever the model actually writes; the default heuristic (one
+step per Go package) is prompt guidance only; the model may combine small packages or split a
+large area into more than one step, but a scope that violates the bounded-scope rule fails
+validation regardless. As of Issue #3928, this is a **denylist**, not an allowlist of four named
+subtrees — see [Plan-step shape](#plan-step-shape) below for the full rule and why the old
+allowlist was a defect, not a simplification.
 
 **Schema-invalid output excludes only the invalid step, never the whole plan; zero valid steps
 is still a planning failure.** `planner.finalize(sweep_dir)` scans `plan/` for `step-*.json`
@@ -2546,6 +2549,60 @@ step's scope must still resolve to exactly one such boundary — never a scope s
 different top-level directories, and never a scope spanning two different second-level
 directories under the same top-level one — but the harness excludes only what it can justify
 excluding, not everything it doesn't already know about.
+
+**Repository-root files are one shared subtree (Issue #4011).** A path with no directory
+component at all — `Makefile`, `go.mod`, `Dockerfile.test-runner`, `.gitleaks.toml`,
+`.gosec.json`, `.trivyignore`, `.mcp.json`, `.pre-commit-config.yaml`, and every other file that
+sits directly in the repository root — used to compute its *own name* as its boundary
+(`_scope_boundary("Makefile") == "Makefile"`, `_scope_boundary("go.mod") == "go.mod"`), so two
+root files were as "different top-level subtrees" as `pkg/` and `cmd/` are, and a step proposing
+to group them always failed the bounded-scope check. In #3985's first end-to-end sweep, the
+planner did exactly that — one step for all 25 root-level files — and `finalize()` rejected it,
+discarding hypotheses about scanner-suppression files disabling detection, `go.mod` replace
+directives, and `.mcp.json` privileges: the files that configure every other security gate this
+harness runs. `_scope_boundary()` now returns one shared `REPO_ROOT_BOUNDARY` sentinel for every
+such file, so a step grouping any number of root-level files is valid.
+
+**The root-file relaxation applies to files only, decided against the bundle inventory.** `pkg`,
+`cmd`, `features`, `web` and `internal` are single-segment paths too, and `scope` legitimately
+accepts a directory path — so a relaxation keyed on the *shape* of the string collapses those
+five to one boundary as well, making `["pkg", "cmd", "features", "web", "internal"]` a single
+valid scope: the whole repository in one step, which is the unbounded-scope collapse this rule
+exists to prevent (and which the G-2/G-3 coverage gates do not catch — one mega-step listing
+every file satisfies both). `_scope_boundary(path, root_files)` therefore returns the sentinel
+only for a single-segment path present in `root_files`, the set of root-level paths read from the
+sweep's own `bundle/01-tree.tsv` (`planner._repository_root_files()`). That inventory is
+harness-written and is a `git ls-tree -r` blob listing, so a single-segment row is a file by
+construction — never the step's own `files` array, which is the model output being validated and
+could simply assert that `pkg` is a file. Any other single-segment path — a top-level directory,
+a path the inventory does not list, or anything at all when the bundle cannot be read — keeps
+returning itself as its own boundary, so the failure direction is a rejected root-file grouping,
+never an accepted unbounded scope. `finalize()` and `finalize_multi_planner()` read the inventory
+once per sweep and pass it into every `validate_step()` call.
+
+**The `web/src/` second-level split is kept deliberately, not relaxed alongside the root-file
+case.** `web/src/components` and `web/src/pages` remain two different subtrees under the
+bounded-scope rule, even though both are "close to the root" in the same sense root-level files
+are. The two cases are not the same shape: `web/src/` fans out into many independently large,
+unrelated areas (components, pages, hooks, routes, ...) — exactly the kind of directory the
+default heuristic ("one step per top-level package directory") exists to keep bounded, which is
+why the rule already special-cased it as its own meaningful top-level unit before this story. The
+repository root is different in kind: it is a small, fixed, enumerable set of configuration and
+tooling files, not a directory that keeps growing new independent subsystems. Collapsing it to
+one subtree does not create an unbounded scope the way collapsing `web/src/`'s second level would;
+re-running `planner.finalize()` against a plan that reproduces #3985's structure (one step per
+root file, plus steps spanning two different `web/src/` second-level directories) accepts the
+former and continues to reject the latter — `planner_test.py`'s
+`test_validate_step_rejects_scope_spanning_two_web_src_second_level_dirs` pins that behavior.
+
+**The prompt rule and the validator rule are one source (Issue #4011).** `planner.BOUNDED_SCOPE_RULE`
+is a single string constant, embedded verbatim into `build_prompt()`'s instructions to the
+planning model and quoted verbatim in `validate_step()`'s rejection message when a scope spans
+more than one boundary. Before this story, the prompt's prose describing the rule and
+`finalize()`'s code enforcing it were two independently maintained descriptions of the same rule
+that could drift apart — which is how the prompt ended up telling the model nothing about
+repository-root files while the validator silently rejected any step that grouped them. A future
+change to the rule's wording is a one-line edit to `BOUNDED_SCOPE_RULE`, read by both sides.
 
 **`finalize()` drops individual invalid steps and records them — it never deletes the whole
 plan because one step failed.** Each `step-NNN.json` is validated independently; a step that
