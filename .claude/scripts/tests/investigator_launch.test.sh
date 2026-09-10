@@ -223,6 +223,17 @@ esac
 STUB
 chmod +x "${FAKEBIN}/docker"
 
+# Baseline systemctl stub (Issue #4005): "unit not found" for every query,
+# so every test below is hermetic regardless of whether the host actually
+# running this test suite has systemd, or an ollama.service of its own --
+# the ollama-harness tests further down override this deliberately for the
+# one scenario that needs a service-managed host to look real.
+cat > "${FAKEBIN}/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "${FAKEBIN}/systemctl"
+
 SWEEP_DIR="${SANDBOX}/sweep/2026-09-05T0000Z-abc123"
 mkdir -p "${SWEEP_DIR}/plan" "${SWEEP_DIR}/lanes"
 mkdir -p "${SANDBOX}/HOME/.claude"
@@ -702,6 +713,70 @@ claude_still_out3=$(PATH="${FAKEBIN}:${PATH}" \
 check_contains "a claude lane on the same (ollama-credential-less) host still dispatches" "$claude_still_out3" "LAUNCHED_INVESTIGATOR:claude-still-fine-3:fake-container-id"
 claude_still_run_call3="$(grep '^run -d' "$DOCKER_CALL_LOG" | tail -1)"
 check_contains "the claude lane still mounts its own credential read-only" "$claude_still_run_call3" "${NO_OLLAMA_HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json:ro"
+
+echo ""
+echo "== REQUIRED TEST — an ollama lane on a service-managed host (systemd"
+echo "   User=ollama, not the invoking user) fails closed naming the daemon's"
+echo "   actual key path, and never silently mounts the operator's own"
+echo "   \$HOME/.ollama key even though it exists (Issue #4005) =="
+cat > "${FAKEBIN}/systemctl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *ollama.service*) echo "ollama" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "${FAKEBIN}/systemctl"
+: > "$DOCKER_CALL_LOG"
+set +e
+ollama_service_out=$(PATH="${FAKEBIN}:${PATH}" \
+  CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+  CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+  HOME="${SANDBOX}/HOME" \
+  bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_DIR" --snapshot-dir "$SNAPSHOT_DIR" --bundle-dir "$BUNDLE_DIR" --mode ollama-service-managed \
+    --harness ollama --model glm-5.3-flash:cloud --lane-entrypoint "$LANE_ENTRYPOINT_STAND_IN" 2>&1)
+ollama_service_rc=$?
+set -e
+if [[ "$ollama_service_rc" -ne 0 ]]; then
+  ok "an ollama lane on a service-managed host exits non-zero"
+else
+  bad "an ollama lane on a service-managed host exits non-zero" "exited 0"
+fi
+check_contains "the failure is reported as credential_unavailable (matches security-review.sh's intentional-skip pattern)" "$ollama_service_out" "credential_unavailable"
+check_contains "the failure names the systemd User= it detected" "$ollama_service_out" "User=ollama"
+check_contains "the failure names the actual signed-in daemon key path, not ~/.ollama" "$ollama_service_out" "/usr/share/ollama/.ollama/id_ed25519"
+check_contains "the failure names the CFGMS_OLLAMA_KEY_DIR override" "$ollama_service_out" "CFGMS_OLLAMA_KEY_DIR"
+check_not_contains "no container is ever dispatched for the service-managed ollama lane" "$(cat "$DOCKER_CALL_LOG" 2>/dev/null || true)" "run -d"
+
+echo ""
+echo "== REQUIRED TEST — CFGMS_OLLAMA_KEY_DIR explicitly overrides the"
+echo "   service-daemon check and mounts the named directory's keypair"
+echo "   (Issue #4005) =="
+OLLAMA_DAEMON_KEY_DIR="${SANDBOX}/daemon-ollama-home/.ollama"
+mkdir -p "$OLLAMA_DAEMON_KEY_DIR"
+echo 'fake-daemon-ed25519-private-key' > "${OLLAMA_DAEMON_KEY_DIR}/id_ed25519"
+echo 'fake-daemon-ed25519-public-key' > "${OLLAMA_DAEMON_KEY_DIR}/id_ed25519.pub"
+: > "$DOCKER_CALL_LOG"
+ollama_override_out=$(PATH="${FAKEBIN}:${PATH}" \
+  CFGMS_TEST_REPO_ROOT="$REPO_ROOT" \
+  CFGMS_AGENT_LEDGER_DIR="${SANDBOX}/ledger" \
+  CFGMS_OLLAMA_KEY_DIR="$OLLAMA_DAEMON_KEY_DIR" \
+  HOME="${SANDBOX}/HOME" \
+  bash "$DISPATCH" launch-investigator --sweep-dir "$SWEEP_DIR" --snapshot-dir "$SNAPSHOT_DIR" --bundle-dir "$BUNDLE_DIR" --mode ollama-key-dir-override \
+    --harness ollama --model glm-5.3-flash:cloud --lane-entrypoint "$LANE_ENTRYPOINT_STAND_IN" 2>&1)
+check_contains "--harness ollama with CFGMS_OLLAMA_KEY_DIR set launches successfully on a service-managed host" "$ollama_override_out" "LAUNCHED_INVESTIGATOR:ollama-key-dir-override:fake-container-id"
+ollama_override_run_call="$(grep '^run -d' "$DOCKER_CALL_LOG" | tail -1)"
+check_contains "the override mounts the named directory's id_ed25519 read-only" "$ollama_override_run_call" "${OLLAMA_DAEMON_KEY_DIR}/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
+check_contains "the override mounts the named directory's id_ed25519.pub read-only" "$ollama_override_run_call" "${OLLAMA_DAEMON_KEY_DIR}/id_ed25519.pub:/home/agent/.ollama/id_ed25519.pub:ro"
+check_not_contains "the override never mounts the operator's own \$HOME/.ollama key" "$ollama_override_run_call" "${SANDBOX}/HOME/.ollama/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
+
+# Restore the baseline "unit not found" systemctl stub for every test after
+# this point, so the two overrides above stay local to this scenario.
+cat > "${FAKEBIN}/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "${FAKEBIN}/systemctl"
 
 echo ""
 echo "== REQUIRED TEST evidence — --mode path traversal cannot widen the writable mount =="

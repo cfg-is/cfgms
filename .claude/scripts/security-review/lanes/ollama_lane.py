@@ -184,10 +184,27 @@ OLLAMA_TIMEOUT_SECONDS = 600.0
 # set every other lane uses.
 _RATE_LIMIT_MARKERS = ("rate limit", "usage limit", "quota exceeded", "429")
 
+# Ollama Cloud's own unauthenticated-call signal (Issue #4005): both the
+# plain-text response ("You need to be signed in to Ollama to run Cloud
+# models.") and the JSON-shaped variant (`{"error": "unauthorized: you need
+# to be signed in"}`) share this substring case-insensitively. Recognizing it
+# lets `call_ollama_harness` distinguish a mounted-but-wrong key (the
+# service-daemon trap `agent-dispatch.sh`'s launch-time check now fails
+# closed on, but cannot catch after the fact -- e.g. a key that was signed in
+# and later revoked) from every other reason `_extract_json_object` might
+# find nothing, so the envelope's `stop_reason_raw` names the actual cause
+# instead of a generic `harness_exit_<N>`.
+_NOT_SIGNED_IN_MARKERS = ("you need to be signed in",)
+
 
 def _looks_rate_limited(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def _looks_not_signed_in(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _NOT_SIGNED_IN_MARKERS)
 
 
 def _is_safe_repo_relative_path(value: object) -> bool:
@@ -387,11 +404,11 @@ def call_ollama_harness(
     model: str, prompt: str, output_path: str, timeout: float = OLLAMA_TIMEOUT_SECONDS
 ) -> tuple:
     """Invoke the `ollama` harness for one step over stdin/stdout. Returns
-    `(exit_code, rate_limited)`. A transport-level failure to even launch the
-    subprocess (binary missing, timeout) is folded into a synthetic non-zero
-    exit code rather than propagating -- the caller treats every step
-    independently and must not abort the whole lane over one step's launch
-    failure.
+    `(exit_code, rate_limited, not_signed_in)`. A transport-level failure to
+    even launch the subprocess (binary missing, timeout) is folded into a
+    synthetic non-zero exit code rather than propagating -- the caller treats
+    every step independently and must not abort the whole lane over one
+    step's launch failure.
 
     `ollama run <model>` has no tool loop and no sandbox/disallowed-tools
     flag to pass (see module docstring): the prompt is piped on stdin and the
@@ -430,6 +447,21 @@ def call_ollama_harness(
     recorded as `failed` (per this story's epic), so the exit code handed to
     `classify()` is forced non-zero whenever extraction fails, whatever the
     real subprocess exit code was.
+
+    **Distinguishing "not signed in" from every other extraction failure
+    (Issue #4005).** The mounted key can be genuinely absent (host never ran
+    `ollama signin` -- `agent-dispatch.sh` fails the launch before this
+    function ever runs), or present but wrong (the service-daemon trap: a
+    key exists at the mounted path but was never the one signed in, e.g. an
+    operator's own `~/.ollama` key on a host where Ollama runs as a systemd
+    service). Both surface identically here, as a 401 on stdout with no
+    JSON. `not_signed_in` is `True` whenever that stdout matches
+    `_looks_not_signed_in` (case-insensitive, over plain-text and
+    JSON-shaped auth errors alike), so `run_lane` can record the envelope's
+    `stop_reason_raw` as "key not signed in" instead of a generic
+    `harness_exit_<N>` -- the caller still decides the terminal state
+    (always `failed`, never `refused` or `complete`); this function only
+    reports what stdout said.
     """
     try:
         result = subprocess.run(
@@ -443,15 +475,35 @@ def call_ollama_harness(
         stdout = result.stdout or ""
         combined = f"{stdout}\n{result.stderr or ''}"
     except (OSError, subprocess.SubprocessError) as exc:
-        return 1, _looks_rate_limited(str(exc))
+        return 1, _looks_rate_limited(str(exc)), False
 
     rate_limited = _looks_rate_limited(combined)
 
     extracted = _extract_json_object(stdout)
     if extracted is None:
-        return (exit_code if exit_code != 0 else 1), rate_limited
+        return (exit_code if exit_code != 0 else 1), rate_limited, _looks_not_signed_in(stdout)
 
     atomic_write.write_json_atomic(output_path, extracted)
+    return exit_code, rate_limited, False
+
+
+def call_ollama_harness_2tuple(
+    model: str, prompt: str, output_path: str, timeout: float = OLLAMA_TIMEOUT_SECONDS
+) -> tuple:
+    """Adapts `call_ollama_harness`'s `(exit_code, rate_limited,
+    not_signed_in)` down to `(exit_code, rate_limited)` -- the shared
+    two-tuple contract every `call_<harness>_harness` function honors
+    (`claude_lane.call_claude_harness`, `codex_lane.call_codex_harness`,
+    `opencode_lane.call_opencode_harness`), which `adjudicator.py`'s generic
+    `HARNESS_CALLS` dispatch calls uniformly across all four harnesses and
+    unpacks as exactly two values (Issue #4005). Adjudication does not need
+    the `not_signed_in` distinction -- an extraction failure there already
+    surfaces as a generic `harness_exit_<N>`, ollama included, both before
+    and after this story -- but a third return value would raise
+    `ValueError: too many values to unpack` the first time an adjudication
+    stage runs under `--harness ollama`, since the other three harnesses'
+    functions still return exactly two."""
+    exit_code, rate_limited, _ = call_ollama_harness(model, prompt, output_path, timeout)
     return exit_code, rate_limited
 
 
@@ -694,7 +746,7 @@ def run_lane(
 
                 prompt = build_prompt(task_step, file_contents, raw_path)
                 try:
-                    exit_code, rate_limited = call_harness_fn(model, prompt, raw_path)
+                    exit_code, rate_limited, not_signed_in = call_harness_fn(model, prompt, raw_path)
                 except Exception as exc:  # noqa: BLE001 -- a launch failure is a failed step, never a crashed lane
                     launch_exc = exc
                     break
@@ -711,6 +763,12 @@ def run_lane(
                     stop_reason_raw = stop_reason_raw or "rate_limited"
                 elif task_state == terminal_state.REFUSED:
                     stop_reason_raw = stop_reason_raw or "no_valid_findings_file"
+                elif task_state == terminal_state.FAILED and not_signed_in:
+                    # Issue #4005: the mounted key was presented and rejected --
+                    # a specific, actionable reason, never folded into the
+                    # generic `harness_exit_<N>` bucket below (which reads to an
+                    # operator as an arbitrary CLI failure, not an auth problem).
+                    stop_reason_raw = stop_reason_raw or "key not signed in"
                 elif task_state == terminal_state.FAILED and exit_code != 0:
                     stop_reason_raw = stop_reason_raw or f"harness_exit_{exit_code}"
                 else:

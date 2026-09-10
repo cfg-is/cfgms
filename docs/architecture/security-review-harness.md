@@ -961,12 +961,12 @@ container and sets three environment variables the container-side harness runner
 `claude`, `codex`, `opencode`, and `ollama` are all wired to an actual credential mount —
 `--harness codex` mounts `~/.codex/auth.json` **read-only** (Issue #3935), `--harness opencode`
 mounts `~/.local/share/opencode/auth.json` **read-only** (Issue #3936), and `--harness ollama`
-mounts `~/.ollama/id_ed25519` and `~/.ollama/id_ed25519.pub` **read-only**, as two individual file
-mounts, never the directory itself (Issue #3976) — the `ollama signin` session keypair the local
-daemon uses to sign Ollama Cloud requests; `~/.ollama/config.json` holds no token. Unlike `claude`
-in lane mode, `codex`, `opencode`, and `ollama`'s mounts are all gated on the host file's
-*existence*, checked before any docker call: a missing credential file (a host that has never run
-`codex login` / `opencode auth login` / `ollama signin`) fails closed with
+mounts `id_ed25519` and `id_ed25519.pub` **read-only**, as two individual file mounts, never the
+directory itself (Issue #3976) — the `ollama signin` session keypair the local daemon uses to sign
+Ollama Cloud requests; `~/.ollama/config.json` holds no token. Unlike `claude` in lane mode,
+`codex`, `opencode`, and `ollama`'s mounts are all gated on the host file's *existence*, checked
+before any docker call: a missing credential file (a host that has never run `codex login` /
+`opencode auth login` / `ollama signin`) fails closed with
 `LAUNCH_FAILED:<container>:credential_unavailable:...`, a message `security-review.sh`'s
 `_is_intentional_dispatch_skip` already recognizes (the same substring
 `gate_credentials_for_launch`'s own `DISPATCH_DEFERRED` path documents) — so a codex, opencode, or
@@ -977,6 +977,28 @@ not yet know how to hand credentials to — including a test's own stub harness)
 credential mount, which is a deliberate no-op rather than a hard failure at this layer; a
 harness's own runner script is responsible for failing loudly if it needed a credential that
 never arrived.
+
+**`ollama`'s key directory is not always `~/.ollama` (Issue #4005).** The default is the invoking
+operator's own `~/.ollama/id_ed25519{,.pub}`, but on a host where Ollama runs as a systemd service
+(`User=ollama` in the unit), `ollama signin` and `ollama run <model>:cloud` both go through the
+daemon — and it is the *daemon's* keypair that ends up signed in, under the service account's own
+home (`/usr/share/ollama/.ollama/id_ed25519{,.pub}` for the package's default service user), never
+the operator's. Mounting the operator's key in that case presents a keypair `ollama.com` has never
+seen signed in: `/api/me` and `/api/generate` answer 401, and the lane sees the same
+unauthenticated response it would on a host with no session at all — the exact gap the first
+end-to-end run (Issue #3985) hit, confirmed by the container's presented public key matching the
+operator's `~/.ollama/id_ed25519.pub` exactly, not the daemon's. Before mounting anything, the
+`ollama)` credential case runs `systemctl show -p User --value ollama.service`; if that names a
+user other than the one invoking `agent-dispatch.sh`, this is the service-managed layout, and the
+launch fails closed naming the actual daemon key path (`getent passwd <that user>`'s home directory,
+falling back to `/usr/share/ollama` if the account itself isn't visible to `getent`) instead of
+silently mounting the operator's own, present-but-wrong key. `CFGMS_OLLAMA_KEY_DIR` is the escape
+hatch: set it to a directory the invoking operator can read (a copy of the daemon's key, or a
+directory the operator has been granted read access to) and the service-daemon check is skipped
+entirely in favor of that directory's `id_ed25519{,.pub}`. On a host where Ollama is not
+service-managed (the common case — `ollama serve` running as the operator's own login session),
+`systemctl show` finds no such unit and behavior is unchanged from Issue #3976: `~/.ollama` is used
+directly.
 
 **Credential delivery is gated on the harness id in *both* modes, and is always read-only.**
 Multi-planner dispatch (C6, Issue #3937) made `--mode plan --harness <id>` a real call shape;
@@ -1362,13 +1384,15 @@ provider's domain.
 
 **Invocation.** An `ollama:<model>:cloud` roster entry resolves to `python3 ollama_lane.py
 <lane-id>` inside a `launch-investigator --harness ollama --model <model>` container, which mounts
-`~/.ollama/id_ed25519` and `~/.ollama/id_ed25519.pub` **read-only**, as two individual file
-mounts, never the `~/.ollama` directory itself — the `ollama signin` session keypair the local
-daemon uses to sign Cloud requests (`~/.ollama/config.json` holds no token). Mounting the
-directory would either leak other host-side daemon state into the container or make the daemon
-try to write through a read-only host mount, since `ollama serve` also writes its models
-directory and `config.json` into that same path. `agent-dispatch.sh` sets the same three
-`CFGMS_SECURITY_REVIEW_HARNESS`/`_MODEL`/`_LANE_ID` variables documented above.
+`id_ed25519` and `id_ed25519.pub` **read-only**, as two individual file mounts, never the key
+directory itself — the `ollama signin` session keypair the local daemon uses to sign Cloud requests
+(`~/.ollama/config.json` holds no token). Mounting the directory would either leak other host-side
+daemon state into the container or make the daemon try to write through a read-only host mount,
+since `ollama serve` also writes its models directory and `config.json` into that same path.
+`agent-dispatch.sh` sets the same three `CFGMS_SECURITY_REVIEW_HARNESS`/`_MODEL`/`_LANE_ID`
+variables documented above. The key directory itself is `~/.ollama` by default but resolves
+differently on a service-managed host — see "`ollama`'s key directory is not always `~/.ollama`"
+earlier in this section (Issue #4005).
 
 **Roster parsing: a bounded relaxation, not an unbounded one.** Ollama model ids carry a mandatory
 tag (`glm-5.3-flash:cloud`), so `roster.py::parse_roster()` splits `harness:model` on the *first*
@@ -1434,9 +1458,31 @@ output and nothing else, reusing `harness_runner.py`'s `shared_preamble(step)`
 
 **Credential-unavailable is a recorded, skippable failure, never a silent substitution** — the
 identical shape `codex_lane.py`/`opencode_lane.py` established: `--harness ollama`'s credential
-mount is gated on `~/.ollama/id_ed25519`'s *existence* on the host, checked by `agent-dispatch.sh`
-before any docker call, failing the launch closed with `LAUNCH_FAILED:...:credential_unavailable`
-on a host that has never run `ollama signin`.
+mount is gated on the resolved key directory's `id_ed25519`/`id_ed25519.pub` *existence* on the
+host, checked by `agent-dispatch.sh` before any docker call, failing the launch closed with
+`LAUNCH_FAILED:...:credential_unavailable` on a host that has never run `ollama signin` — or, on a
+service-managed host with no `CFGMS_OLLAMA_KEY_DIR` override, before even reaching that existence
+check (Issue #4005): a `systemctl`-detected `User=` other than the invoking operator fails the
+launch closed first, naming the daemon's actual key path, rather than falling through to check
+`~/.ollama` (which may well pass the existence check with a key that is simply the wrong one).
+
+**"Key not signed in" is a distinguishable failure reason, not a generic auth error (Issue
+#4005 AC2).** The launch-time check above cannot catch every case a wrong-or-revoked key produces
+the same "not signed in" response — a key that was genuinely signed in and later revoked at
+`ollama.com`, for instance, passes every host-side existence and ownership check and still gets a
+401 from Ollama Cloud. `call_ollama_harness`'s stdout-extraction failure path
+(`_looks_not_signed_in`, matching "you need to be signed in" case-insensitively across both the
+plain-text and JSON-shaped unauthenticated responses) reports this back as a third value,
+`not_signed_in`, alongside the existing `(exit_code, rate_limited)` pair; `run_lane` records the
+envelope's `stop_reason_raw` as the literal string `"key not signed in"` instead of the generic
+`harness_exit_<N>` every other extraction failure gets. The terminal state is unchanged — still
+`failed`, never `refused` or `complete` — only the recorded reason is more specific.
+`adjudicator.py`'s `HARNESS_CALLS` dispatch calls all four harnesses' `call_<harness>_harness`
+functions uniformly and unpacks exactly two return values; since only `ollama_lane.py`'s function
+grew a third, `HARNESS_CALLS["ollama"]` points at `call_ollama_harness_2tuple`, a thin adapter that
+discards `not_signed_in` and returns the plain two-tuple every other harness's function still
+returns — adjudication does not need the distinction (an extraction failure there already reports
+a generic `harness_exit_<N>`, ollama included, unchanged by this story).
 
 **Import isolation, testing.** Identical bootstrap pattern to the other three lanes (the
 `/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a

@@ -106,6 +106,19 @@ own Cloud subscription keypair (`~/.ollama/id_ed25519`), the same "subscription 
 API key" contract every other harness follows. Without it, `--harness ollama` fails closed as a
 recorded, skippable `credential_unavailable` dispatch outcome; every other roster lane still runs.
 
+**On a host where Ollama runs as a systemd service** (`User=ollama` in the unit — check with
+`systemctl cat ollama`), `~/.ollama/id_ed25519` is the wrong key even when the file exists: `ollama
+signin` and `ollama run <model>:cloud` both go through the daemon, so it is the *daemon's* keypair
+that gets signed in, under the service account's own home
+(`/usr/share/ollama/.ollama/id_ed25519{,.pub}` for the package's default service user) — never the
+invoking operator's. Sign in as that account (`sudo -u ollama ollama signin`, or the equivalent for
+whatever user the unit declares), then either grant the invoking operator read access to that
+directory or copy the two key files somewhere readable, and point `agent-dispatch.sh` at it with
+`CFGMS_OLLAMA_KEY_DIR=<that directory>`. `launch-investigator --harness ollama` detects the
+service-managed layout on its own and fails closed naming the exact daemon key path — see
+`agent-dispatch.sh`'s `ollama)` credential case — rather than silently mounting the operator's own,
+unsigned-in key (Issue #4005).
+
 Every roster entry dispatches through `.claude/scripts/agent-dispatch.sh launch-investigator`
 (Issue #3903): one short-lived, read-only container per lane per invocation — `/workspace`
 bind-mounted `:ro`, writable only in that lane's own `lanes/<lane-id>/` directory, egress

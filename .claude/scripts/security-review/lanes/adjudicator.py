@@ -168,11 +168,17 @@ DELIVERY_INSTRUCTIONS = {
 # `call_<harness>_harness(model, prompt, output_path)` -- the one place a
 # harness's CLI invocation, credential lookup, tool restriction and
 # rate-limit detection are defined. This lane adds no harness-specific code.
+# `ollama` points at `call_ollama_harness_2tuple`, not `call_ollama_harness`
+# itself (Issue #4005): the finder lane's own `run_lane` needs a third return
+# value (`not_signed_in`, to record "key not signed in" instead of a generic
+# auth error), but this dispatch table calls all four harnesses uniformly and
+# unpacks exactly two values -- a bare 3-tuple here would raise `ValueError`
+# the first time an adjudication stage ran under `--harness ollama`.
 HARNESS_CALLS = {
     "claude": ("claude_lane", "call_claude_harness"),
     "codex": ("codex_lane", "call_codex_harness"),
     "opencode": ("opencode_lane", "call_opencode_harness"),
-    "ollama": ("ollama_lane", "call_ollama_harness"),
+    "ollama": ("ollama_lane", "call_ollama_harness_2tuple"),
 }
 
 ADJUDICATOR_SYSTEM_PROMPT = (

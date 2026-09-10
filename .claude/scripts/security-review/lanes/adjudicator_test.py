@@ -482,6 +482,50 @@ def test_resolve_harness_call_reuses_each_finder_lanes_own_call():
     check(raised, "harness: an unknown id raises KeyError")
 
 
+def test_ollama_harness_call_resolves_to_2tuple_adapter():
+    """[REQUIRED TEST] Issue #4005 regression. `ollama_lane.call_ollama_harness`
+    grew a third return value (`not_signed_in`) for its own `run_lane`'s use.
+    This dict calls all four harnesses uniformly and unpacks exactly two
+    values (`exit_code, rate_limited = call_harness_fn(...)`) -- a bare
+    3-tuple here would raise `ValueError: too many values to unpack` the
+    first time an adjudication stage ran under `--harness ollama`. Exercised
+    against a REAL stub `ollama` subprocess (not a Python-level stub that
+    could coincidentally match either shape) returning the exact
+    unauthenticated-response text that forces `call_ollama_harness`'s
+    synthetic non-zero path -- the scenario most likely to leak the third
+    value if the adapter were missing or wrong."""
+    check(
+        adjudicator.HARNESS_CALLS["ollama"] == ("ollama_lane", "call_ollama_harness_2tuple"),
+        "ollama: HARNESS_CALLS points at the 2-tuple adapter, not call_ollama_harness itself",
+        repr(adjudicator.HARNESS_CALLS["ollama"]),
+    )
+
+    with tempfile.TemporaryDirectory() as bin_dir:
+        stub_path = os.path.join(bin_dir, "ollama")
+        with open(stub_path, "w") as f:
+            f.write(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "sys.stdout.write('You need to be signed in to Ollama to run Cloud models.\\n')\n"
+                "sys.exit(0)\n"
+            )
+        os.chmod(stub_path, 0o755)
+        original_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}:{original_path}"
+        try:
+            fn = adjudicator.resolve_harness_call("ollama")
+            with tempfile.TemporaryDirectory() as out_dir:
+                result = fn("glm-5.3-flash:cloud", "prompt", os.path.join(out_dir, "raw.json"))
+        finally:
+            os.environ["PATH"] = original_path
+
+    check(
+        result == (1, False),
+        "ollama: the resolved call unpacks cleanly to exactly (exit_code, rate_limited) even on an auth failure",
+        repr(result),
+    )
+
+
 def test_prompt_version_moves_with_the_rubric():
     base = adjudicator.prompt_version()
     real = harness_runner.METHODOLOGY_CORE

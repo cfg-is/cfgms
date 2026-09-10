@@ -3068,18 +3068,63 @@ PROMPT_EOF
           ;;
         ollama)
           # Ollama's own session credential (Issue #3976): the `ollama
-          # signin` keypair, `~/.ollama/id_ed25519{,.pub}` -- confirmed
-          # against the installed CLI (`ollama signin`, host verification
-          # while writing this story: `~/.ollama/config.json` holds no
-          # token; the local daemon signs Cloud requests with this keypair
-          # instead). Same existence-gated fail-closed shape as codex and
-          # opencode above: a host that has never run `ollama signin` fails
-          # the launch closed with credential_unavailable, which
-          # security-review.sh's _is_intentional_dispatch_skip already
-          # recognizes.
+          # signin` keypair, default `~/.ollama/id_ed25519{,.pub}` --
+          # confirmed against the installed CLI (`ollama signin`, host
+          # verification while writing this story: `~/.ollama/config.json`
+          # holds no token; the local daemon signs Cloud requests with this
+          # keypair instead). Same existence-gated fail-closed shape as
+          # codex and opencode above: a host that has never run
+          # `ollama signin` fails the launch closed with
+          # credential_unavailable, which security-review.sh's
+          # _is_intentional_dispatch_skip already recognizes.
           #
-          # The two key files are mounted individually, never the
-          # ~/.ollama directory itself: `ollama serve` (started by
+          # Issue #4005: that default is wrong on a host where Ollama runs
+          # as a systemd service (`User=ollama` in the unit). There,
+          # `ollama signin` and `ollama run <model>:cloud` both go through
+          # the daemon, and it is the DAEMON's keypair that gets signed in
+          # -- under the service account's own home
+          # (`/usr/share/ollama/.ollama/id_ed25519{,.pub}` for the
+          # package's default service user), never the invoking operator's
+          # `~/.ollama/id_ed25519`. Mounting the operator's key presents a
+          # keypair `ollama.com` has never seen signed in: `/api/me` and
+          # `/api/generate` answer 401, and the lane sees the same
+          # unauthenticated response it would on a host with no session at
+          # all. Confirmed end-to-end (Issue #3985's first run): host
+          # `ollama run glm-5.3-flash:cloud` returned a correct answer; the
+          # same model in the container with the operator's key mounted
+          # returned 401; the public key the container presented (read off
+          # the `ollama signin` connect URL) matched the operator's
+          # `~/.ollama/id_ed25519.pub` exactly -- proving the container
+          # authenticated as the wrong identity, not that no identity was
+          # signed in.
+          #
+          # CFGMS_OLLAMA_KEY_DIR is the explicit-override escape hatch: an
+          # operator who has copied the daemon's key, or been granted read
+          # access to the service account's home, points this at that
+          # directory and the service-daemon check below never runs.
+          # Without it, `systemctl show -p User --value ollama.service`
+          # (silently absent/non-systemd hosts fail this and fall through
+          # to the ~/.ollama default unchanged) tells us whether the unit
+          # runs as some user other than the one invoking this script; if
+          # so, this fails closed naming the actual daemon key path rather
+          # than silently mounting the operator's own (wrong, but
+          # frequently still *present*) key -- a present-but-wrong key
+          # would otherwise slip past the plain existence check below and
+          # only surface as a 401 deep inside the container.
+          ollama_key_dir="${CFGMS_OLLAMA_KEY_DIR:-}"
+          if [[ -z "$ollama_key_dir" ]]; then
+            ollama_service_user="$(systemctl show -p User --value ollama.service 2>/dev/null || true)"
+            if [[ -n "$ollama_service_user" && "$ollama_service_user" != "$(id -un)" ]]; then
+              ollama_daemon_home="$(getent passwd "$ollama_service_user" 2>/dev/null | cut -d: -f6 || true)"
+              ollama_daemon_home="${ollama_daemon_home:-/usr/share/ollama}"
+              echo "LAUNCH_FAILED:${container_name}:credential_unavailable:ollama runs as a systemd service (User=${ollama_service_user}) -- ~/.ollama/id_ed25519 is not signed in, the signed-in key is ${ollama_daemon_home}/.ollama/id_ed25519{,.pub}; set CFGMS_OLLAMA_KEY_DIR=${ollama_daemon_home}/.ollama (readable by $(id -un)) to use it"
+              exit 1
+            fi
+            ollama_key_dir="${HOME}/.ollama"
+          fi
+          #
+          # The two key files are mounted individually, never the key
+          # directory itself: `ollama serve` (started by
           # investigator-entrypoint.sh once inside the container) writes
           # other daemon state (models dir, config.json, history) into that
           # same directory, and a directory bind mount from the host would
@@ -3090,13 +3135,13 @@ PROMPT_EOF
           # failing, so an absent id_ed25519.pub alone would silently mount a
           # directory at the path the daemon expects a file, rather than
           # failing closed the same way a missing private key does.
-          if [[ ! -f "${HOME}/.ollama/id_ed25519" || ! -f "${HOME}/.ollama/id_ed25519.pub" ]]; then
-            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no ollama session found at ${HOME}/.ollama/id_ed25519{,.pub} -- run 'ollama signin' on the host"
+          if [[ ! -f "${ollama_key_dir}/id_ed25519" || ! -f "${ollama_key_dir}/id_ed25519.pub" ]]; then
+            echo "LAUNCH_FAILED:${container_name}:credential_unavailable:no ollama session found at ${ollama_key_dir}/id_ed25519{,.pub} -- run 'ollama signin' on the host"
             exit 1
           fi
           inv_harness_creds_mount=(
-            -v "${HOME}/.ollama/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
-            -v "${HOME}/.ollama/id_ed25519.pub:/home/agent/.ollama/id_ed25519.pub:ro"
+            -v "${ollama_key_dir}/id_ed25519:/home/agent/.ollama/id_ed25519:ro"
+            -v "${ollama_key_dir}/id_ed25519.pub:/home/agent/.ollama/id_ed25519.pub:ro"
           )
           ;;
       esac

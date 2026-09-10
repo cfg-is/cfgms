@@ -5,8 +5,8 @@ epic #3975).
 Most tests drive `run_lane` through the `call_harness_fn` injection seam,
 matching the other three lanes' own precedent -- a stub simply writes
 whatever `raw_body` it is given to the output path and reports
-`(exit_code, rate_limited)`, exactly as `call_ollama_harness` would once it
-has already extracted a JSON object from stdout.
+`(exit_code, rate_limited, not_signed_in)`, exactly as `call_ollama_harness`
+would once it has already extracted a JSON object from stdout.
 
 The two tests that matter most for this lane specifically --
 `test_exit_zero_unauthenticated_response_is_failed_not_complete` and
@@ -96,11 +96,17 @@ def good_finding(**overrides) -> dict:
     return finding
 
 
-def make_harness_stub(exit_code: int = 0, raw_body=None, rate_limited: bool = False, raise_exc: bool = False):
+def make_harness_stub(
+    exit_code: int = 0,
+    raw_body=None,
+    rate_limited: bool = False,
+    raise_exc: bool = False,
+    not_signed_in: bool = False,
+):
     """Returns a `call_harness_fn`-shaped callable that writes `raw_body` (if
     given) to the output path -- standing in for `call_ollama_harness` having
     already extracted a JSON object from stdout -- then reports
-    `(exit_code, rate_limited)`."""
+    `(exit_code, rate_limited, not_signed_in)`."""
 
     def _stub(model, prompt, output_path):
         if raise_exc:
@@ -108,7 +114,7 @@ def make_harness_stub(exit_code: int = 0, raw_body=None, rate_limited: bool = Fa
         if raw_body is not None:
             with open(output_path, "w") as f:
                 json.dump(raw_body, f)
-        return exit_code, rate_limited
+        return exit_code, rate_limited, not_signed_in
 
     return _stub
 
@@ -221,8 +227,11 @@ def test_exit_zero_unauthenticated_response_is_failed_not_complete() -> None:
     call, and no JSON at all. Any implementation that trusts the exit code
     would record this step `complete` with an empty findings array -- an
     unreviewed package read as clean. The envelope must be `failed`, never
-    `complete` and never `refused`, must carry a non-empty `stop_reason_raw`,
-    and no findings file may exist for this step."""
+    `complete` and never `refused`, must carry a `stop_reason_raw` that says
+    "key not signed in" -- not a generic `harness_exit_<N>` (Issue #4005 AC2:
+    an operator reading this envelope must be able to tell a credential
+    problem from an arbitrary CLI failure) -- and no findings file may exist
+    for this step."""
     with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
         write_plan_step(plan_dir, "step-001")
         with stub_ollama_on_path(
@@ -239,8 +248,8 @@ def test_exit_zero_unauthenticated_response_is_failed_not_complete() -> None:
         check(state != "complete", "unauthenticated: state is never complete", repr(written))
         check(state != "refused", "unauthenticated: state is never refused", repr(written))
         check(
-            bool(written[0].get("stop_reason_raw")),
-            "unauthenticated: stop_reason_raw is non-empty",
+            written[0].get("stop_reason_raw") == "key not signed in",
+            "unauthenticated: stop_reason_raw says 'key not signed in', not a generic auth error",
             repr(written),
         )
         check(
@@ -308,7 +317,7 @@ def test_call_ollama_harness_passes_nowordwrap_hidethinking_and_format_json() ->
     `--hidethinking`, and `--format json`, not just some of them."""
     with tempfile.TemporaryDirectory() as out_dir:
         with stub_ollama_recording_argv('{"findings": []}\n') as argv_path:
-            exit_code, _ = ollama_lane.call_ollama_harness(
+            exit_code, _, _ = ollama_lane.call_ollama_harness(
                 MODEL, "prompt text", os.path.join(out_dir, "raw.json")
             )
             with open(argv_path) as f:
@@ -438,6 +447,11 @@ def test_json_shaped_auth_error_is_failed_not_refused() -> None:
         check(state == "failed", "json auth error: state is failed", repr(written))
         check(state != "refused", "json auth error: state is never refused", repr(written))
         check(state != "complete", "json auth error: state is never complete", repr(written))
+        check(
+            written[0].get("stop_reason_raw") == "key not signed in",
+            "json auth error: stop_reason_raw says 'key not signed in', not a generic auth error",
+            repr(written),
+        )
         check(
             not os.path.isfile(os.path.join(out_dir, "step-001.findings.json")),
             "json auth error: no findings.json created for this step",
@@ -584,7 +598,7 @@ def test_resume_skips_a_complete_step() -> None:
             calls["n"] += 1
             with open(output_path, "w") as f:
                 json.dump({"findings": []}, f)
-            return 0, False
+            return 0, False, False
 
         first = ollama_lane.run_lane(plan_dir, out_dir, "/workspace", LANE_ID, MODEL, call_harness_fn=stub)
         check(first[0]["state"] == "complete", "resume: first run completes the step", repr(first))
@@ -643,7 +657,7 @@ def test_unsafe_file_path_is_skipped() -> None:
             seen_prompts.append(prompt)
             with open(output_path, "w") as f:
                 json.dump({"findings": []}, f)
-            return 0, False
+            return 0, False, False
 
         ollama_lane.run_lane(plan_dir, out_dir, "/workspace", LANE_ID, MODEL, call_harness_fn=stub)
         check(
@@ -696,6 +710,25 @@ def test_looks_rate_limited() -> None:
     check(ollama_lane._looks_rate_limited("Usage limit reached, try later"), "detects 'usage limit'")
     check(ollama_lane._looks_rate_limited("HTTP 429 too many requests"), "detects '429'")
     check(not ollama_lane._looks_rate_limited("here are your findings"), "does not false-positive on normal output")
+
+
+def test_looks_not_signed_in() -> None:
+    check(
+        ollama_lane._looks_not_signed_in("You need to be signed in to Ollama to run Cloud models."),
+        "detects the plain-text unauthenticated response",
+    )
+    check(
+        ollama_lane._looks_not_signed_in('{"error": "unauthorized: you need to be signed in"}'),
+        "detects the JSON-shaped unauthenticated response",
+    )
+    check(
+        ollama_lane._looks_not_signed_in("YOU NEED TO BE SIGNED IN"),
+        "matches case-insensitively",
+    )
+    check(
+        not ollama_lane._looks_not_signed_in("here are your findings"),
+        "does not false-positive on normal output",
+    )
 
 
 def test_import_isolation_single_file_layout() -> None:
