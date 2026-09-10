@@ -1986,13 +1986,13 @@ always `gorilla/mux`.
 **Every value extracted from a file body is higher-taint than a path** — an attacker who lands a
 commit controls file *content* directly, not just its name — so each extracted value is
 constrained to a tight accepted shape before being emitted: route path
-`^[A-Za-z0-9/_{}.:*-]{1,256}$`, handler symbol `^[A-Za-z0-9_.]{1,128}$`, method `^[A-Z]{3,7}$`,
+`^[A-Za-z0-9/_{}.:*+-]{1,256}$`, handler symbol `^[A-Za-z0-9_.]{1,128}$`, method `^[A-Z]{3,7}$`,
 plus the existing control-character filter on `auth_middleware`. A value failing its shape is
 dropped from the row (never emitted partially or escaped in place) and logged as
-`prompt_unsafe_route_value_dropped`. In practice this drops a handful of real routes whose path
-carries a `mux` regex suffix outside the accepted character class (e.g.
-`/api/v1/entities/{eid:.+}`, `{cidr:.+}`) — an accepted, documented gap in the current shape
-rather than a bug; a future story can widen the character class if those routes need to appear.
+`prompt_unsafe_route_value_dropped`. The route path shape includes `+` so a gorilla/mux regex path
+param of the form `{name:.+}` — used by the multi-tenant and entity routes (e.g.
+`/api/v1/entities/{eid:.+}`, `{cidr:.+}`) — is kept rather than dropped (Issue #4010); a control
+character anywhere in the value still fails the shape and is dropped and logged.
 
 ### `06-config-surface.tsv`: names and counts, never values
 
