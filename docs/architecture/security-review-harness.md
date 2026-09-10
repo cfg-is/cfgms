@@ -1369,21 +1369,37 @@ the daemon-start block is gated on the harness id, and the same `exec python3 "$
 "$MODE"` every other lane already uses still runs for every lane, ollama included, once the daemon
 is confirmed ready.
 
+**Never the terminal-rendered path (Issue #4014).** The pinned client (`ollama` v0.33.3) renders
+`ollama run`'s output as a terminal would even when stdout is a pipe: it word-wraps at a fixed
+column and, at every wrap, repeats the cut word fragment at the start of the next line
+(`findings\nfindings`, `unknow\nunknown`), and it prefixes the answer with the model's thinking
+text. A wrap-duplicated fragment is not valid JSON at the character level — `_extract_json_object`
+cannot decode it (`Expecting value` at the first duplicated piece) — so a real, successful call
+(measured in the first end-to-end sweep, #3985: `POST /api/generate` 200 after 5 min 53 s, 200490
+bytes of stdout, 314 of 827 lines inside the JSON block carrying a duplicated fragment) was still
+recorded `failed`. `call_ollama_harness` passes three flags on every invocation —
+`--nowordwrap` (no wrap, no duplicated fragment), `--hidethinking` (no thinking-text prefix), and
+`--format json` (the daemon returns a JSON-formatted answer rather than free-form prose that
+merely happens to contain JSON) — so the answer is never terminal-rendered in the first place.
+None of the three substitutes for the others: `--format json` alone is still word-wrapped and
+thinking-prefixed without `--nowordwrap`/`--hidethinking`.
+
 **The exit-0-but-unauthenticated case is the failure mode this lane exists to catch.** An
 unauthenticated Cloud call exits `0` with a "not signed in" message on stdout — exactly the
 zero-work-silent-pass failure class this whole harness exists to prevent: a lane that trusted the
 exit code would record that step `complete` with an empty findings array, and an unreviewed
 package would read as clean. `ollama_lane.py::call_ollama_harness` never hands
 `terminal_state.classify()` a bare "exit 0, nothing extracted" pair: it extracts a JSON object out
-of stdout itself (`_extract_json_object`, tolerating prose before/after it — `ollama run` has no
-tool use and no `--format json` guarantee against a plain-text prompt, so the response is not
-assumed to be bare JSON), and when extraction fails for any reason, whatever the real exit code
-was, it reports a *synthetic* non-zero exit code and leaves the findings path unwritten — so
-`classify()` reaches `failed`, never `complete` and never `refused`. When extraction succeeds, the
-extracted object is written to the same raw-output path the other lanes' harness process itself
-would have written, and the real exit code is passed through — the rest of the pipeline
-(enrichment, `classify()`, `apply_refusal_policy()`) is byte-for-byte the same code every other
-lane already runs.
+of stdout itself (`_extract_json_object`, tolerating prose before/after it — `--format json` and
+`--hidethinking` are a CLI contract, not a guarantee this lane trusts blindly: a reasoning model's
+thinking text can still leak past `--hidethinking`, and a model can still echo an illustrative
+example of the output shape before its real answer, so the response is never assumed to be bare
+JSON), and when extraction fails for any reason, whatever the real exit code was, it reports a
+*synthetic* non-zero exit code and leaves the findings path unwritten — so `classify()` reaches
+`failed`, never `complete` and never `refused`. When extraction succeeds, the extracted object is
+written to the same raw-output path the other lanes' harness process itself would have written,
+and the real exit code is passed through — the rest of the pipeline (enrichment, `classify()`,
+`apply_refusal_policy()`) is byte-for-byte the same code every other lane already runs.
 
 **No file-writing tool, no denylist.** `ollama run` has no tool loop at all — unlike
 `claude_lane.py`'s `--disallowedTools` or `codex_lane.py`'s `--sandbox read-only`, this lane passes
@@ -1403,11 +1419,17 @@ on a host that has never run `ollama signin`.
 `__file__`-relative-only import) and the same duplicated (never imported cross-module)
 traversal/symlink containment guard for `files` every other lane carries. `ollama_lane_test.py`
 mirrors the other three lanes' coverage — classification via an injected `call_harness_fn`, the
-refusal-retry-once integration, path-traversal containment — plus two lane-specific proofs: a real
-stub `ollama` binary on `PATH` returning exit 0 with the literal unauthenticated-Cloud-call message
-and no JSON, asserted `failed` (never `complete`, never `refused`) with no findings file created;
-and a real stub `ollama` binary returning a findings object surrounded by prose, asserted
-extracted and validated through `schema.validate_step_envelope`.
+refusal-retry-once integration, path-traversal containment — plus lane-specific proofs: a real stub
+`ollama` binary on `PATH` returning exit 0 with the literal unauthenticated-Cloud-call message and
+no JSON, asserted `failed` (never `complete`, never `refused`) with no findings file created; a
+real stub returning a findings object surrounded by prose, asserted extracted and validated through
+`schema.validate_step_envelope`; a stub that records its own argv, asserting `call_ollama_harness`
+always passes `--nowordwrap`, `--hidethinking`, and `--format json` (Issue #4014); a 200+ KB,
+long-line findings object (the scale of the #3985 sweep's own measurement), asserted parsed intact
+with no dependence on wrapping ever having been disabled by the terminal; and two thinking-text
+fixtures — one where thinking text leaks ahead of a real answer despite `--hidethinking`, asserted
+still extracted (defense in depth, not trust in the flag), and one where stdout is thinking text
+and nothing else, asserted `failed`, never `refused` or `complete`.
 `.devcontainer/investigator-entrypoint_test.sh` is the first test file for
 `investigator-entrypoint.sh` at all, covering the daemon-start/poll/fail-closed behavior with a
 stub `ollama serve`/`ollama list` pair: the lane script runs once the daemon reports ready, never
