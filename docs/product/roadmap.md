@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-07-28
+**Last Updated**: 2026-09-10
 
 ## Versioning Strategy
 
@@ -410,6 +410,25 @@ Opened after this document's 2026-07-21 pass; not yet placed in a named mileston
 - [x] Epic #2911 — DNA clean-break: `commonpb.DNA.attributes` removed (Issue #3331); retires the legacy flat `DNARecord` store once all consumers are re-homed onto the fragment model / entity graph — deferred tail of #2852. `twin`
 - [x] Epic #2898 — Reboot windows: policy-declared device-scoped reboot gating with tenant inheritance and structured schedules, closing the silent-noop left by #2892 rejecting `maintenance.window` at validation. `cms`
 
+**Web console MFA — delivered and superseded; no further work scheduled.** A 2026-07-04 proposal
+(follow-on to #2344) asked for a phishing-resistant WebAuthn *second* factor behind the existing
+password login, plus recovery codes and a require-MFA policy. It was overtaken by a stronger
+outcome and is retired unbuilt. Verified on `origin/develop` 2026-09-10:
+
+- **There is no password to phish.** Password login was removed by Issue #2993;
+  `POST /api/v1/web/login` returns 404, asserted in
+  `features/controller/api/handlers_web_session_test.go`.
+- **Web login is passkey-only**, not password-plus-factor —
+  `features/controller/api/handlers_passkey_login.go` (discoverable login, no credential
+  enumeration, session issued at `AssuranceStrong` per ADR-021 Decision 3).
+- **Enrollment shipped** — `web/src/pages/Enroll.tsx`, `web/src/passkeys/PasskeysView.tsx`.
+- **Per-action MFA shipped** as step-up rather than a login-time policy flag — Epic #2737
+  (assurance levels, ADR-021) and Epic #2931 (`web/src/auth/StepUpModal.tsx`).
+- **Recovery codes were deliberately not built.** ADR-021 §7 routes recovery through the mTLS
+  admin cert — `cfg`, cert, register passkey — the same flow as bootstrap, so a shared-secret
+  recovery path never enters the system.
+- **CSP already covers the ceremony** (see the v0.10.5 Web Frontend Security block).
+
 #### v0.11.0 - Outpost Foundation
 
 - [ ] Basic Outpost component implementation
@@ -624,8 +643,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.4
-- **Last Updated**: 2026-07-28
+- **Document Version**: 4.5
+- **Last Updated**: 2026-09-10
 
 ### Related Documentation
 
