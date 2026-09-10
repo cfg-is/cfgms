@@ -1426,7 +1426,11 @@ output and nothing else, reusing `harness_runner.py`'s `shared_preamble(step)`
 identical shape `codex_lane.py`/`opencode_lane.py` established: `--harness ollama`'s credential
 mount is gated on `~/.ollama/id_ed25519`'s *existence* on the host, checked by `agent-dispatch.sh`
 before any docker call, failing the launch closed with `LAUNCH_FAILED:...:credential_unavailable`
-on a host that has never run `ollama signin`.
+on a host that has never run `ollama signin`. Existence is the only host-side check: a key that
+exists but is not signed in (the shape of a host where Ollama runs as a systemd service, whose
+`ollama signin` connects the *service user's* key under `/usr/share/ollama/.ollama/`, not
+`~/.ollama/`) passes the gate, dispatches, and records every step `failed` — measured in the first
+end-to-end run, `docs/security-review/first-run-report.md`.
 
 **Import isolation, testing.** Identical bootstrap pattern to the other three lanes (the
 `/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a
@@ -1752,7 +1756,7 @@ configured planner's complete output, dispatched in any order the containers hap
 planner's `--harness`/`--model` into the container as `CFGMS_SECURITY_REVIEW_HARNESS`/
 `CFGMS_SECURITY_REVIEW_MODEL` env vars, but `investigator-entrypoint.sh`'s plan-mode branch used
 to ignore both and always run `claude -p <prompt>` with no `--model` flag at all — so a configured
-`claude:sonnet-5` planner and a configured `claude:opus-5` planner ran with whatever model `claude`
+`claude:claude-sonnet-5` planner and a configured `claude:claude-opus-5` planner ran with whatever model `claude`
 itself defaulted to, not the one the roster named, with nothing to say so. The entrypoint now
 passes `--model "$CFGMS_SECURITY_REVIEW_MODEL"` whenever that variable is non-empty (i.e., whenever
 `--harness`/`--model` were actually supplied to `launch-investigator`), and adds `--output-format
@@ -1770,8 +1774,8 @@ D3).** `security-review.sh` — never `planner.py` — writes one JSON file per 
 ```json
 {
   "planners": [
-    {"requested_harness": "codex", "requested_model": "gpt-5-codex",
-     "passed_harness": "codex", "passed_model": "gpt-5-codex",
+    {"requested_harness": "codex", "requested_model": "gpt-5.6-terra",
+     "passed_harness": "codex", "passed_model": "gpt-5.6-terra",
      "resolved_model": "unknown", "outcome": "dispatched"}
   ],
   "lanes": [
@@ -2485,7 +2489,7 @@ severity is raw), skipped for no findings, complete (with counts of adjudicated,
 unmatched, and groups assessed), or did not complete (with the state and reason, cross-referenced
 from `## Incomplete`). Every finding's first line is one of exactly two shapes:
 
-- `Severity (adjudicated): **high** — by `claude` / `opus-5`; lanes reported lane-a=low,
+- `Severity (adjudicated): **high** — by `claude` / `claude-opus-5`; lanes reported lane-a=low,
   lane-b=critical. Rationale: ...` — act on `high`; the lanes' own values are right there.
 - `Severity (raw): **DISAGREEMENT** low → critical — lanes reported ...; not adjudicated (why)`
   or `Severity (raw): **high** — lanes reported ...; not adjudicated (why)` — nothing judged this;
@@ -2819,7 +2823,7 @@ either half failing that shape — raises, and the parser produces no partial li
 fails the whole roster rather than silently running a subset of it. `roster_test.py` covers the
 valid and malformed cases as pure unit tests, no docker or container involved.
 `.env.local.example` documents `CFGMS_SECURITY_REVIEW_LANES` with the epic's `harness:model`
-format, e.g. `claude:sonnet-5`.
+format, e.g. `claude:claude-sonnet-5` (the full model id — the pinned `claude` CLI rejects the short `sonnet-5`).
 
 **`manifest.py::create_sweep()` takes `lanes` as a required argument.** The old hardcoded `LANES`
 tuple (`manifest.py:42`, pre-#3933) is gone with no module-level replacement:
