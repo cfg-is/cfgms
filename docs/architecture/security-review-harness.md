@@ -1786,16 +1786,16 @@ Both `dispatch_planner()` (the `"planners"` array) and `dispatch_roster_lanes()`
 array) write into the same file, merging with whatever the other half already wrote rather than
 overwriting it — `dispatch_planner()` always runs first in both `launch` and `resume`, so
 `dispatch_roster_lanes()` is what actually creates the file on a fresh sweep. `outcome` is one of
-`dispatched` / `credential_unavailable` / `launch_failed`, sourced from the same
-`_is_intentional_dispatch_skip` classification the script already used for its WARNING/ERROR
-lines — this is persistence of a fact the script already determined, not a new classification. A
-credential-unavailable skip is recorded with that exact outcome, never omitted from the file.
-`passed_harness`/`passed_model` always equal `requested_harness`/`requested_model` today — recorded
-as separate fields anyway, per D3's requirement that the three identities stay distinguishable even
-when two happen to be equal in the current implementation, since there is no transformation between
-"configured" and "passed to the executable" anywhere in this codebase. For a multi-planner dispatch,
-`resolved_model` is read back from `planner.py::finalize_multi_planner()`'s own
-`<sweep_dir>/.plan-resolved-models.json` sidecar — written by that function's
+`dispatched` / `credential_unavailable` / `launch_failed` / `container_failed`, the first three
+sourced from the same `_is_intentional_dispatch_skip` classification the script already used for
+its WARNING/ERROR lines — this is persistence of a fact the script already determined, not a new
+classification. A credential-unavailable skip is recorded with that exact outcome, never omitted
+from the file. `passed_harness`/`passed_model` always equal `requested_harness`/`requested_model`
+today — recorded as separate fields anyway, per D3's requirement that the three identities stay
+distinguishable even when two happen to be equal in the current implementation, since there is no
+transformation between "configured" and "passed to the executable" anywhere in this codebase. For a
+multi-planner dispatch, `resolved_model` is read back from `planner.py::finalize_multi_planner()`'s
+own `<sweep_dir>/.plan-resolved-models.json` sidecar — written by that function's
 `_extract_resolved_model()`, keyed by `lane_dir_name`, from each planner's own
 `.investigator-plan-result.json` — and is `"unknown"` wherever that sidecar has nothing for a given
 entry, including always on the legacy no-roster path, which never asks the CLI for a resolved
@@ -1803,9 +1803,35 @@ identity in the first place. `resolved_model` is never fabricated by copying `re
 `passed_model` into it: an unresolved value is reported as `"unknown"`, not silently backfilled.
 Because a multi-planner `launch()` call reports one aggregated success/failure across the whole
 roster rather than a per-entry result (see `launch()`'s own docstring), every configured planner in
-one `dispatch_planner()` call is recorded with the same `outcome` — the finest granularity available
-without changing that contract. Finder lanes get true per-entry outcomes, since
-`dispatch_roster_lanes()`'s loop already tracks each entry's own launch result independently.
+one `dispatch_planner()` call starts out recorded with the same `outcome` — the finest granularity
+that call's own return value can give. Finder lanes get true per-entry outcomes for `dispatched` /
+`credential_unavailable` / `launch_failed`, since `dispatch_roster_lanes()`'s loop already tracks
+each entry's own launch result independently.
+
+**`container_failed`: per-entry, not aggregated (Issue #4009).** A container that launches
+successfully (`launch()` returns 0, so the aggregate `outcome` above reads `dispatched`) but then
+exits non-zero inside — a broken entrypoint, an argv the shell rejected — is a failure `launch()`'s
+own return value cannot see, since `docker run -d` itself succeeded. `dispatch_planner()` observes
+each launched container's real exit code directly via `docker wait` (previously discarded
+entirely) and, for a non-zero exit, writes `{"container_id", "exit_code", "stderr_tail"}` (the last
+30 `docker logs` lines, matching `agent-dispatch.sh inspect-detail`/`inspect-container`'s own tail
+length) to that container's own `plan/.planner-container.json` — `<sweep_dir>/plan/` for the legacy
+single planner, `<sweep_dir>/planners/<lane_dir_name>/plan/` per roster entry.
+`record_planner_dispatch_outcome()` reads this sidecar back per entry — never trusting a value
+threaded through the roster-line argument the two dispatch functions already share — and overrides
+*only that entry's* `outcome` to `container_failed`, adding `container_exit_code` and
+`container_stderr_tail` fields to it; every other entry, including a legacy single-planner entry
+with no sidecar or a clean (zero) exit, keeps the passed-in aggregate `outcome` unchanged. This is
+the one place `dispatch_report.json` reports true per-planner granularity despite `launch()`'s own
+aggregated contract. `planner.py finalize()`/`finalize_multi_planner()` read the same sidecar back
+when zero steps survive, folding the exit code and log tail into `plan/PLANNING_FAILED` itself —
+and `consolidate.py`'s `## Incomplete` section renders a dedicated bullet naming the exit code and
+stderr tail per failed entry, rather than the bare "no step-NNN.json files were produced" that
+cannot be told apart from a model that cleanly declined to write a plan. `dispatch_planner()`
+returns 1 for a `container_failed` outcome exactly like `launch_failed`, after still calling
+`finalize()`/`finalize_multi_planner()` — the sweep tree and the consolidated report still get
+written, but the caller's exit code is non-zero, so nothing reports the sweep as having completed
+cleanly.
 
 ## The auditable planner bundle (Issue #3978)
 
