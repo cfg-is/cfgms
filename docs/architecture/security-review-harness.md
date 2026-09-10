@@ -1191,6 +1191,16 @@ ChatGPT-subscription `codex login` stores its OAuth tokens there, under `$CODEX_
 documented above. For every step `resume.py::missing_steps()` reports outstanding, the module
 invokes the `codex` binary (resolved on `PATH`) as a subprocess.
 
+**`/home/agent/.codex` must exist and be agent-owned in the image before this mount runs.**
+`codex exec` (confirmed on 0.153.4) writes other state — session/history files, not the mounted
+credential itself — inside `$CODEX_HOME` during initialization, and fails every step closed with
+`Permission denied (os error 13)` before any network call if it cannot. A bind mount only creates
+the *file* at the mount point; if the parent directory doesn't already exist in the image, Docker
+creates it as `root:root 755` to hold it. `.devcontainer/Dockerfile` pre-creates
+`/home/agent/.codex` (`chown agent:agent`) for this reason, mirroring `~/.claude` and `~/.ollama`,
+whose directories exist in the image for the same reason and are why the analogous `claude`/
+`ollama` credential mounts don't hit this (Issue #4004).
+
 **Same shared prompt and classifier as `claude_lane.py`, one different capture mechanism.** The
 prompt is built from the same `harness_runner.py` `shared_preamble(step)` (`SYSTEM_PROMPT`, methodology core, per-step
 severity anchors, `OUTPUT_SCHEMA_DESCRIPTION` — C4)
