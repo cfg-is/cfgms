@@ -1953,9 +1953,17 @@ itself defaulted to, not the one the roster named, with nothing to say so. The e
 passes `--model "$CFGMS_SECURITY_REVIEW_MODEL"` whenever that variable is non-empty (i.e., whenever
 `--harness`/`--model` were actually supplied to `launch-investigator`), and adds `--output-format
 json`, redirecting the CLI's own single-result JSON envelope to a fixed path,
-`/workspace-out/.investigator-plan-result.json`, instead of only stdout — confirmed against the
-installed CLI, that envelope's top-level `modelUsage` object is keyed by the canonical model id
-that actually served the request, independent of whichever alias `--model` was given. The legacy,
+`/workspace-out/.investigator-plan-result.json`, instead of only stdout. Confirmed against the
+installed CLI: that envelope's top-level `modelUsage` object is keyed by every model the CLI billed
+in the session, not only the one that served the plan-mode request — a real envelope commonly
+carries a second, near-zero-`outputTokens` entry for the CLI's own internal helper-model calls
+alongside the requested model's entry, in the CLI's own insertion order, which is not a ranking
+(Issue #4043). `_extract_resolved_model()` therefore picks the entry with the highest
+`outputTokens` — the field that distinguishes the model that generated the plan from a helper model
+billed alongside it — and returns `"unknown"`, never a guess, when a single-key envelope's key is
+missing, when no entry carries a usable `outputTokens`, or when the highest value ties between two
+different models. A single-key envelope always returns that key unchanged, regardless of its
+`outputTokens`. The legacy,
 no-roster call (`planners=None`) sets neither env var and is unchanged: it still runs `claude -p
 <prompt>` with no `--model`/`--output-format` at all.
 
