@@ -1162,9 +1162,9 @@ not something a lane can work around at runtime.
 
 ## Prompt transport: stdin, never argv (Issue #4002)
 
-Every prompt this harness sends to a `claude` or `codex` subprocess — the plan prompt in
-`investigator-entrypoint.sh`, and a finder step's prompt in `claude_lane.py`/`codex_lane.py` — is
-piped on the child's stdin. None of it is ever passed as a single argv element, because Linux caps
+Every prompt this harness sends to a `claude`, `codex`, or `opencode` subprocess — the plan prompt
+in `investigator-entrypoint.sh`, and a finder step's prompt in
+`claude_lane.py`/`codex_lane.py`/`opencode_lane.py` — is piped on the child's stdin. None of it is ever passed as a single argv element, because Linux caps
 one argv string at `MAX_ARG_STRLEN` (131072 bytes) and this harness routinely builds prompts larger
 than that: the plan prompt for `develop` at `61bba9b8` was 156037 bytes (3283 inventory paths), and
 a finder step bundling the planner's default ~25 files regularly exceeds it too (a real
@@ -1177,9 +1177,9 @@ distinguished "the model refused" from "the model never started" — until the f
 against this repository (Issue #3985) hit the plan-mode case, and the same run's `pkg/session` step
 showed every lane over the file-count default failing the same way.
 
-**The fix, verified against the installed CLIs in the same image, is the same for both harnesses:**
-a prompt of at least 200000 bytes on stdin starts the child and is answered correctly, with no
-temp file needed for either.
+**The fix, verified against the installed CLIs in the same image, is the same for all three
+harnesses:** a prompt of at least 200000 bytes on stdin starts the child and is answered correctly,
+with no temp file needed for any of them.
 
 - `investigator-entrypoint.sh`'s plan-mode `case` arm execs `claude ... -p < "$PROMPT_FILE"` —
   `-p` with no following argv value, and the prompt file redirected onto stdin — in both branches
@@ -1195,6 +1195,13 @@ temp file needed for either.
 - `codex_lane.py::call_codex_harness` passes `subprocess.run(..., input=prompt, ...)` with `-` as
   the positional prompt argument, telling `codex exec` explicitly to read the prompt from stdin,
   and keeps `--output-last-message <path>` unchanged for capturing the response.
+- `opencode_lane.py::call_opencode_harness` (Issue #4031, the declared follow-up this story's own
+  precedent left open) passes `subprocess.run(..., input=prompt, ...)` with no positional `message`
+  argument at all. Unlike `codex exec`, the installed `opencode run` (`opencode-ai@1.18.29`) has no
+  `--help`-documented stdin flag or sentinel — confirmed empirically (piping a marker string to
+  `opencode run` with no positional message and inspecting the CLI's own session storage afterward
+  shows the piped text as the turn's message) that it reads stdin whenever no positional message is
+  given, so no sentinel argv element is needed the way `codex exec` needs `-`.
 - `lanes/adjudicator.py` needs no code change to reach this: it drives a step's `call_<harness>_harness`
   by name (`resolve_harness_call`), never its own subprocess invocation, so fixing the two functions
   above closes the adjudicator's own exposure automatically. Its `MAX_PROMPT_BYTES = 100_000`
@@ -1203,11 +1210,11 @@ temp file needed for either.
   harness — and is kept purely as a conservative, independent ceiling on one batch's rendered size,
   so it can be tuned without reference to `MAX_ARG_STRLEN`.
 
-`claude_lane_test.py`/`codex_lane_test.py` each prove this against a real stub binary on `PATH`
-(never only the injected `call_harness_fn` seam): the stub records both its own argv and everything
-it reads from stdin, and a 200000-byte prompt is asserted to reach stdin byte for byte while never
-appearing in argv at all. `investigator-entrypoint_test.sh` proves the same property for both
-plan-mode branches with a real 200000-byte prompt file.
+`claude_lane_test.py`/`codex_lane_test.py`/`opencode_lane_test.py` each prove this against a real
+stub binary on `PATH` (never only the injected `call_harness_fn` seam): the stub records both its
+own argv and everything it reads from stdin, and a 200000-byte prompt is asserted to reach stdin
+byte for byte while never appearing in argv at all. `investigator-entrypoint_test.sh` proves the
+same property for both plan-mode branches with a real 200000-byte prompt file.
 
 ## The Claude harness lane
 
