@@ -1053,6 +1053,23 @@ def test_validate_step_bounded_scope_applies_to_directory_axis_only():
     )
 
 
+def test_validate_step_boundary_axis_rejected_when_tree_index_missing():
+    # PR #4061 review finding: a budget-bounded axis (today, "boundary")
+    # with no tree_index to measure it against must be REJECTED, matching
+    # the "reject more, never less" direction the directory axis already
+    # takes when root_files is missing -- not silently accepted as
+    # unbounded.
+    spanning_scope = ["pkg/storage/interfaces/store.go", "features/controller/api/handler.go"]
+    step = valid_step("step-001", spanning_scope, files=spanning_scope)
+    step["axis"] = "boundary"
+    errors = planner.validate_step(step, "step-001.json", tree_index=None)
+    check(
+        len(errors) == 1 and "cannot be checked" in errors[0],
+        "validate_step: an axis:boundary step with no tree_index is rejected, not skipped",
+        str(errors),
+    )
+
+
 def test_validate_step_rejects_an_unknown_axis_value():
     step = valid_step("step-001", ["pkg/foo/foo.go"], files=["pkg/foo/foo.go"])
     step["axis"] = "sideways"

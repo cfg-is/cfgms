@@ -1268,16 +1268,24 @@ def validate_step(
     in hand: `step_id` must match the file it lives in, and `scope` must be
     bounded -- how, depends on the step's own `axis` field (Issue #4056 AC4a):
 
+    The branch below tests which bound applies, not which axis is exempt --
+    `axis == AXIS_DIRECTORY` (or no `axis` at all) gets the subtree rule;
+    everything else defaults to the `loc` budget. A future axis value (e.g.
+    the planned scenario-keyed axis) therefore lands on a bound automatically,
+    from `VALID_AXES` growing, rather than needing a second edit to this
+    function's condition.
+
     - `axis: "directory"` (or no `axis` at all -- the pre-#4056 shape): scope
       must resolve to exactly one bounded top-level subtree (`_scope_boundary()`,
       enforcing `BOUNDED_SCOPE_RULE` -- the same text `build_prompt()` gives
       the planning model, so the instruction and its enforcement cannot drift
       apart).
-    - `axis: "boundary"`: EXEMPT from `_scope_boundary()` -- a boundary-axis
-      step is deliberately allowed to span more than one top-level subtree,
-      since spanning the boundary is the entire point (AC4). It is bounded
-      instead by `partition.MAX_STEP_NON_TEST_LOC` over its `tree_index`-
-      derived non-test `loc`, the same size bound `partition.py`'s own
+    - any other axis (today, only `"boundary"`): EXEMPT from
+      `_scope_boundary()` -- a boundary-axis step is deliberately allowed to
+      span more than one top-level subtree, since spanning the boundary is
+      the entire point (AC4). It is bounded instead by
+      `partition.MAX_STEP_NON_TEST_LOC` over its `tree_index`-derived
+      non-test `loc`, the same size bound `partition.py`'s own
       `_split_by_loc_budget()` enforces when it computes the step in the
       first place -- so this function never accepts an unbounded step on
       either axis, only bounds it by a different property.
@@ -1287,11 +1295,12 @@ def validate_step(
     `_scope_boundary()`; omitting it means no single-segment path is treated
     as a repository-root file, which rejects more than it accepts and never
     the reverse. `tree_index` (Issue #4056) is `path -> {"loc": int, "tier":
-    str}` drawn from the bundle's own `01-tree.tsv`; omitting it means an
-    `axis: "boundary"` step's size is not checked here at all (the caller has
-    no data to check it against), which is the same "reject more, never
-    less" failure direction `root_files=None` already takes. `finalize()` and
-    `finalize_multi_planner()` always supply both.
+    str}` drawn from the bundle's own `01-tree.tsv`; a step bounded by the
+    `loc` budget with no `tree_index` to check it against is REJECTED, not
+    skipped -- the directory axis already fails closed when its own
+    inventory (`root_files`) is missing, and the budget-bounded branch must
+    fail in the same direction rather than accept a step it cannot measure.
+    `finalize()` and `finalize_multi_planner()` always supply both.
     """
     if not isinstance(data, dict):
         return [f"{filename}: step must be a JSON object"]
@@ -1315,20 +1324,7 @@ def validate_step(
     if "scope" in data:
         paths = _scope_paths(data["scope"])
         if paths is not None:
-            if axis == partition.AXIS_BOUNDARY:
-                if tree_index is not None:
-                    non_test_loc = sum(
-                        tree_index[p]["loc"]
-                        for p in paths
-                        if p in tree_index and tree_index[p].get("tier") != "test"
-                    )
-                    if non_test_loc > partition.MAX_STEP_NON_TEST_LOC:
-                        errors.append(
-                            f"{filename}: axis:boundary step's non-test loc ({non_test_loc}) "
-                            f"exceeds the {partition.MAX_STEP_NON_TEST_LOC}-line budget "
-                            f"(partition.MAX_STEP_NON_TEST_LOC): {BOUNDED_SCOPE_RULE}"
-                        )
-            else:
+            if axis == partition.AXIS_DIRECTORY or axis is None:
                 boundaries = {_scope_boundary(p, root_files) for p in paths}
                 if None in boundaries:
                     errors.append(
@@ -1340,6 +1336,26 @@ def validate_step(
                         f"{filename}: scope spans more than one top-level subtree "
                         f"({sorted(boundaries)}): {BOUNDED_SCOPE_RULE}"
                     )
+            else:
+                if tree_index is None:
+                    errors.append(
+                        f"{filename}: axis:{axis} step's non-test loc cannot be checked against "
+                        f"the {partition.MAX_STEP_NON_TEST_LOC}-line budget "
+                        f"(partition.MAX_STEP_NON_TEST_LOC) without a bundle tree index -- "
+                        f"rejecting rather than accepting a step whose size cannot be measured"
+                    )
+                else:
+                    non_test_loc = sum(
+                        tree_index[p]["loc"]
+                        for p in paths
+                        if p in tree_index and tree_index[p].get("tier") != "test"
+                    )
+                    if non_test_loc > partition.MAX_STEP_NON_TEST_LOC:
+                        errors.append(
+                            f"{filename}: axis:{axis} step's non-test loc ({non_test_loc}) "
+                            f"exceeds the {partition.MAX_STEP_NON_TEST_LOC}-line budget "
+                            f"(partition.MAX_STEP_NON_TEST_LOC): {BOUNDED_SCOPE_RULE}"
+                        )
 
     return errors
 
