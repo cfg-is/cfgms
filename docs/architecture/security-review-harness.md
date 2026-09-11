@@ -1744,6 +1744,64 @@ proposal for that scope, `planners` recording every planner id that proposed it,
 reviewed once per lane regardless of how many planners proposed it — a second planner buys wider
 coverage of *what* is worth reviewing, never a second review of the same code.
 
+**Which harnesses can plan (Issue #4041).** `claude` and `codex` only, out of the four wired for
+finder lanes. The roster parser accepts any `harness:model` pair, but the plan-mode entrypoint
+(`.devcontainer/scripts/investigator-entrypoint.sh`) dispatches on
+`CFGMS_SECURITY_REVIEW_HARNESS` and fails closed, naming the harness and the wired set, for
+anything else — it never falls back to `claude`, which before this story it did implicitly: the
+branch always exec'd `claude` and always pre-checked `~/.claude/.credentials.json`, so a
+`--harness codex` planner container exited 1 on a credential it was deliberately not mounted,
+while its correctly-mounted codex session sat unused. `planner.py::launch()` now rejects an
+unwired entry before dispatching its container at all, and collects that rejection like a
+dispatch failure so a wired entry beside it still runs.
+
+The other two cannot plan for reasons that are properties of their CLIs, not missing work:
+`opencode run` takes its prompt as an argv element (`lanes/opencode_lane.py`) and a plan prompt
+for this repository is ~156 KB, over Linux's 131072-byte `MAX_ARG_STRLEN` — the limit Issue #4002
+already hit — with no confirmed stdin form; and `ollama run` has no tool surface with which to
+write a `step-NNN.json` file at all, so its whole plan would have to arrive as one message, where
+a real plan for this repository is ~161k output tokens.
+
+The codex planner runs `codex exec --sandbox danger-full-access --skip-git-repo-check` with its cwd
+set to the plan output directory and the prompt piped on stdin behind a `-` positional argument.
+It reports no resolved-model record equivalent to `claude --output-format json`'s `modelUsage`, so
+`_extract_resolved_model()` records `unknown` for a codex planner rather than echoing the
+requested id back as if it had been confirmed.
+
+**Why that `--sandbox` value, and what actually confines codex here.** The planner has to write
+`step-NNN.json` files, which the `read-only` mode `lanes/codex_lane.py` uses forbids — correct for
+a lane, which only ever returns findings on stdout, and it must stay there. `workspace-write` is
+the obvious next step and **does not work in this container**: codex implements every non-bypass
+sandbox mode with bubblewrap, which needs an unprivileged user namespace that Docker's default
+seccomp/apparmor profiles deny. Sweep `2026-09-11T0205Z-7e40b065` exited 0 having written no steps
+at all, with `bwrap: No permissions to create a new namespace` in its log, and `unshare --user
+true` fails in `cfg-agent:latest` unless both profiles are unconfined. `danger-full-access` is the
+narrowest `--sandbox` value that does not depend on bubblewrap, and it leaves the approval policy
+alone.
+
+Launching the plan container with `--security-opt seccomp=unconfined --security-opt
+apparmor=unconfined`, so bubblewrap could work, was verified to succeed and **rejected
+deliberately**: it weakens the outer boundary this harness's threat model rests on in order to
+restore an inner one that sits strictly inside it. What confines codex here is the container, and
+in plan mode that is the tighter box — `/workspace` is the auditable bundle bind-mounted `:ro` with
+no source file body anywhere in the filesystem (Issue #3979), `/workspace-out` is the only writable
+mount, the credential is mounted `:ro`, egress is default-deny behind the per-harness DNS
+allowlist, and the only added capability is `NET_ADMIN` (no `SYS_ADMIN`, no `--privileged`, no
+docker socket), so nothing inside can remount `/workspace` rw or rewrite the egress policy. This is
+the same principle `codex_lane.py` already states for lanes: codex's internal sandbox sits on top of
+those controls, never in place of them. Do not carry this value to a lane — a lane mounts a real
+source checkout, and its read-only sandbox works there precisely because a lane never writes.
+
+**One shared prompt, one harness-specific paragraph (Issue #4041).** Exactly one paragraph of the
+plan prompt is not harness-neutral: the one naming the `claude` CLI's own tool surface ("your tools
+are `Bash` and `Glob` only (no `Write`)") and instructing a Bash heredoc. `planner.py` holds it as
+`CLAUDE_WRITE_MECHANISM` and `_prompt_for_harness()` swaps in the harness's own wording when
+writing each roster entry's prompt copy; every other line is byte-identical across planners, which
+is what keeps a cross-planner comparison evidence about the *models* rather than about prompt
+variance — the same C4 rule `lanes/harness_runner.py` states for lane prompts. The substitution
+raises rather than silently no-opping if that paragraph is no longer present verbatim, so a future
+reword of `build_prompt()` cannot quietly hand a codex planner Claude's tool list.
+
 **Hypotheses union, not description erasure (Issue #3958).** Before Issue #3958, a plan step's
 only defining content was a single free-text `description`, and merging two planners' proposals
 for the same scope kept only the first-seen proposal's `description` — this was C6's original,
