@@ -906,9 +906,11 @@ create each file with a Bash heredoc, for example:
 
 HARNESS_WRITE_MECHANISM = {
     "claude": CLAUDE_WRITE_MECHANISM,
-    # `codex exec` runs here with `--sandbox workspace-write` and its cwd set
-    # to the output directory, so it writes files with its ordinary shell and
-    # patch tools -- no heredoc instruction, and no Claude tool names.
+    # `codex exec` runs with its cwd set to the output directory, so it writes
+    # files with its ordinary shell and patch tools -- no heredoc instruction,
+    # and no Claude tool names. investigator-entrypoint.sh's plan branch owns
+    # the `--sandbox` value and the reasoning behind it; do not restate it here,
+    # where it would go stale the moment that value changes.
     "codex": """Write each step as its own JSON file in your current working directory, which is
 `/workspace-out` -- the only directory you may write to. For example:
 """,

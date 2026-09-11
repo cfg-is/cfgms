@@ -1755,13 +1755,35 @@ already hit — with no confirmed stdin form; and `ollama run` has no tool surfa
 write a `step-NNN.json` file at all, so its whole plan would have to arrive as one message, where
 a real plan for this repository is ~161k output tokens.
 
-The codex planner runs `codex exec --sandbox workspace-write --skip-git-repo-check` with its cwd
+The codex planner runs `codex exec --sandbox danger-full-access --skip-git-repo-check` with its cwd
 set to the plan output directory and the prompt piped on stdin behind a `-` positional argument.
-`workspace-write` is required: the `read-only` sandbox `lanes/codex_lane.py` uses is correct for a
-lane, which only returns findings on stdout, but would make every step-file write fail. It reports
-no resolved-model record equivalent to `claude --output-format json`'s `modelUsage`, so
+It reports no resolved-model record equivalent to `claude --output-format json`'s `modelUsage`, so
 `_extract_resolved_model()` records `unknown` for a codex planner rather than echoing the
 requested id back as if it had been confirmed.
+
+**Why that `--sandbox` value, and what actually confines codex here.** The planner has to write
+`step-NNN.json` files, which the `read-only` mode `lanes/codex_lane.py` uses forbids — correct for
+a lane, which only ever returns findings on stdout, and it must stay there. `workspace-write` is
+the obvious next step and **does not work in this container**: codex implements every non-bypass
+sandbox mode with bubblewrap, which needs an unprivileged user namespace that Docker's default
+seccomp/apparmor profiles deny. Sweep `2026-09-11T0205Z-7e40b065` exited 0 having written no steps
+at all, with `bwrap: No permissions to create a new namespace` in its log, and `unshare --user
+true` fails in `cfg-agent:latest` unless both profiles are unconfined. `danger-full-access` is the
+narrowest `--sandbox` value that does not depend on bubblewrap, and it leaves the approval policy
+alone.
+
+Launching the plan container with `--security-opt seccomp=unconfined --security-opt
+apparmor=unconfined`, so bubblewrap could work, was verified to succeed and **rejected
+deliberately**: it weakens the outer boundary this harness's threat model rests on in order to
+restore an inner one that sits strictly inside it. What confines codex here is the container, and
+in plan mode that is the tighter box — `/workspace` is the auditable bundle bind-mounted `:ro` with
+no source file body anywhere in the filesystem (Issue #3979), `/workspace-out` is the only writable
+mount, the credential is mounted `:ro`, egress is default-deny behind the per-harness DNS
+allowlist, and the only added capability is `NET_ADMIN` (no `SYS_ADMIN`, no `--privileged`, no
+docker socket), so nothing inside can remount `/workspace` rw or rewrite the egress policy. This is
+the same principle `codex_lane.py` already states for lanes: codex's internal sandbox sits on top of
+those controls, never in place of them. Do not carry this value to a lane — a lane mounts a real
+source checkout, and its read-only sandbox works there precisely because a lane never writes.
 
 **One shared prompt, one harness-specific paragraph (Issue #4041).** Exactly one paragraph of the
 plan prompt is not harness-neutral: the one naming the `claude` CLI's own tool surface ("your tools

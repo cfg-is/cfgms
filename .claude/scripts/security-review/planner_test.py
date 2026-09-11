@@ -2578,8 +2578,8 @@ def test_prompt_for_harness_leaves_the_claude_prompt_byte_identical():
 def test_prompt_for_harness_swaps_the_claude_tool_wording_for_codex():
     # REQUIRED (Issue #4041): a codex planner must not be told it has `Bash`
     # and `Glob` and no `Write` -- those are Claude Code's tool names, and
-    # codex writes step files with its own shell under --sandbox
-    # workspace-write. Everything outside that one paragraph must survive.
+    # codex writes step files with its own shell and patch tools instead.
+    # Everything outside that one paragraph must survive unchanged.
     prompt = "before\n" + planner.CLAUDE_WRITE_MECHANISM + "after\n"
     rendered = planner._prompt_for_harness(prompt, "codex")
     check(
