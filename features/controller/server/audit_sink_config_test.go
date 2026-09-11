@@ -92,6 +92,15 @@ func TestServer_New_UnknownAuditSinkFailsStartup(t *testing.T) {
 	assert.Contains(t, err.Error(), "s3-glacier")
 }
 
+// wormMarkerProbeTenantID mirrors auditsink's unexported tenantRegistryTenantID
+// sentinel (pkg/storage/providers/auditsink/worm_store.go) — the tenant ID the
+// startup writability probe always writes under, regardless of which real
+// tenant IDs the deployment uses. This test lives outside that package and
+// cannot reference the unexported constant, so the literal is duplicated here;
+// pkg/storage/providers/auditsink/worm_store_test.go's own copy of this
+// technique keeps this string honest.
+const wormMarkerProbeTenantID = "_audit_worm_tenant_registry"
+
 // TestServer_New_WormSinkMarkerStoreUnwritableFailsStartup is a REQUIRED test
 // (Issue #4039 AC): the worm sink's marker store is what makes the
 // buffer-then-flush design crash-safe, so an unwritable marker directory must
@@ -99,21 +108,22 @@ func TestServer_New_UnknownAuditSinkFailsStartup(t *testing.T) {
 // sink without crash-safety. The marker root's parent exists and is writable,
 // but a plain file sits where the marker store's registry probe needs a
 // directory (<root>/<tenantRegistryTenantID>) — a real, non-permission-bit
-// write failure that is reliable even when tests run as root.
+// write failure that is reliable even when tests run as root, and on Windows
+// (where os.Geteuid()/chmod-based permission bits don't apply the way they do
+// on Unix). Mirrors TestNewWORMAuditStore_MarkerStoreUnwritableFailsStartup in
+// pkg/storage/providers/auditsink/worm_store_test.go.
 func TestServer_New_WormSinkMarkerStoreUnwritableFailsStartup(t *testing.T) {
 	tempDir := t.TempDir()
 	markerRoot := filepath.Join(tempDir, "marker-root")
 	require.NoError(t, os.MkdirAll(markerRoot, 0o700))
-	// tenantRegistryTenantID is auditsink's unexported sentinel; this test lives
-	// outside that package, so it blocks every possible tenant subdirectory
-	// under markerRoot instead of the specific one, forcing MkdirAll to fail
-	// for any write the marker store's startup probe attempts.
-	require.NoError(t, os.Chmod(markerRoot, 0o500))
-	t.Cleanup(func() { _ = os.Chmod(markerRoot, 0o700) })
-
-	if os.Geteuid() == 0 {
-		t.Skip("running as root bypasses Unix permission bits — this test requires a non-root test user")
-	}
+	// The marker store's startup probe writes to
+	// <markerRoot>/<wormMarkerProbeTenantID>/<namespace>/<name>. Pre-creating a
+	// plain file at <markerRoot>/<wormMarkerProbeTenantID> blocks that write
+	// unconditionally — the filesystem blob store's PutBlob needs that path
+	// segment to be a creatable directory, and a regular file there fails
+	// MkdirAll regardless of OS or which user runs the test.
+	blockingPath := filepath.Join(markerRoot, wormMarkerProbeTenantID)
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
 
 	cfg := &config.Config{
 		ListenAddr:  "127.0.0.1:0",
