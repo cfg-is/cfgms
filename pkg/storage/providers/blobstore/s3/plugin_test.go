@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,6 +29,11 @@ import (
 type inMemoryS3 struct {
 	mu      sync.RWMutex
 	objects map[string]*inMemoryObject
+
+	// objectLockOutput/objectLockErr drive GetObjectLockConfiguration's response
+	// for the ProbeObjectLock tests below. Exactly one should be set per test.
+	objectLockOutput *s3.GetObjectLockConfigurationOutput
+	objectLockErr    error
 }
 
 type inMemoryObject struct {
@@ -168,6 +174,18 @@ func (m *inMemoryS3) DeleteObject(ctx context.Context, params *s3.DeleteObjectIn
 	delete(m.objects, k)
 	m.mu.Unlock()
 	return &s3.DeleteObjectOutput{}, nil
+}
+
+// GetObjectLockConfiguration returns the configured fake response, letting
+// TestS3BlobStore_ProbeObjectLock drive all three ProbeObjectLock outcomes
+// without a real S3/MinIO endpoint.
+func (m *inMemoryS3) GetObjectLockConfiguration(ctx context.Context, params *s3.GetObjectLockConfigurationInput, optFns ...func(*s3.Options)) (*s3.GetObjectLockConfigurationOutput, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.objectLockErr != nil {
+		return nil, m.objectLockErr
+	}
+	return m.objectLockOutput, nil
 }
 
 // newTestStore creates an S3BlobStore backed by the in-memory S3 client.
@@ -684,4 +702,71 @@ func TestS3BlobStore_PutBlobIfAbsent_TenantRequired(t *testing.T) {
 	store := &S3BlobStore{client: client, bucket: "test-bucket"}
 	err := store.PutBlobIfAbsent(context.Background(), blob.BlobKey{Namespace: "ns", Name: "n"}, bytes.NewReader([]byte("x")), blob.BlobMeta{})
 	assert.ErrorIs(t, err, blob.ErrBlobTenantRequired)
+}
+
+// TestS3BlobStore_ProbeObjectLock is a REQUIRED test (Issue #4037 AC):
+// S3BlobStore.ProbeObjectLock must classify all three GetObjectLockConfiguration
+// outcomes correctly — a successful response with ObjectLockEnabledEnum
+// "Enabled", the well-known ObjectLockConfigurationNotFoundError (the only
+// signal for "never had Object Lock"), and any other error (e.g. AccessDenied),
+// which must never be read as "disabled".
+func TestS3BlobStore_ProbeObjectLock(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     *s3.GetObjectLockConfigurationOutput
+		err        error
+		wantStatus blob.ObjectLockStatus
+	}{
+		{
+			name: "enabled",
+			output: &s3.GetObjectLockConfigurationOutput{
+				ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
+					ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
+				},
+			},
+			wantStatus: blob.ObjectLockEnabled,
+		},
+		{
+			name: "never enabled on bucket (ObjectLockConfigurationNotFoundError)",
+			err: &smithy.GenericAPIError{
+				Code:    "ObjectLockConfigurationNotFoundError",
+				Message: "Object Lock configuration does not exist for this bucket",
+			},
+			wantStatus: blob.ObjectLockDisabled,
+		},
+		{
+			name: "arbitrary other error (AccessDenied) must not be read as disabled",
+			err: &smithy.GenericAPIError{
+				Code:    "AccessDenied",
+				Message: "Access Denied",
+			},
+			wantStatus: blob.ObjectLockUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newInMemoryS3()
+			client.objectLockOutput = tc.output
+			client.objectLockErr = tc.err
+			store := &S3BlobStore{client: client, bucket: "test-bucket"}
+
+			status, err := store.ProbeObjectLock(context.Background())
+			require.NoError(t, err, "ProbeObjectLock classifies every outcome into a status; it does not propagate a raw error")
+			assert.Equal(t, tc.wantStatus, status)
+		})
+	}
+}
+
+// TestS3BlobStore_ProbeObjectLock_NonAPIError verifies a transport-level error
+// that is not a smithy.APIError at all (e.g. a network failure) is classified
+// Unknown, never Disabled.
+func TestS3BlobStore_ProbeObjectLock_NonAPIError(t *testing.T) {
+	client := newInMemoryS3()
+	client.objectLockErr = errors.New("connection reset by peer")
+	store := &S3BlobStore{client: client, bucket: "test-bucket"}
+
+	status, err := store.ProbeObjectLock(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, blob.ObjectLockUnknown, status)
 }

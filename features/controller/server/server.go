@@ -93,6 +93,7 @@ import (
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+	"github.com/cfgis/cfgms/pkg/storage/providers/auditsink"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/filesystem" // register filesystem blob provider (Issue #1702)
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/blobstore/s3"         // register S3 blob provider for cluster mode (Issue #2118)
 	dbprovider "github.com/cfgis/cfgms/pkg/storage/providers/database"    // Postgres-backed stores; used by initializeSessionStore in cluster mode (Issue #2775)
@@ -444,6 +445,34 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
+	// Resolve the configured audit sink (Issue #4036/#4037, ADR-033). "local" is
+	// the zero-extra-infrastructure default; "worm" wraps the durable store with
+	// a forward-only shipper to an append-only WORM blob target (Epic #4033
+	// Story 4). This MUST run before storageManager.GetAuditStore() is read for
+	// RBAC or the audit manager below: RBAC builds its own internal audit.Manager
+	// from a captured store reference (rbac.NewManagerWithStorage), so every
+	// reader of the audit store must see the WORM-wrapped instance once
+	// installed, or RBAC-sourced audit entries would silently bypass the WORM
+	// shipper.
+	auditSinkName := cfg.Audit.ResolvedSink()
+	switch auditSinkName {
+	case config.AuditSinkWORM:
+		wormBlobStore, wormBlobErr := blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)
+		if wormBlobErr != nil {
+			return nil, fmt.Errorf("failed to initialize worm audit sink blob store: %w", wormBlobErr)
+		}
+		wormStore := auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, logger)
+		storageManager.SetAuditStore(wormStore)
+	case config.AuditSinkLocal:
+		logger.Info("Audit sink selected",
+			"sink", auditSinkName,
+			"bound", "ADR-004/ADR-033: a host-compromised controller holds the audit HMAC key and can rewrite history under this sink",
+		)
+	default:
+		return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
+			auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
+	}
+
 	// Initialize RBAC system with pluggable storage only
 	auditStore := storageManager.GetAuditStore()
 	clientTenantStore := storageManager.GetClientTenantStore()
@@ -456,25 +485,6 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		rbacStore,
 	)
 	logger.Info("RBAC manager created")
-
-	// Resolve the configured audit sink (Issue #4036, ADR-033). "local" is the
-	// zero-extra-infrastructure default; "worm" is the recommended production
-	// option but its shipper does not exist yet (Story 4 of Epic #4033) — fail
-	// startup with a named error rather than silently running on the local sink.
-	auditSinkName := cfg.Audit.ResolvedSink()
-	switch auditSinkName {
-	case config.AuditSinkWORM:
-		return nil, fmt.Errorf("audit sink %q is not yet implemented (Epic #4033 Story 4) — "+
-			"select %q or remove the audit.sink setting", config.AuditSinkWORM, config.AuditSinkLocal)
-	case config.AuditSinkLocal:
-		logger.Info("Audit sink selected",
-			"sink", auditSinkName,
-			"bound", "ADR-004/ADR-033: a host-compromised controller holds the audit HMAC key and can rewrite history under this sink",
-		)
-	default:
-		return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
-			auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
-	}
 
 	// Initialize unified audit system with pluggable storage only
 	logger.Info("Creating audit manager...")

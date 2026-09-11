@@ -44,11 +44,15 @@ func TestServer_New_DefaultAuditSinkLogsADRBound(t *testing.T) {
 	assert.Contains(t, bound, "ADR-033", "the local-sink log line must name ADR-033 so an operator can look it up")
 }
 
-// TestServer_New_WormSinkFailsStartupNotYetImplemented is a REQUIRED test
-// (Issue #4036 AC): selecting the "worm" sink before Story 4 of Epic #4033
-// lands must fail controller startup with a clear, named error — never fall
-// back to the local sink silently.
-func TestServer_New_WormSinkFailsStartupNotYetImplemented(t *testing.T) {
+// TestServer_New_WormSinkRequiresBlobStoreConfig is a REQUIRED test (Issue
+// #4037 AC): the worm sink is now implemented (Epic #4033 Story 4) — selecting
+// it no longer fails with "not yet implemented". It still fails startup
+// cleanly when the operator has not supplied the S3 blob store's required
+// "bucket" config key, naming the actual misconfiguration rather than a
+// vestigial not-implemented error. This does not exercise a real S3 endpoint:
+// blob.CreateBlobStoreFromConfig rejects a missing bucket before any network
+// call is made.
+func TestServer_New_WormSinkRequiresBlobStoreConfig(t *testing.T) {
 	tempDir := t.TempDir()
 	cfg := &config.Config{
 		ListenAddr:  "127.0.0.1:0",
@@ -60,15 +64,11 @@ func TestServer_New_WormSinkFailsStartupNotYetImplemented(t *testing.T) {
 	logger := logging.NewCapturingLogger()
 	srv, err := New(cfg, logger)
 
-	require.Error(t, err, "selecting the worm sink before Story 4 lands must fail startup, not silently run on local")
-	assert.Nil(t, srv, "no Server may be returned when the configured sink is not yet implemented")
-	assert.True(t, strings.Contains(err.Error(), config.AuditSinkWORM),
-		"the startup error must name the worm sink")
-	assert.True(t, strings.Contains(strings.ToLower(err.Error()), "not yet implemented"),
-		"the startup error must state plainly that the worm sink is not yet implemented")
-
-	_, found := logger.FindInfo("Audit sink selected")
-	assert.False(t, found, "a startup that fails on an unimplemented sink must not also log it as selected")
+	require.Error(t, err, "the worm sink must fail startup cleanly when its blob store config is incomplete")
+	assert.Nil(t, srv)
+	assert.False(t, strings.Contains(strings.ToLower(err.Error()), "not yet implemented"),
+		"the worm sink is implemented as of Issue #4037 — the startup error must no longer claim it is not yet implemented")
+	assert.Contains(t, err.Error(), "bucket", "the startup error must name the missing blob store config key")
 }
 
 // TestServer_New_UnknownAuditSinkFailsStartup guards the default branch of the
