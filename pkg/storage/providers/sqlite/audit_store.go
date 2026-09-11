@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -128,7 +129,7 @@ func (s *SQLiteAuditStore) GetLastAuditEntry(ctx context.Context, tenantID strin
 		LIMIT 1`, tenantID)
 	entry, err := scanAuditEntry(row)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if errors.Is(err, business.ErrAuditNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -572,7 +573,7 @@ func scanAuditEntry(row *sql.Row) (*business.AuditEntry, error) {
 		&e.SequenceNumber, &e.PreviousChecksum,
 	)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("audit entry not found")
+		return nil, business.ErrAuditNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan audit entry: %w", err)

@@ -4,6 +4,7 @@ package sqlite_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -65,7 +66,8 @@ func TestAuditStore_GetNotFound(t *testing.T) {
 	store := newAuditStore(t)
 	ctx := context.Background()
 	_, err := store.GetAuditEntry(ctx, "nonexistent")
-	assert.Error(t, err)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrAuditNotFound), "expected business.ErrAuditNotFound, got %v", err)
 }
 
 func TestAuditStore_Immutability(t *testing.T) {
@@ -181,6 +183,10 @@ func TestAuditStore_GetFailedActions(t *testing.T) {
 	assert.Equal(t, business.AuditResultFailure, results[0].Result)
 }
 
+// TestAuditStore_GetLastAuditEntry_Empty covers GetLastAuditEntry's internal
+// errors.Is(err, business.ErrAuditNotFound) check (replacing a prior
+// strings.Contains(err.Error(), "not found") workaround): a tenant with no
+// entries must still surface as (nil, nil) to callers, not as an error.
 func TestAuditStore_GetLastAuditEntry_Empty(t *testing.T) {
 	store := newAuditStore(t)
 	ctx := context.Background()
