@@ -40,6 +40,17 @@
 > its append mutex across the head read and the write, which is sufficient because
 > that store is single-process by contract.
 
+> **Amended 2026-09-11 (Issue #4034, per Epic #4033) — Audit Sink Architecture.**
+> The Adversary Bound section's "Interim disposition" paragraph below named two
+> candidate shapes for closing the bound and tracked the follow-up as a private
+> project draft. The choice is now made: see
+> [ADR-033](033-audit-sink-architecture-and-adversary-bound.md) for the decision (a
+> pluggable audit sink, local-durable by default, WORM/object-lock as the recommended
+> production option), the precise per-sink adversary bound, the rejected fail-closed
+> alternative, and why a bare signing oracle is not a fix. The follow-up work is no
+> longer tracked only as a private draft — it is ADR-033 plus Stories 2–5 of Epic
+> [#4033](https://github.com/cfg-is/cfgms/issues/4033).
+
 ---
 
 ## Context
@@ -146,13 +157,16 @@ accordingly as part of this issue.
 **Interim disposition.** Closing this bound requires either (a) a signing key the
 controller cannot read after startup (external signer/HSM/KMS), or (b) an
 append-only sink outside the controller's trust boundary that the controller can
-append to but not rewrite. Both are larger than a documentation change and are
+append to but not rewrite. Both were larger than a documentation change and were
 deliberately not attempted here — see Issue #3727's Implementation Notes. The
-follow-up work is tracked as a private project draft
-(`PVTI_lADOCrV4cc4BX5ezzg4Z7eM`, materializes to a public issue at dispatch) titled
-"audit: move audit-chain signing key outside controller's post-startup reach." Until
-that work lands, the chain above should be read with this bound in mind: it is a
-compensating control against storage tampering, not against controller compromise.
+choice between them, and the precise bound each shape achieves, is now recorded in
+[ADR-033](033-audit-sink-architecture-and-adversary-bound.md) (Issue #4034, per Epic
+#4033): shape (b) is the recommended production option, selected by configuration,
+with a local-durable sink as the zero-infrastructure default. The follow-up work is
+no longer tracked only as a private project draft — it is ADR-033 plus Stories 2–5 of
+Epic #4033. Until that work lands, the chain above should be read with this bound in
+mind: it is a compensating control against storage tampering, not against controller
+compromise.
 
 ---
 

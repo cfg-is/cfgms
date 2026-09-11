@@ -74,6 +74,7 @@ What becomes easier or harder by making this decision?
 | [029](029-controller-leadership-authority.md) | Controller Leadership Authority — Lease-Backed Authority and Fenced Side Effects | 2026-08-18 | Amended by ADR-031 |
 | [031](031-controller-cluster-service-model.md) | Controller Cluster Service Model — Any-Node Service, Durable Delivery, Minimal Leadership | 2026-09-01 | Accepted |
 | [032](032-saas-deployment-topology-and-trust.md) | SaaS Deployment Topology and Trust Hierarchy — Cells, Shared Root, Steward-Held Keys | 2026-09-01 | Accepted |
+| [033](033-audit-sink-architecture-and-adversary-bound.md) | Audit Sink Architecture and Adversary Bound — Pluggable Sink, Local-Durable Default, WORM/Object-Lock Recommended Production Option | 2026-09-11 | Accepted |
 
 ### Superseded/Deprecated
 
