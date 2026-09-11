@@ -83,7 +83,7 @@ After initialization, the controller starts normally. If required infrastructure
 - Storage schema mismatch → error with migration instructions
 - Transport address conflict → error with port details and resolution steps
 
-### Audit Sink Selection (ADR-033, Issue #4036)
+### Audit Sink Selection (ADR-033, Issues #4036, #4037)
 
 The controller's audit store is a configurable sink, selected via `audit.sink` in
 controller config (or the `CFGMS_AUDIT_SINK` environment variable override):
@@ -93,25 +93,73 @@ controller config (or the `CFGMS_AUDIT_SINK` environment variable override):
   audit logging. Carries the same adversary bound as ADR-004: a
   host-compromised controller holds the audit HMAC key (loaded from its own
   secrets store) and can rewrite history under this sink.
-- **`worm`** — the recommended production option (ADR-033): an append-only
-  object-lock target outside the controller's trust boundary. **Not yet
-  implemented.** Selecting `worm` fails controller startup with a named error
-  rather than silently falling back to `local` — the shipper lands in a later
-  story of Epic #4033.
+- **`worm`** — the recommended production option (ADR-033): every
+  locally-sequenced audit entry is additionally shipped to an append-only
+  WORM (S3-compatible) blob target, keyed so a second write to the same
+  tenant/sequence key is refused. The local durable store remains the sole
+  sequence authority — `WORMAuditStore` (`pkg/storage/providers/auditsink`) is a
+  forward-only shipper layered over it, never a replacement `AuditStore`.
 
-Resolution and validation happen once, at composition time
-(`features/controller/server/server.go:New`), immediately before the audit
-manager is constructed. Startup logs an `"Audit sink selected"` line naming the
-active sink; for `local`, the same line states plainly that the ADR-004/ADR-033
-bound applies, so an operator reading the log is never left assuming a stronger
-guarantee than the code provides. An unrecognized `audit.sink` value also fails
-startup, naming the valid values.
+Resolution and, for `worm`, construction happen once, at composition time
+(`features/controller/server/server.go:New`), before the RBAC manager and the
+audit manager are constructed — RBAC builds its own internal `audit.Manager`
+from a captured store reference, so the sink must be resolved (and, for
+`worm`, `StorageManager.SetAuditStore` called) before that reference is taken,
+or RBAC-sourced audit entries would silently bypass the WORM shipper.
 
-`pkg/storage/interfaces.StorageManager.SetAuditStore` wires a replacement audit
-store after construction — the plumbing a later story uses to install a
-WORM-wrapped store without changing `StorageManager`'s shape. It is not yet
-called anywhere: today's audit store is always the provider's own
-`GetAuditStore()` result.
+#### `worm` sink configuration
+
+`audit.worm` (or `CFGMS_AUDIT_SINK=worm` with the same keys under
+`audit.worm`) holds the same shape as `storage.cluster.s3`: `bucket`
+(required), `region`, `endpoint_url`, `prefix`, `access_key_id` /
+`secret_access_key` (optional; the default AWS credential chain is used when
+omitted). The blob store is constructed via
+`blob.CreateBlobStoreFromConfig("s3", cfg.Audit.WORM)` against the existing S3
+blob provider — there is no separate WORM-specific provider.
+
+**Object Lock is an operator responsibility, not something this code path can
+turn on.** `PutBlobIfAbsent`'s conditional write only prevents the
+*controller's own code path* from overwriting an already-shipped key; it does
+not stop a credential-holding attacker with full bucket permissions from
+deleting or overwriting objects directly. True protection against that
+requires the operator to (1) enable S3 Object Lock (governance or compliance
+mode) on the target bucket, and (2) scope the controller's IAM credentials
+without `s3:PutObjectRetention` / `s3:BypassGovernanceRetention`. Neither step
+is something the controller can enforce from inside the process.
+
+At startup the controller probes the configured bucket once
+(`S3BlobStore.ProbeObjectLock`, via the optional `blob.ObjectLockProber`
+capability) and logs an `"Audit sink selected"` line reporting the result:
+
+- **Object Lock confirmed on** — logged at `Info`; the strong bound applies.
+- **Object Lock confirmed off**, or **could not be verified** (e.g. the
+  credentials lack permission to read the bucket's Object Lock configuration,
+  or the probe call fails for any other reason) — both logged at `Warn`,
+  naming the reduced bound plainly: entries are write-once against the
+  controller's own code path only, and a credential-holding attacker can
+  still delete or overwrite them. Neither `Warn` case is worded as the strong
+  bound.
+
+The probe outcome never blocks or fails controller startup in any of the
+three cases — fail-closed on sink misconfiguration was explicitly rejected
+(Epic #4033); it only changes what is logged.
+
+**Transitional gap: ship failures are not yet retried.** A `PutBlobIfAbsent`
+failure while shipping a locally-committed entry (e.g. the bucket is
+temporarily unreachable) is logged as a warning and not retried — the local
+write already durably committed, so no entry is lost, but that entry is not
+yet WORM-protected either. The same startup log line states this caveat
+explicitly, in addition to the Object Lock probe outcome, so an operator
+selecting `worm` cannot mistake it for complete protection. Outage
+retry/reconciliation is Story 5 of Epic #4033; once it lands, Story 5 updates
+this log line to drop the caveat.
+
+An unrecognized `audit.sink` value fails startup, naming the valid values.
+
+`pkg/storage/interfaces.StorageManager.SetAuditStore` wires a replacement
+audit store after construction. It is called exactly once, for the `worm`
+sink, to install the `WORMAuditStore`-wrapped store before anything else reads
+`GetAuditStore()`.
 
 ### Degraded-Mode Visibility
 

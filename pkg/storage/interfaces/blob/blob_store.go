@@ -131,6 +131,37 @@ var (
 	ErrBlobAlreadyExists    = &BlobError{Code: "BLOB_ALREADY_EXISTS", Message: "blob already exists"}
 )
 
+// ObjectLockProber is an optional capability a BlobStore may implement to report
+// whether its backing storage enforces WORM/object-lock semantics external to
+// this process (Issue #4037, ADR-033). Callers must type-assert for it — a store
+// that does not implement it (e.g. the filesystem provider) offers no such
+// guarantee and callers must treat that as ObjectLockUnknown, never as
+// ObjectLockEnabled.
+type ObjectLockProber interface {
+	ProbeObjectLock(ctx context.Context) (ObjectLockStatus, error)
+}
+
+// ObjectLockStatus reports the outcome of an ObjectLockProber probe.
+type ObjectLockStatus int
+
+const (
+	ObjectLockUnknown  ObjectLockStatus = iota // could not verify (e.g. permission denied)
+	ObjectLockEnabled                          // bucket-level Object Lock confirmed on
+	ObjectLockDisabled                         // bucket-level Object Lock confirmed off
+)
+
+// String renders the status for log lines.
+func (s ObjectLockStatus) String() string {
+	switch s {
+	case ObjectLockEnabled:
+		return "enabled"
+	case ObjectLockDisabled:
+		return "disabled"
+	default:
+		return "unknown"
+	}
+}
+
 // BlobProvider is the factory interface for BlobStore backends.
 // It follows the same auto-registration pattern as StorageProvider but is kept
 // separate because blob storage is an independent concern with its own lifecycle.

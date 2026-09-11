@@ -36,10 +36,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 )
+
+// objectLockConfigurationNotFoundErrorCode is the well-known S3 error code
+// returned by GetObjectLockConfiguration when Object Lock was never enabled on
+// the bucket. S3 does not model this as a typed Go error struct — it is
+// discriminated by ErrorCode() alone, same shape as isS3PreconditionFailed
+// below.
+const objectLockConfigurationNotFoundErrorCode = "ObjectLockConfigurationNotFoundError"
 
 const (
 	defaultContentType = "application/octet-stream"
@@ -58,6 +66,7 @@ type s3API interface {
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
+	GetObjectLockConfiguration(ctx context.Context, params *s3.GetObjectLockConfigurationInput, optFns ...func(*s3.Options)) (*s3.GetObjectLockConfigurationOutput, error)
 }
 
 // S3BlobProvider implements BlobProvider using an S3-compatible object store.
@@ -522,6 +531,35 @@ func (s *S3BlobStore) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("s3 blob store health check: %w", err)
 	}
 	return nil
+}
+
+// ProbeObjectLock implements blob.ObjectLockProber (Issue #4037). Object Lock
+// is a bucket-creation-time-only setting: GetObjectLockConfigurationOutput's
+// ObjectLockEnabled enum models only one success value, "Enabled" — there is no
+// "disabled" success response. A bucket that never had Object Lock enabled
+// instead fails the call with the well-known
+// ObjectLockConfigurationNotFoundError code, which is the only signal this
+// method treats as a definitive "disabled". Every other error (AccessDenied, a
+// network failure, or any non-smithy.APIError) cannot be distinguished from
+// "disabled" and is classified Unknown so a caller never treats an
+// unverifiable bucket as protected.
+func (s *S3BlobStore) ProbeObjectLock(ctx context.Context) (blob.ObjectLockStatus, error) {
+	output, err := s.client.GetObjectLockConfiguration(ctx, &s3.GetObjectLockConfigurationInput{
+		Bucket: aws.String(s.bucket),
+	})
+	if err == nil {
+		if output.ObjectLockConfiguration != nil &&
+			output.ObjectLockConfiguration.ObjectLockEnabled == s3types.ObjectLockEnabledEnabled {
+			return blob.ObjectLockEnabled, nil
+		}
+		return blob.ObjectLockUnknown, nil
+	}
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == objectLockConfigurationNotFoundErrorCode {
+		return blob.ObjectLockDisabled, nil
+	}
+	return blob.ObjectLockUnknown, nil
 }
 
 // fetchSidecar retrieves and parses the metadata sidecar for a blob.
