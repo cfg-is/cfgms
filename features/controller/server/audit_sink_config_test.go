@@ -3,6 +3,8 @@
 package server
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -88,6 +90,59 @@ func TestServer_New_UnknownAuditSinkFailsStartup(t *testing.T) {
 	require.Error(t, err, "an unrecognized audit sink name must fail startup")
 	assert.Nil(t, srv)
 	assert.Contains(t, err.Error(), "s3-glacier")
+}
+
+// wormMarkerProbeTenantID mirrors auditsink's unexported tenantRegistryTenantID
+// sentinel (pkg/storage/providers/auditsink/worm_store.go) — the tenant ID the
+// startup writability probe always writes under, regardless of which real
+// tenant IDs the deployment uses. This test lives outside that package and
+// cannot reference the unexported constant, so the literal is duplicated here;
+// pkg/storage/providers/auditsink/worm_store_test.go's own copy of this
+// technique keeps this string honest.
+const wormMarkerProbeTenantID = "_audit_worm_tenant_registry"
+
+// TestServer_New_WormSinkMarkerStoreUnwritableFailsStartup is a REQUIRED test
+// (Issue #4039 AC): the worm sink's marker store is what makes the
+// buffer-then-flush design crash-safe, so an unwritable marker directory must
+// fail controller startup with a named error rather than starting the worm
+// sink without crash-safety. The marker root's parent exists and is writable,
+// but a plain file sits where the marker store's registry probe needs a
+// directory (<root>/<tenantRegistryTenantID>) — a real, non-permission-bit
+// write failure that is reliable even when tests run as root, and on Windows
+// (where os.Geteuid()/chmod-based permission bits don't apply the way they do
+// on Unix). Mirrors TestNewWORMAuditStore_MarkerStoreUnwritableFailsStartup in
+// pkg/storage/providers/auditsink/worm_store_test.go.
+func TestServer_New_WormSinkMarkerStoreUnwritableFailsStartup(t *testing.T) {
+	tempDir := t.TempDir()
+	markerRoot := filepath.Join(tempDir, "marker-root")
+	require.NoError(t, os.MkdirAll(markerRoot, 0o700))
+	// The marker store's startup probe writes to
+	// <markerRoot>/<wormMarkerProbeTenantID>/<namespace>/<name>. Pre-creating a
+	// plain file at <markerRoot>/<wormMarkerProbeTenantID> blocks that write
+	// unconditionally — the filesystem blob store's PutBlob needs that path
+	// segment to be a creatable directory, and a regular file there fails
+	// MkdirAll regardless of OS or which user runs the test.
+	blockingPath := filepath.Join(markerRoot, wormMarkerProbeTenantID)
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
+
+	cfg := &config.Config{
+		ListenAddr:  "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{EnableCertManagement: false},
+		Storage:     createTestStorageConfig(tempDir, "audit-sink-worm-marker-unwritable"),
+		Audit: &config.AuditSinkConfig{
+			Sink:       config.AuditSinkWORM,
+			WORM:       map[string]interface{}{"bucket": "cfgms-audit-test"},
+			MarkerRoot: markerRoot,
+		},
+	}
+
+	logger := logging.NewCapturingLogger()
+	srv, err := New(cfg, logger)
+
+	require.Error(t, err, "an unwritable marker store must fail startup, never fall back to shipping without crash-safety")
+	assert.Nil(t, srv)
+	assert.Contains(t, err.Error(), "not writable")
+	assert.Contains(t, err.Error(), markerRoot, "the startup error must name the marker store path")
 }
 
 // stubAuditStore embeds the interface rather than implementing it method by
