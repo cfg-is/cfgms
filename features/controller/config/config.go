@@ -403,6 +403,10 @@ type Config struct {
 	// Storage configuration for global storage provider system
 	Storage *StorageConfig `yaml:"storage"`
 
+	// Audit selects the audit sink (ADR-033). Nil or empty Sink resolves to
+	// AuditSinkLocal — zero extra infrastructure required.
+	Audit *AuditSinkConfig `yaml:"audit,omitempty"`
+
 	// Logging configuration for global logging provider system
 	Logging *LoggingConfig `yaml:"logging"`
 
@@ -699,6 +703,42 @@ type HAConfig struct {
 // IsClusterMode returns true when ha.mode is "cluster".
 func (h *HAConfig) IsClusterMode() bool {
 	return h != nil && h.Mode == "cluster"
+}
+
+const (
+	// AuditSinkLocal is the zero-extra-infrastructure default audit sink (ADR-033).
+	// Carries the same adversary bound as ADR-004: a host-compromised controller
+	// holds the audit HMAC key and can rewrite history.
+	AuditSinkLocal = "local"
+
+	// AuditSinkWORM is the recommended production audit sink (ADR-033): an
+	// append-only object-lock target outside the controller's trust boundary.
+	// Not yet implemented — selecting it fails controller startup (Story 4 of
+	// Epic #4033 implements the shipper).
+	AuditSinkWORM = "worm"
+)
+
+// AuditSinkConfig selects the audit store backing sink (ADR-033, Issue #4036).
+type AuditSinkConfig struct {
+	// Sink selects the audit sink: "local" (default, zero extra infrastructure)
+	// or "worm" (recommended production option, an append-only object-lock
+	// target). Override via CFGMS_AUDIT_SINK.
+	Sink string `yaml:"sink"`
+
+	// WORM holds the WORM sink's connection details (bucket/region/endpoint/
+	// credentials), same shape as ClusterStorageConfig.S3. Credentials follow
+	// the ${ENV_VAR}/_FILE resolution pattern documented above — never a
+	// hardcoded value. Ignored unless Sink is "worm".
+	WORM map[string]interface{} `yaml:"worm,omitempty"`
+}
+
+// ResolvedSink returns the configured sink name, defaulting to AuditSinkLocal
+// when a is nil or Sink is unset.
+func (a *AuditSinkConfig) ResolvedSink() string {
+	if a == nil || a.Sink == "" {
+		return AuditSinkLocal
+	}
+	return a.Sink
 }
 
 // ClusterStorageConfig holds Postgres + S3 connection details for cluster-mode deployments.
@@ -1344,6 +1384,15 @@ func LoadWithPath(configPath string) (*Config, error) {
 			cfg.Storage.Cluster = &ClusterStorageConfig{}
 		}
 		cfg.Storage.Cluster.SessionHMACKey = hmacKey
+	}
+
+	// Audit sink environment variable (Issue #4036, ADR-033).
+	// CFGMS_AUDIT_SINK overrides audit.sink ("local" or "worm").
+	if auditSink := os.Getenv("CFGMS_AUDIT_SINK"); auditSink != "" {
+		if cfg.Audit == nil {
+			cfg.Audit = &AuditSinkConfig{}
+		}
+		cfg.Audit.Sink = strings.ToLower(auditSink)
 	}
 
 	// Cluster CA vault configuration environment variables (Issue #2018).

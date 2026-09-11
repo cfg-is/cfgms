@@ -1301,3 +1301,77 @@ webauthn:
 	assert.Equal(t, "CFGMS Controller", cfg.WebAuthn.RPDisplayName)
 	assert.Equal(t, []string{"https://cfgms.example.com"}, cfg.WebAuthn.RPOrigins)
 }
+
+// TestAuditSinkConfig_DefaultsToLocal is a REQUIRED test (Issue #4036 AC): a
+// controller with no audit config section resolves to the "local" sink, so a
+// basic deployment starts with zero extra infrastructure (ADR-033).
+func TestAuditSinkConfig_DefaultsToLocal(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "listen_addr: \"127.0.0.1:8080\"\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_AUDIT_SINK", "")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	assert.Nil(t, cfg.Audit, "an absent audit section must stay nil, not be materialised with a zero value")
+	assert.Equal(t, AuditSinkLocal, cfg.Audit.ResolvedSink(),
+		"an absent audit section must resolve to the local sink")
+}
+
+// TestAuditSinkConfig_YAMLExplicitWorm verifies that audit.sink: worm is parsed
+// from YAML (Issue #4036, ADR-033).
+func TestAuditSinkConfig_YAMLExplicitWorm(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := `
+audit:
+  sink: worm
+  worm:
+    bucket: "cfgms-audit"
+    region: "us-east-1"
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+	t.Setenv("CFGMS_AUDIT_SINK", "")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Audit, "audit.sink: worm must materialise the audit config section")
+	assert.Equal(t, "worm", cfg.Audit.Sink)
+	assert.Equal(t, AuditSinkWORM, cfg.Audit.ResolvedSink())
+	require.NotNil(t, cfg.Audit.WORM)
+	assert.Equal(t, "cfgms-audit", cfg.Audit.WORM["bucket"])
+	assert.Equal(t, "us-east-1", cfg.Audit.WORM["region"])
+}
+
+// TestAuditSinkConfig_EnvVarOverride verifies that CFGMS_AUDIT_SINK overrides
+// audit.sink, both materialising an absent section and overriding a YAML value
+// (Issue #4036, ADR-033).
+func TestAuditSinkConfig_EnvVarOverride(t *testing.T) {
+	t.Setenv("CFGMS_AUDIT_SINK", "worm")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Audit, "CFGMS_AUDIT_SINK must materialise the audit config section")
+	assert.Equal(t, "worm", cfg.Audit.Sink)
+	assert.Equal(t, AuditSinkWORM, cfg.Audit.ResolvedSink())
+}
+
+// TestAuditSinkConfig_EnvVarOverridesYAML verifies CFGMS_AUDIT_SINK takes
+// precedence over a sink configured in the config file (Issue #4036, ADR-033).
+func TestAuditSinkConfig_EnvVarOverridesYAML(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "controller.cfg")
+	content := "audit:\n  sink: worm\n"
+	require.NoError(t, os.WriteFile(configPath, []byte(content), 0600))
+
+	t.Setenv("CFGMS_AUDIT_SINK", "local")
+
+	cfg, err := LoadWithPath(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Audit)
+	assert.Equal(t, "local", cfg.Audit.Sink,
+		"CFGMS_AUDIT_SINK must override a config-file audit.sink value")
+}
