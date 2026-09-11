@@ -52,7 +52,7 @@ Monitor tool:
 
 The watcher refuses to start if another instance is already running on this host (PID file in the PO cache dir), so double-arming is safe.
 
-**It needs a live session.** Unlike a cron loop, the watcher dies when the session ends. Run it from a long-lived session — the `po-live` tmux pane is the intended host.
+**It needs a long-lived session on the local host.** Two separate constraints meet here. First, the watcher dies when its session ends, unlike a cron loop — so the session has to stay up. Second, every bundle it triggers launches dispatch/review/fix containers, so the session must be the one with Docker access: the **local host session**, not `po-live`. A containerised PO session cannot drive the dispatch containers, so arming the watcher there would produce events nothing can act on.
 
 **Keep the main session thin.** Every event is handled by spawning a fresh-context `po` subagent, exactly as the no-arg path does. The main session accumulates only the one-line cycle summaries, so a wake-up after a long quiet gap re-reads a small context rather than a whole day of cycle transcripts.
 
