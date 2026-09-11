@@ -144,15 +144,57 @@ The probe outcome never blocks or fails controller startup in any of the
 three cases — fail-closed on sink misconfiguration was explicitly rejected
 (Epic #4033); it only changes what is logged.
 
-**Transitional gap: ship failures are not yet retried.** A `PutBlobIfAbsent`
-failure while shipping a locally-committed entry (e.g. the bucket is
-temporarily unreachable) is logged as a warning and not retried — the local
-write already durably committed, so no entry is lost, but that entry is not
-yet WORM-protected either. The same startup log line states this caveat
-explicitly, in addition to the Object Lock probe outcome, so an operator
-selecting `worm` cannot mistake it for complete protection. Outage
-retry/reconciliation is Story 5 of Epic #4033; once it lands, Story 5 updates
-this log line to drop the caveat.
+#### Buffer-then-flush on WORM outage (Issue #4039)
+
+A `PutBlobIfAbsent` failure while shipping a locally-committed entry (e.g. the
+bucket is temporarily unreachable) never blocks or fails the caller and is
+never a permanent gap: the local write already durably committed — the local
+store remains the sole sequence authority — and a pending marker (the entry ID
+only, never audit content) written *before* the local append survives the
+failed ship. A background reconciliation loop retries every pending marker
+once the WORM target is reachable again, on a fixed **30-second** interval
+(not operator-tunable in this story; a follow-up can expose it if needed).
+
+The marker store is a genuinely local filesystem directory, separate from the
+(possibly unreachable) WORM blob target, so it stays writable precisely during
+the outage this design exists to survive. It needs no extra infrastructure:
+it defaults to `<DataDir>/audit-worm-pending`, overridable via
+`audit.marker_root`, matching the `blob_storage.root`/`<DataDir>/installers`
+precedent used for installer artifacts. If the marker store is not writable at
+controller startup, startup fails closed with a named error — the marker
+mechanism is what makes "an entry is never silently dropped" true, so running
+the `worm` sink without a working marker store would silently degrade shipping
+back to best-effort with no crash-safety.
+
+The design resolves each pending entry by asking the one authority that always
+knows the truth — the local store itself, via `GetAuditEntry` — rather than
+inferring from a timestamp window or a persisted high-water mark that can
+drift from reality. This is why it is provably correct rather than
+probabilistic, and why it replaces those two earlier candidate designs
+entirely rather than layering on top of either. Per-tenant entries are **not**
+guaranteed to be appended in non-decreasing `Timestamp` order — `Timestamp` is
+assigned before an entry is queued and `SequenceNumber` is assigned later,
+whichever asynchronous write actually dequeues it first — so the design
+deliberately never inspects `Timestamp` at all, only entry ID and
+`SequenceNumber`.
+
+**Accepted residual risk, unchanged from the `local` sink's default bound
+(ADR-033):** an entry that has committed locally but not yet shipped to WORM
+is, for the duration of that buffered window, rewritable by a
+host-compromised controller exactly like every entry under the `local` sink —
+the WORM guarantee only applies once an entry is actually flushed. This is a
+deliberate, accepted consequence of never blocking or failing a caller on a
+WORM outage (the founder explicitly rejected a fail-closed alternative), not
+an oversight.
+
+**Not a new loss window:** if a marker is written but the process crashes
+before the local append it precedes ever commits, reconciliation correctly
+discards that marker once it observes `business.ErrAuditNotFound` for an entry
+ID that is not in flight — no `SequenceNumber` was ever consumed, so nothing
+is missing from the chain. This is the same pre-existing loss window
+`pkg/audit.Manager`'s in-memory write queue already has today (a crash before
+its drain loop writes a queued entry loses that event, with or without this
+design) — not a new gap introduced by the marker mechanism.
 
 An unrecognized `audit.sink` value fails startup, naming the valid values.
 

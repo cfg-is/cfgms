@@ -163,6 +163,7 @@ type Server struct {
 	tenantManager           *tenant.Manager
 	rbacManager             *rbac.Manager
 	auditManager            *audit.Manager
+	wormAuditStore          *auditsink.WORMAuditStore // Issue #4039: nil unless audit.sink is "worm"; owns the buffer-then-flush reconciliation loop
 	haManager               *ha.Manager
 	controlPlane            controlplaneInterfaces.ControlPlaneProvider // Story #363 / #514
 	connRegistry            registry.Registry                           // Issue #1572: shared steward connection registry (CP provider + API server)
@@ -277,6 +278,17 @@ func resolveInstallerBlobRoot(cfg *config.Config) string {
 		return filepath.Join(cfg.DataDir, "installers")
 	}
 	return ""
+}
+
+// resolveWORMMarkerRoot returns the configured worm-sink marker store root
+// (Issue #4039), or derives the default <DataDir>/audit-worm-pending, matching
+// the BlobStorageConfig.Root/resolveInstallerBlobRoot precedent above. Only
+// called when the worm sink is selected.
+func resolveWORMMarkerRoot(cfg *config.Config) string {
+	if cfg.Audit != nil && cfg.Audit.MarkerRoot != "" {
+		return cfg.Audit.MarkerRoot
+	}
+	return filepath.Join(cfg.DataDir, "audit-worm-pending")
 }
 
 // makeHeartbeatStatusChangeCallback builds the OnStatusChange closure wired into
@@ -445,15 +457,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		}
 	}
 
-	// Resolve the configured audit sink (Issue #4036/#4037, ADR-033). "local" is
-	// the zero-extra-infrastructure default; "worm" wraps the durable store with
-	// a forward-only shipper to an append-only WORM blob target (Epic #4033
-	// Story 4). This MUST run before storageManager.GetAuditStore() is read for
+	// Resolve the configured audit sink (Issue #4036/#4037/#4039, ADR-033).
+	// "local" is the zero-extra-infrastructure default; "worm" wraps the
+	// durable store with a forward-only shipper to an append-only WORM blob
+	// target plus a buffer-then-flush reconciliation loop for outages (Epic
+	// #4033). This MUST run before storageManager.GetAuditStore() is read for
 	// RBAC or the audit manager below: RBAC builds its own internal audit.Manager
 	// from a captured store reference (rbac.NewManagerWithStorage), so every
 	// reader of the audit store must see the WORM-wrapped instance once
 	// installed, or RBAC-sourced audit entries would silently bypass the WORM
 	// shipper.
+	var wormAuditStore *auditsink.WORMAuditStore
 	auditSinkName := cfg.Audit.ResolvedSink()
 	switch auditSinkName {
 	case config.AuditSinkWORM:
@@ -461,8 +475,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if wormBlobErr != nil {
 			return nil, fmt.Errorf("failed to initialize worm audit sink blob store: %w", wormBlobErr)
 		}
-		wormStore := auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, logger)
-		storageManager.SetAuditStore(wormStore)
+		markerRoot := resolveWORMMarkerRoot(cfg)
+		markerStore, markerErr := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": markerRoot})
+		if markerErr != nil {
+			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, markerErr)
+		}
+		var wormErr error
+		wormAuditStore, wormErr = auditsink.NewWORMAuditStore(context.Background(), storageManager.GetAuditStore(), wormBlobStore, markerStore, logger)
+		if wormErr != nil {
+			return nil, fmt.Errorf("audit worm sink: marker store at %q is not writable: %w", markerRoot, wormErr)
+		}
+		storageManager.SetAuditStore(wormAuditStore)
+		wormAuditStore.Start(context.Background())
+		logger.Info("Audit worm sink reconciliation loop started", "marker_root", markerRoot)
 	case config.AuditSinkLocal:
 		logger.Info("Audit sink selected",
 			"sink", auditSinkName,
@@ -1697,6 +1722,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		tenantManager:           tenantManager,
 		rbacManager:             rbacManager,
 		auditManager:            auditManager,
+		wormAuditStore:          wormAuditStore, // Issue #4039: nil unless audit.sink is "worm"
 		haManager:               haManager,
 		controlPlane:            controlPlane,       // Story #363 / #514
 		connRegistry:            connRegistry,       // Issue #1572: shared with CP provider re-init in Start()
@@ -2561,6 +2587,14 @@ func (s *Server) Stop() error {
 			s.logger.Warn("Failed to stop audit manager", "error", err)
 		}
 		cancel()
+	}
+
+	// Stop the worm sink's background reconciliation loop (Issue #4039)
+	// alongside the audit manager above. Stop only halts the loop goroutine —
+	// the wrapped local store is released separately when storageManager.Close
+	// runs later, reached through the AuditStore interface's Close method.
+	if s.wormAuditStore != nil {
+		s.wormAuditStore.Stop()
 	}
 
 	// Stop control plane provider (Story #363)

@@ -713,8 +713,9 @@ const (
 
 	// AuditSinkWORM is the recommended production audit sink (ADR-033): an
 	// append-only object-lock target outside the controller's trust boundary.
-	// Not yet implemented — selecting it fails controller startup (Story 4 of
-	// Epic #4033 implements the shipper).
+	// A WORM outage never blocks or fails a caller — entries stay durable in
+	// the local sequence authority and a background reconciliation loop ships
+	// whatever the WORM target is missing once it recovers (Issue #4039).
 	AuditSinkWORM = "worm"
 )
 
@@ -730,6 +731,13 @@ type AuditSinkConfig struct {
 	// the ${ENV_VAR}/_FILE resolution pattern documented above — never a
 	// hardcoded value. Ignored unless Sink is "worm".
 	WORM map[string]interface{} `yaml:"worm,omitempty"`
+
+	// MarkerRoot is the filesystem directory for the worm sink's local
+	// pending-entry marker store (Issue #4039) — bookkeeping only (entry IDs),
+	// never audit content. Defaults to <DataDir>/audit-worm-pending when not
+	// explicitly set, matching the BlobStorageConfig.Root precedent above.
+	// Ignored unless Sink is "worm".
+	MarkerRoot string `yaml:"marker_root,omitempty"`
 }
 
 // ResolvedSink returns the configured sink name, defaulting to AuditSinkLocal

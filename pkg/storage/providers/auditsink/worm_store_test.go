@@ -9,11 +9,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +52,14 @@ func newTestBlobStoreAt(t *testing.T, root string) blob.BlobStore {
 	return store
 }
 
+// newTestMarkerStore returns a real filesystem-backed marker blob.BlobStore
+// rooted at a fresh t.TempDir(), distinct from any WORM target root used in
+// the same test — markers must stay writable independent of the WORM target.
+func newTestMarkerStore(t *testing.T) blob.BlobStore {
+	t.Helper()
+	return newTestBlobStoreAt(t, t.TempDir())
+}
+
 // newTestLocalStore returns a real SQLite-backed business.AuditStore (via the
 // OSS composite storage manager) — the sequence authority a WORMAuditStore
 // wraps. The backing storage manager is closed on test cleanup.
@@ -59,6 +70,18 @@ func newTestLocalStore(t *testing.T) business.AuditStore {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sm.Close() })
 	return sm.GetAuditStore()
+}
+
+// newTestWORMStore constructs a WORMAuditStore with the given local/WORM
+// stores and a fresh real marker store, failing the test immediately if
+// construction returns an error. Returns the store and its marker store so
+// tests can inspect marker state directly.
+func newTestWORMStore(t *testing.T, ctx context.Context, local business.AuditStore, blobStore blob.BlobStore, logger logging.Logger) (*WORMAuditStore, blob.BlobStore) {
+	t.Helper()
+	markerStore := newTestMarkerStore(t)
+	store, err := NewWORMAuditStore(ctx, local, blobStore, markerStore, logger)
+	require.NoError(t, err)
+	return store, markerStore
 }
 
 // testChecksum returns a computeChecksum function that HMAC-signs an entry's
@@ -104,6 +127,51 @@ func readBlob(t *testing.T, store blob.BlobStore, key blob.BlobKey) []byte {
 	return data
 }
 
+// markerExists reports whether a pending marker is present for tenantID/entryID.
+func markerExists(t *testing.T, markerStore blob.BlobStore, tenantID, entryID string) bool {
+	t.Helper()
+	ok, err := markerStore.BlobExists(context.Background(), blob.BlobKey{TenantID: tenantID, Namespace: pendingMarkerNamespace, Name: entryID})
+	require.NoError(t, err)
+	return ok
+}
+
+// failingBlobStore wraps a real filesystem-backed blob.BlobStore and forces
+// PutBlobIfAbsent to fail while failing() is true — simulating a WORM outage
+// through fault injection over a real implementation, never a mock, mirroring
+// inMemoryS3's "not a mock" precedent (pkg/storage/providers/blobstore/s3).
+// Every other operation, and PutBlobIfAbsent itself once cleared, is the real
+// filesystem provider.
+type failingBlobStore struct {
+	blob.BlobStore
+	mu      sync.Mutex
+	failNow bool
+}
+
+func newFailingBlobStore(t *testing.T) *failingBlobStore {
+	t.Helper()
+	return &failingBlobStore{BlobStore: newTestBlobStore(t)}
+}
+
+func (f *failingBlobStore) setFailing(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNow = v
+}
+
+func (f *failingBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.BlobKey, r io.Reader, meta blob.BlobMeta) error {
+	f.mu.Lock()
+	failing := f.failNow
+	f.mu.Unlock()
+	if failing {
+		return errors.New("simulated WORM outage: PutBlobIfAbsent refused")
+	}
+	return f.BlobStore.PutBlobIfAbsent(ctx, key, r, meta)
+}
+
+// testChecksumKey is a fixed HMAC key shared across tests in this file that
+// don't care about the key's value.
+var testChecksumKey = []byte("shared-key")
+
 // TestWORMAuditStore_ShipsOneImmutableBlobPerSequence is a REQUIRED contract
 // test (Issue #4037 AC): shipping a sequence of entries produces exactly one
 // blob per sequence number, and the stored JSON round-trips to the original
@@ -111,8 +179,8 @@ func readBlob(t *testing.T, store blob.BlobStore, key blob.BlobKey) []byte {
 func TestWORMAuditStore_ShipsOneImmutableBlobPerSequence(t *testing.T) {
 	ctx := context.Background()
 	blobStore := newTestBlobStore(t)
-	store := NewWORMAuditStore(ctx, newTestLocalStore(t), blobStore, logging.NewNoopLogger())
-	checksum := testChecksum([]byte("shared-key"))
+	store, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), blobStore, logging.NewNoopLogger())
+	checksum := testChecksum(testChecksumKey)
 
 	const tenantID = "tenant-a"
 	var entries []*business.AuditEntry
@@ -156,8 +224,8 @@ func TestWORMAuditStore_ShipsOneImmutableBlobPerSequence(t *testing.T) {
 func TestWORMAuditStore_DirectOverwriteAttemptRefused(t *testing.T) {
 	ctx := context.Background()
 	blobStore := newTestBlobStore(t)
-	store := NewWORMAuditStore(ctx, newTestLocalStore(t), blobStore, logging.NewNoopLogger())
-	checksum := testChecksum([]byte("shared-key"))
+	store, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), blobStore, logging.NewNoopLogger())
+	checksum := testChecksum(testChecksumKey)
 
 	const tenantID = "tenant-b"
 	e := newTestEntry(tenantID, "id-1", "original-action")
@@ -190,7 +258,7 @@ func TestWORMAuditStore_KeyHolderCannotOverwriteFlushedHistory(t *testing.T) {
 	const tenantID = "forge-tenant"
 
 	// The legitimate controller: local store A, wrapped, ships the real chain.
-	wormA := NewWORMAuditStore(ctx, newTestLocalStore(t), sharedBlobStore, logging.NewNoopLogger())
+	wormA, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), sharedBlobStore, logging.NewNoopLogger())
 
 	var original []*business.AuditEntry
 	for i := 0; i < 3; i++ {
@@ -209,7 +277,7 @@ func TestWORMAuditStore_KeyHolderCannotOverwriteFlushedHistory(t *testing.T) {
 	// key. Its sequence assignment starts fresh at 1, naturally landing on the
 	// identical sequence numbers the original chain shipped at, and it targets
 	// the SAME shared WORM blob store the legitimate controller shipped to.
-	wormB := NewWORMAuditStore(ctx, newTestLocalStore(t), sharedBlobStore, logging.NewNoopLogger())
+	wormB, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), sharedBlobStore, logging.NewNoopLogger())
 
 	var forged []*business.AuditEntry
 	for i := 0; i < 3; i++ {
@@ -266,7 +334,7 @@ func filesUnder(t *testing.T, root string) []string {
 }
 
 // findWarnWithPrefix returns the fields of the first captured Warn whose message
-// starts with prefix. The ship-failure messages carry the wormShipNotRetriedNote
+// starts with prefix. The ship-failure messages carry the wormShipRetryNote
 // suffix, so they are matched by prefix rather than by equality.
 func findWarnWithPrefix(logger *logging.CapturingLogger, prefix string) (logging.LogEntry, string, bool) {
 	for i, msg := range logger.WarnMessages {
@@ -278,19 +346,19 @@ func findWarnWithPrefix(logger *logging.CapturingLogger, prefix string) (logging
 }
 
 // TestWORMAuditStore_ShipFailureIsLoggedNotReturned is a REQUIRED contract test
-// (Issue #4037 AC) pinning the transitional gap documented in
-// docs/architecture/controller-operating-model.md: when the WORM target refuses
-// a ship for any reason other than blob.ErrBlobAlreadyExists, the local write
-// has already committed, so AppendChainedEntry returns nil to the caller and the
-// failure surfaces only as a Warn. The entry stays durable in the local sequence
-// authority but is NOT WORM-protected — no retry until Story 5 of Epic #4033.
+// (Issue #4037 AC) pinning the documented behavior: when the WORM target
+// refuses a ship for any reason other than blob.ErrBlobAlreadyExists, the
+// local write has already committed, so AppendChainedEntry returns nil to the
+// caller and the failure surfaces only as a Warn. The entry stays durable in
+// the local sequence authority, and its pending marker (Issue #4039) survives
+// so the reconciliation loop retries the ship once the outage clears.
 func TestWORMAuditStore_ShipFailureIsLoggedNotReturned(t *testing.T) {
 	ctx := context.Background()
 	blobRoot := t.TempDir()
 	blobStore := newTestBlobStoreAt(t, blobRoot)
 	local := newTestLocalStore(t)
 	logger := logging.NewCapturingLogger()
-	store := NewWORMAuditStore(ctx, local, blobStore, logger)
+	store, _ := newTestWORMStore(t, ctx, local, blobStore, logger)
 
 	// A hierarchical tenant path containing ".." — accepted by the local
 	// sequence authority, rejected by the real filesystem blob provider's
@@ -318,15 +386,21 @@ func TestWORMAuditStore_ShipFailureIsLoggedNotReturned(t *testing.T) {
 	assert.Equal(t, e.Checksum, got.Checksum)
 	assert.Equal(t, e.SequenceNumber, got.SequenceNumber)
 
-	// Nothing reached the WORM target: this entry is not WORM-protected. That
-	// is the documented transitional gap, not an accident.
+	// Nothing reached the WORM target: this entry is not yet WORM-protected.
 	assert.Empty(t, filesUnder(t, blobRoot),
 		"a failed ship must leave no blob anywhere under the WORM root")
 
+	// This test's tenant ID is deliberately hostile to the filesystem blob
+	// provider's key validation (see directErr above), so the marker write
+	// against the same tenant ID fails identically — logged, not fatal — and
+	// no marker exists to assert on here. Marker persistence-through-failure
+	// is covered by TestWORMAuditStore_OutageThenRecoveryReconciliationShipsPendingEntry
+	// with a well-formed tenant ID and fault-injected failure instead.
+
 	fields, msg, found := findWarnWithPrefix(logger, "audit sink: worm: failed to ship audit entry")
 	require.True(t, found, "a failed ship must be logged at Warn")
-	assert.Contains(t, msg, "not retried",
-		"the ship-failure line must state the failure is not retried, matching the documented transitional gap")
+	assert.Contains(t, msg, "retried automatically by the reconciliation loop",
+		"the ship-failure line must state the failure is retried by reconciliation (Issue #4039), not that it is a permanent unretried gap")
 	assert.Equal(t, logging.SanitizeLogValue(tenantID), fields["tenant_id"])
 	assert.Equal(t, uint64(1), fields["sequence_number"],
 		"the Warn must name the sequence number that is missing from the WORM target, so the gap is reconcilable")
@@ -349,7 +423,7 @@ func TestWORMAuditStore_ShipMarshalFailureIsLoggedNotReturned(t *testing.T) {
 	blobRoot := t.TempDir()
 	local := newTestLocalStore(t)
 	logger := logging.NewCapturingLogger()
-	store := NewWORMAuditStore(ctx, local, newTestBlobStoreAt(t, blobRoot), logger)
+	store, _ := newTestWORMStore(t, ctx, local, newTestBlobStoreAt(t, blobRoot), logger)
 
 	const tenantID = "tenant-marshal-fail"
 	e := newTestEntry(tenantID, "id-1", "action-1")
@@ -367,7 +441,7 @@ func TestWORMAuditStore_ShipMarshalFailureIsLoggedNotReturned(t *testing.T) {
 
 	fields, msg, found := findWarnWithPrefix(logger, "audit sink: worm: failed to marshal audit entry")
 	require.True(t, found, "a marshal failure must be logged at Warn")
-	assert.Contains(t, msg, "not retried")
+	assert.Contains(t, msg, "retried automatically by the reconciliation loop")
 	assert.Equal(t, logging.SanitizeLogValue(tenantID), fields["tenant_id"])
 	assert.Equal(t, uint64(7), fields["sequence_number"])
 	errText, ok := fields["error"].(string)
@@ -379,7 +453,7 @@ func TestWORMAuditStore_ShipMarshalFailureIsLoggedNotReturned(t *testing.T) {
 // methods pass straight through to the wrapped local store.
 func TestWORMAuditStore_DelegatesReadMethods(t *testing.T) {
 	ctx := context.Background()
-	store := NewWORMAuditStore(ctx, newTestLocalStore(t), newTestBlobStore(t), logging.NewNoopLogger())
+	store, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), newTestBlobStore(t), logging.NewNoopLogger())
 	checksum := testChecksum([]byte("k"))
 
 	const tenantID = "delegate-tenant"
@@ -409,14 +483,15 @@ func TestWORMAuditStore_DelegatesReadMethods(t *testing.T) {
 }
 
 // TestWORMAuditStore_CloseDelegatesToLocal verifies Close() releases the
-// wrapped local store's handle rather than being a no-op.
+// wrapped local store's handle rather than being a no-op, and that Close is
+// safe to call even when Start was never called.
 func TestWORMAuditStore_CloseDelegatesToLocal(t *testing.T) {
 	tmpDir := t.TempDir()
 	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sm.Close() })
 
-	store := NewWORMAuditStore(context.Background(), sm.GetAuditStore(), newTestBlobStore(t), logging.NewNoopLogger())
+	store, _ := newTestWORMStore(t, context.Background(), sm.GetAuditStore(), newTestBlobStore(t), logging.NewNoopLogger())
 	require.NoError(t, store.Close())
 }
 
@@ -453,7 +528,8 @@ func TestNewWORMAuditStore_StartupLogSeverityMatchesProbeOutcome(t *testing.T) {
 			stub := &objectLockStubStore{BlobStore: newTestBlobStore(t), status: tc.status}
 			logger := logging.NewCapturingLogger()
 
-			store := NewWORMAuditStore(context.Background(), newTestLocalStore(t), stub, logger)
+			store, err := NewWORMAuditStore(context.Background(), newTestLocalStore(t), stub, newTestMarkerStore(t), logger)
+			require.NoError(t, err)
 			require.NotNil(t, store, "the probe outcome must never prevent construction — no fail-closed on sink misconfiguration")
 
 			if tc.status == blob.ObjectLockEnabled {
@@ -484,8 +560,8 @@ func TestNewWORMAuditStore_StartupLogSeverityMatchesProbeOutcome(t *testing.T) {
 
 			shipRetry, ok := findAuditSinkLog(logger, tc.status)["ship_retry"].(string)
 			require.True(t, ok)
-			assert.Contains(t, shipRetry, "not retried",
-				"the startup line must state ship failures are not yet retried, in addition to the object-lock outcome (Story 5 pending)")
+			assert.Contains(t, shipRetry, "retried automatically by the reconciliation loop",
+				"the startup line must state ship failures are retried by reconciliation (Issue #4039), not that they are an unretried gap")
 		})
 	}
 }
@@ -508,10 +584,296 @@ func findAuditSinkLog(logger *logging.CapturingLogger, status blob.ObjectLockSta
 // ObjectLockUnknown, never as ObjectLockEnabled.
 func TestNewWORMAuditStore_NonProbingBlobStoreLogsUnknown(t *testing.T) {
 	logger := logging.NewCapturingLogger()
-	store := NewWORMAuditStore(context.Background(), newTestLocalStore(t), newTestBlobStore(t), logger)
+	store, err := NewWORMAuditStore(context.Background(), newTestLocalStore(t), newTestBlobStore(t), newTestMarkerStore(t), logger)
+	require.NoError(t, err)
 	require.NotNil(t, store)
 
 	fields, found := logger.FindWarn("Audit sink selected")
 	require.True(t, found)
 	assert.Equal(t, "unknown", fields["object_lock"])
+}
+
+// TestNewWORMAuditStore_MarkerStoreUnwritableFailsStartup is a REQUIRED test
+// (Issue #4039 AC): construction must fail closed with a named error when the
+// marker store cannot actually be written to, and must never fall back to
+// running the worm sink without crash-safety. The marker store's root
+// directory exists and is readable (so a MkdirAll no-op would otherwise mask
+// the problem) but a plain file sits where the probe's write needs a
+// directory, forcing a real, non-permission-bit write failure that is
+// reliable regardless of which OS user runs the test (root bypasses Unix
+// permission bits, so a chmod-based test would be flaky in a root container).
+func TestNewWORMAuditStore_MarkerStoreUnwritableFailsStartup(t *testing.T) {
+	root := t.TempDir()
+	// probeMarkerStoreWritable writes under BlobKey{TenantID:
+	// tenantRegistryTenantID, Namespace: markerProbeNamespace, ...}; the
+	// filesystem provider's PutBlob needs <root>/<TenantID>/<Namespace>/ to be
+	// a creatable directory. Pre-creating a regular file at
+	// <root>/<TenantID> blocks that unconditionally.
+	blockingPath := filepath.Join(root, tenantRegistryTenantID)
+	require.NoError(t, os.WriteFile(blockingPath, []byte("not a directory"), 0o600))
+
+	markerStore, err := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": root})
+	require.NoError(t, err, "the root directory itself is writable — only the probe's specific subpath is blocked")
+
+	store, constructErr := NewWORMAuditStore(context.Background(), newTestLocalStore(t), newTestBlobStore(t), markerStore, logging.NewNoopLogger())
+	require.Error(t, constructErr, "construction must fail closed when the marker store is not writable")
+	assert.Nil(t, store, "a failed construction must never return a usable store")
+	assert.Contains(t, constructErr.Error(), "not writable",
+		"the startup error must name the problem plainly")
+}
+
+// TestWORMAuditStore_MarkerWrittenBeforeAppendAndClearedAfterSuccess is a
+// REQUIRED test (Issue #4039 AC): the marker exists before the local append
+// commits and is cleared once the ship succeeds.
+func TestWORMAuditStore_MarkerWrittenBeforeAppendAndClearedAfterSuccess(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	store, markerStore := newTestWORMStore(t, ctx, local, newTestBlobStore(t), logging.NewNoopLogger())
+
+	const tenantID = "tenant-marker-lifecycle"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	var markerSeenBeforeCommit bool
+	store.testBeforeLocalAppend = func() {
+		markerSeenBeforeCommit = markerExists(t, markerStore, tenantID, e.ID)
+		_, getErr := local.GetAuditEntry(ctx, e.ID)
+		assert.True(t, errors.Is(getErr, business.ErrAuditNotFound),
+			"the local append must not have committed yet when the marker is already visible")
+	}
+
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey)))
+
+	assert.True(t, markerSeenBeforeCommit, "the marker must be written before the local append is attempted")
+	assert.False(t, markerExists(t, markerStore, tenantID, e.ID), "the marker must be cleared once the ship succeeds")
+}
+
+// TestWORMAuditStore_OutageThenRecoveryReconciliationShipsPendingEntry is a
+// REQUIRED test (Issue #4039 AC): an entry written during a simulated WORM
+// outage keeps its marker and returns no error to the caller; once the outage
+// clears, a reconciliation pass ships it and clears the marker.
+func TestWORMAuditStore_OutageThenRecoveryReconciliationShipsPendingEntry(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newFailingBlobStore(t)
+	store, markerStore := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+
+	const tenantID = "tenant-outage-recovery"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	blobStore.setFailing(true)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey)),
+		"a WORM outage must never be returned to the caller")
+
+	assert.True(t, markerExists(t, markerStore, tenantID, e.ID), "the marker must persist while the outage continues")
+	_, _, err := blobStore.GetBlob(ctx, wormBlobKey(tenantID, e.SequenceNumber))
+	require.ErrorIs(t, err, blob.ErrBlobNotFound, "nothing must have reached the WORM target during the outage")
+
+	blobStore.setFailing(false)
+	store.reconcileOnce(ctx)
+
+	assert.False(t, markerExists(t, markerStore, tenantID, e.ID), "reconciliation must clear the marker once the entry ships")
+	data := readBlob(t, blobStore, wormBlobKey(tenantID, e.SequenceNumber))
+	var shipped business.AuditEntry
+	require.NoError(t, json.Unmarshal(data, &shipped))
+	assert.Equal(t, e.ID, shipped.ID)
+	assert.Equal(t, e.Checksum, shipped.Checksum)
+}
+
+// TestWORMAuditStore_ReconciliationDiscardsMarkerForNeverCommittedEntry is a
+// REQUIRED test (Issue #4039 AC): a marker written for an entry ID that was
+// never actually committed locally (simulating a crash between the marker
+// write and the local append) is detected via
+// errors.Is(err, business.ErrAuditNotFound), discarded without shipping
+// anything, and no PutBlobIfAbsent call is made for it.
+func TestWORMAuditStore_ReconciliationDiscardsMarkerForNeverCommittedEntry(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobRoot := t.TempDir()
+	blobStore := newTestBlobStoreAt(t, blobRoot)
+	store, markerStore := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+
+	const tenantID = "tenant-never-committed"
+	const entryID = "ghost-entry"
+
+	// Simulate the crash window directly: register the tenant and write the
+	// marker, as AppendChainedEntry would, but never call local.AppendChainedEntry.
+	store.registerTenant(ctx, tenantID)
+	store.putMarker(ctx, tenantID, entryID)
+	require.True(t, markerExists(t, markerStore, tenantID, entryID))
+
+	_, getErr := local.GetAuditEntry(ctx, entryID)
+	require.True(t, errors.Is(getErr, business.ErrAuditNotFound),
+		"verify against the real local store that this entry genuinely does not exist")
+
+	store.reconcileOnce(ctx)
+
+	assert.False(t, markerExists(t, markerStore, tenantID, entryID), "the marker for a never-committed entry must be discarded")
+	assert.Empty(t, filesUnder(t, blobRoot), "no PutBlobIfAbsent call must be made for an entry that was never locally committed")
+}
+
+// TestWORMAuditStore_InFlightRaceReconciliationSkipsUncommittedEntry is a
+// REQUIRED test (Issue #4039 AC, PO finding epic #4033): the reconciliation
+// loop must not discard a marker for an entry whose local append has not
+// committed yet. The interleaving is driven deterministically via
+// testBeforeLocalAppend, never a time.Sleep: the synchronous path is held
+// between the marker write and local.AppendChainedEntry while exactly one
+// reconciliation tick runs (which must skip the marker because its ID is
+// in-flight), then released to commit, then the ship attempt is forced to
+// fail. The marker must still exist afterward, and the entry must ship on a
+// later reconciliation tick. This test fails if the in-flight-set skip is
+// ever removed.
+func TestWORMAuditStore_InFlightRaceReconciliationSkipsUncommittedEntry(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newFailingBlobStore(t)
+	store, markerStore := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+
+	const tenantID = "tenant-in-flight-race"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	holdAppend := make(chan struct{})
+	releaseAppend := make(chan struct{})
+	store.testBeforeLocalAppend = func() {
+		close(holdAppend)
+		<-releaseAppend
+	}
+
+	appendDone := make(chan error, 1)
+	go func() {
+		appendDone <- store.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey))
+	}()
+
+	<-holdAppend // marker is written; local append has not been called yet
+
+	require.True(t, markerExists(t, markerStore, tenantID, e.ID), "the marker must exist before the local append is attempted")
+	_, getErr := local.GetAuditEntry(ctx, e.ID)
+	require.True(t, errors.Is(getErr, business.ErrAuditNotFound),
+		"the local append genuinely has not committed yet at this point")
+
+	// Exactly one reconciliation tick while the entry is in flight: it must
+	// skip this marker rather than treating the not-found local read as
+	// "never happened".
+	store.reconcileOnce(ctx)
+	assert.True(t, markerExists(t, markerStore, tenantID, e.ID),
+		"reconciliation must not discard the marker for an entry that is still in flight — this is the entire point of the in-flight set")
+
+	// Force the eventual ship attempt to fail once the append commits.
+	blobStore.setFailing(true)
+	close(releaseAppend)
+	require.NoError(t, <-appendDone)
+
+	assert.True(t, markerExists(t, markerStore, tenantID, e.ID), "the marker must persist after the forced ship failure")
+
+	// A later tick, once the entry is no longer in flight and the outage
+	// clears, ships it.
+	blobStore.setFailing(false)
+	store.reconcileOnce(ctx)
+
+	assert.False(t, markerExists(t, markerStore, tenantID, e.ID), "the entry must ship and clear its marker on the later tick")
+	_ = readBlob(t, blobStore, wormBlobKey(tenantID, e.SequenceNumber))
+}
+
+// TestWORMAuditStore_SameTimestampDifferentSequenceBothShipped is a REQUIRED
+// regression guard (Issue #4039 AC): two entries sharing the same Timestamp
+// but different SequenceNumbers are both shipped. True by construction —
+// nothing in this design inspects Timestamp — asserted explicitly to catch a
+// future reintroduction of timestamp-based logic.
+func TestWORMAuditStore_SameTimestampDifferentSequenceBothShipped(t *testing.T) {
+	ctx := context.Background()
+	blobStore := newTestBlobStore(t)
+	store, _ := newTestWORMStore(t, ctx, newTestLocalStore(t), blobStore, logging.NewNoopLogger())
+	checksum := testChecksum(testChecksumKey)
+
+	const tenantID = "tenant-same-timestamp"
+	sharedTimestamp := time.Now().UTC()
+
+	e1 := newTestEntry(tenantID, "id-1", "action-1")
+	e1.Timestamp = sharedTimestamp
+	e2 := newTestEntry(tenantID, "id-2", "action-2")
+	e2.Timestamp = sharedTimestamp
+
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e1, checksum))
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e2, checksum))
+
+	require.NotEqual(t, e1.SequenceNumber, e2.SequenceNumber)
+	require.Equal(t, e1.Timestamp, e2.Timestamp)
+
+	blobs, err := blobStore.ListBlobs(ctx, blob.BlobKey{TenantID: tenantID, Namespace: wormNamespace})
+	require.NoError(t, err)
+	require.Len(t, blobs, 2, "both entries must be shipped despite sharing a Timestamp")
+}
+
+// TestWORMAuditStore_ReconciliationDiscoversTenantAcrossRestart proves the
+// durable tenant registry (Issue #4039): a fresh WORMAuditStore instance,
+// sharing the same local/WORM/marker stores but with no in-memory state from
+// before, still discovers and ships a pending marker for a tenant it has
+// never itself seen an AppendChainedEntry call for — modeling a controller
+// restart after a crash mid-outage.
+func TestWORMAuditStore_ReconciliationDiscoversTenantAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newFailingBlobStore(t)
+	markerStore := newTestMarkerStore(t)
+
+	storeBeforeRestart, err := NewWORMAuditStore(ctx, local, blobStore, markerStore, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	const tenantID = "tenant-restart"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	blobStore.setFailing(true)
+	require.NoError(t, storeBeforeRestart.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey)))
+	require.True(t, markerExists(t, markerStore, tenantID, e.ID))
+
+	// "Restart": a brand-new WORMAuditStore over the same durable stores, with
+	// an empty in-memory knownTenants cache. It must never have seen an
+	// AppendChainedEntry call for tenantID.
+	storeAfterRestart, err := NewWORMAuditStore(ctx, local, blobStore, markerStore, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	blobStore.setFailing(false)
+	storeAfterRestart.reconcileOnce(ctx)
+
+	assert.False(t, markerExists(t, markerStore, tenantID, e.ID),
+		"the post-restart store must discover and ship the pending marker via the durable tenant registry")
+	data := readBlob(t, blobStore, wormBlobKey(tenantID, e.SequenceNumber))
+	var shipped business.AuditEntry
+	require.NoError(t, json.Unmarshal(data, &shipped))
+	assert.Equal(t, e.ID, shipped.ID)
+}
+
+// TestWORMAuditStore_StartAndCloseReconciliationLoop is a REQUIRED test
+// (Issue #4039 AC): the reconciliation loop starts and stops cleanly with no
+// goroutine leak, and while running actually ships a pending entry on its own
+// tick — not just when reconcileOnce is called directly.
+func TestWORMAuditStore_StartAndCloseReconciliationLoop(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newFailingBlobStore(t)
+	store, markerStore := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+	store.reconcileInterval = 10 * time.Millisecond
+
+	const tenantID = "tenant-lifecycle"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	blobStore.setFailing(true)
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey)))
+	require.True(t, markerExists(t, markerStore, tenantID, e.ID))
+
+	store.Start(ctx)
+	blobStore.setFailing(false)
+
+	require.Eventually(t, func() bool {
+		return !markerExists(t, markerStore, tenantID, e.ID)
+	}, time.Second, 5*time.Millisecond, "the running reconciliation loop must ship the pending entry on its own tick")
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- store.Close() }()
+
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return — the reconciliation loop goroutine leaked")
+	}
 }
