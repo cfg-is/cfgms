@@ -1736,13 +1736,19 @@ a second, spoofed record.
 
 Epic #3927's contract C6: `CFGMS_SECURITY_REVIEW_PLANNERS` selects which model(s) build the
 plan — a comma-separated `harness:model` roster in the same shape as `CFGMS_SECURITY_REVIEW_LANES`
-(C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case. When more
-than one is listed, each plans independently over the same metadata-only payload and the
-resulting steps merge by `scope`: one step per distinct scope, `files` the union of every
-proposal for that scope, `planners` recording every planner id that proposed it, and
+(C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case, and remains
+the default: multi-planner is a **benchmarking mode**, not the normal path (Issue #4056). Since
+that story, every planner — one or many — is handed the same harness-computed step partition
+(`partition.py::partition()`, deterministic over the bundle's `01-tree.tsv`/`06-config-surface.tsv`)
+and asked only for hypotheses; the partition is the harness's own decision, never the model's. When
+more than one planner is listed, each plans independently over the same assigned steps and the
+resulting proposals merge by `scope`: one step per distinct scope (now identical by construction
+across planners, since neither chooses its own), `files` the union of every proposal for that scope
+(also identical by construction), `planners` recording every planner id that proposed it, and
 `hypotheses` the union of every proposal's hypotheses (Issue #3958 — see below). A scope is
-reviewed once per lane regardless of how many planners proposed it — a second planner buys wider
-coverage of *what* is worth reviewing, never a second review of the same code.
+reviewed once per lane regardless of how many planners proposed it — a second planner buys a second,
+independent set of hypotheses over the same partition, benchmarkable step by step against the
+first's, never a different partition to compare against.
 
 **Which harnesses can plan (Issue #4041).** `claude` and `codex` only, out of the four wired for
 finder lanes. The roster parser accepts any `harness:model` pair, but the plan-mode entrypoint

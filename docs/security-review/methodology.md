@@ -341,6 +341,41 @@ long-lived secret, or the endpoint imposes no rate limit, since the attempts the
 inside the secret's lifetime.
 <!-- anchor:end -->
 
+## Hypothesis form (Issue #4056)
+
+A hypothesis is what the planner writes for a step; a finder lane closes each one it is
+given with a disposition (`investigated` / `candidate_found` / `inconclusive` /
+`not_attempted`, defined in `schema.py`). Earlier prompt wording asked for "what security
+property or vulnerability class is being investigated" -- an `or` that let two planner
+models each honestly satisfy the same instruction while writing two different *kinds* of
+thing: one wrote falsifiable guesses at named bugs, the other wrote broad properties to
+prove. That divergence is not evidence about the models; it is prompt ambiguity.
+
+**The required form, stated once:** a hypothesis is a falsifiable claim about specific
+code, paired with the evidence that would confirm or refute it -- never a restatement of
+the scope's name, and never a broad security property.
+
+- **Good.** "The certificate expiry check at the point where the chain is validated may
+  compare against a clock value that is never re-read per request, so a certificate that
+  expired after process start could still validate." Specific, names a concrete mechanism,
+  and `required_evidence` can name exactly what to check.
+- **Bad.** "Certificate validation is correct." A broad property, not a claim about
+  specific code. No single bounded step can close it by reading its own files, so a finder
+  lane holding it tends to report `inconclusive` -- the least useful disposition, since it
+  neither confirms nor refutes anything.
+
+Every step additionally carries at least one **absence-shaped** hypothesis: what check
+should exist among the step's files and does not -- a missing authorization call, an
+unregistered revocation path, a handler nobody wired. A step is a list of files that
+exist; nothing in it points at what should exist and is missing unless the hypothesis
+names it. This is prompt guidance, not a schema rule: `schema.validate_plan_step()` does
+not reject a step for lacking one, since forcing a model to invent an absence claim it
+does not believe produces noise, not signal.
+
+The enforced copy of this text lives in `.claude/scripts/security-review/planner.py`'s
+`build_prompt()`, which is what the planner model actually reads; this section is the
+same definition for the reader auditing or reviewing it.
+
 ## What this document does not cover
 
 - Which tools a lane may run inside a step. That is a harness concern, tracked
