@@ -227,3 +227,24 @@ func TestDatabaseAuditStore_AppendChainedEntry_SeedsChainHeadOnPostgres(t *testi
 	assert.Equal(t, uint64(7), entry2.SequenceNumber,
 		"ON CONFLICT DO NOTHING must make the second seed attempt a no-op, continuing the chain rather than resetting it")
 }
+
+// TestDatabaseAuditStore_GetAuditEntry_NotFound guards the database provider's
+// not-found contract (Issue #4038): GetAuditEntry must return an error
+// satisfying errors.Is(err, business.ErrAuditNotFound) for a missing ID, the
+// same contract already covered on the flatfile and sqlite providers, so the
+// three cannot silently drift apart again.
+func TestDatabaseAuditStore_GetAuditEntry_NotFound(t *testing.T) {
+	// setupTestDatabase both skips cleanly without Postgres and drops any
+	// leftover tables from a prior run so the schema is created fresh below.
+	_ = setupTestDatabase(t)
+
+	db := getTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := NewDatabaseAuditStore(db, map[string]interface{}{})
+	require.NoError(t, err)
+
+	_, err = store.GetAuditEntry(context.Background(), "nonexistent-entry")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, business.ErrAuditNotFound), "expected business.ErrAuditNotFound, got %v", err)
+}
