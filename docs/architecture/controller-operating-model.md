@@ -83,6 +83,36 @@ After initialization, the controller starts normally. If required infrastructure
 - Storage schema mismatch → error with migration instructions
 - Transport address conflict → error with port details and resolution steps
 
+### Audit Sink Selection (ADR-033, Issue #4036)
+
+The controller's audit store is a configurable sink, selected via `audit.sink` in
+controller config (or the `CFGMS_AUDIT_SINK` environment variable override):
+
+- **`local`** (default) — the storage provider's own durable audit store. Zero
+  extra infrastructure: an operator who never touches `audit.sink` still gets
+  audit logging. Carries the same adversary bound as ADR-004: a
+  host-compromised controller holds the audit HMAC key (loaded from its own
+  secrets store) and can rewrite history under this sink.
+- **`worm`** — the recommended production option (ADR-033): an append-only
+  object-lock target outside the controller's trust boundary. **Not yet
+  implemented.** Selecting `worm` fails controller startup with a named error
+  rather than silently falling back to `local` — the shipper lands in a later
+  story of Epic #4033.
+
+Resolution and validation happen once, at composition time
+(`features/controller/server/server.go:New`), immediately before the audit
+manager is constructed. Startup logs an `"Audit sink selected"` line naming the
+active sink; for `local`, the same line states plainly that the ADR-004/ADR-033
+bound applies, so an operator reading the log is never left assuming a stronger
+guarantee than the code provides. An unrecognized `audit.sink` value also fails
+startup, naming the valid values.
+
+`pkg/storage/interfaces.StorageManager.SetAuditStore` wires a replacement audit
+store after construction — the plumbing a later story uses to install a
+WORM-wrapped store without changing `StorageManager`'s shape. It is not yet
+called anywhere: today's audit store is always the provider's own
+`GetAuditStore()` result.
+
 ### Degraded-Mode Visibility
 
 A deployment may run with declared-optional storage capabilities absent. Optionality is a legitimate design choice — a subsystem can declare a store as optional (`interfaces.RequirementOptional`) when it degrades gracefully without it, rather than failing composition. Silence about such gaps is not: every declared-optional store that composes absent is surfaced, not left for an operator to discover at request time.

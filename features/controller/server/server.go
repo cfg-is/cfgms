@@ -457,6 +457,25 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	)
 	logger.Info("RBAC manager created")
 
+	// Resolve the configured audit sink (Issue #4036, ADR-033). "local" is the
+	// zero-extra-infrastructure default; "worm" is the recommended production
+	// option but its shipper does not exist yet (Story 4 of Epic #4033) — fail
+	// startup with a named error rather than silently running on the local sink.
+	auditSinkName := cfg.Audit.ResolvedSink()
+	switch auditSinkName {
+	case config.AuditSinkWORM:
+		return nil, fmt.Errorf("audit sink %q is not yet implemented (Epic #4033 Story 4) — "+
+			"select %q or remove the audit.sink setting", config.AuditSinkWORM, config.AuditSinkLocal)
+	case config.AuditSinkLocal:
+		logger.Info("Audit sink selected",
+			"sink", auditSinkName,
+			"bound", "ADR-004/ADR-033: a host-compromised controller holds the audit HMAC key and can rewrite history under this sink",
+		)
+	default:
+		return nil, fmt.Errorf("unknown audit sink %q (valid values: %q, %q)",
+			auditSinkName, config.AuditSinkLocal, config.AuditSinkWORM)
+	}
+
 	// Initialize unified audit system with pluggable storage only
 	logger.Info("Creating audit manager...")
 	auditSecrets, auditSecretsErr := api.NewSecretStore(cfg)

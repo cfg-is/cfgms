@@ -816,6 +816,14 @@ func (sm *StorageManager) GetAuditStore() business.AuditStore {
 	return sm.auditStore
 }
 
+// SetAuditStore wires the audit store after construction. Used when the
+// configured audit sink (Issue #4036) resolves to something other than the
+// provider's own default audit store — e.g. a later story wrapping it with a
+// WORM shipper.
+func (sm *StorageManager) SetAuditStore(s business.AuditStore) {
+	sm.auditStore = s
+}
+
 // GetRBACStore returns the RBAC storage interface.
 func (sm *StorageManager) GetRBACStore() business.RBACStore {
 	return sm.rbacStore
