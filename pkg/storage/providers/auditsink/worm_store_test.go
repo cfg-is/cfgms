@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +36,15 @@ import (
 // fallback path without a real S3/MinIO endpoint.
 func newTestBlobStore(t *testing.T) blob.BlobStore {
 	t.Helper()
-	store, err := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": t.TempDir()})
+	return newTestBlobStoreAt(t, t.TempDir())
+}
+
+// newTestBlobStoreAt is newTestBlobStore rooted at a caller-supplied directory,
+// for tests that inspect the on-disk tree directly (to prove a failed ship wrote
+// nothing anywhere under the root, not merely nothing at the intended key).
+func newTestBlobStoreAt(t *testing.T, root string) blob.BlobStore {
+	t.Helper()
+	store, err := blob.CreateBlobStoreFromConfig("filesystem", map[string]interface{}{"root": root})
 	require.NoError(t, err)
 	return store
 }
@@ -232,6 +242,139 @@ func TestWORMAuditStore_KeyHolderCannotOverwriteFlushedHistory(t *testing.T) {
 	}
 }
 
+// filesUnder returns every regular file beneath root, relative to root. Used to
+// prove a failed ship left nothing on the WORM target — including outside the
+// key's intended prefix.
+func filesUnder(t *testing.T, root string) []string {
+	t.Helper()
+	var found []string
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		found = append(found, rel)
+		return nil
+	}))
+	return found
+}
+
+// findWarnWithPrefix returns the fields of the first captured Warn whose message
+// starts with prefix. The ship-failure messages carry the wormShipNotRetriedNote
+// suffix, so they are matched by prefix rather than by equality.
+func findWarnWithPrefix(logger *logging.CapturingLogger, prefix string) (logging.LogEntry, string, bool) {
+	for i, msg := range logger.WarnMessages {
+		if strings.HasPrefix(msg, prefix) {
+			return logger.WarnEntries[i], msg, true
+		}
+	}
+	return nil, "", false
+}
+
+// TestWORMAuditStore_ShipFailureIsLoggedNotReturned is a REQUIRED contract test
+// (Issue #4037 AC) pinning the transitional gap documented in
+// docs/architecture/controller-operating-model.md: when the WORM target refuses
+// a ship for any reason other than blob.ErrBlobAlreadyExists, the local write
+// has already committed, so AppendChainedEntry returns nil to the caller and the
+// failure surfaces only as a Warn. The entry stays durable in the local sequence
+// authority but is NOT WORM-protected — no retry until Story 5 of Epic #4033.
+func TestWORMAuditStore_ShipFailureIsLoggedNotReturned(t *testing.T) {
+	ctx := context.Background()
+	blobRoot := t.TempDir()
+	blobStore := newTestBlobStoreAt(t, blobRoot)
+	local := newTestLocalStore(t)
+	logger := logging.NewCapturingLogger()
+	store := NewWORMAuditStore(ctx, local, blobStore, logger)
+
+	// A hierarchical tenant path containing ".." — accepted by the local
+	// sequence authority, rejected by the real filesystem blob provider's
+	// path-traversal guard. A genuine non-ErrBlobAlreadyExists ship failure
+	// produced by the real provider, with no fault injection.
+	const tenantID = "tenant-ship-fail/../escape"
+
+	// Confirm this drives the intended branch: the provider's refusal is a
+	// plain error, not the already-shipped sentinel the WORM contract expects.
+	directErr := blobStore.PutBlobIfAbsent(ctx, wormBlobKey(tenantID, 1), strings.NewReader(`{}`), blob.BlobMeta{ContentType: "application/json"})
+	require.Error(t, directErr)
+	require.NotErrorIs(t, directErr, blob.ErrBlobAlreadyExists,
+		"this test must exercise the ship-failed-for-another-reason branch, not the refuse-to-overwrite branch")
+
+	e := newTestEntry(tenantID, "id-1", "action-1")
+	require.NoError(t, store.AppendChainedEntry(ctx, tenantID, e, testChecksum([]byte("k"))),
+		"a ship failure must never be returned to the caller — the local write already committed and its durability is not lost")
+
+	// The local sequence authority committed the entry and assigned its chain
+	// fields, exactly as it would have on a successful ship.
+	assert.Equal(t, uint64(1), e.SequenceNumber)
+	assert.NotEmpty(t, e.Checksum)
+	got, err := local.GetAuditEntry(ctx, e.ID)
+	require.NoError(t, err, "the entry must remain durable in the local store despite the ship failure")
+	assert.Equal(t, e.Checksum, got.Checksum)
+	assert.Equal(t, e.SequenceNumber, got.SequenceNumber)
+
+	// Nothing reached the WORM target: this entry is not WORM-protected. That
+	// is the documented transitional gap, not an accident.
+	assert.Empty(t, filesUnder(t, blobRoot),
+		"a failed ship must leave no blob anywhere under the WORM root")
+
+	fields, msg, found := findWarnWithPrefix(logger, "audit sink: worm: failed to ship audit entry")
+	require.True(t, found, "a failed ship must be logged at Warn")
+	assert.Contains(t, msg, "not retried",
+		"the ship-failure line must state the failure is not retried, matching the documented transitional gap")
+	assert.Equal(t, logging.SanitizeLogValue(tenantID), fields["tenant_id"])
+	assert.Equal(t, uint64(1), fields["sequence_number"],
+		"the Warn must name the sequence number that is missing from the WORM target, so the gap is reconcilable")
+	errText, ok := fields["error"].(string)
+	require.True(t, ok, "the underlying ship error must be logged")
+	assert.NotEmpty(t, errText)
+}
+
+// TestWORMAuditStore_ShipMarshalFailureIsLoggedNotReturned is a REQUIRED
+// contract test (Issue #4037 AC) for ship()'s other swallowed branch: an entry
+// that cannot be serialized is logged at Warn and never shipped, and ship()
+// returns normally so AppendChainedEntry's caller still sees no error.
+//
+// ship() is exercised directly here because the full AppendChainedEntry path
+// cannot reach this branch: the local sequence authority marshals Details itself
+// and rejects the entry first. The test asserts that rather than assuming it, so
+// the reason for the direct call stays honest if the local store ever changes.
+func TestWORMAuditStore_ShipMarshalFailureIsLoggedNotReturned(t *testing.T) {
+	ctx := context.Background()
+	blobRoot := t.TempDir()
+	local := newTestLocalStore(t)
+	logger := logging.NewCapturingLogger()
+	store := NewWORMAuditStore(ctx, local, newTestBlobStoreAt(t, blobRoot), logger)
+
+	const tenantID = "tenant-marshal-fail"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+	e.Details = map[string]interface{}{"unserializable": make(chan int)} // json.Marshal rejects channels
+
+	require.Error(t, store.AppendChainedEntry(ctx, tenantID, e, testChecksum([]byte("k"))),
+		"the local store rejects an unserializable entry before it is ever shipped — so ship() is called directly below")
+	require.Empty(t, logger.WarnMessages[1:],
+		"nothing beyond the startup line is logged when the local write fails: ship() was never reached")
+
+	e.SequenceNumber = 7
+	store.ship(ctx, tenantID, e)
+
+	assert.Empty(t, filesUnder(t, blobRoot), "an entry that cannot be serialized must not be shipped")
+
+	fields, msg, found := findWarnWithPrefix(logger, "audit sink: worm: failed to marshal audit entry")
+	require.True(t, found, "a marshal failure must be logged at Warn")
+	assert.Contains(t, msg, "not retried")
+	assert.Equal(t, logging.SanitizeLogValue(tenantID), fields["tenant_id"])
+	assert.Equal(t, uint64(7), fields["sequence_number"])
+	errText, ok := fields["error"].(string)
+	require.True(t, ok, "the underlying marshal error must be logged")
+	assert.NotEmpty(t, errText)
+}
+
 // TestWORMAuditStore_DelegatesReadMethods verifies non-AppendChainedEntry
 // methods pass straight through to the wrapped local store.
 func TestWORMAuditStore_DelegatesReadMethods(t *testing.T) {
@@ -271,6 +414,7 @@ func TestWORMAuditStore_CloseDelegatesToLocal(t *testing.T) {
 	tmpDir := t.TempDir()
 	sm, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
 
 	store := NewWORMAuditStore(context.Background(), sm.GetAuditStore(), newTestBlobStore(t), logging.NewNoopLogger())
 	require.NoError(t, store.Close())
