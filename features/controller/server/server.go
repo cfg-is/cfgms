@@ -4199,11 +4199,16 @@ func resolveRegistrationWorkflow(cfg *config.Config) string {
 // neither runs, so neither imposes a requirement. Push (#3492) is wired
 // unconditionally via pushStoreRequirements. Workflow-trigger (#3493) is wired
 // unconditionally via workflowtrigger.StoreRequirements — the subsystem is
-// always active when the controller starts.
+// always active when the controller starts. Audit (#4035, Epic #4033) is wired
+// unconditionally via audit.StoreRequirements, next to push and
+// workflow-trigger — audit.NewManager is called for every controller startup,
+// so a nil AuditStore must fail composition rather than surface later wherever
+// the nil store's methods are first called.
 func collectActiveStorageRequirements(cfg *config.Config) []interfaces.StoreRequirement {
 	var reqs []interfaces.StoreRequirement
 	reqs = append(reqs, pushStoreRequirements...)
 	reqs = append(reqs, workflowtrigger.StoreRequirements...)
+	reqs = append(reqs, audit.StoreRequirements...)
 
 	if resolveRegistrationWorkflow(cfg) == registrationWorkflowManualReview {
 		// The approval hook persists incoming requests; the expiry job ages them out.

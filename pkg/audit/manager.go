@@ -22,8 +22,17 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsInterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// StoreRequirements declares the storage stores required by the audit subsystem.
+// Collected by collectActiveStorageRequirements in features/controller/server and validated
+// at startup via interfaces.ValidateStorageRequirements — a missing AuditStore fails
+// closed rather than silently dropping all audit recording when a provider cannot supply it.
+var StoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "audit", Store: interfaces.StoreNameAudit, Severity: interfaces.RequirementRequired},
+}
 
 // RedactedKeys is the deny-list of lower-cased key substrings that trigger value redaction
 // in Details, Changes.Before, Changes.After, and ErrorMessage.
