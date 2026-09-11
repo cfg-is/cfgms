@@ -5,6 +5,7 @@ package ha
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -678,46 +679,58 @@ func TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder(t *testing
 // pkg/lease) — proving the ha.Manager wiring didn't reintroduce the dual-authority
 // gap the primitive itself closed.
 func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
-	store := newTestLeaseStore(t)
+	// Repeated 20x within this single test run — not relying on `go test
+	// -count=20`, which the merge-queue Windows leg does not pass — because the
+	// regression this guards is a goroutine-join race in Manager.Stop(): each
+	// iteration builds a fresh t.TempDir()-backed lease store and Stop()s two
+	// managers against it, so a `TempDir RemoveAll cleanup` diagnostic on any
+	// iteration means Stop() returned before its background loops (
+	// runLeaseAcquisition, runNodeRegistration) had actually released the
+	// store's file handles.
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("iteration_%02d", i), func(t *testing.T) {
+			store := newTestLeaseStore(t)
 
-	managerA := newLeaseBackedClusterManager(t, "dual-auth-a", store)
-	managerB := newLeaseBackedClusterManager(t, "dual-auth-b", store)
+			managerA := newLeaseBackedClusterManager(t, "dual-auth-a", store)
+			managerB := newLeaseBackedClusterManager(t, "dual-auth-b", store)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	require.NoError(t, managerA.Start(ctx))
-	require.NoError(t, managerB.Start(ctx))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			require.NoError(t, managerA.Start(ctx))
+			require.NoError(t, managerB.Start(ctx))
 
-	require.Eventually(t, func() bool {
-		return managerA.HasLeadership() || managerB.HasLeadership()
-	}, 5*time.Second, 5*time.Millisecond, "one of the two managers must acquire the lease")
+			require.Eventually(t, func() bool {
+				return managerA.HasLeadership() || managerB.HasLeadership()
+			}, 5*time.Second, 5*time.Millisecond, "one of the two managers must acquire the lease")
 
-	winner, loser := managerA, managerB
-	if managerB.HasLeadership() {
-		winner, loser = managerB, managerA
+			winner, loser := managerA, managerB
+			if managerB.HasLeadership() {
+				winner, loser = managerB, managerA
+			}
+
+			// Stop the winner so its renewal loop stops (simulates a crashed leader), then
+			// poll both managers' HasLeadership() until the loser takes over. At every
+			// sampled instant at most one may report true.
+			require.NoError(t, winner.Stop(context.Background()))
+
+			deadline := time.Now().Add(3 * time.Second)
+			var loserEverAcquired bool
+			for time.Now().Before(deadline) {
+				winnerHas := winner.HasLeadership()
+				loserHas := loser.HasLeadership()
+				require.False(t, winnerHas && loserHas,
+					"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
+				if loserHas {
+					loserEverAcquired = true
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			assert.True(t, loserEverAcquired, "the surviving manager must eventually take over the lease")
+
+			require.NoError(t, loser.Stop(context.Background()))
+		})
 	}
-
-	// Stop the winner so its renewal loop stops (simulates a crashed leader), then
-	// poll both managers' HasLeadership() until the loser takes over. At every
-	// sampled instant at most one may report true.
-	require.NoError(t, winner.Stop(context.Background()))
-
-	deadline := time.Now().Add(3 * time.Second)
-	var loserEverAcquired bool
-	for time.Now().Before(deadline) {
-		winnerHas := winner.HasLeadership()
-		loserHas := loser.HasLeadership()
-		require.False(t, winnerHas && loserHas,
-			"both managers reported HasLeadership() == true for the same cluster lease simultaneously")
-		if loserHas {
-			loserEverAcquired = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	assert.True(t, loserEverAcquired, "the surviving manager must eventually take over the lease")
-
-	require.NoError(t, loser.Stop(context.Background()))
 }
 
 // TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager proves the

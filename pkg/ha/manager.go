@@ -66,6 +66,14 @@ type Manager struct {
 	startTime      time.Time
 	ctx            context.Context
 	cancel         context.CancelFunc
+	// bgWG tracks the background loops started in Start() (runLeaseAcquisition,
+	// runNodeRegistration) so Stop() can wait for them to actually exit instead
+	// of returning as soon as ctx is cancelled. Without this, Stop() can return
+	// while a loop is mid-write (e.g. to a lease store file), and a caller that
+	// immediately tears down that store's backing directory (t.TempDir()
+	// cleanup) races an in-flight write — harmless on POSIX, but Windows refuses
+	// to unlink a file with an open handle.
+	bgWG sync.WaitGroup
 
 	// Cluster state. Always contains at least the local node; used verbatim by
 	// GetClusterNodes() whenever nodeRegistryStore is nil (SingleServerMode,
@@ -295,6 +303,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		lm := m.leaseManager
 		nodeID := m.nodeInfo.ID
 		renewalInterval := m.leaseRenewalInterval
+		m.bgWG.Add(1)
 		go m.runLeaseAcquisition(m.ctx, lm, nodeID, renewalInterval)
 	}
 
@@ -305,6 +314,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.nodeRegistryStore != nil {
 		store := m.nodeRegistryStore
 		self := business.NodeRecord{ID: m.nodeInfo.ID, Address: m.nodeInfo.Address}
+		m.bgWG.Add(1)
 		go m.runNodeRegistration(m.ctx, store, self)
 	}
 
@@ -329,6 +339,13 @@ func (m *Manager) Stop(ctx context.Context) error {
 	if m.cancel != nil {
 		m.cancel()
 	}
+
+	// Wait for the background loops started in Start() to actually exit before
+	// proceeding — cancelling ctx only asks them to stop; a caller that tears
+	// down state the loops touch (e.g. a t.TempDir()-backed lease store) the
+	// moment Stop() returns must not race a write still in flight. Neither loop
+	// takes m.mu, so waiting here while it's held cannot deadlock.
+	m.bgWG.Wait()
 
 	// Stop all components
 	var stopErrors []error
@@ -604,6 +621,7 @@ func (m *Manager) setLeaseStoreLocked(store business.LeaseStore) error {
 // for the same lease name — the database lease alone decides authority. Bounded
 // by ctx (m.ctx, cancelled by Stop()) so the goroutine always exits.
 func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, holderID string, renewalInterval time.Duration) {
+	defer m.bgWG.Done()
 	ttl := lm.LeaseTTL()
 	ticker := time.NewTicker(renewalInterval)
 	defer ticker.Stop()
@@ -630,6 +648,7 @@ func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, ho
 // leadership lease. Bounded by ctx (m.ctx, cancelled by Stop()) so the
 // goroutine always exits.
 func (m *Manager) runNodeRegistration(ctx context.Context, store business.NodeRegistryStore, self business.NodeRecord) {
+	defer m.bgWG.Done()
 	ticker := time.NewTicker(backgroundLoopRenewInterval)
 	defer ticker.Stop()
 
