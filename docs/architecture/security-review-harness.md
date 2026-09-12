@@ -905,8 +905,8 @@ mounting. A mismatch refuses with `INVESTIGATOR_REFUSED:snapshot_dir_escape:...`
 
 **`--bundle-dir <DIR>` (required in plan mode, Issue #3979).** `/workspace` is mounted `:ro` from
 `--bundle-dir` instead — the sweep's auditable bundle (`metadata.py::write_bundle()`, #3978:
-`01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `05-deps/`, `MANIFEST.json`), never a
-repository checkout of any kind. The containment check mirrors `--snapshot-dir`'s exactly: a
+`01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `07-authz-store-surface.tsv`, `05-deps/`,
+`MANIFEST.json`), never a repository checkout of any kind. The containment check mirrors `--snapshot-dir`'s exactly: a
 missing `--bundle-dir` in plan mode is a hard failure before any `mkdir`, `docker run`, or mount
 construction, and a supplied one must already exist (`security-review.sh`'s `dispatch_planner()`
 creates it via `planner.py::prepare()` → `metadata.write_bundle()` before ever calling this
@@ -1739,7 +1739,8 @@ plan — a comma-separated `harness:model` roster in the same shape as `CFGMS_SE
 (C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case, and remains
 the default: multi-planner is a **benchmarking mode**, not the normal path (Issue #4056). Since
 that story, every planner — one or many — is handed the same harness-computed step partition
-(`partition.py::partition()`, deterministic over the bundle's `01-tree.tsv`/`06-config-surface.tsv`)
+(`partition.py::partition()`, deterministic over the bundle's `01-tree.tsv`, `06-config-surface.tsv`,
+and `07-authz-store-surface.tsv` — the last added by Issue #4060)
 and asked only for hypotheses; the partition is the harness's own decision, never the model's. When
 more than one planner is listed, each plans independently over the same assigned steps and the
 resulting proposals merge by `scope`: one step per distinct scope (now identical by construction
@@ -2067,12 +2068,13 @@ provably bounded to what its own source code can be read to produce.
 
 ```
 bundle/
-├── MANIFEST.json          # provenance + per-artifact sha256 + redaction log
-├── 00-scope.md             # operator-supplied prose description, copied verbatim
-├── 01-tree.tsv             # every file at the commit, with a `tier`
-├── 03-routes.tsv           # HTTP entrypoints with their declared auth guard
-├── 05-deps/                # go.mod, go.sum, web/package.json verbatim
-└── 06-config-surface.tsv   # env var NAMES and reference counts, never values
+├── MANIFEST.json               # provenance + per-artifact sha256 + redaction log
+├── 00-scope.md                  # operator-supplied prose description, copied verbatim
+├── 01-tree.tsv                  # every file at the commit, with a `tier`
+├── 03-routes.tsv                # HTTP entrypoints with their declared auth guard
+├── 05-deps/                     # go.mod, go.sum, web/package.json verbatim
+├── 06-config-surface.tsv        # env var NAMES and reference counts, never values
+└── 07-authz-store-surface.tsv   # the authorization store's decision/read package pairing
 ```
 
 `02-symbols.jsonl` and `04-schema.sql` are deliberately absent — symbol names disclose internal
@@ -2175,9 +2177,10 @@ story.
 `_assemble_bundle_contents()` filters the `git ls-tree` entry list against the scope (a path
 qualifies when it equals a scope entry exactly, or starts with `<entry>/` — never a bare string
 prefix, so `--path pkg/cert` does not also match a sibling `pkg/certutil`) before tier
-classification, route extraction, or config-surface scanning ever run. `01-tree.tsv` therefore
-carries only in-scope rows, and `03-routes.tsv`/`06-config-surface.tsv` narrow for free, since both
-walk the same already-filtered file list rather than re-deriving their own scope check.
+classification, route extraction, config-surface scanning, or authz-store-surface scanning ever
+run. `01-tree.tsv` therefore carries only in-scope rows, and
+`03-routes.tsv`/`06-config-surface.tsv`/`07-authz-store-surface.tsv` narrow for free, since all
+three walk the same already-filtered file list rather than re-deriving their own scope check.
 `MANIFEST.json` records the filter verbatim as `scope_paths` (a list, or `null` when unscoped) —
 the same self-describing-artifact principle `scope_provided`/`scope_file` already follow for
 `--scope-file`.
@@ -2305,6 +2308,65 @@ artifact's shape. **Never a value, never a default value, and never read from a 
 deny list** (see below) — `.env`, `.env.local.example`, and friends are excluded from the
 candidate file set before any content is read, not filtered after the fact.
 
+### `07-authz-store-surface.tsv`: the authorization boundary axis (Issue #4060)
+
+Same six columns as `06-config-surface.tsv` (`key`, `source`, `referenced_in_count`,
+`referencing_files`, `has_default`, `tier`) — `metadata.AUTHZ_HEADER`, kept as its own named
+constant rather than an alias so a future schema change to one artifact never silently changes the
+other. `partition.py`'s boundary-axis step builder consumes a row from either artifact identically,
+which is exactly the point: this is a second *source* for the same boundary axis the config-keyed
+one already feeds, not a new axis type of its own.
+
+**What this axis is for, and why a route- or permission-string join could not deliver it.** The
+partition's boundary axis exists to produce a step that genuinely spans two top-level subtrees, so
+a defect whose evidence sits on both sides of a package boundary has somewhere to be seen (see
+[Two axes](#step-plan-generation-metadata-only-planner) above). An earlier definition asked which
+files define the permission a route demands, matching `requirePermission("resource","action")`
+literals out of `features/controller/api/*.go`. That question turned out to be unanswerable in this
+codebase for a structural reason, not a parsing gap: **CFGMS's RBAC is data-driven.**
+`features/rbac/engine.go`'s `AuthEngine.CheckPermission` takes a resource/action pair as a runtime
+parameter and resolves it against grants held in storage — no second file in another package
+encodes what a route demands, so the join never left `features/controller/api/`, confirmed against
+real routes (`account`/`revoke-enrollment-link`, `refresh`/`list-pending`,
+`cluster`/`drain-node`). Matching the resource/action words separately failed the other way:
+ordinary English words like `steward` (98 files) and `config` (73 files) blew the step size budget
+on nearly every step.
+
+Authorization bugs in a data-driven model do not come from a route naming the wrong string. They
+come from the grants themselves being wrong (data, out of a static reviewer's reach), from the
+**logic that evaluates** grants, or from the **path that reads** grants — a partial, stale, or
+failed read that downstream code treats as a complete answer. The second and third are both in
+source and live in different top-level subtrees: `features/rbac/interfaces.go` declares
+`RoleStore`/`SubjectStore`/`RoleAssignmentStore` and `features/rbac/engine.go` consumes them to
+decide; `pkg/storage/providers/database` and `pkg/storage/providers/sqlite` implement the read.
+`metadata._extract_authz_store_surface()` computes that relationship in three structural hops, no
+call graph and no matching against English words: find the file(s) declaring the three interface
+names, find `AuthEngine.CheckPermission` in the same directory and extract the store method calls
+in its body (`e.roleStore.GetRolePermissions(...)`, etc. — the **grant read path**), then find every
+other directory whose declared methods, unioned across its files, cover that exact call set.
+Verified against `develop`, this lands on exactly the two provider packages above and excludes a
+directory that merely shares one or two generic CRUD method names by coincidence
+(`features/controller/service`, matching only 2 of the 4 read methods).
+
+**The specific fail-open this axis targets.** Reading `engine.go` shows the read paths are already
+fail-closed: a failed subject, assignment, or role read each return a denial, and existing tests
+(`TestAuthEngine_CheckPermission_DBError_Propagates`, `..._NotFoundError_Skips`) cover exactly that.
+A short read that returns no error is also safe — a missing permission produces no match and
+therefore a denial. The fail-open risk is on the **matching** side instead: `CheckPermission` grants
+as soon as `permissionMatches` returns true for any permission on any valid role, so a single
+over-broad grant row over-authorizes. Seeing the matcher (`features/rbac`) and the store that feeds
+it (`pkg/storage/providers/*`) in one step is what makes that visible to a reviewer; a
+directory-scoped step never would, because the matcher and the store sit in different top-level
+subtrees by construction. This axis does not change `permissionMatches` or review the grant data
+itself — both are explicitly out of scope for Issue #4060 — it only makes the pairing visible to a
+review step.
+
+An empty authorization axis (no store interface declared within the sweep's scope, no
+`CheckPermission`-shaped decision function found, or no other directory implementing the full read
+set) is a valid outcome, exactly as an empty configuration-keyed boundary axis already is — a sweep
+scoped away from the RBAC engine entirely has nothing to report on this axis, and that is not a
+harness failure.
+
 ### Deny list: never read, never hashed, never in the bundle
 
 `DENY_PATTERNS` (`.env`, `.env.*`, `*.pem`, `*.key`, matched against the file's basename at any
@@ -2312,8 +2374,8 @@ depth) are excluded before `write_bundle` ever reads their blob content — not 
 already-read value. `.env.*` deliberately covers `.env.example`/`.env.local.example`, which
 routinely carries a realistic-looking value in practice despite the name suggesting otherwise.
 A denied file is counted in `MANIFEST.json`'s `redaction_log.files_excluded_by_deny` and does not
-appear in `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, or `05-deps/` — its path is not
-merely content-scrubbed, the file is absent from the bundle entirely.
+appear in `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `07-authz-store-surface.tsv`, or
+`05-deps/` — its path is not merely content-scrubbed, the file is absent from the bundle entirely.
 
 ### `05-deps/`: dependency manifests, verbatim
 
