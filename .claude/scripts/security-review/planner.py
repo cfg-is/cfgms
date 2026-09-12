@@ -1856,6 +1856,11 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
 
     errors: list[str] = []
     excluded: list[str] = []
+    # Scenarios the planner covered but found nothing in scope for (Issue
+    # #4059). Distinct from a scenario with no step at all, which would be a
+    # coverage failure; this is a planned scenario whose answer was "nothing
+    # here", recorded so a report can say so rather than stay silent.
+    scenarios_without_files: list[str] = []
     valid: list[str] = []
     valid_data: list[dict] = []
     rejected: list[dict] = []
@@ -1972,7 +1977,23 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
             and isinstance(data.get("files"), list)
             and not data["files"]
         )
-        if isinstance(data.get("files"), list) and not data["files"] and not is_empty_scenario:
+        if is_empty_scenario:
+            # Valid, but there is nothing here for a lane to read. Dropped from
+            # the plan rather than dispatched: a lane spent on a step with no
+            # files reviews nothing and reports `complete`, which is the
+            # silent-empty outcome this harness exists to prevent. The scenario
+            # is still covered -- it was planned, and the planner found nothing
+            # in scope bearing on it -- so it is recorded, not an error.
+            schema.log_event(
+                "scenario_step_no_files_in_scope",
+                filename=filename,
+                scenario_id=str(data.get("step_id") or ""),
+            )
+            scenarios_without_files.append(str(data.get("step_id") or filename))
+            excluded.append(filename)
+            continue
+
+        if isinstance(data.get("files"), list) and not data["files"]:
             reason = "step has an empty files array -- nothing for a lane to review"
             schema.log_event("invalid_plan_step", filename=filename, errors=[reason])
             errors.append(f"{filename}: {reason}")

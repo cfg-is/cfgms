@@ -560,6 +560,11 @@ def test_finalize_injects_scope_and_files_from_the_partition():
         check(ok is True, "finalize: a plan with hypotheses only (no scope/files) is accepted end-to-end", str(errors))
 
         for index, step in enumerate(partition_steps, start=1):
+            # A scenario step for which the stub selected no files is dropped
+            # from the plan by design (Issue #4059) -- there is nothing for a
+            # lane to read -- so it has no file to read back here.
+            if step.get("axis") == partition.AXIS_SCENARIO:
+                continue
             with open(os.path.join(plan_dir, f"step-{index:03d}.json")) as f:
                 written = json.load(f)
             check(
