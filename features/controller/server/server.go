@@ -358,6 +358,32 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Create storage manager — cluster mode (Postgres), OSS composite (flatfile+SQLite),
 	// or legacy database single-provider. The git provider is removed (Issue #664).
+	//
+	// From the moment any of the three branches below successfully constructs a
+	// storageManager, New holds open SQLite/Postgres handles. Every remaining
+	// failure returns without a Server, so nothing would ever call Stop to
+	// release them — the handles would leak for the process's life. On Windows
+	// that also pins the database files, so a caller cannot delete the data
+	// directory of a controller that refused to start. The defer below is
+	// declared before the branches (not after) and each branch registers its
+	// storageManager immediately after construction succeeds — including the
+	// cluster branch's assertClusterBackendsReady check, which can fail before
+	// any other code runs — so every post-construction failure path is covered.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		// Reverse order, so a store closes before anything it was layered onto.
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				logger.Warn("Failed to release storage after controller initialization failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
 	var storageManager *interfaces.StorageManager
 	if cfg.HA.IsClusterMode() {
 		// Cluster mode: all business stores backed by shared Postgres so every node
@@ -379,6 +405,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if clusterErr != nil {
 			return nil, fmt.Errorf("failed to initialize cluster storage: %w", clusterErr)
 		}
+		openedStores = append(openedStores, storageManager.Close)
 		logger.Info("Cluster storage backend initialized")
 		if backendErr := assertClusterBackendsReady(cfg, storageManager); backendErr != nil {
 			return nil, backendErr
@@ -392,6 +419,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if ossErr != nil {
 			return nil, fmt.Errorf("failed to initialize OSS composite storage: %w", ossErr)
 		}
+		openedStores = append(openedStores, storageManager.Close)
 		logger.Info("OSS composite storage backend initialized")
 	} else if cfg.Storage.Provider == "database" {
 		logger.Info("Initializing database storage provider (commercial single-provider mode)")
@@ -404,31 +432,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if dbErr != nil {
 			return nil, fmt.Errorf("failed to initialize database storage provider: %w. Verify storage.config contains valid database connection parameters", dbErr)
 		}
+		openedStores = append(openedStores, storageManager.Close)
 	} else {
 		return nil, fmt.Errorf("storage.flatfile_root is required for OSS composite storage, or storage.provider must be 'database' for commercial single-provider mode. The 'git' storage provider has been removed — run 'cfg storage migrate --from git --to flatfile' to migrate existing data")
 	}
-
-	// From here on New holds open SQLite/Postgres handles. Every remaining failure
-	// returns without a Server, so nothing would ever call Stop to release them —
-	// the handles would leak for the process's life. On Windows that also pins the
-	// database files, so a caller cannot delete the data directory of a controller
-	// that refused to start. Each store below registers itself here as soon as it
-	// is opened, mirroring what Stop releases.
-	constructed := false
-	var openedStores []func() error
-	defer func() {
-		if constructed {
-			return
-		}
-		// Reverse order, so a store closes before anything it was layered onto.
-		for i := len(openedStores) - 1; i >= 0; i-- {
-			if closeErr := openedStores[i](); closeErr != nil {
-				logger.Warn("Failed to release storage after controller initialization failed",
-					"error", closeErr)
-			}
-		}
-	}()
-	openedStores = append(openedStores, storageManager.Close)
 
 	// Validate that the constructed StorageManager supplies every store required by
 	// the enabled subsystems. A missing required store fails closed here — at startup,

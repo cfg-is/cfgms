@@ -11,6 +11,7 @@ package interfaces_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -452,6 +453,59 @@ func TestCreateAllStoresFromConfig(t *testing.T) {
 			t.Fatal("expected an error for an unregistered provider name")
 		}
 	})
+}
+
+// storeCapturingFailAtNodeRegistryProvider wraps the real sqlite provider,
+// captures the RoutingStore it creates (so a test can probe it after
+// CreateAllStoresFromConfig returns), and fails NodeRegistryStore creation —
+// the last store CreateAllStoresFromConfig attempts — to drive a late failure
+// after a real per-connection store has already succeeded. Every other method
+// is the real sqlite provider's, promoted via embedding.
+type storeCapturingFailAtNodeRegistryProvider struct {
+	interfaces.StorageProvider
+	capturedRoutingStore business.RoutingStore
+}
+
+func (p *storeCapturingFailAtNodeRegistryProvider) CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error) {
+	store, err := p.StorageProvider.(interfaces.RoutingStoreCreator).CreateRoutingStore(config)
+	if err != nil {
+		return store, err
+	}
+	p.capturedRoutingStore = store
+	return store, nil
+}
+
+func (p *storeCapturingFailAtNodeRegistryProvider) CreateNodeRegistryStore(_ map[string]interface{}) (business.NodeRegistryStore, error) {
+	return nil, errors.New("injected: node registry store creation failed")
+}
+
+// TestCreateAllStoresFromConfig_ClosesEarlierSubStoresOnLaterFailure is a
+// REQUIRED test (Issue #4058 AC #4): a late sub-store creation failure must
+// close every sub-store CreateAllStoresFromConfig had already created, not
+// merely return an error. Node registry store creation is the last store this
+// factory attempts, so failing it exercises the disarmed-defer cleanup added
+// for this story across the whole per-store creation sequence. Routing store
+// (created just before it) opens its own dedicated SQLite connection — the
+// same class of real, per-store handle as the nonce and node-registry stores
+// TestCreateAllStoresFromConfig above already documents — so asserting a
+// post-failure operation on it fails is direct proof the handle was released,
+// reproducible on Linux without needing a Windows host.
+func TestCreateAllStoresFromConfig_ClosesEarlierSubStoresOnLaterFailure(t *testing.T) {
+	withEmptyRegistry(t)
+
+	_, sqliteCfg := ossConfigs(t)
+	provider := &storeCapturingFailAtNodeRegistryProvider{StorageProvider: newSQLiteProvider()}
+	interfaces.RegisterStorageProvider(provider)
+
+	manager, err := interfaces.CreateAllStoresFromConfig("sqlite", sqliteCfg)
+	require.Error(t, err, "node registry store creation was injected to fail")
+	require.Nil(t, manager)
+	require.Contains(t, err.Error(), "node registry store")
+
+	require.NotNil(t, provider.capturedRoutingStore,
+		"precondition: routing store must have been created before the injected failure")
+	recordErr := provider.capturedRoutingStore.RecordConnection(context.Background(), "steward-after-failed-construction", "node-1")
+	assert.Error(t, recordErr, "expected RecordConnection to fail — CreateAllStoresFromConfig must close the routing store it already created before returning the node-registry-store error")
 }
 
 func TestConfigKeyString(t *testing.T) {

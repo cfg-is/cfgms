@@ -48,6 +48,12 @@ func init() {
 		}
 		dstMgr, err := openBackend(to)
 		if err != nil {
+			// srcMgr already holds open flatfile/sqlite/Postgres handles (Issue
+			// #4058) — close it before returning so a failed target-backend
+			// open doesn't leak the source manager for the process's life.
+			if closeErr := srcMgr.Close(); closeErr != nil {
+				return nil, fmt.Errorf("storage migrator: target backend %q: %w (additionally failed to close source backend %q: %v)", to, err, from, closeErr)
+			}
 			return nil, fmt.Errorf("storage migrator: target backend %q: %w", to, err)
 		}
 		return NewStorageMigrator(srcMgr, dstMgr), nil
