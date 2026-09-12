@@ -34,8 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import basedir  # noqa: E402
 import consolidate  # noqa: E402
 import metadata  # noqa: E402
+import partition  # noqa: E402
 import planner  # noqa: E402
 import roster  # noqa: E402
+import scenarios  # noqa: E402
 import schema  # noqa: E402
 
 FAILURES: list[str] = []
@@ -596,6 +598,93 @@ def test_finalize_rejects_a_step_whose_scope_disagrees_with_the_partition():
             "finalize: the rejection names the disagreement",
             str(errors),
         )
+
+
+def test_scenario_step_accepts_model_chosen_files_from_the_inventory():
+    # REQUIRED (Issue #4059): the scenario axis is the one deliberate exception
+    # to #4056 AC6. Which files bear on a risk is a judgement about the code,
+    # so the model selects them -- but only from paths that exist in this
+    # commit, checked against the inventory the partition itself carries.
+    step = {"axis": partition.AXIS_SCENARIO, "scope": "TS-01", "files": []}
+    data = {"step_id": "TS-01", "files": ["pkg/a/a.go", "cmd/b/b.go"]}
+    err = planner._inject_partition_fields(
+        data, step, "step-003.json", frozenset({"pkg/a/a.go", "cmd/b/b.go", "pkg/c/c.go"})
+    )
+    check(err is None, "scenario step: model-chosen files from the inventory are accepted", str(err))
+    check(
+        data["files"] == ["cmd/b/b.go", "pkg/a/a.go"],
+        "scenario step: the model's files are kept, sorted and de-duplicated",
+        str(data.get("files")),
+    )
+    check(data["axis"] == partition.AXIS_SCENARIO, "scenario step: axis still comes from the partition")
+
+
+def test_scenario_step_rejects_a_file_absent_from_the_commit():
+    step = {"axis": partition.AXIS_SCENARIO, "scope": "TS-01", "files": []}
+    data = {"step_id": "TS-01", "files": ["pkg/a/a.go", "pkg/invented/nope.go"]}
+    err = planner._inject_partition_fields(
+        data, step, "step-003.json", frozenset({"pkg/a/a.go"})
+    )
+    check(
+        err is not None and "pkg/invented/nope.go" in err,
+        "scenario step: a path absent from the inventory is rejected, naming it",
+        str(err),
+    )
+
+
+def test_scenario_step_may_select_nothing():
+    # REQUIRED (Issue #4059): a scenario with nothing bearing on it inside a
+    # bounded scope is covered-with-nothing-to-review, not a malformed step.
+    # TS-01 is about route authorisation; a sweep scoped to `pkg/cert` has no
+    # routes. Same posture #4056 AC4c takes for an empty boundary axis.
+    step = {"axis": partition.AXIS_SCENARIO, "scope": "TS-01", "files": []}
+    data = {"step_id": "TS-01"}
+    err = planner._inject_partition_fields(data, step, "step-003.json", frozenset({"pkg/a/a.go"}))
+    check(err is None, "scenario step: selecting no files is a valid outcome", str(err))
+    check(data["files"] == [], "scenario step: an empty selection stays empty")
+
+
+def test_non_scenario_step_still_rejects_model_supplied_files():
+    # The #4056 AC6 rule is unchanged everywhere else: a directory step's files
+    # are the harness's, and a model that supplies different ones is a signal
+    # something went wrong, not something to silently overwrite.
+    step = {"axis": partition.AXIS_DIRECTORY, "scope": "pkg/a", "files": ["pkg/a/a.go"]}
+    data = {"step_id": "step-001", "files": ["pkg/a/other.go"]}
+    err = planner._inject_partition_fields(data, step, "step-001.json", frozenset({"pkg/a/a.go", "pkg/a/other.go"}))
+    check(
+        err is not None and "disagrees with the harness-assigned" in err,
+        "directory step: model-supplied files are still rejected",
+        str(err),
+    )
+
+
+def test_every_scenario_gets_a_step_in_a_real_prepare():
+    # REQUIRED (Issue #4059): coverage over risk is structural. Every id in the
+    # shipped catalogue must appear as a step after a real prepare() -- this is
+    # the assertion that replaces a coverage gate evaluated after the fact.
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep_dir:
+        sha = init_repo_with_commit(repo, {"go.mod": "module example.com/x\n\ngo 1.23\n", "pkg/a/a.go": "package a\n"})
+        planner.prepare(sweep_dir, sha, repo_root=repo)
+        with open(os.path.join(sweep_dir, "plan", planner.PARTITION_FILENAME)) as f:
+            steps = json.load(f)
+    planned = {s["step_id"] for s in steps if s.get("axis") == partition.AXIS_SCENARIO}
+    missing = [sid for sid in scenarios.scenario_ids() if sid not in planned]
+    check(not missing, "prepare: every catalogue scenario has its own plan step", str(missing))
+
+
+def test_prompt_carries_each_scenario_to_its_own_step():
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep_dir:
+        sha = init_repo_with_commit(repo, {"go.mod": "module example.com/x\n\ngo 1.23\n", "pkg/a/a.go": "package a\n"})
+        planner.prepare(sweep_dir, sha, repo_root=repo)
+        with open(os.path.join(sweep_dir, "plan", planner.PROMPT_FILENAME)) as f:
+            prompt = f.read()
+    catalogue = scenarios.load_scenarios()
+    missing = [s["id"] for s in catalogue if s["requirement"] not in prompt]
+    check(not missing, "prompt: every scenario's requirement reaches the prompt", str(missing))
+    check(
+        "This step is a risk, not a directory" in prompt,
+        "prompt: a scenario step is presented as a risk rather than a location",
+    )
 
 
 def test_finalize_rejects_a_step_position_with_no_partition_entry():

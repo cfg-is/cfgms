@@ -56,6 +56,71 @@ def _canon(steps: "list[dict]") -> str:
     return json.dumps(steps, sort_keys=True)
 
 
+# --- Issue #4059: the scenario axis -----------------------------------------
+
+SCENARIO_FIXTURE = [
+    {"id": "TS-01", "tier": "T0", "boundary": "internet-listener",
+     "requirement": "A requirement.", "check": "- **Check:** something."},
+    {"id": "TS-02", "tier": "T2", "boundary": "cross-cutting",
+     "requirement": "Another requirement.", "check": "- **Check:** something else."},
+]
+
+
+def test_scenario_axis_emits_one_step_per_scenario_in_catalogue_order():
+    # REQUIRED: coverage over risk is structural -- a scenario cannot go
+    # unexamined because it always has a step. Order is catalogue order so the
+    # plan is stable across runs and comparable across planner models.
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [("pkg/a/a.go", "go", "10", "abcdef123456", "business")])
+        steps = partition.partition(bundle_dir, SCENARIO_FIXTURE)
+    scenario_steps = [s for s in steps if s["axis"] == partition.AXIS_SCENARIO]
+    check(len(scenario_steps) == 2, "scenario axis: one step per scenario", str(len(scenario_steps)))
+    check(
+        [s["step_id"] for s in scenario_steps] == ["TS-01", "TS-02"],
+        "scenario axis: step_id is the scenario id, in catalogue order",
+        str([s["step_id"] for s in scenario_steps]),
+    )
+
+
+def test_scenario_steps_come_last_and_leave_files_to_the_model():
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [("pkg/a/a.go", "go", "10", "abcdef123456", "business")])
+        steps = partition.partition(bundle_dir, SCENARIO_FIXTURE)
+    axes = [s["axis"] for s in steps]
+    check(
+        axes.index(partition.AXIS_SCENARIO) == len(axes) - 2,
+        "scenario axis: scenario steps come after every other axis",
+        str(axes),
+    )
+    check(
+        all(s["files"] == [] for s in steps if s["axis"] == partition.AXIS_SCENARIO),
+        "scenario axis: files are left empty for the model to select",
+    )
+
+
+def test_partition_without_a_catalogue_is_unchanged():
+    # REQUIRED: `partition()` stays a pure function of its arguments. A caller
+    # with no catalogue -- every existing test, and any pre-#4059 sweep --
+    # gets exactly the partition it got before.
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [("pkg/a/a.go", "go", "10", "abcdef123456", "business")])
+        without = partition.partition(bundle_dir)
+        with_empty = partition.partition(bundle_dir, [])
+    check(_canon(without) == _canon(with_empty), "scenario axis: no catalogue and an empty catalogue agree")
+    check(
+        all(s["axis"] != partition.AXIS_SCENARIO for s in without),
+        "scenario axis: no scenario steps are emitted without a catalogue",
+    )
+
+
+def test_scenario_axis_is_deterministic():
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [("pkg/a/a.go", "go", "10", "abcdef123456", "business")])
+        first = partition.partition(bundle_dir, SCENARIO_FIXTURE)
+        second = partition.partition(bundle_dir, list(reversed(list(reversed(SCENARIO_FIXTURE)))))
+    check(_canon(first) == _canon(second), "scenario axis: repeated calls are byte-identical")
+
+
 # --- AC1: pure function, order-independent ----------------------------------
 
 def test_partition_is_order_independent():
