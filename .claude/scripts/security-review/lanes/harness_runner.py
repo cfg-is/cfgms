@@ -99,6 +99,7 @@ import terminal_state  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import atomic_write  # noqa: E402
+import scenarios  # noqa: E402
 import schema  # noqa: E402
 
 RETRY = "retry"
@@ -440,22 +441,63 @@ def render_anchors(selected: list, subject_matched: bool = True) -> str:
     return "\n".join(lines).rstrip()
 
 
+def scenario_block(step: dict) -> str:
+    """The threat scenario a scenario-axis step owns, rendered for its lane
+    (Issue #4059). Empty for every other step.
+
+    Selection is DETERMINISTIC: the step carries its own `scenario_id`, set by
+    the harness's partition, and that id is looked up directly. This is
+    deliberately unlike `select_anchors()`, which matches severity examples to
+    a step by word overlap -- lexical matching is acceptable for an
+    illustrative example and is not acceptable here, where the scenario is the
+    step's entire subject and a miss would leave the lane reviewing a file list
+    with no idea which risk it was assembled for.
+
+    Returns "" rather than raising when the id is unknown: a lane resuming an
+    older sweep whose plan predates a catalogue edit still runs, reviewing the
+    files it was given. The planner is where a missing catalogue fails closed.
+    """
+    scenario_id = step.get("scenario_id") or (
+        step.get("step_id") if str(step.get("axis", "")) == "scenario" else None
+    )
+    if not scenario_id:
+        return ""
+    try:
+        catalogue = {s["id"]: s for s in scenarios.load_scenarios()}
+    except scenarios.ScenarioError:
+        return ""
+    found = catalogue.get(scenario_id)
+    if not found:
+        return ""
+    return (
+        f"--- THREAT SCENARIO {found['id']} (attacker tier {found['tier']}, "
+        f"boundary {found['boundary']}) ---\n"
+        f"This step's files were selected because they bear on this requirement. Report where it "
+        f"does not hold.\n"
+        f"{found['requirement']}\n"
+        f"{found['check']}"
+    )
+
+
 def shared_preamble(step: dict) -> str:
     """The one shared prompt preamble every lane's `build_prompt` starts
     with (C4): `SYSTEM_PROMPT`, the methodology core, this step's selected
-    anchors, then `OUTPUT_SCHEMA_DESCRIPTION`. A lane appends only its own
-    delivery instruction (where its output goes) and the step's content."""
+    anchors, its threat scenario if it has one, then
+    `OUTPUT_SCHEMA_DESCRIPTION`. A lane appends only its own delivery
+    instruction (where its output goes) and the step's content."""
     selected = select_anchors(step)
     terms = step_terms(step)
     subject_matched = any(anchor["tags"] & terms for anchor in selected)
-    return "\n\n".join(
-        [
-            SYSTEM_PROMPT,
-            METHODOLOGY_CORE,
-            render_anchors(selected, subject_matched),
-            OUTPUT_SCHEMA_DESCRIPTION,
-        ]
-    )
+    parts = [
+        SYSTEM_PROMPT,
+        METHODOLOGY_CORE,
+        render_anchors(selected, subject_matched),
+    ]
+    scenario = scenario_block(step)
+    if scenario:
+        parts.append(scenario)
+    parts.append(OUTPUT_SCHEMA_DESCRIPTION)
+    return "\n\n".join(parts)
 
 
 def anchor_identity(anchor: dict) -> str:

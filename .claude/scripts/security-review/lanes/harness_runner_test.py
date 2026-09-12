@@ -2089,6 +2089,86 @@ def test_methodology_resolves_from_the_trusted_harness_mount_first():
                     os.environ[k] = v
 
 
+def _scenario_step(scenario_id: str = "TS-12") -> dict:
+    return {
+        "step_id": scenario_id,
+        "axis": "scenario",
+        "scenario_id": scenario_id,
+        "scope": scenario_id,
+        "files": ["pkg/fleet/selector/selector.go"],
+        "hypotheses": [{"id": "h1", "objective": "o", "required_evidence": "e"}],
+    }
+
+
+def _directory_step() -> dict:
+    return {
+        "step_id": "step-001",
+        "axis": "directory",
+        "scope": "pkg/a",
+        "files": ["pkg/a/a.go"],
+        "hypotheses": [{"id": "h1", "objective": "o", "required_evidence": "e"}],
+    }
+
+
+def test_scenario_block_is_selected_by_id_not_by_word_overlap():
+    # REQUIRED (Issue #4059): a scenario is the step's entire subject, so it is
+    # looked up by the id the harness put on the step. Anchors may be chosen
+    # lexically because they are illustrative; a scenario may not, because a
+    # miss leaves the lane reviewing a file list with no idea which risk it was
+    # assembled for.
+    step = _scenario_step("TS-12")
+    step["files"] = ["totally/unrelated/path.go"]
+    step["hypotheses"] = [{"id": "h1", "objective": "zzz", "required_evidence": "zzz"}]
+    block = harness_runner.scenario_block(step)
+    check("THREAT SCENARIO TS-12" in block, "scenario block: found by id even with no lexical overlap", block[:120])
+
+
+def test_scenario_block_carries_tier_and_boundary():
+    block = harness_runner.scenario_block(_scenario_step("TS-12"))
+    check("attacker tier T2" in block, "scenario block: names the attacker tier")
+    check("boundary controller-to-steward" in block, "scenario block: names the trust boundary")
+
+
+def test_scenario_block_is_empty_for_a_non_scenario_step():
+    check(
+        harness_runner.scenario_block(_directory_step()) == "",
+        "scenario block: a directory step gets no scenario",
+    )
+
+
+def test_unknown_scenario_id_does_not_break_the_lane():
+    # A lane resuming an older sweep whose plan predates a catalogue edit must
+    # still run against the files it was given. The planner is where a missing
+    # catalogue fails closed; a lane degrades instead.
+    step = _scenario_step("TS-99")
+    check(harness_runner.scenario_block(step) == "", "scenario block: an unknown id yields no block, not an error")
+    preamble = harness_runner.shared_preamble(step)
+    check(harness_runner.SYSTEM_PROMPT in preamble, "scenario block: the lane still gets its preamble for an unknown id")
+
+
+def test_shared_preamble_includes_the_scenario_only_when_there_is_one():
+    with_scenario = harness_runner.shared_preamble(_scenario_step("TS-12"))
+    without = harness_runner.shared_preamble(_directory_step())
+    check("THREAT SCENARIO TS-12" in with_scenario, "preamble: a scenario step carries its scenario")
+    check("THREAT SCENARIO" not in without, "preamble: a directory step is unchanged")
+    check(
+        harness_runner.METHODOLOGY_CORE in with_scenario and harness_runner.METHODOLOGY_CORE in without,
+        "preamble: the methodology core still reaches both",
+    )
+
+
+def test_every_catalogue_scenario_renders_for_a_lane():
+    # REQUIRED: a scenario the planner can plan but a lane cannot render would
+    # produce a step reviewed with no stated risk, silently.
+    import scenarios as _scenarios
+    missing = []
+    for s in _scenarios.load_scenarios():
+        block = harness_runner.scenario_block({"axis": "scenario", "scenario_id": s["id"]})
+        if s["requirement"] not in block:
+            missing.append(s["id"])
+    check(not missing, "scenario block: every catalogue scenario renders for a lane", str(missing))
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
