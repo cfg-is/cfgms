@@ -123,6 +123,7 @@ import atomic_write  # noqa: E402
 import basedir  # noqa: E402
 import metadata  # noqa: E402
 import partition  # noqa: E402
+import scenarios  # noqa: E402
 import roster  # noqa: E402
 import schema  # noqa: E402
 
@@ -507,7 +508,9 @@ def _read_bundle_scope_paths(bundle_dir: str) -> "list[str] | None":
     return scope_paths
 
 
-def _render_partition_steps_block(steps: "list[dict]") -> str:
+def _render_partition_steps_block(
+    steps: "list[dict]", scenario_by_id: "dict[str, dict] | None" = None
+) -> str:
     """Render the harness's own deterministic partition (Issue #4056 AC6) as
     the fixed list of steps the planner model is assigned -- never asked to
     invent. Each step's `files` were already re-checked against
@@ -515,6 +518,7 @@ def _render_partition_steps_block(steps: "list[dict]") -> str:
     safe to render the same way `_read_bundle_tree_paths()`'s output is."""
     if not steps:
         return "  (no steps -- this bundle has nothing to review)"
+    scenario_by_id = scenario_by_id or {}
     blocks = []
     for index, step in enumerate(steps, start=1):
         filename = f"step-{index:03d}.json"
@@ -525,6 +529,19 @@ def _render_partition_steps_block(steps: "list[dict]") -> str:
         # different shape. A directory step needs no label at all -- nothing in the
         # prompt asks the model to treat one differently.
         header = f"Step {index} -- write your hypotheses to `/workspace-out/{filename}`"
+        if step["axis"] == partition.AXIS_SCENARIO:
+            # The only step whose files the model chooses, and the only one whose
+            # subject is a risk rather than a location (Issue #4059).
+            scenario = scenario_by_id.get(step["scenario_id"], {})
+            blocks.append(
+                f"{header}\n"
+                f"This step is a risk, not a directory. Requirement:\n"
+                f"{scenario.get('requirement', step['scenario_id'])}\n"
+                f"{scenario.get('check', '')}\n"
+                f"Set `files` to the paths from any step above that bear on this requirement, "
+                f"anywhere in the repository. Hypothesise how the requirement fails."
+            )
+            continue
         if step["axis"] == partition.AXIS_BOUNDARY:
             header += (
                 f"\nThese files span subtrees because they all read or write `{step['config_key']}`."
@@ -587,8 +604,10 @@ def build_prompt(bundle_dir: str, sweep_id: str) -> str:
         )
     else:
         scope_line = "Scope: the full repository."
-    partition_steps = partition.partition(bundle_dir)
-    steps_block = _render_partition_steps_block(partition_steps)
+    partition_steps = partition.partition(bundle_dir, scenarios.load_scenarios())
+    steps_block = _render_partition_steps_block(
+        partition_steps, {s["id"]: s for s in scenarios.load_scenarios()}
+    )
     return f"""Write review hypotheses.
 
 {scope_line}
@@ -702,7 +721,8 @@ def prepare(
     # just partitioned above, so the prompt's assigned steps and this file
     # never disagree.
     atomic_write.write_json_atomic(
-        os.path.join(plan_dir, PARTITION_FILENAME), partition.partition(bundle_dir)
+        os.path.join(plan_dir, PARTITION_FILENAME),
+        partition.partition(bundle_dir, scenarios.load_scenarios()),
     )
 
     prompt_path = os.path.join(plan_dir, PROMPT_FILENAME)
@@ -1201,7 +1221,11 @@ def _bundle_tree_index(sweep_dir: str) -> "dict[str, dict] | None":
     return index
 
 
-VALID_AXES = frozenset({partition.AXIS_DIRECTORY, partition.AXIS_BOUNDARY})
+VALID_AXES = frozenset({
+    partition.AXIS_DIRECTORY,
+    partition.AXIS_BOUNDARY,
+    partition.AXIS_SCENARIO,
+})
 
 
 def validate_step(
@@ -1700,10 +1724,36 @@ def _read_partition(sweep_dir: str) -> "list[dict] | None":
     return data
 
 
-def _inject_partition_fields(data: dict, partition_step: dict, filename: str) -> "str | None":
+def _inventory_from_partition(partition_steps: "list[dict] | None") -> "frozenset[str] | None":
+    """The commit's file inventory, recovered from the partition itself.
+
+    The directory axis assigns every non-excluded tree row to exactly one step
+    (`partition._directory_steps()`), so the union of the non-scenario steps'
+    files IS the inventory -- no second read of the bundle at finalize time,
+    and no way for the two to disagree. Used to check that a scenario step's
+    model-chosen `files` name real paths from this commit.
+    """
+    paths: set[str] = set()
+    for step in partition_steps or ():
+        if step.get("axis") == partition.AXIS_SCENARIO:
+            continue
+        paths.update(step.get("files") or [])
+    return frozenset(paths) if partition_steps else None
+
+
+def _inject_partition_fields(
+    data: dict,
+    partition_step: dict,
+    filename: str,
+    known_paths: "frozenset[str] | None" = None,
+) -> "str | None":
     """Overwrite `data`'s `axis`/`scope`/`files` from `partition_step` (Issue
     #4056 AC6) -- the harness's own computed identity for the step assigned
     to this filename's position, never trusted from the model.
+
+    A scenario-axis step (Issue #4059) is the one exception: its `files` are
+    the model's own selection, accepted here after every path is checked
+    against `known_paths` (the bundle inventory for this commit).
 
     Returns an error string, injecting nothing, when the model supplied its
     own `scope` or `files` that disagree with the assigned value: a step the
@@ -1712,6 +1762,29 @@ def _inject_partition_fields(data: dict, partition_step: dict, filename: str) ->
     model), so the step is rejected rather than silently overwritten. Absent
     or agreeing `scope`/`files` inject cleanly and return `None`.
     """
+    # A scenario-axis step is the one deliberate exception to AC6 (Issue #4059).
+    # Its files are the model's contribution: which code bears on "one action
+    # reaches only what the principal is authorised for" is a judgement about
+    # the code, not something a partition over the file tree can compute. The
+    # harness still fixes WHICH risks are reviewed and what the step is called
+    # -- `step_id` is the scenario id -- so two planner models remain
+    # comparable, and file selection becomes part of what is compared. Every
+    # path is still checked against the bundle's own inventory below, so the
+    # model cannot name a file that does not exist in this commit.
+    if partition_step.get("axis") == partition.AXIS_SCENARIO:
+        model_files = _scope_paths(data.get("files")) or []
+        unknown = [p for p in model_files if p not in (known_paths or ())]
+        if unknown:
+            return (
+                f"{filename}: scenario step names {len(unknown)} file(s) absent from this "
+                f"commit's inventory, first {unknown[0]!r} -- a scenario step selects from the "
+                "inventory, it does not invent paths"
+            )
+        data["axis"] = partition_step.get("axis")
+        data["scope"] = partition_step.get("scope")
+        data["files"] = sorted(set(model_files))
+        return None
+
     for field in ("scope", "files"):
         if field not in data:
             continue
@@ -1779,6 +1852,7 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
     root_files = _repository_root_files(sweep_dir)
     tree_index = _bundle_tree_index(sweep_dir)
     partition_steps = _read_partition(sweep_dir)
+    known_paths = _inventory_from_partition(partition_steps)
 
     errors: list[str] = []
     excluded: list[str] = []
@@ -1856,7 +1930,9 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
                     rejected.append({"filename": filename, "error": reason})
                     excluded.append(filename)
                     continue
-                disagreement = _inject_partition_fields(data, partition_steps[index], filename)
+                disagreement = _inject_partition_fields(
+                    data, partition_steps[index], filename, known_paths
+                )
                 if disagreement:
                     schema.log_event("invalid_plan_step", filename=filename, errors=[disagreement])
                     errors.append(disagreement)
@@ -1883,7 +1959,20 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
         # reviewed nothing. That is a judgment about the plan as a whole, not
         # a per-step shape rule, so it belongs here rather than in
         # `validate_plan_step()`.
-        if isinstance(data.get("files"), list) and not data["files"]:
+        # A scenario step is the exception (Issue #4059): its files are the
+        # model's selection, and a scenario with nothing bearing on it inside a
+        # bounded scope legitimately selects none -- TS-01 is about route
+        # authorisation, and a sweep scoped to `pkg/cert` contains no routes.
+        # Recorded as covered-with-nothing-to-review, the same posture Issue
+        # #4056 AC4c takes for an empty boundary axis, rather than rejected as
+        # a malformed step. The coverage report distinguishes a scenario with
+        # no files from a scenario with no step at all.
+        is_empty_scenario = (
+            data.get("axis") == partition.AXIS_SCENARIO
+            and isinstance(data.get("files"), list)
+            and not data["files"]
+        )
+        if isinstance(data.get("files"), list) and not data["files"] and not is_empty_scenario:
             reason = "step has an empty files array -- nothing for a lane to review"
             schema.log_event("invalid_plan_step", filename=filename, errors=[reason])
             errors.append(f"{filename}: {reason}")
@@ -2073,6 +2162,7 @@ def finalize_multi_planner(sweep_dir: str, planners: "list[roster.Lane]") -> tup
     root_files = _repository_root_files(sweep_dir)
     tree_index = _bundle_tree_index(sweep_dir)
     partition_steps = _read_partition(sweep_dir)
+    known_paths = _inventory_from_partition(partition_steps)
 
     errors: list[str] = []
 
@@ -2124,7 +2214,9 @@ def finalize_multi_planner(sweep_dir: str, planners: "list[roster.Lane]") -> tup
                         errors.append(f"{label}: {reason}")
                         rejected.append({"filename": label, "error": reason})
                         continue
-                    disagreement = _inject_partition_fields(data, partition_steps[index], label)
+                    disagreement = _inject_partition_fields(
+                        data, partition_steps[index], label, known_paths
+                    )
                     if disagreement:
                         schema.log_event("invalid_plan_step", filename=label, errors=[disagreement])
                         errors.append(disagreement)

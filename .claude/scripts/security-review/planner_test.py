@@ -607,14 +607,23 @@ def test_finalize_rejects_a_step_position_with_no_partition_entry():
         plan_dir = os.path.join(sweep_dir, "plan")
         with open(os.path.join(plan_dir, planner.PARTITION_FILENAME)) as f:
             partition_steps = json.load(f)
-        check(len(partition_steps) == 1, "sanity: this fixture's bundle produces exactly one partition step", str(partition_steps))
+        # One directory step plus one step per threat scenario (Issue #4059).
+        # The extra file is the first position PAST the partition, whatever
+        # that number is, so this does not re-pin a count the catalogue moves.
+        assigned = len(partition_steps)
+        check(assigned >= 1, "sanity: the fixture bundle produces at least one partition step", str(assigned))
 
-        write_step(plan_dir, "step-001.json", {"step_id": "step-001", "hypotheses": [valid_hypothesis()]})
-        write_step(plan_dir, "step-002.json", {"step_id": "step-002", "hypotheses": [valid_hypothesis()]})
+        for index in range(1, assigned + 1):
+            write_step(
+                plan_dir, f"step-{index:03d}.json",
+                {"step_id": f"step-{index:03d}", "hypotheses": [valid_hypothesis()]},
+            )
+        extra = f"step-{assigned + 1:03d}.json"
+        write_step(plan_dir, extra, {"step_id": extra[:-5], "hypotheses": [valid_hypothesis()]})
 
         ok, errors = planner.finalize(sweep_dir)
-        check(ok is True, "finalize: the one valid step still survives", str(errors))
-        check(not os.path.exists(os.path.join(plan_dir, "step-002.json")), "finalize: the extra step with no partition entry is removed")
+        check(ok is True, "finalize: the assigned steps still survive", str(errors))
+        check(not os.path.exists(os.path.join(plan_dir, extra)), "finalize: the extra step with no partition entry is removed")
         check(
             any("no partition step assigned at this position" in e for e in errors),
             "finalize: the rejection names the missing partition entry",

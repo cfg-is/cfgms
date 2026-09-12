@@ -75,6 +75,14 @@ CONFIG_ARTIFACT_NAME = "06-config-surface.tsv"
 
 AXIS_DIRECTORY = "directory"
 AXIS_BOUNDARY = "boundary"
+# One step per threat scenario (Issue #4059). Unlike the other two axes, a
+# scenario step's `files` are EMPTY here and chosen by the planner model from
+# the inventory -- the deliberate exception to Issue #4056 AC6, documented at
+# `planner._inject_partition_fields()`. The harness fixes WHICH risks are
+# reviewed and what each step is called; the model contributes which files bear
+# on that risk, which is the judgement worth benchmarking. Step id is the
+# scenario id, so two planner models produce comparable plans.
+AXIS_SCENARIO = "scenario"
 
 # Basis recorded in Issue #4056: measured on the evidence sweep's own bundle
 # (scope pkg/cert + pkg/session, commit 70b3024c), Fable's four steps came to
@@ -317,7 +325,7 @@ def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list
     return steps
 
 
-def partition(bundle_dir: str) -> "list[dict]":
+def partition(bundle_dir: str, scenario_list: "list[dict] | None" = None) -> "list[dict]":
     """Compute the deterministic step partition for the bundle at
     `bundle_dir` (AC1). Pure function of `01-tree.tsv` and
     `06-config-surface.tsv`'s content -- the same bundle produces a
@@ -326,7 +334,9 @@ def partition(bundle_dir: str) -> "list[dict]":
     Returns an ordered list of step dicts, each `{"step_id", "axis", "scope",
     "files"}` (`axis: "boundary"` steps additionally carry `"config_key"`).
     Directory-axis steps come first (AC2), sorted by their top-level
-    boundary; boundary-axis steps follow (AC4), sorted by configuration key.
+    boundary; boundary-axis steps follow (AC4), sorted by configuration key;
+    scenario-axis steps come last, in catalogue order (Issue #4059), one per
+    threat scenario, with `files` left for the model to choose.
     Both axes are bounded by `MAX_STEP_NON_TEST_LOC` (AC3). Carries no
     hypotheses -- those are the planner model's own contribution, added later
     by `planner.py::finalize()` from whatever the model wrote for a step this
@@ -334,4 +344,39 @@ def partition(bundle_dir: str) -> "list[dict]":
     """
     tree_rows = _read_tree_rows(bundle_dir)
     config_rows = _read_config_rows(bundle_dir)
-    return _directory_steps(tree_rows) + _boundary_steps(tree_rows, config_rows)
+    return (
+        _directory_steps(tree_rows)
+        + _boundary_steps(tree_rows, config_rows)
+        + _scenario_steps(scenario_list)
+    )
+
+
+def _scenario_steps(scenario_list: "list[dict] | None") -> "list[dict]":
+    """One step per threat scenario, in catalogue order (Issue #4059).
+
+    `files` is empty and `scope` is the scenario id rather than a path: the
+    planner model selects the files that bear on this risk from the inventory,
+    because which files those are is a judgement about the code, not something
+    a partition over the file tree can compute. `planner.validate_step()`
+    already bounds every non-directory axis by `MAX_STEP_NON_TEST_LOC` instead
+    of the subtree rule, so a scenario step spanning the repository is valid
+    and a bloated one is not.
+
+    `scenario_list` is passed in rather than loaded here so `partition()` stays
+    a pure function of its arguments -- a test can partition without a
+    catalogue on disk, and the caller owns the fail-closed load.
+    """
+    if not scenario_list:
+        return []
+    return [
+        {
+            "step_id": s["id"],
+            "axis": AXIS_SCENARIO,
+            "scope": s["id"],
+            "files": [],
+            "scenario_id": s["id"],
+            "scenario_tier": s["tier"],
+            "scenario_boundary": s["boundary"],
+        }
+        for s in scenario_list
+    ]
