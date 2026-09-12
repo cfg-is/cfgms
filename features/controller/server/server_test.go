@@ -145,6 +145,81 @@ func (p *testClusterProvider) CreateAlertStore(_ map[string]interface{}) (busine
 	return nil, business.ErrNotSupported
 }
 
+// clusterStorageCloseCountingProvider wraps a real StorageProvider (the actual
+// registered "database" provider) and counts how many ClientTenantStore
+// instances it creates are later closed. It delegates every Create*Store call
+// to the wrapped provider (so Postgres performs real I/O) and only
+// instruments the returned ClientTenantStore's Close — the same technique
+// pkg/storage/interfaces/provider_test.go's closeCountingProvider uses, here
+// against the "database" provider registration itself (temporarily swapped
+// in, restored via t.Cleanup) since New()'s cluster branch resolves the
+// provider by that fixed name rather than accepting one as a parameter.
+type clusterStorageCloseCountingProvider struct {
+	interfaces.StorageProvider
+	closes int
+}
+
+func (p *clusterStorageCloseCountingProvider) CreateClientTenantStore(config map[string]interface{}) (business.ClientTenantStore, error) {
+	store, err := p.StorageProvider.CreateClientTenantStore(config)
+	if err != nil {
+		return store, err
+	}
+	return clusterCloseCountingClientTenantStore{ClientTenantStore: store, p: p}, nil
+}
+
+type clusterCloseCountingClientTenantStore struct {
+	business.ClientTenantStore
+	p *clusterStorageCloseCountingProvider
+}
+
+func (s clusterCloseCountingClientTenantStore) Close() error {
+	s.p.closes++
+	return s.ClientTenantStore.Close()
+}
+
+// TestNew_ClusterMode_ClosesStorageManagerWhenBackendsNotReady is a REQUIRED
+// test (Issue #4058 AC #1/#2): New()'s cluster branch used to register its
+// disarmed-defer cleanup (`openedStores = append(openedStores,
+// storageManager.Close)`) only AFTER the whole storage if/else chain, so
+// assertClusterBackendsReady's failure (line 383 in the pre-fix source, called
+// immediately after a successful CreateClusterStorageManager) returned before
+// that registration ever ran — the constructed StorageManager, and every
+// Postgres connection it opened, leaked for the process's life. The fix moves
+// the defer registration before the branches and has each branch register its
+// storageManager the moment construction succeeds, so this path is covered
+// too. Requires a reachable Postgres (skipStorageRequirementsWiringTestIfNoPostgres
+// skips otherwise, matching storage_requirements_wiring_test.go).
+func TestNew_ClusterMode_ClosesStorageManagerWhenBackendsNotReady(t *testing.T) {
+	dsn := skipStorageRequirementsWiringTestIfNoPostgres(t)
+	t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+
+	original, err := interfaces.GetStorageProvider("database")
+	require.NoError(t, err, "the database provider must be registered (blank import) for this test to instrument it")
+	provider := &clusterStorageCloseCountingProvider{StorageProvider: original}
+	interfaces.RegisterStorageProvider(provider)
+	t.Cleanup(func() { interfaces.RegisterStorageProvider(original) })
+
+	cfg := &config.Config{
+		ListenAddr:  "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{EnableCertManagement: false},
+		HA:          &config.HAConfig{Mode: "cluster"},
+		Storage: &config.StorageConfig{
+			Cluster: &config.ClusterStorageConfig{
+				PostgresDSN:    dsn,
+				SessionHMACKey: "test-session-hmac-key-story-4058",
+			},
+		},
+	}
+
+	srv, err := New(cfg, logging.NewNoopLogger())
+	require.Error(t, err, "assertClusterBackendsReady must fail with no S3 bucket configured")
+	assert.Nil(t, srv)
+	assert.Contains(t, err.Error(), "CFGMS_S3_INSTALLER_BUCKET")
+
+	assert.GreaterOrEqual(t, provider.closes, 1,
+		"New() must close the StorageManager it constructed before assertClusterBackendsReady failed, not merely return an error")
+}
+
 // recordingLogger implements logging.Logger and captures every log call so
 // tests can assert on what was (or was not) logged.
 var _ logging.Logger = (*recordingLogger)(nil)
