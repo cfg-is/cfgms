@@ -605,6 +605,23 @@ func CreateNonceStoreFromConfig(providerName string, config map[string]interface
 // Deprecated: CreateAllStoresFromConfig creates all storage interfaces from a single configuration.
 // Use CreateOSSStorageManager for new deployments. This function is retained for backward
 // compatibility with the database provider in single-backend mode.
+// appendIfCloser registers store's Close method in *openedStores for disarmed-
+// defer cleanup (Issue #4058), if store is non-nil and implements Close() error.
+// Some store interfaces (e.g. config.ConfigStore, business.PushStore) don't
+// declare Close() at all even though several concrete implementations provide
+// one — mirroring StorageManager.Close()'s own optional-closer type assertion —
+// so this takes interface{} rather than a Close()-typed generic constraint. A
+// genuinely nil interface value passed in stays nil across the interface{}
+// conversion, so the nil check is safe.
+func appendIfCloser(openedStores *[]func() error, store interface{}) {
+	if store == nil {
+		return
+	}
+	if closer, ok := store.(interface{ Close() error }); ok {
+		*openedStores = append(*openedStores, closer.Close)
+	}
+}
+
 func CreateAllStoresFromConfig(providerName string, config map[string]interface{}) (*StorageManager, error) {
 	provider, err := GetStorageProvider(providerName)
 	if err != nil {
@@ -616,70 +633,108 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		return nil, fmt.Errorf("storage provider '%s' not available. Available providers: %v. Error: %w", providerName, availableNames, err)
 	}
 
+	// Every store below registers its Close as soon as it is successfully
+	// created. A later store's creation failure returns before `constructed` is
+	// set, so the deferred cleanup closes everything already opened — the same
+	// disarmed-defer shape as features/controller/server/server.go's New()
+	// (Issue #4058). Some providers open a real per-store handle for each call
+	// below (a provider that does not batch its stores behind a single shared
+	// connection), so an unclosed earlier store here is a genuine leaked
+	// SQLite/flatfile handle, not just hygiene.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				registryLoggerMu.RLock()
+				l := registryLogger
+				registryLoggerMu.RUnlock()
+				l.Warn("Failed to release storage after CreateAllStoresFromConfig failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
 	clientTenantStore, err := provider.CreateClientTenantStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create client tenant store: %w", err)
 	}
+	appendIfCloser(&openedStores, clientTenantStore)
 
 	configStore, err := provider.CreateConfigStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create config store: %w", err)
 	}
+	appendIfCloser(&openedStores, configStore)
 
 	auditStore, err := provider.CreateAuditStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create audit store: %w", err)
 	}
+	appendIfCloser(&openedStores, auditStore)
 
 	rbacStore, err := provider.CreateRBACStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create RBAC store: %w", err)
 	}
+	appendIfCloser(&openedStores, rbacStore)
 
 	tenantStore, err := provider.CreateTenantStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create tenant store: %w", err)
 	}
+	appendIfCloser(&openedStores, tenantStore)
 
 	registrationTokenStore, err := provider.CreateRegistrationTokenStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create registration token store: %w", err)
 	}
+	appendIfCloser(&openedStores, registrationTokenStore)
 
 	sessionStore, err := provider.CreateSessionStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create session store: %w", err)
 	}
+	appendIfCloser(&openedStores, sessionStore)
 
 	stewardStore, err := provider.CreateStewardStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create steward store: %w", err)
 	}
+	appendIfCloser(&openedStores, stewardStore)
 
 	commandStore, err := provider.CreateCommandStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create command store: %w", err)
 	}
+	appendIfCloser(&openedStores, commandStore)
 
 	triggerStore, err := provider.CreateTriggerStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create trigger store: %w", err)
 	}
+	appendIfCloser(&openedStores, triggerStore)
 
 	pushStore, err := provider.CreatePushStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create push store: %w", err)
 	}
+	appendIfCloser(&openedStores, pushStore)
 
 	ipTrustStore, err := provider.CreateIPTrustStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create IP trust store: %w", err)
 	}
+	appendIfCloser(&openedStores, ipTrustStore)
 
 	alertStore, err := provider.CreateAlertStore(config)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create alert store: %w", err)
 	}
+	appendIfCloser(&openedStores, alertStore)
 
 	// Nonce store (Issue #3755, ADR-031 amendment to ADR-011). Single-provider mode
 	// is a live deployment shape — features/controller/server routes
@@ -697,6 +752,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 			}
 			nonceStore = nil
 		}
+		appendIfCloser(&openedStores, nonceStore)
 	}
 
 	// Lease store is optional at the interface level: only providers implementing
@@ -708,6 +764,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		if err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return nil, fmt.Errorf("failed to create lease store: %w", err)
 		}
+		appendIfCloser(&openedStores, leaseStore)
 	}
 
 	// Routing store is optional at the interface level: only providers
@@ -720,6 +777,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		if err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return nil, fmt.Errorf("failed to create routing store: %w", err)
 		}
+		appendIfCloser(&openedStores, routingStore)
 	}
 
 	// Node registry store is optional at the interface level: only providers
@@ -732,8 +790,10 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		if err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return nil, fmt.Errorf("failed to create node registry store: %w", err)
 		}
+		appendIfCloser(&openedStores, nodeRegistryStore)
 	}
 
+	constructed = true
 	return &StorageManager{
 		providerName:           providerName,
 		provider:               provider,
@@ -1255,62 +1315,102 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		return nil, fmt.Errorf("database provider not registered for cluster storage (blank-import database provider in calling binary or test providers_test.go): %w", err)
 	}
 
+	// Same disarmed-defer shape as CreateOSSStorageManager, CreateAllStoresFromConfig,
+	// and features/controller/server/server.go's New() (Issue #4058): every store
+	// created below registers its Close immediately, and `constructed` is set true
+	// only at the single successful return, so a later store's creation failure
+	// closes everything already opened. (The registered database provider's
+	// individual store Close() methods are documented no-ops — ADR-031 Decision 6
+	// gives the shared connection pool a single owner, DatabaseProvider itself —
+	// but this wiring is generic across providers and must hold for any future
+	// database-compatible provider that does not share that design.)
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				registryLoggerMu.RLock()
+				l := registryLogger
+				registryLoggerMu.RUnlock()
+				l.Warn("Failed to release storage after CreateClusterStorageManager failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
 	clientTenantStore, err := provider.CreateClientTenantStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create client tenant store: %w", err)
 	}
+	appendIfCloser(&openedStores, clientTenantStore)
 	configStore, err := provider.CreateConfigStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create config store: %w", err)
 	}
+	appendIfCloser(&openedStores, configStore)
 	auditStore, err := provider.CreateAuditStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create audit store: %w", err)
 	}
+	appendIfCloser(&openedStores, auditStore)
 	rbacStore, err := provider.CreateRBACStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create RBAC store: %w", err)
 	}
+	appendIfCloser(&openedStores, rbacStore)
 	tenantStore, err := provider.CreateTenantStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create tenant store: %w", err)
 	}
+	appendIfCloser(&openedStores, tenantStore)
 	registrationTokenStore, err := provider.CreateRegistrationTokenStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create registration token store: %w", err)
 	}
+	appendIfCloser(&openedStores, registrationTokenStore)
 	sessionStore, err := provider.CreateSessionStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create session store: %w", err)
 	}
+	appendIfCloser(&openedStores, sessionStore)
 	stewardStore, err := provider.CreateStewardStore(dbCfg)
 	if err != nil {
 		return nil, fmt.Errorf("cluster storage: failed to create steward store: %w", err)
 	}
+	appendIfCloser(&openedStores, stewardStore)
 	commandStore, err := provider.CreateCommandStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create command store: %w", err)
 	}
+	appendIfCloser(&openedStores, commandStore)
 	triggerStore, err := provider.CreateTriggerStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create trigger store: %w", err)
 	}
+	appendIfCloser(&openedStores, triggerStore)
 	pushStore, err := provider.CreatePushStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create push store: %w", err)
 	}
+	appendIfCloser(&openedStores, pushStore)
 	ipTrustStore, err := provider.CreateIPTrustStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create IP trust store: %w", err)
 	}
+	appendIfCloser(&openedStores, ipTrustStore)
 	alertStore, err := provider.CreateAlertStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create alert store: %w", err)
 	}
+	appendIfCloser(&openedStores, alertStore)
 	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
 	}
+	appendIfCloser(&openedStores, pendingRegStore)
 
 	sm := &StorageManager{
 		providerName:           "database",
@@ -1340,6 +1440,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if refreshPolicyStore != nil {
 			sm.SetRefreshPolicyStore(refreshPolicyStore)
+			appendIfCloser(&openedStores, refreshPolicyStore)
 		}
 		pendingRefreshStore, err := rsc.CreatePendingRefreshStore(dbCfg)
 		if err != nil && !errors.Is(err, business.ErrNotSupported) {
@@ -1347,6 +1448,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if pendingRefreshStore != nil {
 			sm.SetPendingRefreshStore(pendingRefreshStore)
+			appendIfCloser(&openedStores, pendingRefreshStore)
 		}
 	}
 	// Wire assurance policy store if the provider implements AssuranceStoreCreator (Issue #2845).
@@ -1357,6 +1459,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if assurancePolicyStore != nil {
 			sm.SetAssurancePolicyStore(assurancePolicyStore)
+			appendIfCloser(&openedStores, assurancePolicyStore)
 		}
 	}
 	// Wire blast radius policy store if the provider implements BlastRadiusStoreCreator (Issue #3698).
@@ -1367,6 +1470,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if blastRadiusPolicyStore != nil {
 			sm.SetBlastRadiusPolicyStore(blastRadiusPolicyStore)
+			appendIfCloser(&openedStores, blastRadiusPolicyStore)
 		}
 	}
 	// Wire tenant crossing store if the provider implements TenantCrossingStoreCreator (ADR-025).
@@ -1377,6 +1481,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if tenantCrossingStore != nil {
 			sm.SetTenantCrossingStore(tenantCrossingStore)
+			appendIfCloser(&openedStores, tenantCrossingStore)
 		}
 	}
 	// Wire case store if the provider implements CaseStoreCreator (ADR-022 §8, Issue #3602).
@@ -1387,6 +1492,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if caseStore != nil {
 			sm.SetCaseStore(caseStore)
+			appendIfCloser(&openedStores, caseStore)
 		}
 	}
 	// Wire nonce store if the provider implements NonceStoreCreator (Issue #3755,
@@ -1399,6 +1505,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if nonceStore != nil {
 			sm.SetNonceStore(nonceStore)
+			appendIfCloser(&openedStores, nonceStore)
 		}
 	}
 	// Wire lease store if the provider implements LeaseStoreCreator (ADR-031 Decision 5,
@@ -1411,6 +1518,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if leaseStore != nil {
 			sm.SetLeaseStore(leaseStore)
+			appendIfCloser(&openedStores, leaseStore)
 		}
 	}
 	// Wire routing store if the provider implements RoutingStoreCreator (ADR-031
@@ -1424,6 +1532,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if routingStore != nil {
 			sm.SetRoutingStore(routingStore)
+			appendIfCloser(&openedStores, routingStore)
 		}
 	}
 	// Wire node registry store if the provider implements NodeRegistryStoreCreator
@@ -1438,6 +1547,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if nodeRegistryStore != nil {
 			sm.SetNodeRegistryStore(nodeRegistryStore)
+			appendIfCloser(&openedStores, nodeRegistryStore)
 		}
 	}
 	// Wire cert revocation store if the provider implements CertRevocationStoreCreator
@@ -1450,6 +1560,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if certRevocationStore != nil {
 			sm.SetCertRevocationStore(certRevocationStore)
+			appendIfCloser(&openedStores, certRevocationStore)
 		}
 	}
 	// Wire signing cursor store if the provider implements SigningCursorStoreCreator
@@ -1462,6 +1573,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if signingCursorStore != nil {
 			sm.SetSigningCursorStore(signingCursorStore)
+			appendIfCloser(&openedStores, signingCursorStore)
 		}
 	}
 	// Wire module approval store if the provider implements ModuleApprovalStoreCreator
@@ -1475,6 +1587,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if moduleApprovalStore != nil {
 			sm.SetModuleApprovalStore(moduleApprovalStore)
+			appendIfCloser(&openedStores, moduleApprovalStore)
 		}
 	}
 	// Wire rate counter store if the provider implements RateCounterStoreCreator
@@ -1488,8 +1601,10 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		}
 		if rateCounterStore != nil {
 			sm.SetRateCounterStore(rateCounterStore)
+			appendIfCloser(&openedStores, rateCounterStore)
 		}
 	}
+	constructed = true
 	return sm, nil
 }
 
@@ -1518,26 +1633,56 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		return nil, fmt.Errorf("sqlite provider not registered: %w", err)
 	}
 
+	// Same disarmed-defer shape as CreateAllStoresFromConfig and
+	// features/controller/server/server.go's New() (Issue #4058): every store
+	// created below registers its Close immediately, and `constructed` is set
+	// true only at each of this function's two successful returns (the bundle
+	// path and the legacy per-store fallback), so a later failure in either
+	// path closes everything this call already opened. On success this disarms
+	// the whole defer — the returned StorageManager's own Close() takes over
+	// ownership of the same stores, so nothing is ever double-closed.
+	constructed := false
+	var openedStores []func() error
+	defer func() {
+		if constructed {
+			return
+		}
+		for i := len(openedStores) - 1; i >= 0; i-- {
+			if closeErr := openedStores[i](); closeErr != nil {
+				registryLoggerMu.RLock()
+				l := registryLogger
+				registryLoggerMu.RUnlock()
+				l.Warn("Failed to release storage after CreateOSSStorageManager failed",
+					"error", closeErr)
+			}
+		}
+	}()
+
 	configStore, err := ffProvider.CreateConfigStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create config store (flatfile): %w", err)
 	}
+	appendIfCloser(&openedStores, configStore)
 	auditStore, err := ffProvider.CreateAuditStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create audit store (flatfile): %w", err)
 	}
+	appendIfCloser(&openedStores, auditStore)
 	stewardStore, err := ffProvider.CreateStewardStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create steward store (flatfile): %w", err)
 	}
+	appendIfCloser(&openedStores, stewardStore)
 	ipTrustStore, err := ffProvider.CreateIPTrustStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ip trust store (flatfile): %w", err)
 	}
+	appendIfCloser(&openedStores, ipTrustStore)
 	alertStore, err := ffProvider.CreateAlertStore(flatfileCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create alert store (flatfile): %w", err)
 	}
+	appendIfCloser(&openedStores, alertStore)
 
 	// Nonce storage (Issue #3755, ADR-031 amendment to ADR-011) is sourced from the
 	// flatfile provider like IPTrustStore and AlertStore above: the OSS deployment
@@ -1548,6 +1693,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		if err != nil && !errors.Is(err, business.ErrNotSupported) {
 			return nil, fmt.Errorf("failed to create nonce store (flatfile): %w", err)
 		}
+		appendIfCloser(&openedStores, nonceStore)
 	}
 
 	// Prefer single-connection bundle when the provider supports it.
@@ -1578,6 +1724,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 			sm.SetNonceStore(nonceStore)
 		}
 		sm.SetLeaseStore(bundle.Lease)
+		constructed = true
 		return sm, nil
 	}
 
@@ -1585,38 +1732,47 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	if err != nil {
 		return nil, fmt.Errorf("failed to create RBAC store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, rbacStore)
 	tenantStore, err := sqProvider.CreateTenantStore(sqliteCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tenant store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, tenantStore)
 	clientTenantStore, err := sqProvider.CreateClientTenantStore(sqliteCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client tenant store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, clientTenantStore)
 	registrationTokenStore, err := sqProvider.CreateRegistrationTokenStore(sqliteCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create registration token store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, registrationTokenStore)
 	sessionStore, err := sqProvider.CreateSessionStore(sqliteCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create session store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, sessionStore)
 	commandStore, err := sqProvider.CreateCommandStore(sqliteCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create command store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, commandStore)
 	triggerStore, err := sqProvider.CreateTriggerStore(sqliteCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create trigger store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, triggerStore)
 	pushStore, err := sqProvider.CreatePushStore(sqliteCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create push store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, pushStore)
 	pendingRegStore, err := sqProvider.CreatePendingRegistrationStore(sqliteCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("failed to create pending registration store (sqlite): %w", err)
 	}
+	appendIfCloser(&openedStores, pendingRegStore)
 
 	sm := NewStorageManagerFromStores(
 		configStore, auditStore, rbacStore,
@@ -1639,6 +1795,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		if leaseStore != nil {
 			sm.SetLeaseStore(leaseStore)
+			appendIfCloser(&openedStores, leaseStore)
 		}
 	}
 	// Wire routing store if the SQLite provider implements RoutingStoreCreator
@@ -1650,6 +1807,7 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		if routingStore != nil {
 			sm.SetRoutingStore(routingStore)
+			appendIfCloser(&openedStores, routingStore)
 		}
 	}
 	// Wire node registry store if the SQLite provider implements
@@ -1662,11 +1820,13 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 		}
 		if nodeRegistryStore != nil {
 			sm.SetNodeRegistryStore(nodeRegistryStore)
+			appendIfCloser(&openedStores, nodeRegistryStore)
 		}
 	}
 	// PendingRefreshStore and RefreshPolicyStore are only available via BusinessStoreBundle
 	// (OpenBusinessStores). The non-bundle fallback path leaves them nil — acceptable since
 	// this path is only taken when the provider does not implement BusinessStoreOpener,
 	// which in practice means unit tests that do not exercise the refresh flow.
+	constructed = true
 	return sm, nil
 }
