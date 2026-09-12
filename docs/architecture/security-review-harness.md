@@ -1798,6 +1798,52 @@ the same principle `codex_lane.py` already states for lanes: codex's internal sa
 those controls, never in place of them. Do not carry this value to a lane — a lane mounts a real
 source checkout, and its read-only sandbox works there precisely because a lane never writes.
 
+**The scenario axis (Issue #4059).** A third partition axis, after directory and boundary: one step
+per entry in `docs/security-review/threat-scenarios.md`. A planner reasoning bottom-up from a file
+inventory produces bottom-up guesses -- shown `pkg/session/token.go` it proposes weak token entropy,
+and never proposes that one fleet action might reach every endpoint, because nothing in a file tree
+suggests that question. The catalogue supplies the questions; this axis gives each one a step.
+
+Coverage over risk is therefore **structural, not a gate**. A scenario cannot go unexamined because
+it always has a step, so there is nothing to discover after the fact — `planner_test.py` asserts
+that after a real `prepare()` every catalogue id has one.
+
+`step_id` is the scenario id, so two planner models produce plans that line up step for step and can
+be diffed directly. What differs is which files each selected and what it asked about them.
+
+**This is the one axis where the model chooses its own files**, a deliberate exception to Issue
+#4056 AC6, documented at `planner._inject_partition_fields()`. Which code bears on "one action
+reaches only what the principal is authorised for" is a judgement about the code, not something a
+partition over the file tree can compute — and it is precisely the judgement worth comparing between
+models. Every path the model names is checked against the commit's own inventory, recovered from the
+partition itself (`_inventory_from_partition()`) rather than a second read of the bundle, so the two
+cannot disagree. A directory step still rejects model-supplied files exactly as before: the exception
+is scoped, not a hole.
+
+A scenario with nothing bearing on it inside a bounded scope selects no files -- TS-01 is about route
+authorisation, and a sweep scoped to `pkg/cert` contains no routes. Such a step is **dropped from the
+plan and recorded** (`scenario_step_no_files_in_scope`), never dispatched: a lane spent on a step with
+no files reads nothing and reports `complete`. The distinction that matters is between a scenario with
+no step, which is a coverage failure because the risk was never considered, and a scenario that was
+planned and whose answer was "nothing here".
+
+On the lane side, `harness_runner.scenario_block()` renders the step's scenario into the shared
+preamble. Selection is **by id, never by word overlap** — unlike `select_anchors()`, which matches
+severity examples lexically. An anchor is illustrative and a near-miss costs little; the scenario is
+the step's entire subject, and a miss would leave the lane reviewing an assembled file list with no
+idea which risk assembled it. An unknown id degrades to no block rather than raising, so a lane
+resuming a sweep whose plan predates a catalogue edit still runs; the planner is where a missing
+catalogue fails closed.
+
+**The regression corpus (Issue #4059).** `docs/security-review/regression-corpus.md` pins defects
+this repository has had to commits where they are still present, so "model A beats model B" and "this
+change made it worse" are answerable with a number. `corpus.py` scores on file plus `vuln_class` --
+never line numbers, which rot. Right file, wrong class is `near`; an entry with no recorded files is
+`unscoreable` and leaves the denominator. An entry must be a defect **verified in its fix commit's
+body**: a subject line is not evidence, and an entry that was never a defect marks a model down for
+missing something that never existed. Read the corpus score beside the closure rate, never either
+alone.
+
 **One shared prompt, one harness-specific paragraph (Issue #4041).** Exactly one paragraph of the
 plan prompt is not harness-neutral: the one naming the `claude` CLI's own tool surface ("your tools
 are `Bash` and `Glob` only (no `Write`)") and instructing a Bash heredoc. `planner.py` holds it as
