@@ -211,7 +211,7 @@ def test_build_prompt_metadata_block_cannot_be_escaped_by_a_crafted_path_via_rea
 
         after_block = prompt.split("--- END REPOSITORY METADATA ---", 1)[1]
         check(
-            after_block.lstrip().startswith("This sweep has already been partitioned"),
+            after_block.lstrip().startswith("Each hypothesis is a falsifiable claim"),
             "build_prompt: the real instructional body directly follows the closing delimiter",
             repr(after_block[:120]),
         )
@@ -282,7 +282,7 @@ def test_build_prompt_no_longer_instructs_glob_and_names_the_tree_artifact():
         prompt,
     )
     check(
-        planner.TREE_ARTIFACT_NAME in prompt,
+        planner.TREE_ARTIFACT_NAME not in prompt,
         "build_prompt: names 01-tree.tsv as the source of the file inventory",
         prompt,
     )
@@ -299,18 +299,18 @@ def test_build_prompt_presents_assigned_steps_and_never_asks_for_scope():
         ])
         prompt = planner.build_prompt(bundle_dir, sweep_id="sweep-1")
     check(
-        "already been partitioned" in prompt and "not by you" in prompt,
-        "build_prompt: states the partition is the harness's own, not the model's job",
+        "Steps are fixed" in prompt,
+        "build_prompt: states the partition is fixed and not the model's to change",
         prompt,
     )
     check(
-        "Do NOT include `scope`, `files`" in prompt,
-        "build_prompt: instructs the model not to supply scope or files",
+        "No other keys" in prompt,
+        "build_prompt: instructs the model to emit no key beyond the template's",
         prompt,
     )
     check(
-        "rejected" in prompt,
-        "build_prompt: states a disagreeing model-supplied scope/files is rejected",
+        "rejected" not in prompt,
+        "build_prompt: does not narrate what the harness does with a malformed step",
         prompt,
     )
     check("pkg/foo/foo.go" in prompt and "pkg/bar/bar.go" in prompt, "build_prompt: both assigned steps' files are listed")
@@ -332,8 +332,8 @@ def test_prompt_requires_falsifiable_hypothesis_form():
     )
     check("Good:" in prompt and "Bad:" in prompt, "build_prompt: gives one worked example of each shape, good and bad", prompt)
     check(
-        "inconclusive" in prompt,
-        "build_prompt: explains why a broad property tends to resolve inconclusive",
+        "inconclusive" not in prompt,
+        "build_prompt: does not explain the downstream disposition, only the required form",
         prompt,
     )
 
@@ -345,7 +345,8 @@ def test_prompt_requires_one_absence_shaped_hypothesis_per_step():
         _write_tree_tsv(bundle_dir, [("pkg/foo/foo.go", "go", "1", "abcdef123456", "business")])
         prompt = planner.build_prompt(bundle_dir, sweep_id="sweep-1")
     check(
-        "absence-shaped" in prompt and "what check should exist" in prompt,
+        "at least one hypothesis naming a check that should exist" in prompt
+        and "does\nnot" in prompt,
         "build_prompt: requires at least one absence-shaped hypothesis per step",
         prompt,
     )
@@ -374,7 +375,7 @@ def test_build_prompt_states_bounded_scope_from_bundle_manifest():
             json.dump({"scope_paths": ["pkg/cert", "pkg/session"]}, f)
         prompt = planner.build_prompt(bundle_dir, sweep_id="sweep-1")
     check(
-        "BOUNDED sweep" in prompt,
+        "Scope: `pkg/cert`, `pkg/session`." in prompt,
         "build_prompt: a scoped bundle's prompt says the inventory is a bounded scope",
         prompt,
     )
@@ -458,7 +459,11 @@ def test_prepare_paths_filters_bundle_and_prompt_states_the_scope():
             "prepare: --path bounds the prompt's file inventory, excluding out-of-scope files",
             content,
         )
-        check("BOUNDED sweep" in content, "prepare: the prompt states the inventory is a bounded scope")
+        check(
+            content.startswith("Write review hypotheses.\n\nScope: `pkg/cert`"),
+            "prepare: the prompt states the bounded scope",
+            content[:120],
+        )
 
         manifest_path = os.path.join(sweep_dir, "bundle", "MANIFEST.json")
         with open(manifest_path) as f:
@@ -935,12 +940,18 @@ def test_validate_step_root_file_scope_error_and_prompt_share_the_same_rule_text
         "validate_step: rejection message quotes BOUNDED_SCOPE_RULE verbatim",
         str(errors),
     )
+    # The rule is single-sourced into `validate_step()`'s rejection message, asserted above, and
+    # deliberately NOT into the plan prompt. Since Issue #4056 the partition is computed by the
+    # harness and the model never chooses a scope, so quoting 1,296 characters of scope rule at it
+    # instructs nothing it can act on -- it was already marked "informational only" where it sat.
+    # The drift this pairing guards against is between the rule and its ENFORCEMENT, which the
+    # assertion above covers; a prompt that cannot use the rule is not part of that pairing.
     with tempfile.TemporaryDirectory() as bundle_dir:
         _write_tree_tsv(bundle_dir, [("pkg/foo/foo.go", "go", "1", "abcdef123456", "business")])
         prompt = planner.build_prompt(bundle_dir, sweep_id="sweep-1")
     check(
-        planner.BOUNDED_SCOPE_RULE in prompt,
-        "build_prompt: the prompt quotes the exact same BOUNDED_SCOPE_RULE text used by validate_step",
+        planner.BOUNDED_SCOPE_RULE not in prompt,
+        "build_prompt: does not quote the scope rule at a model that no longer chooses scope",
     )
 
 

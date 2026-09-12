@@ -519,16 +519,19 @@ def _render_partition_steps_block(steps: "list[dict]") -> str:
     for index, step in enumerate(steps, start=1):
         filename = f"step-{index:03d}.json"
         files_block = "\n".join(f"{metadata.ENTRY_PREFIX}{p}" for p in step["files"]) or "  (none)"
-        axis_note = (
-            f"axis: boundary (configuration key `{step['config_key']}`, spans more than one "
-            "top-level subtree by design -- see the bounded-scope note below)"
-            if step["axis"] == partition.AXIS_BOUNDARY
-            else "axis: directory"
-        )
-        blocks.append(
-            f"Step {index} -- write your hypotheses to `/workspace-out/{filename}` ({axis_note})\n"
-            f"files:\n{files_block}"
-        )
+        # The boundary step carries its own instruction rather than a label plus a
+        # note elsewhere in the prompt (Issue #4059 review): it is the only step
+        # whose files deliberately span subtrees, and the hypotheses it wants are a
+        # different shape. A directory step needs no label at all -- nothing in the
+        # prompt asks the model to treat one differently.
+        header = f"Step {index} -- write your hypotheses to `/workspace-out/{filename}`"
+        if step["axis"] == partition.AXIS_BOUNDARY:
+            header += (
+                f"\nThese files span subtrees because they all read or write `{step['config_key']}`."
+                " Hypothesise disagreement between them about that key: a caller assuming the"
+                " callee validates, a callee assuming the caller did."
+            )
+        blocks.append(f"{header}\nfiles:\n{files_block}")
     return "\n\n".join(blocks)
 
 
@@ -580,65 +583,35 @@ def build_prompt(bundle_dir: str, sweep_id: str) -> str:
     if scope_paths:
         scope_list = ", ".join(f"`{p}`" for p in scope_paths)
         scope_line = (
-            f"This is a BOUNDED sweep, not a full-repository review: the inventory below is "
-            f"scoped to {scope_list} only. There is nothing outside it for you to cover."
+            f"Scope: {scope_list}."
         )
     else:
-        scope_line = (
-            "This sweep covers the full repository -- the inventory below is not bounded to any "
-            "subtree."
-        )
+        scope_line = "Scope: the full repository."
     partition_steps = partition.partition(bundle_dir)
     steps_block = _render_partition_steps_block(partition_steps)
-    return f"""You are a hypothesis writer for security-review sweep `{sweep_id}`.
+    return f"""Write review hypotheses.
 
 {scope_line}
 
-You have been given the file inventory below, read from the bundle's
-`{TREE_ARTIFACT_NAME}` artifact. It contains only repository-relative file paths -- it
-deliberately does NOT contain the contents of any source file, and there is no repository
-checkout mounted in this container for you to read one from even if you wanted to: `/workspace`
-here is the bundle itself, not a checkout. Do not attempt to read any file's contents (via `cat`,
-`git show`, or any other command) to learn more than what is given here.
+You have file paths, no file contents. Ground every hypothesis in what the paths suggest, never
+in invented specifics.
 
---- REPOSITORY METADATA (paths only) ---
-{payload}--- END REPOSITORY METADATA ---
+Write hypotheses for each step below. Steps are fixed.
 
-This sweep has already been partitioned into the review steps below, deterministically, by the
-harness itself -- not by you. Each step's files were assigned from the file inventory above.
-Do not add, remove, rename, or resize a step, and do not choose different files for one: they are
-enforced underneath you, and a step file whose `scope` or `files` disagrees with what is given
-below is rejected outright rather than silently corrected. Your only job for each step is to
-write hypotheses.
-
-A directory-axis step's files always share one top-level repository subtree ({BOUNDED_SCOPE_RULE}
--- informational only here, since you are not choosing scope). A boundary-axis step is the
-deliberate exception: it collects every file that reads or writes one configuration key,
-regardless of which subtree each file lives in, because that is exactly the shape of evidence a
-directory-bounded step can never see on its own -- a caller that assumes the callee validates
-something, and a callee that assumes the caller already did.
-
+--- REPOSITORY METADATA (assigned steps) ---
 {steps_block}
+--- END REPOSITORY METADATA ---
 
-For each step, propose one or more concrete hypotheses about what a later review pass should
-investigate in that step's files. A hypothesis has exactly one required form: a falsifiable claim
-about specific code, paired with the evidence that would confirm or refute it -- never a broad
-security property. Good: "the certificate expiry check at the point where the chain is validated
-may compare against a clock value that is never re-read per request, so a certificate that expired
-after process start could still validate" -- specific, and `required_evidence` names exactly what
-to look for. Bad: "certificate validation is correct" -- a broad property no single bounded step
-can close, which is why a hypothesis phrased this way tends to resolve `inconclusive`, the least
-useful disposition a finder lane can report. Base every hypothesis only on what the file inventory
-(paths, directory names) suggests the code might do; you have not read any file's contents, so
-ground every hypothesis in that, not in invented specifics.
+Each hypothesis is a falsifiable claim about specific code. Never a broad property.
 
-Every step must include at least one hypothesis of the absence-shaped form: what check should
-exist among this step's files and does not -- a missing authorization call, an unregistered
-revocation path, a handler nobody wired. A list of files that exist points at nothing that is
-missing unless you name it yourself.
+Good: "the retry loop may re-read the deadline only on entry, so a request that exceeds it mid-loop
+still completes."
+Bad: "request handling is correct".
 
-Write each step as its own JSON file. Because your tools are `Bash` and `Glob` only (no `Write`),
-create each file with a Bash heredoc, for example:
+Give every step at least one hypothesis naming a check that should exist among its files and does
+not — a missing authorization call, an unregistered revocation path, a handler nobody wired.
+
+Write each step as its own JSON file, using a Bash heredoc:
 
     cat > /workspace-out/step-001.json <<'JSON'
     {{
@@ -658,26 +631,7 @@ create each file with a Bash heredoc, for example:
     }}
     JSON
 
-Rules for every step file:
-- File name: `step-NNN.json` (zero-padded, matching the step's own number above), written
-  directly under `/workspace-out/` -- your only writable directory.
-- `step_id`: must exactly match the file's own name without the `.json` suffix (e.g.
-  `step-001` for `step-001.json`).
-- `hypotheses`: a JSON array of at least one hypothesis object, including at least one
-  absence-shaped one (see above). Each entry has:
-  - `id`: a short identifier unique within this step's own hypotheses list (e.g. `h1`, `h2`) --
-    it does not need to be unique across steps or across other planners.
-  - `objective`: the falsifiable claim -- see the required form above.
-  - `required_evidence`: what evidence in the code would confirm or refute this hypothesis.
-  - Do NOT include a `planner` field on any hypothesis -- it is filled in for you, exactly like
-    `sweep_id`/`commit_sha`/`planners` at the step level.
-- Do NOT include `scope`, `files`, `sweep_id`, `commit_sha`, or `planners` -- these are filled in
-  for you from the harness's own partition above. If you include `scope` or `files` anyway, they
-  must exactly match the step's assignment above, or the entire step is rejected.
-
-Write one file per step listed above. Do not write anything else, anywhere else. When you are
-done, stop -- do not summarize your work in chat, since nothing you say outside these files is
-read by anyone.
+`step_id` matches the filename. No other keys.
 """
 
 
@@ -985,8 +939,7 @@ def launch(
 # that is not claude, and raises if the paragraph is not found verbatim -- a
 # future edit to the prompt must not silently skip the substitution and leave a
 # codex planner reading instructions about Claude Code's tool list.
-CLAUDE_WRITE_MECHANISM = """Write each step as its own JSON file. Because your tools are `Bash` and `Glob` only (no `Write`),
-create each file with a Bash heredoc, for example:
+CLAUDE_WRITE_MECHANISM = """Write each step as its own JSON file, using a Bash heredoc:
 """
 
 HARNESS_WRITE_MECHANISM = {
@@ -996,8 +949,7 @@ HARNESS_WRITE_MECHANISM = {
     # and no Claude tool names. investigator-entrypoint.sh's plan branch owns
     # the `--sandbox` value and the reasoning behind it; do not restate it here,
     # where it would go stale the moment that value changes.
-    "codex": """Write each step as its own JSON file in your current working directory, which is
-`/workspace-out` -- the only directory you may write to. For example:
+    "codex": """Write each step as its own JSON file in your working directory, `/workspace-out`:
 """,
 }
 
