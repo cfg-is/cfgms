@@ -733,6 +733,156 @@ func TestManager_DualAuthorityWindowBound_ThroughManager(t *testing.T) {
 	}
 }
 
+// blockingLeaseStore wraps a real business.LeaseStore and blocks each
+// AcquireOrRenew call until the test closes release, so a test can
+// deterministically observe Manager.Stop() waiting on runLeaseAcquisition's
+// in-flight call. Every method other than AcquireOrRenew is the embedded real
+// store's own — this delegates to a genuine implementation rather than faking
+// one (CLAUDE.md's no-mocks rule).
+type blockingLeaseStore struct {
+	business.LeaseStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingLeaseStore(inner business.LeaseStore) *blockingLeaseStore {
+	return &blockingLeaseStore{
+		LeaseStore: inner,
+		entered:    make(chan struct{}, 1),
+		release:    make(chan struct{}),
+	}
+}
+
+func (b *blockingLeaseStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// blockingNodeRegistryStore is blockingLeaseStore's counterpart for
+// business.NodeRegistryStore, gating RegisterNode instead of AcquireOrRenew.
+type blockingNodeRegistryStore struct {
+	business.NodeRegistryStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingNodeRegistryStore(inner business.NodeRegistryStore) *blockingNodeRegistryStore {
+	return &blockingNodeRegistryStore{
+		NodeRegistryStore: inner,
+		entered:           make(chan struct{}, 1),
+		release:           make(chan struct{}),
+	}
+}
+
+func (b *blockingNodeRegistryStore) RegisterNode(ctx context.Context, self business.NodeRecord) error {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.NodeRegistryStore.RegisterNode(ctx, self)
+}
+
+// TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning is the deterministic
+// regression guard for Issue #4057 (PR #4062 review, round 3): it asserts the
+// join in Stop() directly instead of racing a Windows-only file-handle timing
+// window. TestManager_DualAuthorityWindowBound_ThroughManager's revert-and-rerun
+// showed 20/20 passes even with Stop()'s m.bgWG.Wait() removed on the hardware
+// available at the time — a regression guard that cannot fail when the fix is
+// reverted is not a guard. This test blocks the lease store's AcquireOrRenew call
+// mid-flight, calls Stop() on a separate goroutine, and requires Stop() has NOT
+// returned while that call is still blocked; only after release does Stop()
+// return. Reverting m.bgWG.Wait() in Stop() fails this test immediately, on any
+// OS, with no race required.
+func TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning(t *testing.T) {
+	blocking := newBlockingLeaseStore(newTestLeaseStore(t))
+	manager := newLeaseBackedClusterManager(t, "stop-join-lease-node", blocking)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLeaseAcquisition never called AcquireOrRenew")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.Stop(context.Background()) }()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop() returned while runLeaseAcquisition's AcquireOrRenew call was still blocked in flight — Stop() is not joining the background loop")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the blocked AcquireOrRenew call was released")
+	}
+}
+
+// TestManager_Stop_JoinsNodeRegistrationLoopBeforeReturning is
+// TestManager_Stop_JoinsLeaseAcquisitionLoopBeforeReturning's counterpart for
+// runNodeRegistration, the second goroutine m.bgWG joins in Stop(). Both
+// goroutines share one WaitGroup, but each has its own Add/Done pair, so a
+// defect that dropped the join for only one of the two would not be caught by
+// exercising the other.
+func TestManager_Stop_JoinsNodeRegistrationLoopBeforeReturning(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, storageManager.Close()) })
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "stop-join-registry-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	require.NoError(t, manager.SetLeaseStore(newTestLeaseStore(t)))
+
+	blocking := newBlockingNodeRegistryStore(newTestNodeRegistryStore(t))
+	manager.nodeRegistryStore = blocking
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runNodeRegistration never called RegisterNode")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- manager.Stop(context.Background()) }()
+
+	select {
+	case <-stopDone:
+		t.Fatal("Stop() returned while runNodeRegistration's RegisterNode call was still blocked in flight — Stop() is not joining the background loop")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(blocking.release)
+
+	select {
+	case err := <-stopDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return after the blocked RegisterNode call was released")
+	}
+}
+
 // TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager proves the
 // leadership lease is wired by construction from the StorageManager the Manager is
 // handed, with no explicit SetLeaseStore call anywhere in the test. This is the

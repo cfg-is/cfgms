@@ -627,6 +627,15 @@ func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, ho
 	defer ticker.Stop()
 
 	for {
+		// select does not prefer ctx.Done() over ticker.C when both are ready at
+		// once, so without this check a cancellation observed by Stop() can still
+		// lose that race and let one more write start after m.cancel() — this
+		// check makes "no new write once cancellation is observed" structural
+		// rather than a timing coincidence.
+		if ctx.Err() != nil {
+			return
+		}
+
 		if _, _, err := lm.TryAcquire(ctx, clusterLeadershipLeaseName, holderID, ttl); err != nil {
 			m.logger.Warn("Failed to acquire/renew cluster leadership lease",
 				"error", logging.SanitizeLogValue(err.Error()))
@@ -653,6 +662,14 @@ func (m *Manager) runNodeRegistration(ctx context.Context, store business.NodeRe
 	defer ticker.Stop()
 
 	for {
+		// See the identical check in runLeaseAcquisition: select does not prefer
+		// ctx.Done() over ticker.C when both are ready, so this makes "no new
+		// write once cancellation is observed" structural rather than timing-
+		// dependent.
+		if ctx.Err() != nil {
+			return
+		}
+
 		if err := store.RegisterNode(ctx, self); err != nil {
 			m.logger.Warn("Failed to register cluster node",
 				"error", logging.SanitizeLogValue(err.Error()))
