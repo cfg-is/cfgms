@@ -2677,20 +2677,55 @@ reach every `HIGH_RISK_TIERS` file either.
 #4066's answer is a third axis, `axis: "risk"` (`partition._risk_steps()`), rather than re-scoping
 G-3 to measure less: every row whose `tier` is in `HIGH_RISK_TIERS` is grouped across the *whole*
 reviewed tree — never by directory or configuration key — and `partition._interleave_by_directory()`
-round-robins that group across its distinct directories before the shared budget packer
-(`partition._pack_by_loc_budget()`) cuts it into `MAX_STEP_NON_TEST_LOC`-bounded steps. The
-interleave step matters: packing high-risk rows in the same same-subject-first order the other two
-axes use would silently reproduce a single directory's own grouping whenever that directory's
-high-risk files formed a whole bucket by themselves, defeating the axis's purpose in exactly the
-cases it exists for. Because a risk-axis step's `axis` field is neither `"directory"` nor `None`, it
-lands on `planner.validate_step()`'s existing non-directory branch unmodified (documented as generic
-there since #4056) — allowed to span subtrees, bounded by loc instead. Every `entrypoint`/`security`
-file therefore gets a second step whose grouping key and, in every case but a bundle whose high-risk
-files all sit in one directory, whose file set genuinely differ from its directory step — the
-coverage half of G-3 now holds by construction the way #4056 originally (and wrongly) claimed. The
-"ask a different question" half stays the model's job, exactly as before: a risk-axis step still
-needs a hypothesis whose `objective` text differs from its directory-axis sibling's for G-3 to pass
-in full.
+round-robins that group across its distinct directory boundaries before a packer cuts it into
+`MAX_STEP_NON_TEST_LOC`-bounded steps. Because a risk-axis step's `axis` field is neither
+`"directory"` nor `None`, it lands on `planner.validate_step()`'s existing non-directory branch
+unmodified (documented as generic there since #4056) — allowed to span subtrees, bounded by loc
+instead.
+
+**The first cut of the risk axis did not deliver the guarantee it claimed (PO fix round, Issue
+#4066, post-merge).** Merged behind PR #4068, `_interleave_by_directory()` fed a plain
+`_pack_by_loc_budget()`, and the module docstring asserted a resulting step's file set was "drawn
+from more than one directory whenever the high-risk files themselves span more than one." Round-robin
+interleave only spreads a minority directory's rows once each; once every minority directory is
+exhausted, every later bucket is built from consecutive rows of whichever directory has the most
+high-risk files — the directory axis's own grouping under a different `axis` label. Measured
+directly: a 40/1/1 high-risk file split across three directories left 5 of 6 risk steps confined to
+the dominant directory, and a sweep of 1–14 minority directories against 8–79 dominant-directory
+files found 144 configurations where a risk step's file set came out byte-identical to a
+directory-axis step's — a file "reviewed twice" that way was reviewed once, from the same angle, and
+G-3 reported coverage that did not exist. The founder's call was to fix the packer rather than
+narrow the claim: `partition._pack_multi_directory()` tracks which directory boundary a bucket has
+accumulated so far and, while it holds rows from only one, reserves headroom (`MAX_STEP_NON_TEST_LOC`
+minus the smallest-`loc` row belonging to a different boundary) so that a bucket which would
+otherwise close single-boundary can still borrow that row in and stay within budget. A borrowed row
+costs its full `loc` like any other row: it is a second appearance of a file already read in its own
+bucket, so exempting it the way a `tier: test` row is exempted is defensible in principle, but
+`planner.validate_step()` grants no such exemption — it sums every non-test path in a step's scope,
+borrowed or not, and a step over `MAX_STEP_NON_TEST_LOC` is rejected and deleted from the plan. An
+uncounted borrow therefore does not buy a bigger step, it deletes the step: measured on this
+repository's own numbers (12 300-`loc` `security` rows in `pkg/cert` plus `cmd/steward/main.go` at
+its real 2209 `loc`), the first cut of the borrow produced four risk steps of 2509/3709/3709/2809
+non-test `loc`, every one of them rejected, silently reverting the plan to the pre-#4066 shape the
+axis exists to fix. The packer and the validator now measure the same number
+(`partition._counted_loc()`), so a borrow that would not fit is declined, and the headroom
+reservation is dropped entirely when no row of the boundary being packed could fit inside it (a
+reservation that buys no borrow only fragments budget-filling steps into single-row ones).
+Because a directory-axis
+step is always confined to one boundary, a risk-axis bucket that spans more than one can never be
+set-identical to it, so this closes the gap except where the budget itself forbids the borrow, and
+the one case that cannot be helped at all: a bundle whose high-risk files all sit in a single
+directory boundary, where there is no
+other boundary to borrow from — and where, not coincidentally, the directory axis's own step is
+already the full set, so nothing is lost by comparison. Staying in budget wins over the
+multi-boundary guarantee wherever the two conflict: a single-boundary step is a weaker look at a
+file, an over-budget step is no look at all. Every `entrypoint`/`security` file therefore
+gets a second step whose grouping key — and, wherever the budget leaves room for the borrow, whose
+file set — genuinely differs from its directory step's: the
+coverage half of G-3 now holds by construction the way #4056 originally (and wrongly) claimed, and
+the way #4066's first cut (also wrongly) claimed to have fixed. The "ask a different question" half
+stays the model's job, exactly as before: a risk-axis step still needs a hypothesis whose `objective`
+text differs from its directory-axis sibling's for G-3 to pass in full.
 
 **Why G-3 earns its keep.** Metadata-only decomposition partitions blind: the planner cannot see a
 data flow that crosses two files it happened to place in different steps, so that flow falls
