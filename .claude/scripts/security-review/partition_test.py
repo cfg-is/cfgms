@@ -291,10 +291,18 @@ def test_boundary_axis_empty_when_config_surface_is_header_only():
     )
 
 
-def test_boundary_axis_oversized_key_splits_deterministically():
-    # Tech Lead note: a key whose referencing_files alone exceed the budget
-    # splits into multiple axis:boundary steps keyed to the same config key,
-    # never silently dropping files or emitting an over-budget step.
+def test_boundary_axis_skips_an_oversized_key_rather_than_splitting_it():
+    # CHANGED (Issue #4059). This previously asserted that an over-budget key
+    # SPLITS into several steps. Measured against the real repository, that is
+    # the wrong behaviour: splitting buckets a key's files by directory, which
+    # is the axis the boundary step exists to escape, and it produced steps
+    # confined to one subtree -- twenty of forty-four -- and even single-file
+    # steps. A boundary step's only property is that every file touching the
+    # key is visible at once; a split destroys it and leaves something that
+    # looks like coverage. A key referenced that widely is also not a trust
+    # signal, it just says "widely used". The directory axis still covers every
+    # one of those files, and an empty boundary axis is already valid (#4056
+    # AC4c), so the key is skipped.
     rows = []
     files = []
     for i, top in enumerate(["pkg", "features"]):
@@ -310,17 +318,46 @@ def test_boundary_axis_oversized_key_splits_deterministically():
         steps = partition.partition(bundle_dir)
 
     boundary_steps = [s for s in steps if s["axis"] == "boundary"]
-    check(len(boundary_steps) > 1, "partition: an oversized boundary key splits into more than one step", str(len(boundary_steps)))
     check(
-        all(s["config_key"] == "CFGMS_WIDE_KEY" for s in boundary_steps),
-        "partition: every split step stays keyed to the same config key",
+        boundary_steps == [],
+        "partition: an oversized boundary key yields no boundary step, rather than a split one",
         str(boundary_steps),
     )
-    all_files = sorted(f for s in boundary_steps for f in s["files"])
-    check(all_files == sorted(files), "partition: no file is dropped across the split", str(all_files))
-    for s in boundary_steps:
-        non_test_loc = sum(300 for _ in s["files"])
-        check(non_test_loc <= partition.MAX_STEP_NON_TEST_LOC, "partition: each split boundary step stays within budget", str(non_test_loc))
+    # The files are not lost -- the directory axis covers all of them.
+    covered = {f for s in steps if s["axis"] == "directory" for f in s["files"]}
+    check(
+        covered.issuperset(files),
+        "partition: skipping the key drops no file from the plan",
+        str(sorted(set(files) - covered)),
+    )
+
+
+def test_boundary_axis_keeps_an_in_budget_key_whole():
+    # The property the axis exists for: every file touching one key in ONE
+    # step, spanning subtrees. Asserted directly so a future change that
+    # reintroduces splitting fails here.
+    rows = []
+    files = []
+    for i, top in enumerate(["pkg", "features"]):
+        path = f"{top}/mod{i}/file.go"
+        files.append(path)
+        rows.append((path, "go", "100", f"{'b' * 10}{i}0", "business"))
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, rows)
+        write_config_tsv(bundle_dir, [
+            ("CFGMS_NARROW_KEY", "env", "2", "|".join(sorted(files)), "unknown", "business"),
+        ])
+        steps = partition.partition(bundle_dir)
+
+    boundary_steps = [s for s in steps if s["axis"] == "boundary"]
+    check(len(boundary_steps) == 1, "partition: an in-budget key is exactly one step", str(len(boundary_steps)))
+    check(
+        sorted(boundary_steps[0]["files"]) == sorted(files),
+        "partition: that step holds every file touching the key",
+        str(boundary_steps[0]["files"]),
+    )
+    tops = {f.split("/")[0] for f in boundary_steps[0]["files"]}
+    check(len(tops) == 2, "partition: and it spans more than one top-level subtree", str(tops))
 
 
 # --- AC5: stable step ids -----------------------------------------------------

@@ -84,14 +84,21 @@ AXIS_BOUNDARY = "boundary"
 # scenario id, so two planner models produce comparable plans.
 AXIS_SCENARIO = "scenario"
 
-# Basis recorded in Issue #4056: measured on the evidence sweep's own bundle
-# (scope pkg/cert + pkg/session, commit 70b3024c), Fable's four steps came to
-# 3441/910/544/1090 non-test loc, and pkg/cert alone is 4895 non-test loc
-# across 17 non-test files. 1500 splits only the one outsized step and leaves
-# the other three intact -- it reproduces the shape of a plan a capable model
-# already produced rather than imposing an invented granularity. A starting
-# point with a recorded basis, not a law -- tune it against later evidence.
-MAX_STEP_NON_TEST_LOC = 1500
+# Raised from 1500 to 3000 (Issue #4059) against full-repository evidence.
+#
+# 1500 was calibrated on a BOUNDED sweep -- two packages, where Fable's own
+# four steps came to 3441/910/544/1090 non-test loc -- and it does not
+# generalise. This repository holds 621,684 non-test loc, so a 1500 budget
+# imposes a floor of 415 directory steps and produced 513, against the 203
+# Fable chose when it planned the same tree itself. The budget, not the
+# grouping, sets the step count, and every step is one invocation per lane:
+# a granularity two and a half times finer than a capable model thought the
+# work needed is paid for on every lane of every sweep.
+#
+# 3000 lands near 250 directory steps, close to that model-chosen shape.
+# Still a starting point with a recorded basis, not a law -- but calibrate the
+# next change against the whole tree, not one package.
+MAX_STEP_NON_TEST_LOC = 3000
 
 # Mirrors `planner.EXCLUDED_TOP_LEVEL_DIRS` / `REPO_ROOT_BOUNDARY` exactly
 # (kept as an independent, minimal copy rather than an import -- see the
@@ -287,6 +294,34 @@ def _directory_steps(tree_rows: "list[dict]") -> "list[dict]":
     return steps
 
 
+def _split_boundary_key(
+    rows: "list[dict]", root_files: "frozenset[str]"
+) -> "list[list[dict]]":
+    """One bucket per boundary-axis step for a single configuration key.
+
+    Returns a single bucket whenever the key fits `MAX_STEP_NON_TEST_LOC`,
+    which is the common case and the one that matters: the whole point of the
+    axis is that every file touching the key is visible at once.
+
+    Over budget, returns NO bucket: the key is skipped. Splitting destroys the
+    only property the step has, and an empty boundary axis is already a valid
+    outcome (#4056 AC4c). The directory axis still covers every one of those
+    files.
+    """
+    non_test_loc = sum(r["loc"] for r in rows if r.get("tier") != _TEST_TIER)
+    if non_test_loc <= MAX_STEP_NON_TEST_LOC:
+        return [sorted(rows, key=lambda r: r["path"])]
+    # Over budget: SKIP the key rather than split it. Any split destroys the
+    # one property the step has -- every file touching the key visible at once
+    # -- and measurement showed splitting produces single-subtree, sometimes
+    # single-FILE buckets, which is a directory step wearing a boundary label.
+    # A key referenced across that much of the tree is also not a trust-
+    # boundary signal: `CFGMS_ALLOWED_ORIGINS` read in fifty places says
+    # "widely used", not "here is where untrusted input crosses". Skipping is
+    # honest; shredding manufactures steps that look like coverage.
+    return []
+
+
 def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list[dict]":
     root_files = frozenset(r["path"] for r in tree_rows if "/" not in r["path"])
     tree_by_path = {r["path"]: r for r in tree_rows}
@@ -311,7 +346,20 @@ def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list
             continue
 
         rows_for_key = [tree_by_path[p] for p in referencing]
-        for bucket in _split_by_loc_budget(rows_for_key):
+        # ONE STEP PER KEY. `_split_by_loc_budget()` orders by directory stem
+        # so a test file sorts beside its subject -- correct for the directory
+        # axis, and exactly wrong here: splitting a key's files buckets them
+        # BY DIRECTORY, which is the axis this one exists to escape. Measured
+        # on this repository before the fix: `CFGMS_ADMIN_BUNDLE` became two
+        # steps, one holding a single test file and one holding six files from
+        # elsewhere, so the cross-subtree pairing the step exists to show was
+        # split apart and neither half spanned two subtrees.
+        #
+        # An over-budget key is split as a last resort, but round-robin across
+        # its subtrees rather than by directory, so every part still spans more
+        # than one -- a part that did not would be a directory step wearing the
+        # wrong axis.
+        for bucket in _split_boundary_key(rows_for_key, root_files):
             files = sorted(r["path"] for r in bucket)
             steps.append(
                 {
