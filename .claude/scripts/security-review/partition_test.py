@@ -270,6 +270,115 @@ def test_boundary_axis_oversized_key_splits_deterministically():
         check(non_test_loc <= partition.MAX_STEP_NON_TEST_LOC, "partition: each split boundary step stays within budget", str(non_test_loc))
 
 
+# --- Risk axis (Issue #4066) -------------------------------------------------
+
+def test_risk_axis_gives_every_high_risk_file_a_second_step_with_different_files():
+    # [REQUIRED TEST] (Issue #4066 AC2): a synthetic bundle with entrypoint/
+    # security-tier files spread across more than one directory alongside
+    # ordinary business-tier files. Every high-risk file must appear in a
+    # step besides its own directory-axis step, and that second step's file
+    # set must differ from the directory step's -- the exact contract G-3
+    # depends on ("a high-risk file appearing in at least two steps" whose
+    # coverage half is no longer left to chance).
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [
+            ("pkg/cert/manager.go", "go", "10", "aaaaaaaaaaaa", "security"),
+            ("pkg/cert/util.go", "go", "10", "bbbbbbbbbbbb", "business"),
+            ("pkg/session/session.go", "go", "10", "cccccccccccc", "security"),
+            ("cmd/steward/main.go", "go", "10", "dddddddddddd", "entrypoint"),
+            ("features/rbac/engine.go", "go", "10", "eeeeeeeeeeee", "business"),
+        ])
+        steps = partition.partition(bundle_dir)
+
+    risk_steps = [s for s in steps if s["axis"] == "risk"]
+    check(len(risk_steps) >= 1, "partition: at least one risk-axis step is produced", str(steps))
+
+    high_risk_files = ["pkg/cert/manager.go", "pkg/session/session.go", "cmd/steward/main.go"]
+    file_to_steps: "dict[str, list[dict]]" = {}
+    for step in steps:
+        for f in step["files"]:
+            file_to_steps.setdefault(f, []).append(step)
+
+    for path in high_risk_files:
+        covering = file_to_steps.get(path, [])
+        directory_step = next((s for s in covering if s["axis"] == "directory"), None)
+        risk_step = next((s for s in covering if s["axis"] == "risk"), None)
+        check(directory_step is not None, f"partition: {path} still has its directory-axis step", str(covering))
+        check(risk_step is not None, f"partition: {path} is also assigned to a risk-axis step", str(covering))
+        if directory_step is not None and risk_step is not None:
+            check(
+                set(risk_step["files"]) != set(directory_step["files"]),
+                f"partition: {path}'s risk-axis step has a different file set than its directory step",
+                f"directory={directory_step['files']} risk={risk_step['files']}",
+            )
+
+    all_risk_step_files = {f for s in risk_steps for f in s["files"]}
+    check(
+        "pkg/cert/util.go" not in all_risk_step_files and "features/rbac/engine.go" not in all_risk_step_files,
+        "partition: a business-tier file is never pulled into the risk axis",
+        str(all_risk_step_files),
+    )
+
+
+def test_risk_axis_interleaves_high_risk_files_across_directories():
+    # The risk axis exists specifically because a bucket built from
+    # consecutive same-directory rows would just reproduce the directory
+    # axis's own grouping. With high-risk files in three directories and a
+    # budget wide enough for only one step, that step's files must be drawn
+    # from more than one directory.
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [
+            ("pkg/cert/manager.go", "go", "10", "aaaaaaaaaaaa", "security"),
+            ("pkg/session/session.go", "go", "10", "bbbbbbbbbbbb", "security"),
+            ("pkg/secrets/store.go", "go", "10", "cccccccccccc", "security"),
+        ])
+        steps = partition.partition(bundle_dir)
+
+    risk_steps = [s for s in steps if s["axis"] == "risk"]
+    check(len(risk_steps) == 1, "partition: a small high-risk set fits in one risk-axis step", str(risk_steps))
+    top_level_dirs = {f.split("/")[1] for f in risk_steps[0]["files"]}
+    check(
+        len(top_level_dirs) > 1,
+        "partition: the risk-axis step draws from more than one directory",
+        str(top_level_dirs),
+    )
+
+
+def test_risk_axis_bounded_by_loc_budget():
+    # [REQUIRED TEST] mirrors test_no_step_exceeds_loc_budget_over_non_test_files
+    # for the risk axis: many high-risk files across several directories,
+    # summing well past MAX_STEP_NON_TEST_LOC, must still split into
+    # multiple budget-respecting risk-axis steps with no file dropped.
+    rows = []
+    files = []
+    for i in range(20):
+        path = f"pkg/security{i % 4}/file{i:02d}.go"
+        files.append(path)
+        rows.append((path, "go", "200", f"{'a' * 11}{i}", "security"))
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, rows)
+        steps = partition.partition(bundle_dir)
+
+    risk_steps = [s for s in steps if s["axis"] == "risk"]
+    check(len(risk_steps) > 1, "partition: an oversized risk axis splits into more than one step", str(len(risk_steps)))
+    for s in risk_steps:
+        non_test_loc = sum(200 for _ in s["files"])
+        check(non_test_loc <= partition.MAX_STEP_NON_TEST_LOC, "partition: each risk-axis step stays within budget", str(non_test_loc))
+    all_risk_files = sorted(f for s in risk_steps for f in s["files"])
+    check(all_risk_files == sorted(files), "partition: no high-risk file is dropped across the risk-axis split", str(all_risk_files))
+
+
+def test_risk_axis_empty_when_no_high_risk_tier_files():
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        write_tree_tsv(bundle_dir, [
+            ("pkg/foo/foo.go", "go", "10", "aaaaaaaaaaaa", "business"),
+            ("docs/README.md", "markdown", "5", "bbbbbbbbbbbb", "docs"),
+        ])
+        steps = partition.partition(bundle_dir)
+    risk_steps = [s for s in steps if s["axis"] == "risk"]
+    check(risk_steps == [], "partition: no risk-axis step when the bundle has no entrypoint/security file", str(risk_steps))
+
+
 # --- Authorization boundary axis (Issue #4060) -------------------------------
 
 def test_authz_boundary_step_spans_two_subtrees_for_grant_read_path():

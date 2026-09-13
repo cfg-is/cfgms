@@ -17,7 +17,7 @@ bundle produces a byte-identical, order-independent partition every time
 `scope`/`files` to the planner model, which is asked only for hypotheses
 (AC6).
 
-Two axes, concatenated in the list `partition()` returns:
+Three axes, concatenated in the list `partition()` returns:
 
 - **`axis: "directory"`** (AC2). Files group by directory: the same top-level-
   subtree boundary `planner.py::validate_step()`'s `BOUNDED_SCOPE_RULE`
@@ -61,15 +61,47 @@ Two axes, concatenated in the list `partition()` returns:
     configuration-keyed boundary axis is.
   Both feed the same `_boundary_steps()` unmodified: a row is a row,
   regardless of which artifact it came from.
+- **`axis: "risk"`** (Issue #4066). Issue #4056 claimed G-3's coverage half
+  (a `HIGH_RISK_TIERS` file appearing in at least two steps) was satisfied by
+  construction by the two axes above. It is not: the directory axis gives
+  every file exactly one step, and the boundary axis only reaches a file that
+  happens to reference a configuration key (or, since #4060, sit in the
+  authorization grant-read join) whose referencing files cross a subtree --
+  most `entrypoint`/`security` files reference no such key at all. Measured
+  on this repository's own tree: 252 `entrypoint`/`security`-tier files
+  exist; at most 12 sit under the #4060 authorization axis's two scope
+  directories (`features/rbac/`, `pkg/storage/providers/`), and that axis
+  fires only when a store interface is actually declared and implemented
+  across them, so the real count is lower still. The scenario axis (#4059)
+  is a separate, not-yet-merged effort. This axis closes the gap directly
+  rather than stretching either existing one to fit data it does not
+  naturally have: every row whose `tier` is in `HIGH_RISK_TIERS` (mirroring
+  `planner.HIGH_RISK_TIERS`) is grouped -- across the whole reviewed tree,
+  never by directory or configuration key -- and `_interleave_by_directory()`
+  round-robins that group across its distinct directories before
+  `_pack_by_loc_budget()` cuts it into budget-bounded steps, so a resulting
+  step's file set is drawn from more than one directory whenever the
+  high-risk files themselves span more than one -- never the same set the
+  directory axis already produced for any one of them. A bundle whose
+  high-risk files all sit in a single directory is the one case this cannot
+  improve on; it is also the one case where the directory axis's own step
+  already is the full set, so nothing is lost by comparison. An empty risk
+  axis (no `HIGH_RISK_TIERS` file in scope) is a valid outcome, same as an
+  empty boundary axis.
 
-Both axes are bounded the same way: no step's total `loc` over its
+All three axes are bounded the same way: no step's total `loc` over its
 `tier != "test"` files exceeds `MAX_STEP_NON_TEST_LOC` (AC3). A `tier: test`
 file still travels with its subject (evidence about intended behaviour) --
-it just never counts against the budget. An oversized group of either axis
-splits deterministically (`_split_by_loc_budget()`), sorted by a
+it just never counts against the budget. An oversized directory or boundary
+group splits deterministically (`_split_by_loc_budget()`), sorted by a
 same-subject-stays-together key so a Go file and its `_test.go` sibling land
 in the same bucket, then by path -- so the split itself is as reproducible as
-everything else this module computes.
+everything else this module computes. The risk axis shares the identical
+budget-packing logic (`_pack_by_loc_budget()`, factored out of
+`_split_by_loc_budget()` for exactly this reuse) but feeds it a
+directory-interleaved order instead of the same-subject-first sort, per the
+risk axis's own note above -- packing risk-tier rows in directory order would
+silently reproduce the directory axis's own grouping.
 
 Every step's `step_id` is a digest of its own sorted scope path list (AC5) --
 never a counter -- so two independent partitioner runs over the same commit
@@ -101,6 +133,13 @@ AUTHZ_ARTIFACT_NAME = "07-authz-store-surface.tsv"
 
 AXIS_DIRECTORY = "directory"
 AXIS_BOUNDARY = "boundary"
+AXIS_RISK = "risk"
+
+# Mirrors `planner.HIGH_RISK_TIERS` exactly (Issue #4066) -- kept as an
+# independent, minimal copy for the same import-cycle reason
+# `EXCLUDED_TOP_LEVEL_DIRS` below is: `planner.py` imports this module to
+# compute the partition, so a reverse import would cycle.
+HIGH_RISK_TIERS = frozenset({"entrypoint", "security"})
 
 # Basis recorded in Issue #4056: measured on the evidence sweep's own bundle
 # (scope pkg/cert + pkg/session, commit 70b3024c), Fable's four steps came to
@@ -282,18 +321,17 @@ def _stem_key(path: str) -> "tuple[str, str]":
     return (directory, name)
 
 
-def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
-    """Split `rows` (every row sharing one directory boundary or one
-    configuration key) into buckets whose summed `loc` over `tier != "test"`
-    rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3).
-
-    Deterministic: `rows` is first sorted by `(_stem_key(path), path)`, so the
-    resulting buckets do not depend on the order `rows` arrived in (AC1) and a
-    test file sorts next to its subject. A single non-test file whose own
-    `loc` already exceeds the budget still becomes (the start of) its own
-    bucket -- there is nothing smaller to split it into.
+def _pack_by_loc_budget(ordered: "list[dict]") -> "list[list[dict]]":
+    """Greedily cut `ordered` into buckets whose summed `loc` over
+    `tier != "test"` rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3),
+    preserving the caller's order -- the packing half of
+    `_split_by_loc_budget()`, factored out so `_risk_steps()` can feed it a
+    directory-interleaved order instead of the same-subject-first sort
+    `_split_by_loc_budget()` uses (Issue #4066; see the module docstring's
+    risk-axis note for why that distinction matters). A single non-test row
+    whose own `loc` already exceeds the budget still becomes (the start of)
+    its own bucket -- there is nothing smaller to split it into.
     """
-    ordered = sorted(rows, key=lambda r: (_stem_key(r["path"]), r["path"]))
     buckets: "list[list[dict]]" = []
     current: "list[dict]" = []
     current_loc = 0
@@ -309,6 +347,57 @@ def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
     if current:
         buckets.append(current)
     return buckets
+
+
+def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
+    """Split `rows` (every row sharing one directory boundary or one
+    configuration key) into buckets whose summed `loc` over `tier != "test"`
+    rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3).
+
+    Deterministic: `rows` is first sorted by `(_stem_key(path), path)`, so the
+    resulting buckets do not depend on the order `rows` arrived in (AC1) and a
+    test file sorts next to its subject, then packed by `_pack_by_loc_budget()`.
+    """
+    ordered = sorted(rows, key=lambda r: (_stem_key(r["path"]), r["path"]))
+    return _pack_by_loc_budget(ordered)
+
+
+def _interleave_by_directory(rows: "list[dict]") -> "list[dict]":
+    """Round-robin `rows` across the distinct directories (`_stem_key()`'s
+    first element) its paths belong to, so a budget-bounded bucket built from
+    consecutive items in the returned order draws from more than one
+    directory whenever `rows` itself spans more than one -- unlike sorting by
+    path or by `_stem_key()`, either of which clusters same-directory rows
+    adjacently and would let `_pack_by_loc_budget()` silently reproduce a
+    single directory's own grouping (Issue #4066's `axis: risk`; see the
+    module docstring). Within a directory, rows keep `_split_by_loc_budget()`'s
+    same-subject-first order so a file and its test sibling still land
+    together when the round-robin happens to keep them in the same bucket.
+
+    Deterministic regardless of `rows`' incoming order: directories are
+    visited in sorted order at every round, and each directory's own rows are
+    pre-sorted the same way `_split_by_loc_budget()` sorts them.
+    """
+    groups: "dict[str, list[dict]]" = {}
+    for row in rows:
+        directory, _ = _stem_key(row["path"])
+        groups.setdefault(directory, []).append(row)
+    for directory in groups:
+        groups[directory].sort(key=lambda r: (_stem_key(r["path"]), r["path"]))
+
+    ordered_dirs = sorted(groups)
+    interleaved: "list[dict]" = []
+    index = 0
+    remaining = True
+    while remaining:
+        remaining = False
+        for directory in ordered_dirs:
+            bucket = groups[directory]
+            if index < len(bucket):
+                interleaved.append(bucket[index])
+                remaining = True
+        index += 1
+    return interleaved
 
 
 def _directory_steps(tree_rows: "list[dict]") -> "list[dict]":
@@ -373,6 +462,32 @@ def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list
     return steps
 
 
+def _risk_steps(tree_rows: "list[dict]") -> "list[dict]":
+    """The `axis: "risk"` steps (Issue #4066): every row whose `tier` is in
+    `HIGH_RISK_TIERS`, grouped across the whole tree -- never by directory or
+    configuration key -- so every `entrypoint`/`security` file gets a second
+    step whose grouping key genuinely differs from its directory step, not
+    only in name. See the module docstring's risk-axis note for why this
+    exists and why `_interleave_by_directory()` feeds the packer instead of
+    the same-subject-first sort the other two axes use.
+    """
+    risk_rows = [r for r in tree_rows if r.get("tier") in HIGH_RISK_TIERS]
+    if not risk_rows:
+        return []
+    steps: "list[dict]" = []
+    for bucket in _pack_by_loc_budget(_interleave_by_directory(risk_rows)):
+        files = sorted(r["path"] for r in bucket)
+        steps.append(
+            {
+                "step_id": _step_id(files),
+                "axis": AXIS_RISK,
+                "scope": files,
+                "files": files,
+            }
+        )
+    return steps
+
+
 def partition(bundle_dir: str) -> "list[dict]":
     """Compute the deterministic step partition for the bundle at
     `bundle_dir` (AC1). Pure function of `01-tree.tsv`, `06-config-surface.tsv`,
@@ -386,13 +501,19 @@ def partition(bundle_dir: str) -> "list[dict]":
     `07-authz-store-surface.tsv`; the two artifacts share one row shape, so
     `_boundary_steps()` treats a row from either identically). Directory-axis
     steps come first (AC2), sorted by their top-level boundary; boundary-axis
-    steps follow (AC4), sorted by key across both artifacts' rows together.
-    Both axes are bounded by `MAX_STEP_NON_TEST_LOC` (AC3). Carries no
-    hypotheses -- those are the planner model's own contribution, added later
-    by `planner.py::finalize()` from whatever the model wrote for a step this
-    function assigned.
+    steps follow (AC4), sorted by key across both artifacts' rows together;
+    risk-axis steps (Issue #4066) come last, giving every `HIGH_RISK_TIERS`
+    file a second step built on a different grouping key from its directory
+    step. All three axes are bounded by `MAX_STEP_NON_TEST_LOC` (AC3). Carries
+    no hypotheses -- those are the planner model's own contribution, added
+    later by `planner.py::finalize()` from whatever the model wrote for a
+    step this function assigned.
     """
     tree_rows = _read_tree_rows(bundle_dir)
     config_rows = _read_config_rows(bundle_dir)
     authz_rows = _read_authz_rows(bundle_dir)
-    return _directory_steps(tree_rows) + _boundary_steps(tree_rows, config_rows + authz_rows)
+    return (
+        _directory_steps(tree_rows)
+        + _boundary_steps(tree_rows, config_rows + authz_rows)
+        + _risk_steps(tree_rows)
+    )

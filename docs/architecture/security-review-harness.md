@@ -2656,6 +2656,42 @@ step whose objectives are a strict subset of the other's: reviewing a subset of 
 set of questions is not independent overlap either. Where a file appears in three or more steps,
 G-3 passes if any pair among them satisfies the rule.
 
+**The coverage half needed its own axis (Issue #4066).** Issue #4056 shipped the deterministic
+partitioner (`partition.py`) and claimed "G-2 passes for every bundle by construction, and so does
+G-3's coverage half (a high-risk file appearing in at least two steps)." That claim was false as
+shipped, and #4066 corrected it rather than let a gate that fails by default train readers to skip
+`## Incomplete`. The directory axis gives every file exactly one step, never two. The boundary axis
+(`axis: "boundary"`, above `_boundary_steps()`) only reaches a file that references a configuration
+key — or, since #4060, sits in the authorization grant-read join — whose referencing files cross a
+top-level subtree; most `entrypoint`/`security` files reference no such key. Evidence sweep
+`2026-09-12T1251Z-bab1f8d6` (scope `pkg/cert` + `pkg/session`) showed the failure directly: all 23
+short files failed on `len(covering) < 2`, none on `_objectives_differ()` — no non-test file was in
+two steps at all. Measured on this repository's own tree at the time of #4066: 252
+`entrypoint`/`security`-tier files exist; at most 12 sit under the #4060 authorization axis's two
+scope directories (`features/rbac/`, `pkg/storage/providers/`), and that axis only fires when a
+store interface is actually declared and implemented across them, so the real count reached is
+lower still. The scenario axis (Issue #4059, per-threat-scenario grouping) was not yet merged to
+`develop` when #4066 landed and, being scenario-scoped rather than universal, would not by itself
+reach every `HIGH_RISK_TIERS` file either.
+
+#4066's answer is a third axis, `axis: "risk"` (`partition._risk_steps()`), rather than re-scoping
+G-3 to measure less: every row whose `tier` is in `HIGH_RISK_TIERS` is grouped across the *whole*
+reviewed tree — never by directory or configuration key — and `partition._interleave_by_directory()`
+round-robins that group across its distinct directories before the shared budget packer
+(`partition._pack_by_loc_budget()`) cuts it into `MAX_STEP_NON_TEST_LOC`-bounded steps. The
+interleave step matters: packing high-risk rows in the same same-subject-first order the other two
+axes use would silently reproduce a single directory's own grouping whenever that directory's
+high-risk files formed a whole bucket by themselves, defeating the axis's purpose in exactly the
+cases it exists for. Because a risk-axis step's `axis` field is neither `"directory"` nor `None`, it
+lands on `planner.validate_step()`'s existing non-directory branch unmodified (documented as generic
+there since #4056) — allowed to span subtrees, bounded by loc instead. Every `entrypoint`/`security`
+file therefore gets a second step whose grouping key and, in every case but a bundle whose high-risk
+files all sit in one directory, whose file set genuinely differ from its directory step — the
+coverage half of G-3 now holds by construction the way #4056 originally (and wrongly) claimed. The
+"ask a different question" half stays the model's job, exactly as before: a risk-axis step still
+needs a hypothesis whose `objective` text differs from its directory-axis sibling's for G-3 to pass
+in full.
+
 **Why G-3 earns its keep.** Metadata-only decomposition partitions blind: the planner cannot see a
 data flow that crosses two files it happened to place in different steps, so that flow falls
 between step boundaries and is reviewed by nobody — while the coverage table still reads 100%,
