@@ -7,16 +7,17 @@ model's real contribution: the first varies so much between models that two
 plans become impossible to compare (see the issue's evidence sweep), which
 blocks benchmarking one planner model against another. This module replaces
 the first job with plain code: `partition(bundle_dir)` is a pure function of
-the bundle's `01-tree.tsv` file inventory plus `06-config-surface.tsv`'s
-`referencing_files` column (Issue #4056 AC4b) -- no model, no I/O beyond
-reading those two already-written bundle artifacts, no randomness. The same
+the bundle's `01-tree.tsv` file inventory plus `06-config-surface.tsv`'s and
+`07-authz-store-surface.tsv`'s `referencing_files` columns (Issue #4056 AC4b;
+`07-authz-store-surface.tsv` added by Issue #4060) -- no model, no I/O beyond
+reading those already-written bundle artifacts, no randomness. The same
 bundle produces a byte-identical, order-independent partition every time
 (AC1) -- `planner.py::prepare()` writes the result to `plan/partition.json`
 (AC10) and `planner.py::build_prompt()` presents each returned step's own
 `scope`/`files` to the planner model, which is asked only for hypotheses
 (AC6).
 
-Two axes, concatenated in the list `partition()` returns:
+Three axes, concatenated in the list `partition()` returns:
 
 - **`axis: "directory"`** (AC2). Files group by directory: the same top-level-
   subtree boundary `planner.py::validate_step()`'s `BOUNDED_SCOPE_RULE`
@@ -26,25 +27,121 @@ Two axes, concatenated in the list `partition()` returns:
   directory-axis step therefore satisfies `BOUNDED_SCOPE_RULE` BY
   CONSTRUCTION: it is never possible for one to span two top-level subtrees,
   so `validate_step()` never has to catch one that does.
-- **`axis: "boundary"`** (AC4). Cut by trust boundary rather than by the tree:
-  for every configuration key in `06-config-surface.tsv` whose
-  `referencing_files` (AC4b) span more than one top-level subtree, one step
-  containing exactly those files -- deliberately spanning the same subtree
-  boundary the directory axis cannot cross, so a defect whose evidence sits on
-  both sides of a package boundary (a caller that assumes the callee
-  validates; a callee that assumes the caller did) has somewhere to be seen.
-  A key referenced from only one subtree is not a boundary case -- the
-  directory axis already covers it -- and produces no boundary step (AC4c: an
-  empty boundary axis is a valid outcome, never a failure).
+- **`axis: "boundary"`** (AC4). Cut by trust boundary rather than by the tree,
+  fed by two independent bundle artifacts that share one row shape:
+  - For every configuration key in `06-config-surface.tsv` whose
+    `referencing_files` (AC4b) span more than one top-level subtree, one step
+    containing exactly those files -- deliberately spanning the same subtree
+    boundary the directory axis cannot cross, so a defect whose evidence sits
+    on both sides of a package boundary (a caller that assumes the callee
+    validates; a callee that assumes the caller did) has somewhere to be
+    seen. A key referenced from only one subtree is not a boundary case --
+    the directory axis already covers it -- and produces no boundary step
+    (AC4c: an empty boundary axis is a valid outcome, never a failure).
+  - `07-authz-store-surface.tsv` (Issue #4060) carries the same shape for the
+    **authorization** boundary: the package that declares the RBAC store
+    interfaces and decides with them, joined with the package(s) that
+    implement the specific methods that decision reads a grant through (the
+    "grant read path"). It targets the fail-open risk a data-driven RBAC
+    model actually has -- not a route naming the wrong permission string
+    (verified unanswerable: `features/rbac/engine.go`'s
+    `AuthEngine.CheckPermission` resolves each request's resource/action
+    against runtime grants, so no route-keyed join ever leaves
+    `features/controller/api/`), but a single over-broad grant row being
+    accepted by a loose `permissionMatches` comparison once the
+    role/subject/assignment reads it depends on have actually returned data.
+    Seeing the matcher (`features/rbac`) and the store that feeds it
+    (`pkg/storage/providers/*`) in one step is what makes that visible; a
+    directory-scoped step never would. See
+    `metadata._extract_authz_store_surface()` for exactly how the join is
+    computed, and its module docstring for why the row-naming and
+    permission-string alternatives were rejected. An empty authorization axis
+    (no interface declared in scope, or no external package implements the
+    full read set) is a valid outcome for the same reason an empty
+    configuration-keyed boundary axis is.
+  Both feed the same `_boundary_steps()` unmodified: a row is a row,
+  regardless of which artifact it came from.
+- **`axis: "risk"`** (Issue #4066). Issue #4056 claimed G-3's coverage half
+  (a `HIGH_RISK_TIERS` file appearing in at least two steps) was satisfied by
+  construction by the two axes above. It is not: the directory axis gives
+  every file exactly one step, and the boundary axis only reaches a file that
+  happens to reference a configuration key (or, since #4060, sit in the
+  authorization grant-read join) whose referencing files cross a subtree --
+  most `entrypoint`/`security` files reference no such key at all. Measured
+  on this repository's own tree: 252 `entrypoint`/`security`-tier files
+  exist; at most 12 sit under the #4060 authorization axis's two scope
+  directories (`features/rbac/`, `pkg/storage/providers/`), and that axis
+  fires only when a store interface is actually declared and implemented
+  across them, so the real count is lower still. The scenario axis (#4059)
+  is a separate, not-yet-merged effort. This axis closes the gap directly
+  rather than stretching either existing one to fit data it does not
+  naturally have: every row whose `tier` is in `HIGH_RISK_TIERS` (mirroring
+  `planner.HIGH_RISK_TIERS`) is grouped -- across the whole reviewed tree,
+  never by directory or configuration key.
 
-Both axes are bounded the same way: no step's total `loc` over its
-`tier != "test"` files exceeds `MAX_STEP_NON_TEST_LOC` (AC3). A `tier: test`
-file still travels with its subject (evidence about intended behaviour) --
-it just never counts against the budget. An oversized group of either axis
-splits deterministically (`_split_by_loc_budget()`), sorted by a
-same-subject-stays-together key so a Go file and its `_test.go` sibling land
-in the same bucket, then by path -- so the split itself is as reproducible as
-everything else this module computes.
+  The first cut of this axis (round-robin interleave, then pack by budget,
+  nothing else) does not hold up under directory skew: once round-robin
+  exhausts every minority directory, every later bucket is built entirely
+  from consecutive rows of whichever directory has the most high-risk files,
+  which is exactly the directory axis's own grouping wearing a different
+  `axis` label -- a file "reviewed twice" that way was actually reviewed
+  once, from the same angle, and G-3 would report coverage that is not
+  there. A PO fix round (Issue #4066, post-merge) measured this directly: a
+  40/1/1 file split across three directories produced 5 of 6 risk steps
+  confined to the dominant directory, and a sweep of 1-14 minority
+  directories against 8-79 dominant-directory files found 144 configurations
+  where a risk step's file set was set-identical to a directory-axis step's.
+  `_pack_multi_directory()` (not plain `_pack_by_loc_budget()`) closes this:
+  it tracks which directory boundaries (`_directory_boundary()`, the same
+  granularity the directory axis itself groups by -- not the finer per-
+  directory `_stem_key()` grouping `_interleave_by_directory()` uses only to
+  order rows within a boundary) a bucket has accumulated so far, and while a
+  bucket holds rows from only one boundary it reserves enough headroom
+  (`MAX_STEP_NON_TEST_LOC` minus the smallest-`loc` row that belongs to a
+  different boundary) so that, if the bucket would otherwise close
+  single-boundary, it can still append that borrowed row and stay in
+  budget -- guaranteeing every bucket spans more than one directory boundary
+  whenever the high-risk row set itself does, not just the buckets
+  round-robin happens to interleave before minorities run out. A borrowed
+  row costs its full `loc` like any other row, and the borrow is declined
+  outright when it would not fit: `planner.py::validate_step()` measures a
+  step's budget over every non-test path in its scope with no exemption for
+  a second appearance, so an uncounted borrow does not buy a bigger step --
+  it gets the whole step rejected and deleted (PR #4068 review finding; see
+  `_pack_multi_directory()` for the measured numbers). Because a
+  multi-boundary bucket is, by construction, impossible to set-equal a
+  directory-axis step (the latter is always confined to one boundary), every
+  bucket that does borrow is a look G-3 has not already had.
+
+  Two bundles bound that: one whose high-risk files all sit in a single
+  directory boundary (no other boundary exists to borrow from -- and, not
+  coincidentally, the directory axis's own step is already the full set, so
+  nothing is lost by comparison), and one where the budget leaves no room for
+  even the smallest foreign row. In the second, the bucket closes
+  single-boundary rather than over budget: an over-budget step is not a
+  weaker look at a file, it is no look at all. An empty risk axis (no
+  `HIGH_RISK_TIERS` file in scope) is a valid outcome, same as an empty
+  boundary axis.
+
+All three axes are bounded the same way: no step's total `loc` over its
+counted `tier != "test"` files exceeds `MAX_STEP_NON_TEST_LOC` (AC3). A
+`tier: test` file still travels with its subject (evidence about intended
+behaviour) -- it just never counts against the budget. That single
+exemption (`_counted_loc()`) is the whole of it, and it is the same one
+`planner.py::validate_step()` applies when it re-measures a step: this
+module never packs against a budget its own validator computes
+differently. An oversized
+directory or boundary group splits deterministically
+(`_split_by_loc_budget()`), sorted by a same-subject-stays-together key so a
+Go file and its `_test.go` sibling land in the same bucket, then by path --
+so the split itself is as reproducible as everything else this module
+computes. The risk axis reuses `_split_by_loc_budget()`'s packing primitive
+(`_pack_by_loc_budget()`, factored out for exactly this reuse) for the
+single-directory case, where no borrowing is possible or needed, and
+`_pack_multi_directory()` otherwise -- both feed the packer a
+directory-interleaved order instead of the same-subject-first sort, per the
+risk axis's own note above -- packing risk-tier rows in directory order would
+silently reproduce the directory axis's own grouping.
 
 Every step's `step_id` is a digest of its own sorted scope path list (AC5) --
 never a counter -- so two independent partitioner runs over the same commit
@@ -53,7 +150,7 @@ identical ids for identical scopes, the "shared spine" `plan/partition.json`
 exists to give two planners' contributions something to be diffed against.
 
 **Purity and safety.** Like `metadata.py`, this module's only I/O is reading
-two files already written under `bundle_dir` -- no subprocess, no network, no
+files already written under `bundle_dir` -- no subprocess, no network, no
 model call. Every path is re-checked against `metadata._prompt_safe()` before
 it can become part of a returned step (mirroring `planner.py`'s own
 `_read_bundle_tree_paths()` re-check), so a hand-crafted or corrupted bundle
@@ -72,30 +169,42 @@ import metadata  # noqa: E402
 
 TREE_ARTIFACT_NAME = "01-tree.tsv"
 CONFIG_ARTIFACT_NAME = "06-config-surface.tsv"
+AUTHZ_ARTIFACT_NAME = "07-authz-store-surface.tsv"
 
 AXIS_DIRECTORY = "directory"
 AXIS_BOUNDARY = "boundary"
-# One step per threat scenario (Issue #4059). Unlike the other two axes, a
+AXIS_RISK = "risk"
+# One step per threat scenario (Issue #4059). Unlike the other three axes, a
 # scenario step's `files` are EMPTY here and chosen by the planner model from
 # the inventory -- the deliberate exception to Issue #4056 AC6, documented at
 # `planner._inject_partition_fields()`. The harness fixes WHICH risks are
 # reviewed and what each step is called; the model contributes which files bear
 # on that risk, which is the judgement worth benchmarking. Step id is the
 # scenario id, so two planner models produce comparable plans.
+#
+# It differs from `AXIS_RISK` in what it guarantees. The risk axis guarantees a
+# high-risk FILE is seen twice; this guarantees a catalogued RISK is asked
+# about, and unlike the risk axis it supplies the question rather than only a
+# regrouping.
 AXIS_SCENARIO = "scenario"
+
+# Mirrors `planner.HIGH_RISK_TIERS` exactly (Issue #4066) -- kept as an
+# independent, minimal copy for the same import-cycle reason
+# `EXCLUDED_TOP_LEVEL_DIRS` below is: `planner.py` imports this module to
+# compute the partition, so a reverse import would cycle.
+HIGH_RISK_TIERS = frozenset({"entrypoint", "security"})
 
 # Raised from 1500 to 3000 (Issue #4059) against full-repository evidence.
 #
 # 1500 was calibrated on a BOUNDED sweep -- two packages, where Fable's own
-# four steps came to 3441/910/544/1090 non-test loc -- and it does not
-# generalise. This repository holds 621,684 non-test loc, so a 1500 budget
-# imposes a floor of 415 directory steps and produced 513, against the 203
-# Fable chose when it planned the same tree itself. The budget, not the
-# grouping, sets the step count, and every step is one invocation per lane:
-# a granularity two and a half times finer than a capable model thought the
-# work needed is paid for on every lane of every sweep.
+# four steps came to 3441/910/544/1090 non-test loc -- and does not generalise.
+# This repository holds 621,684 non-test loc, so a 1500 budget imposes a floor
+# of 415 directory steps and produced 513, against the 203 Fable chose when it
+# planned the same tree itself. The budget, not the grouping, sets the step
+# count, and every step is one invocation per lane: a granularity two and a
+# half times finer than a capable model thought the work needed is paid on
+# every lane of every sweep.
 #
-# 3000 lands near 250 directory steps, close to that model-chosen shape.
 # Still a starting point with a recorded basis, not a law -- but calibrate the
 # next change against the whole tree, not one package.
 MAX_STEP_NON_TEST_LOC = 3000
@@ -217,6 +326,36 @@ def _read_config_rows(bundle_dir: str) -> "list[dict]":
     return rows
 
 
+def _read_authz_rows(bundle_dir: str) -> "list[dict]":
+    """Tolerant parse of `<bundle_dir>/07-authz-store-surface.tsv` (Issue
+    #4060). `[]` on any absent, header-only (AC5: an empty authorization axis
+    is a valid outcome), or malformed file -- same posture as
+    `_read_config_rows()`. Same row shape as `06-config-surface.tsv`
+    (`metadata.AUTHZ_HEADER == metadata.CONFIG_HEADER`'s columns), so the
+    caller can hand both lists to `_boundary_steps()` without it knowing or
+    caring which artifact a row came from."""
+    authz_path = os.path.join(bundle_dir, AUTHZ_ARTIFACT_NAME)
+    try:
+        with open(authz_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return []
+
+    lines = text.split("\n")
+    if not lines or lines[0].split("\t") != list(metadata.AUTHZ_HEADER):
+        return []
+
+    rows: list[dict] = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        fields = line.split("\t")
+        if len(fields) != len(metadata.AUTHZ_HEADER):
+            continue
+        rows.append(dict(zip(metadata.AUTHZ_HEADER, fields)))
+    return rows
+
+
 def _step_id(scope_paths: "list[str]") -> str:
     """A digest of `scope_paths`' sorted content (AC5) -- never a counter, so
     two independent calls over equivalent scopes (regardless of input order)
@@ -241,24 +380,38 @@ def _stem_key(path: str) -> "tuple[str, str]":
     return (directory, name)
 
 
-def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
-    """Split `rows` (every row sharing one directory boundary or one
-    configuration key) into buckets whose summed `loc` over `tier != "test"`
-    rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3).
+def _counted_loc(row: "dict") -> int:
+    """The `loc` a row contributes to a step's budget: its own, or 0 for a
+    `tier: test` row (AC3 -- a test file travels with its subject as evidence
+    about intended behaviour but is not new reading).
 
-    Deterministic: `rows` is first sorted by `(_stem_key(path), path)`, so the
-    resulting buckets do not depend on the order `rows` arrived in (AC1) and a
-    test file sorts next to its subject. A single non-test file whose own
-    `loc` already exceeds the budget still becomes (the start of) its own
-    bucket -- there is nothing smaller to split it into.
+    This is the single definition of "counted loc" inside this module, and it
+    matches the sum `planner.py::validate_step()` computes over a step's scope
+    (`tree_index[p]["loc"]` for every non-test path) exactly. The two MUST
+    agree: a step this module packs under a budget its validator measures
+    differently is a step that gets rejected and deleted downstream, silently
+    reverting the axis that produced it (PR #4068 review finding).
     """
-    ordered = sorted(rows, key=lambda r: (_stem_key(r["path"]), r["path"]))
+    return 0 if row.get("tier") == _TEST_TIER else row["loc"]
+
+
+def _pack_by_loc_budget(ordered: "list[dict]") -> "list[list[dict]]":
+    """Greedily cut `ordered` into buckets whose summed `loc` over
+    `tier != "test"` rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3),
+    preserving the caller's order -- the packing half of
+    `_split_by_loc_budget()`, factored out so `_risk_steps()` can feed it a
+    directory-interleaved order instead of the same-subject-first sort
+    `_split_by_loc_budget()` uses (Issue #4066; see the module docstring's
+    risk-axis note for why that distinction matters). A single non-test row
+    whose own `loc` already exceeds the budget still becomes (the start of)
+    its own bucket -- there is nothing smaller to split it into.
+    """
     buckets: "list[list[dict]]" = []
     current: "list[dict]" = []
     current_loc = 0
     for row in ordered:
         is_test = row.get("tier") == _TEST_TIER
-        row_loc = 0 if is_test else row["loc"]
+        row_loc = _counted_loc(row)
         if current and not is_test and current_loc + row_loc > MAX_STEP_NON_TEST_LOC:
             buckets.append(current)
             current = []
@@ -267,6 +420,181 @@ def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
         current_loc += row_loc
     if current:
         buckets.append(current)
+    return buckets
+
+
+def _split_by_loc_budget(rows: "list[dict]") -> "list[list[dict]]":
+    """Split `rows` (every row sharing one directory boundary or one
+    configuration key) into buckets whose summed `loc` over `tier != "test"`
+    rows never exceeds `MAX_STEP_NON_TEST_LOC` (AC3).
+
+    Deterministic: `rows` is first sorted by `(_stem_key(path), path)`, so the
+    resulting buckets do not depend on the order `rows` arrived in (AC1) and a
+    test file sorts next to its subject, then packed by `_pack_by_loc_budget()`.
+    """
+    ordered = sorted(rows, key=lambda r: (_stem_key(r["path"]), r["path"]))
+    return _pack_by_loc_budget(ordered)
+
+
+def _interleave_by_directory(rows: "list[dict]", root_files: "frozenset[str]") -> "list[dict]":
+    """Round-robin `rows` across the distinct directory boundaries
+    (`_directory_boundary()` -- the same granularity the directory axis
+    itself groups by, not the finer per-file `_stem_key()` directory) its
+    paths belong to. This spreads minority-boundary rows as early as
+    possible in the returned order, but it is only a head start, not a
+    guarantee: once round-robin exhausts every boundary but the largest, the
+    remainder of the returned order is a single-boundary tail by
+    construction. `_pack_multi_directory()` -- not plain
+    `_pack_by_loc_budget()` -- is what turns that head start into the actual
+    guarantee (Issue #4066's PO fix round; see the module docstring's
+    risk-axis note). Within a boundary, rows keep `_split_by_loc_budget()`'s
+    same-subject-first order so a file and its test sibling still land
+    together when the round-robin happens to keep them in the same bucket.
+
+    Deterministic regardless of `rows`' incoming order: boundaries are
+    visited in sorted order at every round, and each boundary's own rows are
+    pre-sorted the same way `_split_by_loc_budget()` sorts them.
+    """
+    groups: "dict[str, list[dict]]" = {}
+    for row in rows:
+        boundary = _directory_boundary(row["path"], root_files) or row["path"]
+        groups.setdefault(boundary, []).append(row)
+    for boundary in groups:
+        groups[boundary].sort(key=lambda r: (_stem_key(r["path"]), r["path"]))
+
+    ordered_dirs = sorted(groups)
+    interleaved: "list[dict]" = []
+    index = 0
+    remaining = True
+    while remaining:
+        remaining = False
+        for boundary in ordered_dirs:
+            bucket = groups[boundary]
+            if index < len(bucket):
+                interleaved.append(bucket[index])
+                remaining = True
+        index += 1
+    return interleaved
+
+
+def _pack_multi_directory(
+    ordered: "list[dict]", directory_of: "dict[str, str]"
+) -> "list[list[dict]]":
+    """Pack `ordered` into `MAX_STEP_NON_TEST_LOC`-bounded buckets like
+    `_pack_by_loc_budget()`, with one additional goal: every bucket spans more
+    than one directory boundary (`directory_of`, keyed by path -- the same
+    boundary `_interleave_by_directory()` grouped by) wherever the budget
+    leaves room for it, because interleaving alone does not deliver that once
+    round-robin exhausts every boundary but one (Issue #4066's PO fix round;
+    see the module docstring). The budget is the harder of the two bounds --
+    see "Two cases" below -- because it is the one `planner.validate_step()`
+    enforces by deleting the step.
+
+    While the bucket being built holds rows from only one boundary, this
+    reserves headroom -- `MAX_STEP_NON_TEST_LOC` minus the smallest counted
+    `loc` among rows belonging to a *different* boundary -- so that if the
+    bucket would otherwise close single-boundary, the smallest such row can
+    still be borrowed in without breaking the budget. Once a bucket naturally
+    gains a second boundary, the reservation is dropped for the rest of that
+    bucket -- the guarantee this bucket exists to provide is already met.
+
+    **A borrowed row costs its full `loc`, exactly like any other row** (PR
+    #4068 review finding). It is a second appearance of a file already read in
+    its own bucket, so exempting it from this bucket's budget is defensible in
+    principle -- but `planner.py::validate_step()` grants no such exemption:
+    it sums `tree_index[p]["loc"]` over every non-test path in a step's scope,
+    borrowed or not, and rejects the step above `MAX_STEP_NON_TEST_LOC`. A
+    rejected step is deleted from the plan, so an uncounted borrow did not buy
+    a bigger step -- it silently deleted the whole step, reverting the risk
+    axis to the single-boundary shape it exists to fix, with no coverage
+    signal. Measured on this repository's real numbers before the fix: 12
+    300-`loc` `security` rows in `pkg/cert` plus `cmd/steward/main.go` at its
+    real 2209 `loc` produced four risk steps of 2509/3709/3709/2809 counted
+    `loc` -- every one of them rejected by `validate_step()`. The packer's
+    budget and the validator's budget must be the same number (`_counted_loc()`),
+    so the borrow is declined whenever it would not fit.
+
+    Two cases therefore close single-boundary, and both are deliberate:
+    a bucket whose rows already fill the budget so tightly that even the
+    smallest foreign row would push it over, and the degenerate bucket whose
+    lone row is itself at or over the whole budget (`_pack_by_loc_budget()`'s
+    long-standing accepted exception -- a file cannot be split). Staying in
+    budget wins over the multi-boundary guarantee in that conflict: a
+    single-boundary step is a weaker look at a file, while an over-budget step
+    is no look at all.
+
+    The reservation is itself dropped whenever it could not pay for itself --
+    when no row of the boundary being packed is small enough to fit inside
+    `MAX_STEP_NON_TEST_LOC` minus the borrow, every bucket would close with
+    one row, overflow the reservation anyway, and STILL have the borrow
+    declined by the budget test above. That trades whole steps for nothing:
+    a 1400-`loc` foreign row against 300-`loc` rows fragmented three
+    budget-filling steps into twelve single-row ones, none of which gained a
+    second boundary. Falling back to the full budget keeps the steps whole and
+    loses nothing that was ever reachable.
+    """
+    by_loc = sorted(ordered, key=lambda r: (_counted_loc(r), r["path"]))
+
+    min_loc_by_boundary: "dict[str, int]" = {}
+    for row in ordered:
+        boundary = directory_of[row["path"]]
+        row_counted = _counted_loc(row)
+        if boundary not in min_loc_by_boundary or row_counted < min_loc_by_boundary[boundary]:
+            min_loc_by_boundary[boundary] = row_counted
+
+    def smallest_foreign(boundary: str) -> "dict | None":
+        for row in by_loc:
+            if directory_of[row["path"]] != boundary:
+                return row
+        return None
+
+    buckets: "list[list[dict]]" = []
+    current: "list[dict]" = []
+    current_loc = 0
+    current_dirs: "set[str]" = set()
+
+    def borrow_candidate() -> "dict | None":
+        """The foreign row this bucket would borrow if it closed now, before
+        any budget test -- `None` when the bucket is not single-boundary or no
+        other boundary exists to draw from."""
+        if len(current_dirs) != 1:
+            return None
+        (only_boundary,) = tuple(current_dirs)
+        return smallest_foreign(only_boundary)
+
+    def effective_cap() -> int:
+        borrow = borrow_candidate()
+        if borrow is None:
+            return MAX_STEP_NON_TEST_LOC
+        reserved = MAX_STEP_NON_TEST_LOC - _counted_loc(borrow)
+        # A reservation no row of this boundary could fit inside buys no
+        # borrow at all (`close_bucket()` declines it on the budget test) and
+        # costs a bucket split per row: pack to the full budget instead.
+        (only_boundary,) = tuple(current_dirs)
+        if reserved <= 0 or reserved < min_loc_by_boundary[only_boundary]:
+            return MAX_STEP_NON_TEST_LOC
+        return reserved
+
+    def close_bucket() -> None:
+        nonlocal current, current_loc, current_dirs
+        borrow = borrow_candidate()
+        if borrow is not None and current_loc + _counted_loc(borrow) <= MAX_STEP_NON_TEST_LOC:
+            current = current + [borrow]
+        buckets.append(current)
+        current = []
+        current_loc = 0
+        current_dirs = set()
+
+    for row in ordered:
+        is_test = row.get("tier") == _TEST_TIER
+        row_loc = _counted_loc(row)
+        if current and not is_test and current_loc + row_loc > effective_cap():
+            close_bucket()
+        current.append(row)
+        current_loc += row_loc
+        current_dirs.add(directory_of[row["path"]])
+    if current:
+        close_bucket()
     return buckets
 
 
@@ -294,31 +622,11 @@ def _directory_steps(tree_rows: "list[dict]") -> "list[dict]":
     return steps
 
 
-def _split_boundary_key(
-    rows: "list[dict]", root_files: "frozenset[str]"
-) -> "list[list[dict]]":
-    """One bucket per boundary-axis step for a single configuration key.
-
-    Returns a single bucket whenever the key fits `MAX_STEP_NON_TEST_LOC`,
-    which is the common case and the one that matters: the whole point of the
-    axis is that every file touching the key is visible at once.
-
-    Over budget, returns NO bucket: the key is skipped. Splitting destroys the
-    only property the step has, and an empty boundary axis is already a valid
-    outcome (#4056 AC4c). The directory axis still covers every one of those
-    files.
-    """
-    non_test_loc = sum(r["loc"] for r in rows if r.get("tier") != _TEST_TIER)
-    if non_test_loc <= MAX_STEP_NON_TEST_LOC:
+def _boundary_buckets(rows: "list[dict]") -> "list[list[dict]]":
+    """One bucket per boundary-axis step for a single key: the whole key when
+    it fits `MAX_STEP_NON_TEST_LOC`, and nothing at all when it does not."""
+    if sum(_counted_loc(r) for r in rows) <= MAX_STEP_NON_TEST_LOC:
         return [sorted(rows, key=lambda r: r["path"])]
-    # Over budget: SKIP the key rather than split it. Any split destroys the
-    # one property the step has -- every file touching the key visible at once
-    # -- and measurement showed splitting produces single-subtree, sometimes
-    # single-FILE buckets, which is a directory step wearing a boundary label.
-    # A key referenced across that much of the tree is also not a trust-
-    # boundary signal: `CFGMS_ALLOWED_ORIGINS` read in fifty places says
-    # "widely used", not "here is where untrusted input crosses". Skipping is
-    # honest; shredding manufactures steps that look like coverage.
     return []
 
 
@@ -346,20 +654,23 @@ def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list
             continue
 
         rows_for_key = [tree_by_path[p] for p in referencing]
-        # ONE STEP PER KEY. `_split_by_loc_budget()` orders by directory stem
-        # so a test file sorts beside its subject -- correct for the directory
-        # axis, and exactly wrong here: splitting a key's files buckets them
-        # BY DIRECTORY, which is the axis this one exists to escape. Measured
-        # on this repository before the fix: `CFGMS_ADMIN_BUNDLE` became two
-        # steps, one holding a single test file and one holding six files from
-        # elsewhere, so the cross-subtree pairing the step exists to show was
-        # split apart and neither half spanned two subtrees.
+        # ONE STEP PER KEY, or none (Issue #4059). `_split_by_loc_budget()`
+        # orders by directory stem so a test file sorts beside its subject --
+        # correct for the directory axis and exactly wrong here, because it
+        # buckets a key's files BY DIRECTORY, the axis this one exists to
+        # escape. Measured on the full tree before the fix: 43 boundary steps
+        # over 29 keys, 11 keys shredded, and 20 of the 43 confined to a single
+        # subtree. `CFGMS_ADMIN_BUNDLE` became one step holding a single test
+        # file and another holding six files elsewhere, so the cross-package
+        # pairing the step exists to show was split apart.
         #
-        # An over-budget key is split as a last resort, but round-robin across
-        # its subtrees rather than by directory, so every part still spans more
-        # than one -- a part that did not would be a directory step wearing the
-        # wrong axis.
-        for bucket in _split_boundary_key(rows_for_key, root_files):
+        # Over budget, the key is SKIPPED. A boundary step's only property is
+        # that every file touching the key is visible at once; any split
+        # destroys it and leaves something that looks like coverage. A key
+        # referenced that widely is not a trust signal either -- it says
+        # "widely used". The directory axis still covers every one of those
+        # files, and an empty boundary axis is already valid (#4056 AC4c).
+        for bucket in _boundary_buckets(rows_for_key):
             files = sorted(r["path"] for r in bucket)
             steps.append(
                 {
@@ -373,42 +684,59 @@ def _boundary_steps(tree_rows: "list[dict]", config_rows: "list[dict]") -> "list
     return steps
 
 
-def partition(bundle_dir: str, scenario_list: "list[dict] | None" = None) -> "list[dict]":
-    """Compute the deterministic step partition for the bundle at
-    `bundle_dir` (AC1). Pure function of `01-tree.tsv` and
-    `06-config-surface.tsv`'s content -- the same bundle produces a
-    byte-identical, order-independent result on every call.
-
-    Returns an ordered list of step dicts, each `{"step_id", "axis", "scope",
-    "files"}` (`axis: "boundary"` steps additionally carry `"config_key"`).
-    Directory-axis steps come first (AC2), sorted by their top-level
-    boundary; boundary-axis steps follow (AC4), sorted by configuration key;
-    scenario-axis steps come last, in catalogue order (Issue #4059), one per
-    threat scenario, with `files` left for the model to choose.
-    Both axes are bounded by `MAX_STEP_NON_TEST_LOC` (AC3). Carries no
-    hypotheses -- those are the planner model's own contribution, added later
-    by `planner.py::finalize()` from whatever the model wrote for a step this
-    function assigned.
+def _risk_steps(tree_rows: "list[dict]") -> "list[dict]":
+    """The `axis: "risk"` steps (Issue #4066): every row whose `tier` is in
+    `HIGH_RISK_TIERS`, grouped across the whole tree -- never by directory or
+    configuration key -- so every `entrypoint`/`security` file gets a second
+    step whose grouping key genuinely differs from its directory step, not
+    only in name. When the high-risk row set spans more than one directory
+    boundary, `_pack_multi_directory()` (Issue #4066's PO fix round)
+    guarantees every resulting step does too, which is what makes "genuinely
+    differs" true rather than merely intended -- see the module docstring's
+    risk-axis note for the measured evidence that plain interleave-then-pack
+    did not deliver that under directory skew. A high-risk row set confined
+    to a single boundary has nothing to guarantee (there is no other
+    boundary to draw from), so it falls back to the shared, simpler
+    `_pack_by_loc_budget()` primitive the other two axes already use.
     """
-    tree_rows = _read_tree_rows(bundle_dir)
-    config_rows = _read_config_rows(bundle_dir)
-    return (
-        _directory_steps(tree_rows)
-        + _boundary_steps(tree_rows, config_rows)
-        + _scenario_steps(scenario_list)
-    )
+    risk_rows = [r for r in tree_rows if r.get("tier") in HIGH_RISK_TIERS]
+    if not risk_rows:
+        return []
+    root_files = frozenset(r["path"] for r in tree_rows if "/" not in r["path"])
+    directory_of = {
+        r["path"]: _directory_boundary(r["path"], root_files) or r["path"]
+        for r in risk_rows
+    }
+    ordered = _interleave_by_directory(risk_rows, root_files)
+    if len(set(directory_of.values())) < 2:
+        buckets = _pack_by_loc_budget(ordered)
+    else:
+        buckets = _pack_multi_directory(ordered, directory_of)
+
+    steps: "list[dict]" = []
+    for bucket in buckets:
+        files = sorted(r["path"] for r in bucket)
+        steps.append(
+            {
+                "step_id": _step_id(files),
+                "axis": AXIS_RISK,
+                "scope": files,
+                "files": files,
+            }
+        )
+    return steps
 
 
 def _scenario_steps(scenario_list: "list[dict] | None") -> "list[dict]":
     """One step per threat scenario, in catalogue order (Issue #4059).
 
     `files` is empty and `scope` is the scenario id rather than a path: the
-    planner model selects the files that bear on this risk from the inventory,
-    because which files those are is a judgement about the code, not something
-    a partition over the file tree can compute. `planner.validate_step()`
-    already bounds every non-directory axis by `MAX_STEP_NON_TEST_LOC` instead
-    of the subtree rule, so a scenario step spanning the repository is valid
-    and a bloated one is not.
+    planner model selects the files that bear on this risk, because which files
+    those are is a judgement about the code, not something a partition over the
+    file tree can compute. `planner.validate_step()` already bounds every
+    non-directory axis by `MAX_STEP_NON_TEST_LOC` instead of the subtree rule,
+    so a scenario step spanning the repository is valid and a bloated one is
+    not.
 
     `scenario_list` is passed in rather than loaded here so `partition()` stays
     a pure function of its arguments -- a test can partition without a
@@ -428,3 +756,35 @@ def _scenario_steps(scenario_list: "list[dict] | None") -> "list[dict]":
         }
         for s in scenario_list
     ]
+
+
+def partition(bundle_dir: str, scenario_list: "list[dict] | None" = None) -> "list[dict]":
+    """Compute the deterministic step partition for the bundle at
+    `bundle_dir` (AC1). Pure function of `01-tree.tsv`, `06-config-surface.tsv`,
+    and `07-authz-store-surface.tsv`'s content (Issue #4060) -- the same
+    bundle produces a byte-identical, order-independent result on every call.
+
+    Returns an ordered list of step dicts, each `{"step_id", "axis", "scope",
+    "files"}` (`axis: "boundary"` steps additionally carry `"config_key"` --
+    the configuration key for a `06-config-surface.tsv` row, or
+    `metadata.AUTHZ_SURFACE_KEY` for the authorization boundary row from
+    `07-authz-store-surface.tsv`; the two artifacts share one row shape, so
+    `_boundary_steps()` treats a row from either identically). Directory-axis
+    steps come first (AC2), sorted by their top-level boundary; boundary-axis
+    steps follow (AC4), sorted by key across both artifacts' rows together;
+    risk-axis steps (Issue #4066) come last, giving every `HIGH_RISK_TIERS`
+    file a second step built on a different grouping key from its directory
+    step. All three axes are bounded by `MAX_STEP_NON_TEST_LOC` (AC3). Carries
+    no hypotheses -- those are the planner model's own contribution, added
+    later by `planner.py::finalize()` from whatever the model wrote for a
+    step this function assigned.
+    """
+    tree_rows = _read_tree_rows(bundle_dir)
+    config_rows = _read_config_rows(bundle_dir)
+    authz_rows = _read_authz_rows(bundle_dir)
+    return (
+        _directory_steps(tree_rows)
+        + _boundary_steps(tree_rows, config_rows + authz_rows)
+        + _risk_steps(tree_rows)
+        + _scenario_steps(scenario_list)
+    )

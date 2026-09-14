@@ -548,6 +548,12 @@ def _render_partition_steps_block(
                 " Hypothesise disagreement between them about that key: a caller assuming the"
                 " callee validates, a callee assuming the caller did."
             )
+        elif step["axis"] == partition.AXIS_RISK:
+            header += (
+                "\nThese are entrypoint- and security-tier files, regrouped across the tree for a"
+                " second look. Ask a different question here than a reviewer of their directory"
+                " step would."
+            )
         blocks.append(f"{header}\nfiles:\n{files_block}")
     return "\n\n".join(blocks)
 
@@ -1224,6 +1230,7 @@ def _bundle_tree_index(sweep_dir: str) -> "dict[str, dict] | None":
 VALID_AXES = frozenset({
     partition.AXIS_DIRECTORY,
     partition.AXIS_BOUNDARY,
+    partition.AXIS_RISK,
     partition.AXIS_SCENARIO,
 })
 
@@ -1256,7 +1263,8 @@ def validate_step(
       enforcing `BOUNDED_SCOPE_RULE` -- the same text `build_prompt()` gives
       the planning model, so the instruction and its enforcement cannot drift
       apart).
-    - any other axis (today, only `"boundary"`): EXEMPT from
+    - any other axis (`"boundary"`, `"risk"` -- Issue #4066 -- and
+      `"scenario"` -- Issue #4059): EXEMPT from
       `_scope_boundary()` -- a boundary-axis step is deliberately allowed to
       span more than one top-level subtree, since spanning the boundary is
       the entire point (AC4). It is bounded instead by

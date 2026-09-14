@@ -905,8 +905,8 @@ mounting. A mismatch refuses with `INVESTIGATOR_REFUSED:snapshot_dir_escape:...`
 
 **`--bundle-dir <DIR>` (required in plan mode, Issue #3979).** `/workspace` is mounted `:ro` from
 `--bundle-dir` instead — the sweep's auditable bundle (`metadata.py::write_bundle()`, #3978:
-`01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `05-deps/`, `MANIFEST.json`), never a
-repository checkout of any kind. The containment check mirrors `--snapshot-dir`'s exactly: a
+`01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `07-authz-store-surface.tsv`, `05-deps/`,
+`MANIFEST.json`), never a repository checkout of any kind. The containment check mirrors `--snapshot-dir`'s exactly: a
 missing `--bundle-dir` in plan mode is a hard failure before any `mkdir`, `docker run`, or mount
 construction, and a supplied one must already exist (`security-review.sh`'s `dispatch_planner()`
 creates it via `planner.py::prepare()` → `metadata.write_bundle()` before ever calling this
@@ -1739,7 +1739,9 @@ plan — a comma-separated `harness:model` roster in the same shape as `CFGMS_SE
 (C5), parsed by the same `roster.py::parse_roster()`. One entry is the ordinary case, and remains
 the default: multi-planner is a **benchmarking mode**, not the normal path (Issue #4056). Since
 that story, every planner — one or many — is handed the same harness-computed step partition
-(`partition.py::partition()`, deterministic over the bundle's `01-tree.tsv`/`06-config-surface.tsv`)
+(`partition.py::partition()`, deterministic over the bundle's `01-tree.tsv`, `06-config-surface.tsv`,
+and `07-authz-store-surface.tsv` — the last added by Issue #4060; the scenario axis is the one
+exception, taking its steps from `docs/security-review/threat-scenarios.md` instead, Issue #4059)
 and asked only for hypotheses; the partition is the harness's own decision, never the model's. When
 more than one planner is listed, each plans independently over the same assigned steps and the
 resulting proposals merge by `scope`: one step per distinct scope (now identical by construction
@@ -2113,12 +2115,13 @@ provably bounded to what its own source code can be read to produce.
 
 ```
 bundle/
-├── MANIFEST.json          # provenance + per-artifact sha256 + redaction log
-├── 00-scope.md             # operator-supplied prose description, copied verbatim
-├── 01-tree.tsv             # every file at the commit, with a `tier`
-├── 03-routes.tsv           # HTTP entrypoints with their declared auth guard
-├── 05-deps/                # go.mod, go.sum, web/package.json verbatim
-└── 06-config-surface.tsv   # env var NAMES and reference counts, never values
+├── MANIFEST.json               # provenance + per-artifact sha256 + redaction log
+├── 00-scope.md                  # operator-supplied prose description, copied verbatim
+├── 01-tree.tsv                  # every file at the commit, with a `tier`
+├── 03-routes.tsv                # HTTP entrypoints with their declared auth guard
+├── 05-deps/                     # go.mod, go.sum, web/package.json verbatim
+├── 06-config-surface.tsv        # env var NAMES and reference counts, never values
+└── 07-authz-store-surface.tsv   # the authorization store's decision/read package pairing
 ```
 
 `02-symbols.jsonl` and `04-schema.sql` are deliberately absent — symbol names disclose internal
@@ -2221,9 +2224,10 @@ story.
 `_assemble_bundle_contents()` filters the `git ls-tree` entry list against the scope (a path
 qualifies when it equals a scope entry exactly, or starts with `<entry>/` — never a bare string
 prefix, so `--path pkg/cert` does not also match a sibling `pkg/certutil`) before tier
-classification, route extraction, or config-surface scanning ever run. `01-tree.tsv` therefore
-carries only in-scope rows, and `03-routes.tsv`/`06-config-surface.tsv` narrow for free, since both
-walk the same already-filtered file list rather than re-deriving their own scope check.
+classification, route extraction, config-surface scanning, or authz-store-surface scanning ever
+run. `01-tree.tsv` therefore carries only in-scope rows, and
+`03-routes.tsv`/`06-config-surface.tsv`/`07-authz-store-surface.tsv` narrow for free, since all
+three walk the same already-filtered file list rather than re-deriving their own scope check.
 `MANIFEST.json` records the filter verbatim as `scope_paths` (a list, or `null` when unscoped) —
 the same self-describing-artifact principle `scope_provided`/`scope_file` already follow for
 `--scope-file`.
@@ -2351,6 +2355,65 @@ artifact's shape. **Never a value, never a default value, and never read from a 
 deny list** (see below) — `.env`, `.env.local.example`, and friends are excluded from the
 candidate file set before any content is read, not filtered after the fact.
 
+### `07-authz-store-surface.tsv`: the authorization boundary axis (Issue #4060)
+
+Same six columns as `06-config-surface.tsv` (`key`, `source`, `referenced_in_count`,
+`referencing_files`, `has_default`, `tier`) — `metadata.AUTHZ_HEADER`, kept as its own named
+constant rather than an alias so a future schema change to one artifact never silently changes the
+other. `partition.py`'s boundary-axis step builder consumes a row from either artifact identically,
+which is exactly the point: this is a second *source* for the same boundary axis the config-keyed
+one already feeds, not a new axis type of its own.
+
+**What this axis is for, and why a route- or permission-string join could not deliver it.** The
+partition's boundary axis exists to produce a step that genuinely spans two top-level subtrees, so
+a defect whose evidence sits on both sides of a package boundary has somewhere to be seen (see
+[Two axes](#step-plan-generation-metadata-only-planner) above). An earlier definition asked which
+files define the permission a route demands, matching `requirePermission("resource","action")`
+literals out of `features/controller/api/*.go`. That question turned out to be unanswerable in this
+codebase for a structural reason, not a parsing gap: **CFGMS's RBAC is data-driven.**
+`features/rbac/engine.go`'s `AuthEngine.CheckPermission` takes a resource/action pair as a runtime
+parameter and resolves it against grants held in storage — no second file in another package
+encodes what a route demands, so the join never left `features/controller/api/`, confirmed against
+real routes (`account`/`revoke-enrollment-link`, `refresh`/`list-pending`,
+`cluster`/`drain-node`). Matching the resource/action words separately failed the other way:
+ordinary English words like `steward` (98 files) and `config` (73 files) blew the step size budget
+on nearly every step.
+
+Authorization bugs in a data-driven model do not come from a route naming the wrong string. They
+come from the grants themselves being wrong (data, out of a static reviewer's reach), from the
+**logic that evaluates** grants, or from the **path that reads** grants — a partial, stale, or
+failed read that downstream code treats as a complete answer. The second and third are both in
+source and live in different top-level subtrees: `features/rbac/interfaces.go` declares
+`RoleStore`/`SubjectStore`/`RoleAssignmentStore` and `features/rbac/engine.go` consumes them to
+decide; `pkg/storage/providers/database` and `pkg/storage/providers/sqlite` implement the read.
+`metadata._extract_authz_store_surface()` computes that relationship in three structural hops, no
+call graph and no matching against English words: find the file(s) declaring the three interface
+names, find `AuthEngine.CheckPermission` in the same directory and extract the store method calls
+in its body (`e.roleStore.GetRolePermissions(...)`, etc. — the **grant read path**), then find every
+other directory whose declared methods, unioned across its files, cover that exact call set.
+Verified against `develop`, this lands on exactly the two provider packages above and excludes a
+directory that merely shares one or two generic CRUD method names by coincidence
+(`features/controller/service`, matching only 2 of the 4 read methods).
+
+**The specific fail-open this axis targets.** Reading `engine.go` shows the read paths are already
+fail-closed: a failed subject, assignment, or role read each return a denial, and existing tests
+(`TestAuthEngine_CheckPermission_DBError_Propagates`, `..._NotFoundError_Skips`) cover exactly that.
+A short read that returns no error is also safe — a missing permission produces no match and
+therefore a denial. The fail-open risk is on the **matching** side instead: `CheckPermission` grants
+as soon as `permissionMatches` returns true for any permission on any valid role, so a single
+over-broad grant row over-authorizes. Seeing the matcher (`features/rbac`) and the store that feeds
+it (`pkg/storage/providers/*`) in one step is what makes that visible to a reviewer; a
+directory-scoped step never would, because the matcher and the store sit in different top-level
+subtrees by construction. This axis does not change `permissionMatches` or review the grant data
+itself — both are explicitly out of scope for Issue #4060 — it only makes the pairing visible to a
+review step.
+
+An empty authorization axis (no store interface declared within the sweep's scope, no
+`CheckPermission`-shaped decision function found, or no other directory implementing the full read
+set) is a valid outcome, exactly as an empty configuration-keyed boundary axis already is — a sweep
+scoped away from the RBAC engine entirely has nothing to report on this axis, and that is not a
+harness failure.
+
 ### Deny list: never read, never hashed, never in the bundle
 
 `DENY_PATTERNS` (`.env`, `.env.*`, `*.pem`, `*.key`, matched against the file's basename at any
@@ -2358,8 +2421,8 @@ depth) are excluded before `write_bundle` ever reads their blob content — not 
 already-read value. `.env.*` deliberately covers `.env.example`/`.env.local.example`, which
 routinely carries a realistic-looking value in practice despite the name suggesting otherwise.
 A denied file is counted in `MANIFEST.json`'s `redaction_log.files_excluded_by_deny` and does not
-appear in `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, or `05-deps/` — its path is not
-merely content-scrubbed, the file is absent from the bundle entirely.
+appear in `01-tree.tsv`, `03-routes.tsv`, `06-config-surface.tsv`, `07-authz-store-surface.tsv`, or
+`05-deps/` — its path is not merely content-scrubbed, the file is absent from the bundle entirely.
 
 ### `05-deps/`: dependency manifests, verbatim
 
@@ -2639,6 +2702,77 @@ the other does not. Two steps with identical objectives fail this, and so, delib
 step whose objectives are a strict subset of the other's: reviewing a subset of an already-asked
 set of questions is not independent overlap either. Where a file appears in three or more steps,
 G-3 passes if any pair among them satisfies the rule.
+
+**The coverage half needed its own axis (Issue #4066).** Issue #4056 shipped the deterministic
+partitioner (`partition.py`) and claimed "G-2 passes for every bundle by construction, and so does
+G-3's coverage half (a high-risk file appearing in at least two steps)." That claim was false as
+shipped, and #4066 corrected it rather than let a gate that fails by default train readers to skip
+`## Incomplete`. The directory axis gives every file exactly one step, never two. The boundary axis
+(`axis: "boundary"`, above `_boundary_steps()`) only reaches a file that references a configuration
+key — or, since #4060, sits in the authorization grant-read join — whose referencing files cross a
+top-level subtree; most `entrypoint`/`security` files reference no such key. Evidence sweep
+`2026-09-12T1251Z-bab1f8d6` (scope `pkg/cert` + `pkg/session`) showed the failure directly: all 23
+short files failed on `len(covering) < 2`, none on `_objectives_differ()` — no non-test file was in
+two steps at all. Measured on this repository's own tree at the time of #4066: 252
+`entrypoint`/`security`-tier files exist; at most 12 sit under the #4060 authorization axis's two
+scope directories (`features/rbac/`, `pkg/storage/providers/`), and that axis only fires when a
+store interface is actually declared and implemented across them, so the real count reached is
+lower still. The scenario axis (Issue #4059, per-threat-scenario grouping) was not yet merged to
+`develop` when #4066 landed and, being scenario-scoped rather than universal, would not by itself
+reach every `HIGH_RISK_TIERS` file either.
+
+#4066's answer is a third axis, `axis: "risk"` (`partition._risk_steps()`), rather than re-scoping
+G-3 to measure less: every row whose `tier` is in `HIGH_RISK_TIERS` is grouped across the *whole*
+reviewed tree — never by directory or configuration key — and `partition._interleave_by_directory()`
+round-robins that group across its distinct directory boundaries before a packer cuts it into
+`MAX_STEP_NON_TEST_LOC`-bounded steps. Because a risk-axis step's `axis` field is neither
+`"directory"` nor `None`, it lands on `planner.validate_step()`'s existing non-directory branch
+unmodified (documented as generic there since #4056) — allowed to span subtrees, bounded by loc
+instead.
+
+**The first cut of the risk axis did not deliver the guarantee it claimed (PO fix round, Issue
+#4066, post-merge).** Merged behind PR #4068, `_interleave_by_directory()` fed a plain
+`_pack_by_loc_budget()`, and the module docstring asserted a resulting step's file set was "drawn
+from more than one directory whenever the high-risk files themselves span more than one." Round-robin
+interleave only spreads a minority directory's rows once each; once every minority directory is
+exhausted, every later bucket is built from consecutive rows of whichever directory has the most
+high-risk files — the directory axis's own grouping under a different `axis` label. Measured
+directly: a 40/1/1 high-risk file split across three directories left 5 of 6 risk steps confined to
+the dominant directory, and a sweep of 1–14 minority directories against 8–79 dominant-directory
+files found 144 configurations where a risk step's file set came out byte-identical to a
+directory-axis step's — a file "reviewed twice" that way was reviewed once, from the same angle, and
+G-3 reported coverage that did not exist. The founder's call was to fix the packer rather than
+narrow the claim: `partition._pack_multi_directory()` tracks which directory boundary a bucket has
+accumulated so far and, while it holds rows from only one, reserves headroom (`MAX_STEP_NON_TEST_LOC`
+minus the smallest-`loc` row belonging to a different boundary) so that a bucket which would
+otherwise close single-boundary can still borrow that row in and stay within budget. A borrowed row
+costs its full `loc` like any other row: it is a second appearance of a file already read in its own
+bucket, so exempting it the way a `tier: test` row is exempted is defensible in principle, but
+`planner.validate_step()` grants no such exemption — it sums every non-test path in a step's scope,
+borrowed or not, and a step over `MAX_STEP_NON_TEST_LOC` is rejected and deleted from the plan. An
+uncounted borrow therefore does not buy a bigger step, it deletes the step: measured on this
+repository's own numbers (12 300-`loc` `security` rows in `pkg/cert` plus `cmd/steward/main.go` at
+its real 2209 `loc`), the first cut of the borrow produced four risk steps of 2509/3709/3709/2809
+non-test `loc`, every one of them rejected, silently reverting the plan to the pre-#4066 shape the
+axis exists to fix. The packer and the validator now measure the same number
+(`partition._counted_loc()`), so a borrow that would not fit is declined, and the headroom
+reservation is dropped entirely when no row of the boundary being packed could fit inside it (a
+reservation that buys no borrow only fragments budget-filling steps into single-row ones).
+Because a directory-axis
+step is always confined to one boundary, a risk-axis bucket that spans more than one can never be
+set-identical to it, so this closes the gap except where the budget itself forbids the borrow, and
+the one case that cannot be helped at all: a bundle whose high-risk files all sit in a single
+directory boundary, where there is no
+other boundary to borrow from — and where, not coincidentally, the directory axis's own step is
+already the full set, so nothing is lost by comparison. Staying in budget wins over the
+multi-boundary guarantee wherever the two conflict: a single-boundary step is a weaker look at a
+file, an over-budget step is no look at all. Every `entrypoint`/`security` file therefore
+gets a second step whose grouping key — and, wherever the budget leaves room for the borrow, whose
+file set — genuinely differs from its directory step's: the
+coverage half of G-3 now holds by construction the way #4056 originally (and wrongly) claimed, and
+the way #4066's first cut (also wrongly) claimed to have fixed. The "ask a different question" half
+stays the model's job, exactly as before: a risk-axis step still needs a hypothesis whose `objective`
+text differs from its directory-axis sibling's for G-3 to pass in full.
 
 **Why G-3 earns its keep.** Metadata-only decomposition partitions blind: the planner cannot see a
 data flow that crosses two files it happened to place in different steps, so that flow falls
