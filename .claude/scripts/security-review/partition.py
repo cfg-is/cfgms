@@ -209,6 +209,22 @@ HIGH_RISK_TIERS = frozenset({"entrypoint", "security"})
 # next change against the whole tree, not one package.
 MAX_STEP_NON_TEST_LOC = 3000
 
+# A scenario step is bounded separately, and larger (Issue #4059). The other
+# axes hold one package or one configuration key; a scenario deliberately spans
+# the repository, and 3000 loc reduced TS-12 from the 50 files its planner
+# chose to 2 -- a loud failure traded for a quiet one, which is worse.
+#
+# Sized against the real constraint, which is the finder's context window
+# rather than a number anyone picked. MEASURED on the failing run: TS-12's 50
+# files came to 21,270 non-test loc and produced a ~305,000-token prompt, so
+# this tree averages ~14.3 tokens per line. 10,000 lines is ~143,000 tokens of
+# file content, leaving headroom under a 200,000-token limit for the shared
+# preamble, the scenario, the hypotheses and the scanner evidence.
+#
+# Re-measure this if the limit changes or the corpus shifts -- the ratio is a
+# property of this repository's code, not a constant.
+MAX_SCENARIO_NON_TEST_LOC = 10000
+
 # Mirrors `planner.EXCLUDED_TOP_LEVEL_DIRS` / `REPO_ROOT_BOUNDARY` exactly
 # (kept as an independent, minimal copy rather than an import -- see the
 # module docstring's note on the import cycle `planner.py` importing this

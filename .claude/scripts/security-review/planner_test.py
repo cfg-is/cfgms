@@ -636,11 +636,58 @@ def test_scenario_step_accepts_model_chosen_files_from_the_inventory():
     )
     check(err is None, "scenario step: model-chosen files from the inventory are accepted", str(err))
     check(
-        data["files"] == ["cmd/b/b.go", "pkg/a/a.go"],
-        "scenario step: the model's files are kept, sorted and de-duplicated",
+        data["files"] == ["pkg/a/a.go", "cmd/b/b.go"],
+        "scenario step: the model's files are kept in its own order, de-duplicated",
         str(data.get("files")),
     )
     check(data["axis"] == partition.AXIS_SCENARIO, "scenario step: axis still comes from the partition")
+
+
+def test_scenario_step_file_selection_is_bounded_by_the_loc_budget():
+    # REQUIRED (Issue #4059). Every other axis is bounded when the partition
+    # builds it; a scenario step is built by the MODEL, so nothing bounded it
+    # until finalize. Unbounded, Fable selected 50 files for TS-12 and the
+    # finder lane failed outright -- a 305,221-token prompt against a 200,000
+    # limit -- so every product-level risk was reviewed by nobody and the step
+    # read as `failed` rather than as a gap in the design.
+    step = {"axis": partition.AXIS_SCENARIO, "scope": "TS-01", "files": []}
+    paths = [f"pkg/p{i}/f.go" for i in range(10)]
+    data = {"step_id": "TS-01", "files": list(paths)}
+    loc = {p: 4000 for p in paths}
+    err = planner._inject_partition_fields(
+        data, step, "step-003.json", frozenset(paths), loc
+    )
+    check(err is None, "scenario step: an over-budget selection is trimmed, not rejected", str(err))
+    kept = data["files"]
+    check(
+        sum(loc[p] for p in kept) <= partition.MAX_SCENARIO_NON_TEST_LOC,
+        "scenario step: the kept files fit the scenario loc budget",
+        f"{sum(loc[p] for p in kept)} > {partition.MAX_SCENARIO_NON_TEST_LOC}",
+    )
+    check(
+        kept == paths[:len(kept)],
+        "scenario step: trimming keeps the model's own order -- its only relevance ranking",
+        str(kept),
+    )
+    check(
+        data.get("files_dropped_over_budget") == paths[len(kept):],
+        "scenario step: the dropped paths are recorded, never silently gone",
+        str(data.get("files_dropped_over_budget")),
+    )
+
+
+def test_scenario_step_under_budget_keeps_every_file():
+    step = {"axis": partition.AXIS_SCENARIO, "scope": "TS-01", "files": []}
+    paths = ["pkg/a/a.go", "pkg/b/b.go"]
+    data = {"step_id": "TS-01", "files": list(paths)}
+    err = planner._inject_partition_fields(
+        data, step, "step-003.json", frozenset(paths), {p: 10 for p in paths}
+    )
+    check(err is None and data["files"] == paths, "scenario step: an in-budget selection is untouched", str(data))
+    check(
+        "files_dropped_over_budget" not in data,
+        "scenario step: nothing is recorded as dropped when nothing was",
+    )
 
 
 def test_scenario_step_rejects_a_file_absent_from_the_commit():

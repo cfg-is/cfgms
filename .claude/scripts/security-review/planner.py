@@ -1732,6 +1732,24 @@ def _read_partition(sweep_dir: str) -> "list[dict] | None":
     return data
 
 
+def _loc_by_path(sweep_dir: str) -> "dict[str, int]":
+    """Non-test line count per path, read from the sweep's own bundle.
+
+    Used to bound a scenario step's model-chosen file list at finalize. Returns
+    an empty mapping when the bundle cannot be read: the bound then admits
+    everything, which is the pre-#4059 behaviour and strictly better than
+    refusing a plan because a metadata file moved.
+    """
+    try:
+        rows = partition._read_tree_rows(os.path.join(sweep_dir, "bundle"))
+    except Exception:  # noqa: BLE001 -- a bundle read must never fail finalize
+        return {}
+    return {
+        r["path"]: (0 if r.get("tier") == "test" else int(r.get("loc") or 0))
+        for r in rows
+    }
+
+
 def _inventory_from_partition(partition_steps: "list[dict] | None") -> "frozenset[str] | None":
     """The commit's file inventory, recovered from the partition itself.
 
@@ -1754,6 +1772,7 @@ def _inject_partition_fields(
     partition_step: dict,
     filename: str,
     known_paths: "frozenset[str] | None" = None,
+    loc_by_path: "dict[str, int] | None" = None,
 ) -> "str | None":
     """Overwrite `data`'s `axis`/`scope`/`files` from `partition_step` (Issue
     #4056 AC6) -- the harness's own computed identity for the step assigned
@@ -1788,9 +1807,40 @@ def _inject_partition_fields(
                 f"commit's inventory, first {unknown[0]!r} -- a scenario step selects from the "
                 "inventory, it does not invent paths"
             )
+        # BOUND THE SELECTION (Issue #4059). Every other axis is bounded by
+        # `MAX_STEP_NON_TEST_LOC` when the partition builds it; a scenario step
+        # is built by the model, so nothing bounded it until here. The bound is
+        # `MAX_SCENARIO_NON_TEST_LOC`, not the per-package one: a scenario
+        # deliberately spans the tree, and the package budget cut TS-12 from 50
+        # files to 2. Measured
+        # consequence of leaving it unbounded: Fable selected 50 files for
+        # TS-12 and TS-15, and the finder lane failed outright on both -- a
+        # 305,221-token prompt against a 200,000 limit. Every product-level
+        # risk in the catalogue was reviewed by nobody, and the step read as
+        # `failed` rather than as a gap in the design.
+        #
+        # The model's own ORDER is kept rather than sorted away: it is the only
+        # relevance ranking available, so a truncation keeps what the model
+        # thought mattered most. Dropped paths are recorded on the step, so a
+        # report can say the scenario was reviewed in part rather than silently
+        # showing a short file list.
+        kept, dropped, running = [], [], 0
+        seen: set = set()
+        for path in model_files:
+            if path in seen:
+                continue
+            seen.add(path)
+            cost = (loc_by_path or {}).get(path, 0)
+            if kept and running + cost > partition.MAX_SCENARIO_NON_TEST_LOC:
+                dropped.append(path)
+                continue
+            kept.append(path)
+            running += cost
         data["axis"] = partition_step.get("axis")
         data["scope"] = partition_step.get("scope")
-        data["files"] = sorted(set(model_files))
+        data["files"] = kept
+        if dropped:
+            data["files_dropped_over_budget"] = dropped
         return None
 
     for field in ("scope", "files"):
@@ -1861,6 +1911,7 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
     tree_index = _bundle_tree_index(sweep_dir)
     partition_steps = _read_partition(sweep_dir)
     known_paths = _inventory_from_partition(partition_steps)
+    loc_by_path = _loc_by_path(sweep_dir)
 
     errors: list[str] = []
     excluded: list[str] = []
@@ -1944,7 +1995,7 @@ def finalize(sweep_dir: str) -> tuple[bool, list[str]]:
                     excluded.append(filename)
                     continue
                 disagreement = _inject_partition_fields(
-                    data, partition_steps[index], filename, known_paths
+                    data, partition_steps[index], filename, known_paths, loc_by_path
                 )
                 if disagreement:
                     schema.log_event("invalid_plan_step", filename=filename, errors=[disagreement])
@@ -2192,6 +2243,7 @@ def finalize_multi_planner(sweep_dir: str, planners: "list[roster.Lane]") -> tup
     tree_index = _bundle_tree_index(sweep_dir)
     partition_steps = _read_partition(sweep_dir)
     known_paths = _inventory_from_partition(partition_steps)
+    loc_by_path = _loc_by_path(sweep_dir)
 
     errors: list[str] = []
 
@@ -2244,7 +2296,7 @@ def finalize_multi_planner(sweep_dir: str, planners: "list[roster.Lane]") -> tup
                         rejected.append({"filename": label, "error": reason})
                         continue
                     disagreement = _inject_partition_fields(
-                        data, partition_steps[index], label, known_paths
+                        data, partition_steps[index], label, known_paths, loc_by_path
                     )
                     if disagreement:
                         schema.log_event("invalid_plan_step", filename=label, errors=[disagreement])
