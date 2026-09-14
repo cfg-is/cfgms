@@ -650,7 +650,7 @@ Write each step as its own JSON file, using a Bash heredoc:
     }}
     JSON
 
-`step_id` matches the filename. No other keys.
+`step_id` matches the filename. A scenario step also sets `files`. No other keys.
 """
 
 

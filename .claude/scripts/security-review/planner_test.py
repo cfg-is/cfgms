@@ -605,6 +605,25 @@ def test_finalize_rejects_a_step_whose_scope_disagrees_with_the_partition():
         )
 
 
+def test_rules_do_not_contradict_the_scenario_step_instruction():
+    # REQUIRED (Issue #4059). The rules line once read "No other keys", which
+    # flatly contradicted every scenario step's "Set `files` to the paths ...".
+    # Astra obeyed the literal rule and set no files on all fifteen scenario
+    # steps; Fable inferred the intent and set them. Both behaved correctly
+    # given a self-contradicting prompt. Because an empty scenario step is
+    # dropped from the plan by design, the consequence was that every
+    # product-level risk would have been reviewed by nobody, silently.
+    with tempfile.TemporaryDirectory() as bundle_dir:
+        _write_tree_tsv(bundle_dir, [("pkg/foo/foo.go", "go", "1", "abcdef123456", "business")])
+        prompt = planner.build_prompt(bundle_dir, sweep_id="sweep-1")
+    check("Set `files`" in prompt, "prompt: a scenario step is told to set files")
+    check(
+        "No other keys" not in prompt or "A scenario step also sets `files`" in prompt,
+        "prompt: the rules do not forbid the key a scenario step is told to set",
+        prompt[-300:],
+    )
+
+
 def test_scenario_step_accepts_model_chosen_files_from_the_inventory():
     # REQUIRED (Issue #4059): the scenario axis is the one deliberate exception
     # to #4056 AC6. Which files bear on a risk is a judgement about the code,
