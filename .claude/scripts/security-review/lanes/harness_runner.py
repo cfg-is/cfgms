@@ -924,6 +924,79 @@ MAX_STOP_REASON_CHARS = 500
 #
 # `CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS` overrides it for genuinely slow
 # hardware without a code change.
+# --- Rate-limit backoff, single-sourced (Issue #4059) ------------------------
+#
+# A lane that hits a rate limit parks the step and moves straight to the next
+# one, which hits the same limit, and so on to the end of the plan. Measured on
+# the six-step benchmark: the codex lane completed 3 steps, hit the limit, and
+# parked the remaining 3 within seconds. A resume two minutes later parked the
+# same three again. Parking is the correct terminal state, but reaching it
+# without ever waiting means a lane can never finish a plan on a limited
+# account -- it only converts "not done" into "not done, recorded".
+#
+# Waiting is what finishes a run. On a rate-limited response the same step is
+# retried after a backoff, doubling each attempt, until the total wait would
+# exceed the budget; only then is it parked for a resume to pick up.
+#
+# Bounded on TOTAL WAIT rather than attempt count, so the worst case is a
+# number an operator can reason about ("this lane may sit for 15 minutes")
+# rather than one they have to derive from a doubling sequence.
+RATE_LIMIT_FIRST_WAIT_SECONDS = 30.0
+RATE_LIMIT_MAX_TOTAL_WAIT_DEFAULT = 900.0
+RATE_LIMIT_MAX_TOTAL_WAIT_ENV = "CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS"
+
+
+def rate_limit_max_total_wait() -> float:
+    """Total seconds a single step may spend waiting out rate limits.
+
+    Unset, empty, unparseable or negative falls back to the default. Zero is
+    honoured and disables waiting entirely -- useful for a test, and the one
+    value a caller might legitimately want to mean "do not wait".
+    """
+    raw = os.environ.get(RATE_LIMIT_MAX_TOTAL_WAIT_ENV, "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return RATE_LIMIT_MAX_TOTAL_WAIT_DEFAULT
+    return value if value >= 0 else RATE_LIMIT_MAX_TOTAL_WAIT_DEFAULT
+
+
+def call_with_rate_limit_backoff(call_fn, model, prompt, raw_path, sleep_fn=None):
+    """Invoke a lane's harness call, waiting out rate limits rather than
+    parking on the first one.
+
+    `call_fn` has every lane's shared shape -- `(model, prompt, raw_path)` ->
+    `(exit_code, rate_limited, output_tail)`. Returns the last result, which is
+    the successful one when a retry succeeded and the rate-limited one when the
+    wait budget ran out (the caller then parks it exactly as before).
+
+    `sleep_fn` is injected so a test can assert the backoff schedule without
+    spending it.
+    """
+    # A lane test injects `call_harness_fn`, and its stub often reports rate
+    # limited on purpose. Waiting that out for real makes every such suite sit
+    # for the whole budget, so the wait is opt-IN: it happens only when the
+    # environment asks for it. `security-review.sh` sets the variable for a real
+    # sweep; a test that says nothing waits not at all and still exercises every
+    # branch by injecting `sleep_fn`.
+    sleep_fn = sleep_fn or time.sleep
+    if sleep_fn is time.sleep and not os.environ.get(RATE_LIMIT_MAX_TOTAL_WAIT_ENV, ""):
+        budget = 0.0
+    else:
+        budget = rate_limit_max_total_wait()
+    waited = 0.0
+    delay = RATE_LIMIT_FIRST_WAIT_SECONDS
+    while True:
+        exit_code, rate_limited, output_tail = call_fn(model, prompt, raw_path)
+        if not rate_limited:
+            return exit_code, rate_limited, output_tail
+        if waited + delay > budget:
+            return exit_code, rate_limited, output_tail
+        sleep_fn(delay)
+        waited += delay
+        delay *= 2
+
+
 LANE_TIMEOUT_SECONDS_DEFAULT = 3600.0
 LANE_TIMEOUT_ENV = "CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS"
 
@@ -952,7 +1025,17 @@ HARNESS_OUTPUT_TAIL_MAX_CHARS = 4_000
 # re-embedded in a later prompt, so delimiter neutralisation does not apply
 # here -- `consolidate.py`'s own `_md_escape_inline` is what makes it safe
 # to render in `report/consolidated.md`.
-_HARNESS_OUTPUT_TAIL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# A whole escape sequence is removed, not just its ESC byte. Stripping the ESC
+# alone leaves the sequence BODY behind as ordinary text, so a tail dominated by
+# a progress spinner reads as `[?25l[?25h[?25l...` -- 4,000 characters of noise
+# that hides the one line explaining the failure. Measured on the six-step
+# benchmark: every captured tail from a failing ollama step was this.
+_HARNESS_OUTPUT_TAIL_CONTROL_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"  # CSI: colour, cursor show/hide, erase
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: title set, terminated by BEL or ST
+    r"|\x1b[@-Z\\-_]"  # two-character escapes
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"  # stray control bytes (newline/tab kept)
+)
 
 
 def sanitize_harness_output_tail(text: str) -> str:
@@ -997,6 +1080,61 @@ def remove_step_temp_artifacts(lane_dir: str, step_id: str) -> None:
             os.remove(os.path.join(lane_dir, name))
         except OSError:
             pass
+
+
+STEP_DIAGNOSTICS_DIRNAME = "diagnostics"
+STEP_DIAGNOSTICS_MAX_BYTES = 4_000_000
+
+
+def step_diagnostics_dir(lane_dir: str) -> str:
+    """Directory under `lane_dir` holding the evidence a failing step leaves
+    behind. A subdirectory, not a dotfile, so `remove_step_temp_artifacts`
+    never reaches it."""
+    return os.path.join(lane_dir, STEP_DIAGNOSTICS_DIRNAME)
+
+
+def write_step_diagnostic(lane_dir: str, name: str, text: str) -> "str | None":
+    """Persist one piece of failure evidence -- the prompt a step sent, the
+    bytes a harness printed -- under `step_diagnostics_dir(lane_dir)`, and
+    return its path, or `None` if it could not be written.
+
+    Written ONLY for a step that did not reach `complete`. A `complete` step
+    has nothing to explain, and writing a copy of every prompt in a
+    full-repository sweep would cost hundreds of megabytes to answer a
+    question nobody asked.
+
+    This exists because the alternative is inference. The lanes delete every
+    per-step scratch file on both the success and the failure path, so the
+    one artifact that explains an `invalid_findings_schema` -- what the model
+    actually printed -- was gone before anyone could read it, leaving only a
+    4,000-character tail. Three successive diagnoses of the ollama lane were
+    made from that tail and all three were wrong. Keeping the bytes is
+    cheaper than guessing at them.
+
+    Bounded by `STEP_DIAGNOSTICS_MAX_BYTES`, keeping the END of an oversized
+    value for the same reason `sanitize_harness_output_tail` does: the
+    explanation sits at the end of a harness's output. A prompt is the
+    exception in principle but not in practice -- it is bounded by
+    `MAX_BUNDLE_BYTES` long before it reaches this cap.
+
+    Never raises. Diagnostics are a convenience for a human triager; a
+    read-only output directory or a full disk must not turn a recorded
+    failure into a crashed lane.
+    """
+    if not text:
+        return None
+    try:
+        diag_dir = step_diagnostics_dir(lane_dir)
+        os.makedirs(diag_dir, exist_ok=True)
+        payload = text
+        if len(payload) > STEP_DIAGNOSTICS_MAX_BYTES:
+            payload = payload[-STEP_DIAGNOSTICS_MAX_BYTES:]
+        path = os.path.join(diag_dir, name)
+        with open(path, "w", encoding="utf-8", errors="replace") as f:
+            f.write(payload)
+        return path
+    except OSError:
+        return None
 
 
 def write_step_failure_envelope(

@@ -400,6 +400,7 @@ def _extract_json_object(text: str) -> "dict | None":
     successfully parsed answer with a `refused`-shaped absence of findings).
     Returns `None` if no such object exists anywhere in `text`, including
     when `text` is empty or contains no `{` at all."""
+    text = _strip_terminal_control(text)
     decoder = json.JSONDecoder()
     search_from = 0
     candidates: list = []
@@ -427,8 +428,7 @@ def _extract_json_object(text: str) -> "dict | None":
 def call_ollama_harness(
     model: str, prompt: str, output_path: str, timeout: float = OLLAMA_TIMEOUT_SECONDS
 ) -> tuple:
-    """
-    text = _strip_terminal_control(text)Invoke the `ollama` harness for one step over stdin/stdout. Returns
+    """Invoke the `ollama` harness for one step over stdin/stdout. Returns
     `(exit_code, rate_limited, output_tail)` -- `output_tail` (Issue #4008)
     is the sanitized tail of the subprocess's own combined stdout+stderr,
     via `harness_runner.sanitize_harness_output_tail`, so a step's envelope
@@ -476,6 +476,8 @@ def call_ollama_harness(
     `classify()` is forced non-zero whenever extraction fails, whatever the
     real subprocess exit code was.
     """
+    lane_dir = os.path.dirname(output_path)
+    diag_base = _diagnostic_base(output_path)
     try:
         result = subprocess.run(
             ["ollama", "run", model, "--nowordwrap", "--hidethinking", "--format", "json"],
@@ -486,20 +488,67 @@ def call_ollama_harness(
         )
         exit_code = result.returncode
         stdout = result.stdout or ""
-        combined = f"{stdout}\n{result.stderr or ''}"
+        stderr = result.stderr or ""
+        combined = f"{stdout}\n{stderr}"
     except (OSError, subprocess.SubprocessError) as exc:
         error_text = str(exc)
+        # A timeout carries the partial output the model had produced when the
+        # clock ran out, and that is the single most useful artifact for sizing
+        # the timeout correctly -- `subprocess.TimeoutExpired.stdout` is bytes.
+        partial = getattr(exc, "output", None) or getattr(exc, "stdout", None)
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", errors="replace")
+        harness_runner.write_step_diagnostic(
+            lane_dir, f"{diag_base}.launch-error.txt", error_text
+        )
+        if partial:
+            harness_runner.write_step_diagnostic(
+                lane_dir, f"{diag_base}.stdout.txt", partial
+            )
         return 1, _looks_rate_limited(error_text), harness_runner.sanitize_harness_output_tail(error_text)
 
     rate_limited = _looks_rate_limited(combined)
     output_tail = harness_runner.sanitize_harness_output_tail(combined)
 
     extracted = _extract_json_object(stdout)
+    if extracted is None or exit_code != 0:
+        # Keep what the model actually printed. Without this the only surviving
+        # record of a schema failure is a 4,000-character tail, which is not
+        # enough to tell a truncated answer from a refusal from a rate-limit
+        # notice rendered as prose -- see `write_step_diagnostic`.
+        harness_runner.write_step_diagnostic(lane_dir, f"{diag_base}.stdout.txt", stdout)
+        harness_runner.write_step_diagnostic(lane_dir, f"{diag_base}.stderr.txt", stderr)
+        harness_runner.write_step_diagnostic(
+            lane_dir,
+            f"{diag_base}.meta.json",
+            json.dumps(
+                {
+                    "model": model,
+                    "exit_code": exit_code,
+                    "extracted_json_object": extracted is not None,
+                    "rate_limited": rate_limited,
+                    "prompt_chars": len(prompt),
+                    "stdout_chars": len(stdout),
+                    "stderr_chars": len(stderr),
+                    "timeout_seconds": timeout,
+                },
+                indent=2,
+            ),
+        )
     if extracted is None:
         return (exit_code if exit_code != 0 else 1), rate_limited, output_tail
 
     atomic_write.write_json_atomic(output_path, extracted)
     return exit_code, rate_limited, output_tail
+
+
+def _diagnostic_base(output_path: str) -> str:
+    """Filename stem for the diagnostics a failing call leaves behind, derived
+    from the raw-output path so it carries the step id (and the `.taskN`
+    suffix when a step was split) without needing a second argument -- the
+    `call_harness_fn` signature is shared with the other three lanes."""
+    base = os.path.basename(output_path).lstrip(".")
+    return base[:-5] if base.endswith(".json") else base
 
 
 def _raw_output_path(out_dir: str, step_id: str) -> str:
@@ -742,7 +791,13 @@ def run_lane(
 
                 prompt = build_prompt(task_step, file_contents, raw_path)
                 try:
-                    exit_code, rate_limited, output_tail = call_harness_fn(model, prompt, raw_path)
+                    # Wait out a rate limit rather than parking on the first one
+                    # (Issue #4059): parking without waiting only converts "not
+                    # done" into "not done, recorded", and a lane on a limited
+                    # account can never finish a plan that way.
+                    exit_code, rate_limited, output_tail = harness_runner.call_with_rate_limit_backoff(
+                        call_harness_fn, model, prompt, raw_path
+                    )
                 except Exception as exc:  # noqa: BLE001 -- a launch failure is a failed step, never a crashed lane
                     launch_exc = exc
                     break
@@ -756,6 +811,23 @@ def run_lane(
                     task_findings.extend(enriched or [])
                     task_dispositions.extend(_build_dispositions(raw_path, task_hypotheses, step_id))
                 else:
+                    # Issue #4059: keep the prompt that produced this failure and
+                    # the raw answer the harness did manage to write, before the
+                    # cleanup below removes them. A failure that can only be read
+                    # through a bounded tail cannot be reproduced, and a failure
+                    # that cannot be reproduced gets diagnosed by guesswork.
+                    diag_base = _diagnostic_base(raw_path)
+                    harness_runner.write_step_diagnostic(
+                        out_dir, f"{diag_base}.prompt.txt", prompt
+                    )
+                    try:
+                        with open(raw_path, "r", encoding="utf-8", errors="replace") as rf:
+                            harness_runner.write_step_diagnostic(
+                                out_dir, f"{diag_base}.extracted.json", rf.read()
+                            )
+                    except OSError:
+                        pass
+
                     harness_output_tail = harness_output_tail or output_tail
                     if task_state == terminal_state.PARKED:
                         stop_reason_raw = stop_reason_raw or "rate_limited"

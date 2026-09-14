@@ -2221,6 +2221,155 @@ def test_every_lane_uses_the_shared_timeout():
     check(len(set(values.values())) == 1, "lane timeout: every lane shares one value", str(values))
 
 
+def test_rate_limit_backoff_retries_the_same_step_before_parking():
+    # REQUIRED (Issue #4059). A lane that parks on the FIRST rate limit moves
+    # straight to the next step, hits the same limit, and so on to the end of
+    # the plan. Measured: the codex lane completed 3 of 6 steps, then parked the
+    # remaining 3 within seconds, and a resume two minutes later parked the same
+    # three again. Parking without waiting only converts "not done" into "not
+    # done, recorded".
+    slept, calls = [], []
+
+    def limited_then_ok(model, prompt, raw_path):
+        calls.append(1)
+        return (0, len(calls) < 3, "tail")
+
+    ec, rate_limited, _ = harness_runner.call_with_rate_limit_backoff(
+        limited_then_ok, "m", "p", "/tmp/raw", sleep_fn=slept.append
+    )
+    check(len(calls) == 3, "backoff: the same step is retried until it succeeds", str(len(calls)))
+    check(rate_limited is False, "backoff: a retry that succeeds is not parked")
+    check(slept == [30.0, 60.0], "backoff: the wait doubles between attempts", str(slept))
+
+
+def test_rate_limit_backoff_is_bounded_by_total_wait():
+    import os as _os
+    saved = _os.environ.get(harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV)
+    slept, calls = [], []
+
+    def always_limited(model, prompt, raw_path):
+        calls.append(1)
+        return (0, True, "tail")
+
+    try:
+        _os.environ.pop(harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV, None)
+        ec, rate_limited, _ = harness_runner.call_with_rate_limit_backoff(
+            always_limited, "m", "p", "/tmp/raw", sleep_fn=slept.append
+        )
+        check(rate_limited is True, "backoff: a step still rate limited at the budget is parked")
+        check(
+            sum(slept) <= harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_DEFAULT,
+            "backoff: total wait never exceeds the budget",
+            str(sum(slept)),
+        )
+    finally:
+        if saved is not None:
+            _os.environ[harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV] = saved
+
+
+def test_rate_limit_backoff_zero_budget_still_makes_one_attempt():
+    # Zero means "do not wait", never "do not try" -- a lane that skipped the
+    # call entirely would report a park it never earned.
+    import os as _os
+    saved = _os.environ.get(harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV)
+    slept, calls = [], []
+    try:
+        _os.environ[harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV] = "0"
+        harness_runner.call_with_rate_limit_backoff(
+            lambda m, p, r: (calls.append(1), (0, True, "t"))[1], "m", "p", "/tmp/raw",
+            sleep_fn=slept.append,
+        )
+        check(len(calls) == 1, "backoff: a zero budget still attempts the call once", str(len(calls)))
+        check(slept == [], "backoff: a zero budget waits not at all")
+    finally:
+        _os.environ.pop(harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV, None)
+        if saved is not None:
+            _os.environ[harness_runner.RATE_LIMIT_MAX_TOTAL_WAIT_ENV] = saved
+
+
+def test_sanitize_harness_output_tail_strips_whole_escape_sequences():
+    # Removing the ESC byte alone leaves the sequence BODY as ordinary text, so
+    # a spinner-dominated tail reads as `[?25l[?25h...` and the one line that
+    # explains the failure is pushed out by the 4,000-character cap.
+    raw = "\x1b[?25l\x1b[?25h" * 50 + "error: model not found"
+    cleaned = harness_runner.sanitize_harness_output_tail(raw)
+    check(
+        cleaned == "error: model not found",
+        "sanitize_harness_output_tail: a spinner leaves no residue at all",
+        repr(cleaned[:80]),
+    )
+
+
+def test_write_step_diagnostic_persists_under_the_diagnostics_dir():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        path = harness_runner.write_step_diagnostic(lane_dir, "step-001.stdout.txt", "the bytes")
+        check(path is not None, "write_step_diagnostic: returns the path it wrote")
+        check(
+            path == os.path.join(lane_dir, harness_runner.STEP_DIAGNOSTICS_DIRNAME, "step-001.stdout.txt"),
+            "write_step_diagnostic: writes under the diagnostics subdirectory",
+            str(path),
+        )
+        with open(path) as f:
+            check(f.read() == "the bytes", "write_step_diagnostic: content is written verbatim")
+
+
+def test_write_step_diagnostic_ignores_empty_content():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        check(
+            harness_runner.write_step_diagnostic(lane_dir, "empty.txt", "") is None,
+            "write_step_diagnostic: empty content writes nothing",
+        )
+        check(
+            not os.path.isdir(harness_runner.step_diagnostics_dir(lane_dir)),
+            "write_step_diagnostic: empty content does not even create the directory",
+        )
+
+
+def test_write_step_diagnostic_keeps_the_end_when_over_the_cap():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        tail = "the actual error"
+        oversized = "a" * harness_runner.STEP_DIAGNOSTICS_MAX_BYTES + tail
+        path = harness_runner.write_step_diagnostic(lane_dir, "big.txt", oversized)
+        with open(path) as f:
+            written = f.read()
+        check(
+            written.endswith(tail) and len(written) == harness_runner.STEP_DIAGNOSTICS_MAX_BYTES,
+            "write_step_diagnostic: an oversized value is bounded and keeps its end",
+            str(len(written)),
+        )
+
+
+def test_write_step_diagnostic_never_raises_on_an_unwritable_dir():
+    with tempfile.TemporaryDirectory() as parent:
+        lane_dir = os.path.join(parent, "ro")
+        os.makedirs(lane_dir)
+        os.chmod(lane_dir, 0o500)
+        try:
+            check(
+                harness_runner.write_step_diagnostic(lane_dir, "x.txt", "data") is None,
+                "write_step_diagnostic: an unwritable lane dir returns None instead of raising",
+            )
+        finally:
+            os.chmod(lane_dir, 0o700)
+
+
+def test_remove_step_temp_artifacts_never_removes_diagnostics():
+    with tempfile.TemporaryDirectory() as lane_dir:
+        harness_runner.write_step_diagnostic(lane_dir, "step-001.prompt.txt", "the prompt")
+        open(os.path.join(lane_dir, ".step-001.raw.json"), "w").close()
+        harness_runner.remove_step_temp_artifacts(lane_dir, "step-001")
+        check(
+            not os.path.exists(os.path.join(lane_dir, ".step-001.raw.json")),
+            "remove_step_temp_artifacts: the step's own scratch dotfile is still removed",
+        )
+        check(
+            os.path.exists(
+                os.path.join(lane_dir, harness_runner.STEP_DIAGNOSTICS_DIRNAME, "step-001.prompt.txt")
+            ),
+            "remove_step_temp_artifacts: the evidence a failure left behind survives cleanup",
+        )
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

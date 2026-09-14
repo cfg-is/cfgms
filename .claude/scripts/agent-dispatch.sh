@@ -3210,6 +3210,13 @@ PROMPT_EOF
         -e "CFGMS_SECURITY_REVIEW_HARNESS=${inv_harness}"
         -e "CFGMS_SECURITY_REVIEW_MODEL=${inv_model}"
         -e "CFGMS_SECURITY_REVIEW_LANE_ID=${inv_mode}"
+        # Rate-limit backoff is opt-in inside the lane (Issue #4059): a lane
+        # test's stub reports rate limited on purpose, and waiting that out for
+        # real would make every such suite sit for the whole budget. A REAL
+        # lane always wants to wait, so the variable is set here, at the one
+        # place that launches a real one. The operator's own value wins.
+        -e "CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS=${CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS:-900}"
+        -e "CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS=${CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS:-3600}"
       )
     fi
 

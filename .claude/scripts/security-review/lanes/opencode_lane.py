@@ -687,7 +687,13 @@ def run_lane(
 
                 prompt = build_prompt(task_step, file_contents, raw_path)
                 try:
-                    exit_code, rate_limited, output_tail = call_harness_fn(model, prompt, raw_path)
+                    # Wait out a rate limit rather than parking on the first one
+                    # (Issue #4059): parking without waiting only converts "not
+                    # done" into "not done, recorded", and a lane on a limited
+                    # account can never finish a plan that way.
+                    exit_code, rate_limited, output_tail = harness_runner.call_with_rate_limit_backoff(
+                        call_harness_fn, model, prompt, raw_path
+                    )
                 except Exception as exc:  # noqa: BLE001 -- a launch failure is a failed step, never a crashed lane
                     launch_exc = exc
                     break

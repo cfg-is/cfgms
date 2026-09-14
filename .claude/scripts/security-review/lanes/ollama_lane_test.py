@@ -884,6 +884,94 @@ def test_escaped_escape_inside_a_json_string_is_preserved():
     )
 
 
+def test_spinner_sequences_interleaved_inside_the_json_are_stripped():
+    # THE case that matters, and the one the pre-existing pollution test missed:
+    # the spinner renders WHILE the answer streams, so its sequences land in the
+    # middle of the JSON document, not politely around it. Noise outside the
+    # object is harmless -- `_extract_json_object` scans forward to the first
+    # `{` and decodes from there -- so a test that brackets the JSON passes even
+    # when the strip is not wired in at all. That is exactly what happened: the
+    # strip call was left sitting inside a docstring, dead, and every test
+    # still passed.
+    raw = '{"findings": [], ' + "\x1b[?25l" + '"dispositions"' + "\x1b[?25h" + ': []}'
+    got = ollama_lane._extract_json_object(raw)
+    check(got is not None, "ollama: interleaved spinner codes inside the JSON still parse", repr(raw))
+    check(
+        got is not None and got.get("dispositions") == [],
+        "ollama: the answer survives the strip intact",
+        repr(got),
+    )
+
+
+def test_a_failed_call_preserves_stdout_stderr_and_meta():
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = ollama_lane._raw_output_path(out_dir, "step-900")
+        code, _limited, _tail = _run_with_fake_ollama(
+            out_dir, raw_path, stdout="I cannot produce that.", stderr="warn: slow", returncode=0
+        )
+        check(code != 0, "ollama: no JSON extracted reports a non-zero code", str(code))
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        check(
+            any(n.endswith(".stdout.txt") for n in names),
+            "ollama: a failed call keeps the model's stdout",
+            str(names),
+        )
+        check(
+            any(n.endswith(".stderr.txt") for n in names),
+            "ollama: a failed call keeps the harness's stderr",
+            str(names),
+        )
+        meta = [n for n in names if n.endswith(".meta.json")]
+        check(len(meta) == 1, "ollama: a failed call records one meta file", str(names))
+        if meta:
+            with open(os.path.join(diag, meta[0])) as f:
+                parsed = json.load(f)
+            check(
+                parsed.get("extracted_json_object") is False
+                and parsed.get("stdout_chars") == len("I cannot produce that."),
+                "ollama: meta records why the call failed and how much was printed",
+                repr(parsed),
+            )
+        with open(os.path.join(diag, [n for n in names if n.endswith(".stdout.txt")][0])) as f:
+            check(
+                f.read() == "I cannot produce that.",
+                "ollama: the preserved stdout is the model's own bytes, unmodified",
+            )
+
+
+def test_a_successful_call_writes_no_diagnostics():
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = ollama_lane._raw_output_path(out_dir, "step-901")
+        code, _limited, _tail = _run_with_fake_ollama(
+            out_dir, raw_path, stdout='{"findings": [], "dispositions": []}', stderr="", returncode=0
+        )
+        check(code == 0, "ollama: a clean answer reports exit 0", str(code))
+        check(
+            not os.path.isdir(harness_runner.step_diagnostics_dir(out_dir)),
+            "ollama: a complete call leaves no diagnostics behind",
+        )
+
+
+def _run_with_fake_ollama(out_dir, raw_path, stdout, stderr, returncode):
+    """Drive `call_ollama_harness` against a stubbed subprocess.run."""
+
+    class _Result:
+        pass
+
+    result = _Result()
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
+
+    real_run = ollama_lane.subprocess.run
+    ollama_lane.subprocess.run = lambda *a, **k: result
+    try:
+        return ollama_lane.call_ollama_harness("m", "a prompt", raw_path)
+    finally:
+        ollama_lane.subprocess.run = real_run
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
