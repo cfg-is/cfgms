@@ -174,7 +174,10 @@ DEFAULT_PLAN_DIR = "/workspace-plan"
 DEFAULT_OUT_DIR = "/workspace-out"
 DEFAULT_REPO_ROOT = "/workspace"
 
-OPENCODE_TIMEOUT_SECONDS = 600.0
+# Single-sourced in `harness_runner` (Issue #4059) so one number covers every
+# lane and a slow finder does not need a per-lane edit. See that module for
+# why it is bounded rather than removed.
+OPENCODE_TIMEOUT_SECONDS = harness_runner.lane_timeout_seconds()
 
 # OpenCode's Zen gateway provider id -- confirmed via `opencode models`,
 # which lists its free catalog as `opencode/<id>` with no login required.

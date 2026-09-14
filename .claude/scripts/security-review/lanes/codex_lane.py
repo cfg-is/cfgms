@@ -138,7 +138,10 @@ DEFAULT_PLAN_DIR = "/workspace-plan"
 DEFAULT_OUT_DIR = "/workspace-out"
 DEFAULT_REPO_ROOT = "/workspace"
 
-CODEX_TIMEOUT_SECONDS = 600.0
+# Single-sourced in `harness_runner` (Issue #4059) so one number covers every
+# lane and a slow finder does not need a per-lane edit. See that module for
+# why it is bounded rather than removed.
+CODEX_TIMEOUT_SECONDS = harness_runner.lane_timeout_seconds()
 
 # `codex exec`'s own rate-limit/quota-exhaustion signal. Like
 # `claude_lane.py`, `terminal_state.py` never sniffs this out of prose itself

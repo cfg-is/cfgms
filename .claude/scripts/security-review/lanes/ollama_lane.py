@@ -95,6 +95,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -175,7 +176,10 @@ DEFAULT_REPO_ROOT = "/workspace"
 # (`CLAUDE_TIMEOUT_SECONDS` / `CODEX_TIMEOUT_SECONDS` /
 # `OPENCODE_TIMEOUT_SECONDS`), not an ad hoc value -- a Cloud turn over a
 # large prompt is slow.
-OLLAMA_TIMEOUT_SECONDS = 600.0
+# Single-sourced in `harness_runner` (Issue #4059) so one number covers every
+# lane and a slow finder does not need a per-lane edit. See that module for
+# why it is bounded rather than removed.
+OLLAMA_TIMEOUT_SECONDS = harness_runner.lane_timeout_seconds()
 
 # `ollama run`'s own rate-limit/quota-exhaustion signal. Like the other three
 # lanes, `terminal_state.py` never sniffs this out of prose itself --
@@ -335,6 +339,27 @@ def build_prompt(step: dict, file_contents: dict, output_path: str) -> str:
     )
 
 
+# Terminal control sequences `ollama run` emits around its output -- cursor
+# hide/show from the progress spinner, most visibly. `--nowordwrap` and
+# `--hidethinking` (Issue #4014) suppress the wrapping and the thinking prefix
+# but NOT this: the spinner renders regardless of whether stdout is a terminal,
+# and the codes land interleaved with the answer. Measured on the six-step
+# benchmark: a step whose findings were otherwise well-formed failed as
+# `invalid_findings_schema` with a captured tail that was almost entirely
+# `ESC[?25l ESC[?25h` pairs.
+#
+# Stripping is safe rather than lossy: a raw ESC byte is never valid inside a
+# JSON document, so anything removed here could not have been part of the
+# answer. An escaped `\u001b` inside a JSON string is text, not a raw byte, and
+# is untouched.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _strip_terminal_control(text: str) -> str:
+    """Remove terminal control sequences and stray control bytes from `text`."""
+    return _ANSI_RE.sub("", text or "")
+
+
 def _extract_json_object(text: str) -> "dict | None":
     """Best-effort extraction of the answer's top-level JSON object embedded
     in `text`, tolerating prose before, between, and after it.
@@ -402,7 +427,8 @@ def _extract_json_object(text: str) -> "dict | None":
 def call_ollama_harness(
     model: str, prompt: str, output_path: str, timeout: float = OLLAMA_TIMEOUT_SECONDS
 ) -> tuple:
-    """Invoke the `ollama` harness for one step over stdin/stdout. Returns
+    """
+    text = _strip_terminal_control(text)Invoke the `ollama` harness for one step over stdin/stdout. Returns
     `(exit_code, rate_limited, output_tail)` -- `output_tail` (Issue #4008)
     is the sanitized tail of the subprocess's own combined stdout+stderr,
     via `harness_runner.sanitize_harness_output_tail`, so a step's envelope

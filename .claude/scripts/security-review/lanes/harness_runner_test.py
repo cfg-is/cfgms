@@ -2169,6 +2169,58 @@ def test_every_catalogue_scenario_renders_for_a_lane():
     check(not missing, "scenario block: every catalogue scenario renders for a lane", str(missing))
 
 
+def test_lane_timeout_default_is_generous_enough_for_a_slow_finder():
+    # REQUIRED (Issue #4059). 600s was set when every lane was a hosted
+    # frontier model. On the six-step benchmark both Ollama Cloud lanes timed
+    # out on BOTH large steps at 600s, having done the work correctly on every
+    # step they had time for -- four of that run's failures were this one
+    # number. The roster is heading toward local models on the operator's own
+    # hardware, where a few tokens per second is normal.
+    import os as _os
+    saved = _os.environ.pop(harness_runner.LANE_TIMEOUT_ENV, None)
+    try:
+        check(
+            harness_runner.lane_timeout_seconds() >= 3600.0,
+            "lane timeout: the default leaves room for a slow finder",
+            str(harness_runner.lane_timeout_seconds()),
+        )
+    finally:
+        if saved is not None:
+            _os.environ[harness_runner.LANE_TIMEOUT_ENV] = saved
+
+
+def test_lane_timeout_is_overridable_and_fails_safe():
+    import os as _os
+    saved = _os.environ.get(harness_runner.LANE_TIMEOUT_ENV)
+    try:
+        _os.environ[harness_runner.LANE_TIMEOUT_ENV] = "7200"
+        check(harness_runner.lane_timeout_seconds() == 7200.0, "lane timeout: an override is honoured")
+        for bad in ("", "garbage", "0", "-5"):
+            _os.environ[harness_runner.LANE_TIMEOUT_ENV] = bad
+            check(
+                harness_runner.lane_timeout_seconds() == harness_runner.LANE_TIMEOUT_SECONDS_DEFAULT,
+                f"lane timeout: {bad!r} falls back to the default rather than raising",
+                str(harness_runner.lane_timeout_seconds()),
+            )
+    finally:
+        _os.environ.pop(harness_runner.LANE_TIMEOUT_ENV, None)
+        if saved is not None:
+            _os.environ[harness_runner.LANE_TIMEOUT_ENV] = saved
+
+
+def test_every_lane_uses_the_shared_timeout():
+    # A per-lane constant is how 600s survived in four places; assert they all
+    # resolve to the one value so a future slow-finder change is a single edit.
+    import claude_lane, codex_lane, ollama_lane, opencode_lane  # noqa: E402
+    values = {
+        "claude": claude_lane.CLAUDE_TIMEOUT_SECONDS,
+        "codex": codex_lane.CODEX_TIMEOUT_SECONDS,
+        "ollama": ollama_lane.OLLAMA_TIMEOUT_SECONDS,
+        "opencode": opencode_lane.OPENCODE_TIMEOUT_SECONDS,
+    }
+    check(len(set(values.values())) == 1, "lane timeout: every lane shares one value", str(values))
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

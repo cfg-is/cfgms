@@ -170,7 +170,10 @@ DEFAULT_PLAN_DIR = "/workspace-plan"
 DEFAULT_OUT_DIR = "/workspace-out"
 DEFAULT_REPO_ROOT = "/workspace"
 
-CLAUDE_TIMEOUT_SECONDS = 600.0
+# Single-sourced in `harness_runner` (Issue #4059) so one number covers every
+# lane and a slow finder does not need a per-lane edit. See that module for
+# why it is bounded rather than removed.
+CLAUDE_TIMEOUT_SECONDS = harness_runner.lane_timeout_seconds()
 
 # Passed to the harness subprocess's environment so a stub test binary has an
 # unambiguous, machine-readable place to look -- it never has to parse the

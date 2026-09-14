@@ -850,6 +850,40 @@ def test_build_prompt_starts_with_the_shared_methodology_preamble():
     )
 
 
+def test_terminal_control_codes_do_not_break_json_extraction():
+    # REQUIRED (Issue #4059). `--nowordwrap` and `--hidethinking` (Issue #4014)
+    # suppress wrapping and the thinking prefix but NOT the progress spinner,
+    # which emits cursor hide/show codes interleaved with the answer whether or
+    # not stdout is a terminal. Measured on the six-step benchmark: a step whose
+    # findings were otherwise well-formed failed as `invalid_findings_schema`
+    # with a captured tail that was almost entirely ESC[?25l/ESC[?25h pairs.
+    raw = ('{"findings": [], "dispositions": [{"hypothesis_id": "h1", '
+           '"disposition": "investigated", "summary": "ok"}]}')
+    polluted = "\x1b[?25l\x1b[?25h" + raw + "\x1b[?25h\x1b[?25l"
+    got = ollama_lane._extract_json_object(polluted)
+    check(got is not None, "ollama: a spinner-polluted answer still parses", repr(polluted[:60]))
+    check(
+        got == ollama_lane._extract_json_object(raw),
+        "ollama: stripping control bytes yields the same object as the clean answer",
+        repr(got),
+    )
+
+
+def test_escaped_escape_inside_a_json_string_is_preserved():
+    # The strip must remove RAW control bytes only. An escaped \u001b inside a
+    # string is text the model meant to send, and losing it would corrupt a
+    # finding's own evidence.
+    raw = ('{"findings": [], "dispositions": [{"hypothesis_id": "h1", '
+           '"disposition": "investigated", "summary": "has \\u001b escape"}]}')
+    got = ollama_lane._extract_json_object(raw)
+    check(got is not None, "ollama: an escaped ESC inside a string still parses")
+    check(
+        got and "\x1b" in got["dispositions"][0]["summary"],
+        "ollama: the escaped character survives the strip",
+        repr(got["dispositions"][0]["summary"]) if got else "",
+    )
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

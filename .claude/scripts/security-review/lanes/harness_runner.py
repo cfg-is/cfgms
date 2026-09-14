@@ -902,6 +902,47 @@ MAX_STOP_REASON_CHARS = 500
 # id, an auth failure, or a crash actually says what happened. Still a
 # bounded TAIL beside a step's status, never the full transcript a lane's
 # harness call produced (out of scope for this issue).
+# --- Lane timeout, single-sourced (Issue #4059) ------------------------------
+#
+# One turn per step, and a step can hold thousands of lines of source. 600s was
+# set when every lane was a hosted frontier model. It does not survive contact
+# with a slow finder: on the six-step benchmark both Ollama Cloud lanes timed
+# out on BOTH large steps at 600s, having done the work correctly on every step
+# they had time for. Four of the run's failures were this number.
+#
+# Sized for a finder that may generate at a few tokens per second -- a local
+# model on the operator's own hardware, which is where this roster is heading.
+# A step generating ~5,000 output tokens at 10 tok/s is ~500s of generation
+# alone, before prompt evaluation; 600s was inside the noise of that, 3600s
+# leaves real headroom.
+#
+# BOUNDED, NOT REMOVED. The dispatcher blocks on `docker wait` for each lane,
+# so a lane with no timeout at all does not fail loudly -- it hangs the sweep
+# with no diagnostic, which is the opposite of this harness's posture
+# everywhere else. A timeout produces a `failed` step naming the condition,
+# which a resume then retries.
+#
+# `CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS` overrides it for genuinely slow
+# hardware without a code change.
+LANE_TIMEOUT_SECONDS_DEFAULT = 3600.0
+LANE_TIMEOUT_ENV = "CFGMS_SECURITY_REVIEW_LANE_TIMEOUT_SECONDS"
+
+
+def lane_timeout_seconds() -> float:
+    """The per-step lane timeout, from the environment or the default.
+
+    An unset, empty, unparseable or non-positive value falls back to the
+    default rather than raising: a malformed override must not take a whole
+    sweep down, and the default is always a safe answer.
+    """
+    raw = os.environ.get(LANE_TIMEOUT_ENV, "")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return LANE_TIMEOUT_SECONDS_DEFAULT
+    return value if value > 0 else LANE_TIMEOUT_SECONDS_DEFAULT
+
+
 HARNESS_OUTPUT_TAIL_MAX_CHARS = 4_000
 
 # Control characters stripped from a harness output tail before it is
