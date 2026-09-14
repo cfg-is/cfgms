@@ -551,6 +551,33 @@ def _diagnostic_base(output_path: str) -> str:
     return base[:-5] if base.endswith(".json") else base
 
 
+def _previous_answer_text(out_dir: str, raw_path: str) -> str:
+    """What the model actually said on the call now being repaired.
+
+    Prefers the extracted JSON object at `raw_path` -- the answer as the model
+    wrote it, before enrichment adds the harness-owned identity fields, so a
+    repair round never shows the model fields it must not supply. Falls back to
+    the raw stdout `call_ollama_harness` preserved under `diagnostics/`, which
+    is the only surviving record when extraction found no JSON at all. Returns
+    `""` when neither survives: there is then nothing to repair, and the caller
+    must not spend a call asking the model to correct an answer it cannot see.
+    """
+    try:
+        with open(raw_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        pass
+    diag_path = os.path.join(
+        harness_runner.step_diagnostics_dir(out_dir),
+        f"{_diagnostic_base(raw_path)}.stdout.txt",
+    )
+    try:
+        with open(diag_path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
 def _raw_output_path(out_dir: str, step_id: str) -> str:
     return os.path.join(out_dir, f".{step_id}.ollama-raw.json")
 
@@ -805,6 +832,61 @@ def run_lane(
                 enriched = _build_candidate(raw_path, candidate_path, sweep_id, commit_sha, lane_id, step_id)
                 findings_path = candidate_path if enriched is not None else None
                 task_state = terminal_state.classify(exit_code, findings_path, rate_limited=rate_limited)
+
+                # Issue #4059: one repair round. Both measured ollama failures
+                # were a complete, correct review thrown away over
+                # transcription -- one answer omitted the opening quote on a
+                # long string value, the other omitted one required field from
+                # its single finding. Handing the model the exact defect and
+                # its own previous answer recovers the whole step for one small
+                # call: a repair prompt carries no file contents, so it is a
+                # fraction of the original's size.
+                #
+                # Never attempted for a rate-limited call. That is not a
+                # defective answer, it is no answer, and `parked` already means
+                # "retry this later" -- spending the repair budget on it would
+                # burn the one attempt a genuinely repairable answer needs.
+                if task_state != terminal_state.COMPLETE and not rate_limited:
+                    for _ in range(harness_runner.REPAIR_ATTEMPTS):
+                        previous_answer = _previous_answer_text(out_dir, raw_path)
+                        if not previous_answer:
+                            break
+                        defects = (
+                            harness_runner.describe_findings_defects(enriched)
+                            if enriched is not None
+                            else []
+                        )
+                        repair_prompt = harness_runner.build_repair_prompt(defects, previous_answer)
+                        harness_runner.write_step_diagnostic(
+                            out_dir, f"{_diagnostic_base(raw_path)}.repair-prompt.txt", repair_prompt
+                        )
+                        schema.log_event(
+                            "step_repair_attempted", step_id=step_id, defects=len(defects)
+                        )
+                        try:
+                            exit_code, rate_limited, output_tail = (
+                                harness_runner.call_with_rate_limit_backoff(
+                                    call_harness_fn, model, repair_prompt, raw_path
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- a launch failure is a failed step
+                            launch_exc = exc
+                            break
+                        enriched = _build_candidate(
+                            raw_path, candidate_path, sweep_id, commit_sha, lane_id, step_id
+                        )
+                        findings_path = candidate_path if enriched is not None else None
+                        task_state = terminal_state.classify(
+                            exit_code, findings_path, rate_limited=rate_limited
+                        )
+                        schema.log_event(
+                            "step_repair_result", step_id=step_id, state=task_state
+                        )
+                        if task_state == terminal_state.COMPLETE or rate_limited:
+                            break
+                    if launch_exc is not None:
+                        break
+
                 task_states.append(task_state)
 
                 if task_state == terminal_state.COMPLETE:

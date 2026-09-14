@@ -1137,6 +1137,70 @@ def write_step_diagnostic(lane_dir: str, name: str, text: str) -> "str | None":
         return None
 
 
+# One repair round, and only one. Measured on the six-step benchmark: the two
+# ollama failures were an answer missing the opening quote on a long string
+# value, and an answer whose single finding omitted one required field. Both
+# were otherwise complete, correct reviews thrown away over punctuation and a
+# missing key. A model that cannot fix its own output when handed the exact
+# defect will not fix it on a third pass either, so the budget is one.
+REPAIR_ATTEMPTS = 1
+
+# A repair prompt carries the previous answer but NOT the step's file
+# contents, so it is a fraction of the original prompt's size and costs a
+# fraction of its time. This cap bounds the pathological case (a model that
+# answered with megabytes) rather than the normal one.
+REPAIR_PREVIOUS_ANSWER_MAX_CHARS = 120_000
+
+UNPARSEABLE_ANSWER_DEFECT = (
+    'your answer was not a JSON object of the shape '
+    '{"findings": [...], "dispositions": [...]}'
+)
+
+
+def describe_findings_defects(findings: list) -> list:
+    """One line per schema violation across `findings`, indexed by the
+    position the model wrote each finding at, so a repair prompt can name
+    exactly which entry to fix. Empty when every finding validates.
+
+    Validate the ENRICHED findings, not the raw ones: the harness-owned
+    identity fields are added before validation, so a defect reported here is
+    always the model's own and never an artifact of enrichment."""
+    defects: list = []
+    for index, finding in enumerate(findings):
+        errors = schema.validate_finding(finding)
+        if errors:
+            defects.append(f"findings[{index}]: " + "; ".join(errors))
+    return defects
+
+
+def build_repair_prompt(defects: list, previous_answer: str) -> str:
+    """The prompt for one repair round: the defects, the output contract, and
+    the model's own previous answer.
+
+    Deliberately omits the step's file contents. The model has already done
+    the review; what is being asked for is a transcription fix, and re-sending
+    hundreds of kilobytes of source invites it to review again from scratch
+    and produce a different answer rather than correct this one."""
+    answer = previous_answer or ""
+    if len(answer) > REPAIR_PREVIOUS_ANSWER_MAX_CHARS:
+        answer = answer[:REPAIR_PREVIOUS_ANSWER_MAX_CHARS]
+    defect_lines = "\n".join(f"- {d}" for d in defects) if defects else f"- {UNPARSEABLE_ANSWER_DEFECT}"
+    return (
+        "Your previous answer was rejected. Correct it.\n\n"
+        "Rejected because:\n"
+        f"{defect_lines}\n\n"
+        "Keep every finding and every disposition you already wrote. Change only "
+        "what the list above names. Do not review the code again. Do not add or "
+        "remove findings.\n\n"
+        "Required shape:\n"
+        f"{OUTPUT_SCHEMA_DESCRIPTION}\n\n"
+        "Print the corrected JSON object, and only that object, to standard "
+        "output -- no prose before or after it.\n\n"
+        "Your previous answer:\n"
+        f"{answer}\n"
+    )
+
+
 def write_step_failure_envelope(
     lane_dir: str, context: dict, model_id: str, stop_reason_raw: str
 ) -> dict | None:
