@@ -847,21 +847,29 @@ def run_lane(
                 # "retry this later" -- spending the repair budget on it would
                 # burn the one attempt a genuinely repairable answer needs.
                 if task_state != terminal_state.COMPLETE and not rate_limited:
-                    for _ in range(harness_runner.REPAIR_ATTEMPTS):
+                    attempt = 0
+                    defects = (
+                        harness_runner.describe_findings_defects(enriched)
+                        if enriched is not None
+                        else []
+                    )
+                    signature = harness_runner.repair_signature(enriched, defects)
+                    while attempt < harness_runner.REPAIR_MAX_ATTEMPTS:
                         previous_answer = _previous_answer_text(out_dir, raw_path)
                         if not previous_answer:
                             break
-                        defects = (
-                            harness_runner.describe_findings_defects(enriched)
-                            if enriched is not None
-                            else []
-                        )
+                        attempt += 1
                         repair_prompt = harness_runner.build_repair_prompt(defects, previous_answer)
                         harness_runner.write_step_diagnostic(
-                            out_dir, f"{_diagnostic_base(raw_path)}.repair-prompt.txt", repair_prompt
+                            out_dir,
+                            f"{_diagnostic_base(raw_path)}.repair{attempt}-prompt.txt",
+                            repair_prompt,
                         )
                         schema.log_event(
-                            "step_repair_attempted", step_id=step_id, defects=len(defects)
+                            "step_repair_attempted",
+                            step_id=step_id,
+                            attempt=attempt,
+                            defects=len(defects),
                         )
                         try:
                             exit_code, rate_limited, output_tail = (
@@ -880,10 +888,22 @@ def run_lane(
                             exit_code, findings_path, rate_limited=rate_limited
                         )
                         schema.log_event(
-                            "step_repair_result", step_id=step_id, state=task_state
+                            "step_repair_result",
+                            step_id=step_id,
+                            attempt=attempt,
+                            state=task_state,
                         )
                         if task_state == terminal_state.COMPLETE or rate_limited:
                             break
+                        defects = (
+                            harness_runner.describe_findings_defects(enriched)
+                            if enriched is not None
+                            else []
+                        )
+                        next_signature = harness_runner.repair_signature(enriched, defects)
+                        if not harness_runner.repair_made_progress(signature, next_signature):
+                            break
+                        signature = next_signature
                     if launch_exc is not None:
                         break
 

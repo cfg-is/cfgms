@@ -1137,13 +1137,45 @@ def write_step_diagnostic(lane_dir: str, name: str, text: str) -> "str | None":
         return None
 
 
-# One repair round, and only one. Measured on the six-step benchmark: the two
-# ollama failures were an answer missing the opening quote on a long string
-# value, and an answer whose single finding omitted one required field. Both
-# were otherwise complete, correct reviews thrown away over punctuation and a
-# missing key. A model that cannot fix its own output when handed the exact
-# defect will not fix it on a third pass either, so the budget is one.
-REPAIR_ATTEMPTS = 1
+# A repair round is worth repeating only while it is converging. Measured on the
+# six-step benchmark: one step's first answer was unparseable, the repair fixed
+# the JSON, and the now-readable answer turned out to omit a required field on
+# all 60 of its findings. The defect class had CHANGED -- the answer was
+# strictly better -- but the budget was already spent, so a recoverable step was
+# recorded failed.
+#
+# An attempt that changes the defect class, or shrinks the defect count, is
+# evidence the model is converging and earns one more. An attempt that
+# reproduces the same defect earns nothing: a model that repeats its own error
+# verbatim will repeat it again. Hard cap regardless, so a model that converges
+# by one defect at a time cannot walk a rate-limited account's budget to zero.
+REPAIR_MAX_ATTEMPTS = 2
+
+UNPARSEABLE_SIGNATURE = ("unparseable",)
+
+
+def repair_signature(enriched: "list | None", defects: list) -> tuple:
+    """A comparable summary of what is wrong with one answer: either it did not
+    parse into the expected shape at all, or it parsed and carries a count of
+    schema defects. Compared across attempts by `repair_made_progress`."""
+    if enriched is None:
+        return UNPARSEABLE_SIGNATURE
+    return ("schema", len(defects))
+
+
+def repair_made_progress(previous: tuple, current: tuple) -> bool:
+    """True when `current` is strictly better than `previous`.
+
+    Two ways to be better: an answer that did not parse now parses, or a
+    parsing answer carries strictly fewer schema defects. Everything else --
+    the same count, more defects, or a parsing answer that stopped parsing --
+    is not progress, and the caller stops rather than spending another call.
+    """
+    if previous == UNPARSEABLE_SIGNATURE:
+        return current != UNPARSEABLE_SIGNATURE
+    if current == UNPARSEABLE_SIGNATURE:
+        return False
+    return current[1] < previous[1]
 
 # A repair prompt carries the previous answer but NOT the step's file
 # contents, so it is a fraction of the original prompt's size and costs a

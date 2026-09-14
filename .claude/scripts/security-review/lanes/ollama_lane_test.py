@@ -1114,6 +1114,99 @@ def test_repair_is_skipped_when_no_previous_answer_survives():
         check(written[0]["state"] == "failed", "repair: the step is still recorded failed", repr(written[0]["state"]))
 
 
+def _no_cwe(**overrides) -> dict:
+    finding = good_finding(**overrides)
+    del finding["cwe"]
+    return finding
+
+
+def test_a_converging_repair_earns_a_second_attempt():
+    # The measured step-413 case: the first answer did not parse, the first
+    # repair fixed the JSON and revealed findings that every one omitted a
+    # required field. The defect class changed, so the model is converging and
+    # earns the second attempt that recovers the step.
+    prompts: list = []
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001")
+        harness_runner.write_step_diagnostic(
+            out_dir, "step-001.ollama-raw.stdout.txt", '{"findings": [}'
+        )
+        written = ollama_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_sequenced_harness_stub(
+                [
+                    (1, False, None),
+                    (0, False, {"findings": [_no_cwe(), _no_cwe()]}),
+                    (0, False, {"findings": [good_finding(), good_finding()]}),
+                ],
+                prompts,
+            ),
+        )
+        check(len(prompts) == 3, "converging repair: two repair calls were made", str(len(prompts)))
+        check(
+            written[0]["state"] == "complete",
+            "converging repair: the step is recovered",
+            repr(written[0]["state"]),
+        )
+        recovered = written[0].get("findings") or []
+        check(
+            len(recovered) == 2,
+            "converging repair: both findings survive",
+            repr(len(recovered)),
+        )
+
+
+def test_a_converging_repair_still_stops_at_the_hard_cap():
+    # Converging is not a licence to keep calling. Two attempts, then stop,
+    # even though the defect count is still falling.
+    prompts: list = []
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001")
+        harness_runner.write_step_diagnostic(
+            out_dir, "step-001.ollama-raw.stdout.txt", '{"findings": [}'
+        )
+        written = ollama_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_sequenced_harness_stub(
+                [
+                    (1, False, None),
+                    (0, False, {"findings": [_no_cwe(), _no_cwe(), _no_cwe()]}),
+                    (0, False, {"findings": [_no_cwe()]}),
+                ],
+                prompts,
+            ),
+        )
+        check(
+            len(prompts) == 3,
+            "converging repair: the hard cap stops a third repair call",
+            str(len(prompts)),
+        )
+        check(
+            written[0]["state"] == "failed",
+            "converging repair: a step still broken at the cap is recorded failed",
+            repr(written[0]["state"]),
+        )
+
+
+def test_a_repair_that_goes_backwards_earns_nothing():
+    # A parsing answer that stops parsing is not converging.
+    prompts: list = []
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001")
+        written = ollama_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_sequenced_harness_stub(
+                [(0, False, {"findings": [_no_cwe()]}), (1, False, None)], prompts
+            ),
+        )
+        check(
+            len(prompts) == 2,
+            "backwards repair: no second attempt is spent",
+            str(len(prompts)),
+        )
+        check(written[0]["state"] == "failed", "backwards repair: the step is recorded failed")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

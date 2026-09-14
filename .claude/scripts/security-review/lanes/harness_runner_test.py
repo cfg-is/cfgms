@@ -2430,12 +2430,65 @@ def test_build_repair_prompt_bounds_a_huge_previous_answer():
     )
 
 
-def test_repair_budget_is_exactly_one_attempt():
+def test_repair_budget_is_capped_at_two_attempts():
     check(
-        harness_runner.REPAIR_ATTEMPTS == 1,
-        "repair: the budget is one attempt -- a model that cannot fix its own "
-        "output when handed the exact defect will not fix it on a third pass",
-        str(harness_runner.REPAIR_ATTEMPTS),
+        harness_runner.REPAIR_MAX_ATTEMPTS == 2,
+        "repair: the hard cap is two attempts, so a model converging one defect "
+        "at a time cannot walk a rate-limited account's budget to zero",
+        str(harness_runner.REPAIR_MAX_ATTEMPTS),
+    )
+
+
+def test_repair_signature_separates_unparseable_from_schema_defects():
+    check(
+        harness_runner.repair_signature(None, []) == harness_runner.UNPARSEABLE_SIGNATURE,
+        "repair_signature: an answer that did not parse has its own signature",
+    )
+    check(
+        harness_runner.repair_signature([{}, {}], ["a", "b"]) == ("schema", 2),
+        "repair_signature: a parsing answer carries its defect count",
+    )
+
+
+def test_repair_progress_when_an_unparseable_answer_starts_parsing():
+    check(
+        harness_runner.repair_made_progress(
+            harness_runner.UNPARSEABLE_SIGNATURE, ("schema", 60)
+        ),
+        "repair_made_progress: unparseable -> parseable is progress even with many defects",
+    )
+
+
+def test_repair_progress_when_the_defect_count_shrinks():
+    check(
+        harness_runner.repair_made_progress(("schema", 60), ("schema", 3)),
+        "repair_made_progress: fewer defects is progress",
+    )
+
+
+def test_repair_no_progress_when_the_defect_count_holds_or_grows():
+    check(
+        not harness_runner.repair_made_progress(("schema", 2), ("schema", 2)),
+        "repair_made_progress: the same defect count is not progress",
+    )
+    check(
+        not harness_runner.repair_made_progress(("schema", 2), ("schema", 5)),
+        "repair_made_progress: more defects is not progress",
+    )
+
+
+def test_repair_no_progress_when_a_parsing_answer_stops_parsing():
+    check(
+        not harness_runner.repair_made_progress(
+            ("schema", 2), harness_runner.UNPARSEABLE_SIGNATURE
+        ),
+        "repair_made_progress: a parsing answer that stopped parsing went backwards",
+    )
+    check(
+        not harness_runner.repair_made_progress(
+            harness_runner.UNPARSEABLE_SIGNATURE, harness_runner.UNPARSEABLE_SIGNATURE
+        ),
+        "repair_made_progress: still unparseable is not progress",
     )
 
 
