@@ -145,37 +145,52 @@ SYSTEM_PROMPT = (
 # the same C4 single-sourcing this module already applies to the methodology
 # document is applied here to the closed CWE vocabulary too.
 def _build_output_schema_description() -> str:
+    """The output contract, shared by all four lanes (C4).
+
+    Describes the SHAPE only. Each lane states its own destination -- a file
+    path for claude and opencode, standard output for codex and ollama -- so
+    naming one here would contradict two of the four in the same prompt.
+    """
     cwe_list = ", ".join(f'"{cwe}"' for cwe in sorted(schema.CWE_VALUES))
     return (
-        'Write a single JSON object of the exact shape {"findings": [...], '
-        '"dispositions": [...]} to the output file. '
-        '"dispositions" is a JSON array with exactly one entry per hypothesis you '
-        "were given -- every hypothesis id must appear exactly once. Each entry is a "
-        'JSON object with exactly these string fields: "hypothesis_id" (the id of '
-        'the hypothesis this entry resolves), "disposition" (one of '
-        '"investigated"/"candidate_found"/"inconclusive"/"not_attempted"), and '
-        '"summary" (what you found, or why you could not investigate it). Use '
-        '"not_attempted" only for a hypothesis you genuinely could not get to -- '
-        "never fabricate a summary for one you skipped, and never invent a "
-        "hypothesis id that was not given to you. "
-        '"findings" is a JSON array, empty if you found nothing -- a '
-        "genuinely clean review is a valid, expected result. Each element is a JSON "
-        'object with these fields, all required except "end_line": "hypothesis_id" '
-        '(the id of the hypothesis this finding resulted from), "file" '
-        '(repo-relative path), "symbol" (function/method/type name), "line" '
-        "(integer, 1 or greater -- the primary line number the defect concerns), "
-        '"end_line" (integer >= "line", only when the defect spans more than one '
-        'line -- omit it otherwise), "vuln_class" (a short vulnerability-class '
-        f'label), "cwe" (exactly one of {cwe_list}, or "other: <short label>" when '
-        'none of those fits -- never a bare number, never free text outside that '
-        'escape), "severity" (one of "low"/"medium"/"high"/"critical"), '
-        '"confidence" (one of "low"/"medium"/"high"), "title", "evidence" (why this '
-        'is a real, exploitable issue), and "suggested_fix". "line"/"end_line" are '
-        "read as a hint at where to look, never verified against the file -- get "
-        "them as close as you can, but a defect is never dropped for an uncertain "
-        "line. Findings are de-duplicated by file + symbol + vuln_class, never by "
-        "line -- report the same defect once even if you are unsure of the exact "
-        "line. Include no fields beyond these."
+        'A single JSON object: {"findings": [...], "dispositions": [...]}\n'
+        "\n"
+        '"dispositions" -- one entry per hypothesis you were given, every id '
+        "exactly once:\n"
+        '  "hypothesis_id"  the hypothesis this entry resolves\n'
+        '  "disposition"    "investigated" | "candidate_found" | "inconclusive" '
+        '| "not_attempted"\n'
+        '  "summary"        what you found, or why you could not investigate it\n'
+        "\n"
+        'Use "not_attempted" only for a hypothesis you did not investigate. '
+        "Never invent a hypothesis id.\n"
+        "\n"
+        '"findings" -- one entry per defect. An empty array is a valid result.\n'
+        'Every field below is required except "end_line". Add no other fields.\n'
+        '  "hypothesis_id"  the hypothesis this finding came from\n'
+        '  "file"           repo-relative path\n'
+        '  "symbol"         function, method, or type name\n'
+        '  "line"           integer, 1 or greater\n'
+        '  "end_line"       integer >= "line", only when the defect spans '
+        "several lines\n"
+        '  "vuln_class"     short vulnerability-class label\n'
+        # Measured, not styled. nemotron-3-super omitted "cwe" on 74 of 110
+        # findings (67%) without this line and 0 of 94 with it, same prompt,
+        # four samples each -- it emits "vuln_class" and treats "cwe" as the
+        # same field unless told otherwise at the point it chooses. Reword only
+        # with a fresh measurement; the wording below is the one that was tested.
+        '  (every finding needs BOTH "vuln_class" and "cwe" below -- they are '
+        "different fields)\n"
+        f'  "cwe"            exactly one of: {cwe_list}\n'
+        '                   or "other: <short label>" when none of those fits\n'
+        '  "severity"       "low" | "medium" | "high" | "critical"\n'
+        '  "confidence"     "low" | "medium" | "high"\n'
+        '  "title"          one line\n'
+        '  "evidence"       why this is a real, exploitable issue\n'
+        '  "suggested_fix"  what to change\n'
+        "\n"
+        '"line" is a hint; get it close. Report each defect once -- duplicates '
+        'are matched on "file" + "symbol" + "vuln_class".'
     )
 
 
