@@ -1038,6 +1038,56 @@ def test_build_prompt_starts_with_the_shared_methodology_preamble():
     )
 
 
+def test_rate_limit_detector_ignores_digits_inside_numbers():
+    # The measured false positive: a scanner's own timing value contains the
+    # digits 429, and the markers are matched against the harness's COMBINED
+    # output, which includes the model's answer. A finished step was parked.
+    check(
+        not opencode_lane._looks_rate_limited('"rules_parse_time":0.015944957733154297'),
+        "opencode_lane: a timing number containing 429 is not a rate limit",
+    )
+    check(
+        not opencode_lane._looks_rate_limited("line 429 is missing a bounds check"),
+        "opencode_lane: a line number 429 is not a rate limit",
+    )
+    check(
+        not opencode_lane._looks_rate_limited("elapsed 4290ms"),
+        "opencode_lane: 429 inside a larger number is not a rate limit",
+    )
+
+
+def test_rate_limit_detector_ignores_a_finding_about_rate_limiting():
+    # A security review's answer is the text most likely to discuss rate
+    # limiting. Saying an endpoint lacks one must not park the step reporting it.
+    for text in (
+        "the endpoint has no rate limit",
+        "add a rate limit to this handler",
+        "no usage limit is enforced",
+    ):
+        check(
+            not opencode_lane._looks_rate_limited(text),
+            "opencode_lane: a finding about rate limiting is not a rate limit",
+            repr(text),
+        )
+
+
+def test_rate_limit_detector_still_matches_real_limits():
+    for text in (
+        "HTTP 429 too many requests",
+        "429 Too Many Requests",
+        "status: 429",
+        "Usage limit reached, try later",
+        "rate limit exceeded",
+        "You have hit your usage limit",
+        "quota exceeded",
+    ):
+        check(
+            opencode_lane._looks_rate_limited(text),
+            "opencode_lane: a real rate limit is still detected",
+            repr(text),
+        )
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

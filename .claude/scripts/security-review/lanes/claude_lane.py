@@ -79,6 +79,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -247,12 +248,33 @@ def resolve_disallowed_tools(env: "dict | None" = None) -> str:
 # caller concern, per that module's docstring). A harness has no structured
 # equivalent of a REST 429; this is a best-effort text match over the
 # subprocess's combined stdout+stderr, case-insensitive.
-_RATE_LIMIT_MARKERS = ("rate limit", "usage limit", "quota exceeded", "429")
+# Issue #4069: a rate limit must look like a rate limit, not like three digits.
+# The previous markers were bare substrings -- "rate limit", "usage limit",
+# "quota exceeded", "429" -- tested against the harness's COMBINED output, which
+# includes the model's own answer. A security review's answer is precisely the
+# text most likely to contain both: a finding that says an endpoint "has no rate
+# limit", and a stray 429 inside any number. Measured: a finished step was
+# parked because a scanner's timing value, 0.015944957733154297, contains 429.
+#
+# Every alternative below needs a companion word, so a number alone and a
+# finding that merely discusses rate limiting no longer match. A real limit that
+# is phrased differently is missed and the step records a failure instead --
+# visible and retryable, unlike silently discarding a complete review.
+_RATE_LIMIT_RE = re.compile(
+    r"too\s+many\s+requests"
+    r"|(?:http|https|status(?:\s+code)?|code|error)\s*[:/]?\s*429\b"
+    r"|rate[\s_-]?limit(?:s|ed|ing)?[\s:,.-]+(?:exceeded|reached|hit|error)"
+    r"|(?:exceeded|reached|hit)\s+(?:your\s+|the\s+)*rate[\s_-]?limit"
+    r"|usage\s+limit[\s:,.-]+(?:exceeded|reached)"
+    r"|(?:exceeded|reached|hit)\s+(?:your\s+|the\s+)*usage\s+limit"
+    r"|quota\s+(?:exceeded|exhausted)"
+    r"|(?:exceeded|exhausted)\s+(?:your\s+|the\s+)*quota",
+    re.IGNORECASE,
+)
 
 
 def _looks_rate_limited(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+    return bool(_RATE_LIMIT_RE.search(text or ""))
 
 
 # Issue #4006: the pinned CLI rejects a model id outside its catalog with this

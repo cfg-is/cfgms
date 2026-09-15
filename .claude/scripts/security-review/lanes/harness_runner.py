@@ -1003,7 +1003,12 @@ def call_with_rate_limit_backoff(call_fn, model, prompt, raw_path, sleep_fn=None
     delay = RATE_LIMIT_FIRST_WAIT_SECONDS
     while True:
         exit_code, rate_limited, output_tail = call_fn(model, prompt, raw_path)
-        if not rate_limited:
+        # A call that wrote its answer is not retried, whatever its output text
+        # said. Without this, one loose marker match in a model's own findings
+        # makes a FINISHED step sleep out the whole wait budget before being
+        # parked -- the cost of a false positive goes from wrong to expensive.
+        # `terminal_state.classify` applies the same precedence.
+        if not rate_limited or os.path.isfile(raw_path):
             return exit_code, rate_limited, output_tail
         if waited + delay > budget:
             return exit_code, rate_limited, output_tail
