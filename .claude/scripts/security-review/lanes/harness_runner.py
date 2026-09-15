@@ -1209,7 +1209,7 @@ UNPARSEABLE_ANSWER_DEFECT = (
 )
 
 
-def describe_findings_defects(findings: list) -> list:
+def describe_findings_defects(findings: list, known_hypothesis_ids: object = None) -> list:
     """One line per schema violation across `findings`, indexed by the
     position the model wrote each finding at, so a repair prompt can name
     exactly which entry to fix. Empty when every finding validates.
@@ -1219,7 +1219,7 @@ def describe_findings_defects(findings: list) -> list:
     always the model's own and never an artifact of enrichment."""
     defects: list = []
     for index, finding in enumerate(findings):
-        errors = schema.validate_finding(finding)
+        errors = schema.validate_finding(finding, known_hypothesis_ids)
         if errors:
             defects.append(f"findings[{index}]: " + "; ".join(errors))
     return defects

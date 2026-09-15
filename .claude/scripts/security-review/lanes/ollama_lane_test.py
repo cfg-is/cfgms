@@ -1257,6 +1257,58 @@ def test_rate_limit_detector_still_matches_real_limits():
         )
 
 
+def test_a_truncated_hypothesis_id_is_repaired():
+    # The measured case: the model answers with the bare "h1" instead of the
+    # full id the step gave it. Before Issue #4069 that passed validation, so
+    # the repair round never fired and the finding could not be traced back to
+    # the planner that proposed it.
+    prompts: list = []
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001", hypotheses=[{
+            "id": "codex-gpt-6-astra:h1", "objective": "o",
+            "required_evidence": "e", "planner": "codex-gpt-6-astra"}])
+        step = json.load(open(os.path.join(plan_dir, "step-001.json")))
+        real_id = (step.get("hypotheses") or [{}])[0].get("id")
+        check(real_id == "codex-gpt-6-astra:h1",
+              "repair: the fixture step carries a prefixed hypothesis id", repr(real_id))
+        truncated = good_finding(hypothesis_id="h1")
+        fixed = good_finding(hypothesis_id=real_id)
+        written = ollama_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_sequenced_harness_stub(
+                [(0, False, {"findings": [truncated]}), (0, False, {"findings": [fixed]})],
+                prompts,
+            ),
+        )
+        check(len(prompts) == 2, "repair: a truncated id triggers exactly one repair call",
+              str(len(prompts)))
+        repair_prompt = prompts[1] if len(prompts) > 1 else ""
+        check("h1" in repair_prompt and real_id in repair_prompt,
+              "repair: the repair prompt names the bad id and the ids that were available",
+              repr(repair_prompt[:400]))
+        check(written[0]["state"] == "complete",
+              "repair: the step completes once the id is corrected", repr(written[0]["state"]))
+        check((written[0].get("findings") or [{}])[0].get("hypothesis_id") == real_id,
+              "repair: the corrected finding carries the full id")
+
+
+def test_a_correct_hypothesis_id_costs_no_repair():
+    prompts: list = []
+    with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
+        write_plan_step(plan_dir, "step-001", hypotheses=[{
+            "id": "codex-gpt-6-astra:h1", "objective": "o",
+            "required_evidence": "e", "planner": "codex-gpt-6-astra"}])
+        step = json.load(open(os.path.join(plan_dir, "step-001.json")))
+        real_id = (step.get("hypotheses") or [{}])[0].get("id")
+        written = ollama_lane.run_lane(
+            plan_dir, out_dir, "/workspace", LANE_ID, MODEL,
+            call_harness_fn=make_sequenced_harness_stub(
+                [(0, False, {"findings": [good_finding(hypothesis_id=real_id)]})], prompts),
+        )
+        check(len(prompts) == 1, "repair: a correct id costs exactly one call", str(len(prompts)))
+        check(written[0]["state"] == "complete", "repair: and the step completes")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

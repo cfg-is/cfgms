@@ -851,9 +851,20 @@ def run_lane(
                     launch_exc = exc
                     break
 
+                # Issue #4069: the ids this task actually showed the model. A
+                # finding quoting anything else is a defect, so classify() must
+                # see them -- otherwise the envelope reads `complete` and the
+                # repair round below never fires. Task-scoped, not step-scoped:
+                # a split step shows each task only its own subset.
+                task_hypothesis_ids = {
+                    h.get("id") for h in task_hypotheses if isinstance(h, dict) and h.get("id")
+                }
                 enriched = _build_candidate(raw_path, candidate_path, sweep_id, commit_sha, lane_id, step_id)
                 findings_path = candidate_path if enriched is not None else None
-                task_state = terminal_state.classify(exit_code, findings_path, rate_limited=rate_limited)
+                task_state = terminal_state.classify(
+                    exit_code, findings_path, rate_limited=rate_limited,
+                    known_hypothesis_ids=task_hypothesis_ids,
+                )
 
                 # Issue #4059: one repair round. Both measured ollama failures
                 # were a complete, correct review thrown away over
@@ -871,7 +882,7 @@ def run_lane(
                 if task_state != terminal_state.COMPLETE and not rate_limited:
                     attempt = 0
                     defects = (
-                        harness_runner.describe_findings_defects(enriched)
+                        harness_runner.describe_findings_defects(enriched, task_hypothesis_ids)
                         if enriched is not None
                         else []
                     )
@@ -907,7 +918,8 @@ def run_lane(
                         )
                         findings_path = candidate_path if enriched is not None else None
                         task_state = terminal_state.classify(
-                            exit_code, findings_path, rate_limited=rate_limited
+                            exit_code, findings_path, rate_limited=rate_limited,
+                            known_hypothesis_ids=task_hypothesis_ids,
                         )
                         schema.log_event(
                             "step_repair_result",
@@ -918,7 +930,7 @@ def run_lane(
                         if task_state == terminal_state.COMPLETE or rate_limited:
                             break
                         defects = (
-                            harness_runner.describe_findings_defects(enriched)
+                            harness_runner.describe_findings_defects(enriched, task_hypothesis_ids)
                             if enriched is not None
                             else []
                         )
