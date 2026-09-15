@@ -1253,6 +1253,46 @@ def build_repair_prompt(defects: list, previous_answer: str) -> str:
     )
 
 
+def write_call_diagnostics(
+    output_path: str, model: str, exit_code: int, prompt: str, stdout: str, stderr: str,
+    timeout: float,
+) -> None:
+    """Preserve what a failing harness call printed, for lanes whose harness
+    writes its own answer file (claude, codex, opencode).
+
+    Called only when the call failed -- a non-zero exit, or no answer file
+    written. A `complete` call keeps nothing, for the reason
+    `write_step_diagnostic` gives: a full-repository sweep would otherwise
+    write hundreds of megabytes to answer a question nobody asked.
+
+    The filename stem comes from `output_path` so it carries the step id and
+    any `.taskN` suffix, matching what each lane's own `_diagnostic_base`
+    derives. Never raises."""
+    base = os.path.basename(output_path).lstrip(".")
+    if base.endswith(".json"):
+        base = base[:-5]
+    lane_dir = os.path.dirname(output_path)
+    write_step_diagnostic(lane_dir, f"{base}.stdout.txt", stdout)
+    write_step_diagnostic(lane_dir, f"{base}.stderr.txt", stderr)
+    write_step_diagnostic(lane_dir, f"{base}.prompt.txt", prompt)
+    write_step_diagnostic(
+        lane_dir,
+        f"{base}.meta.json",
+        json.dumps(
+            {
+                "model": model,
+                "exit_code": exit_code,
+                "answer_file_written": os.path.isfile(output_path),
+                "prompt_chars": len(prompt or ""),
+                "stdout_chars": len(stdout or ""),
+                "stderr_chars": len(stderr or ""),
+                "timeout_seconds": timeout,
+            },
+            indent=2,
+        ),
+    )
+
+
 def write_step_failure_envelope(
     lane_dir: str, context: dict, model_id: str, stop_reason_raw: str
 ) -> dict | None:
