@@ -179,6 +179,79 @@ def test_assert_form_is_silent_on_a_clean_verdict():
         check(False, "assert_no_leak: a clean verdict passes silently", str(exc))
 
 
+LONG_LINE = (
+    'return fmt.Errorf("audit enqueue cancelled while waiting for capacity: %w", ctx.Err())'
+)
+
+
+def test_an_elided_quote_is_caught():
+    # Issue #4071. The whole-span check slides a window of DEFAULT_MIN_LEAK_CHARS
+    # over the text; a model that drops the middle of a long line and writes "..."
+    # in the gap leaves no single run that long, while both halves are source.
+    verdict = f"Reachable: {LONG_LINE[:44]} ... {LONG_LINE[44:]}"
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is not None, "a quote elided with ... is caught", repr(verdict[:70]))
+
+
+def test_an_elided_quote_that_really_drops_content_is_caught():
+    # The harder shape: the elision removes source rather than just interrupting
+    # it, so joining the halves yields text that is in no file. The total amount
+    # of verbatim source still reaches the threshold, which is what is judged.
+    verdict = (
+        'return fmt.Errorf("audit enqueue cancelled while waiting '
+        "... "
+        '%w", ctx.Err())'
+    )
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is not None, "an elision that drops content is still caught", repr(span))
+
+
+def test_the_unicode_ellipsis_character_is_also_an_elision():
+    verdict = f"Reachable: {LONG_LINE[:44]}\u2026{LONG_LINE[44:]}"
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is not None, "U+2026 counts as an elision marker", repr(span))
+
+
+def test_zero_width_characters_cannot_disguise_a_leak():
+    # U+200B is not whitespace to \s, so without stripping Cf the normalised
+    # text keeps it and every verbatim run becomes one character long -- while
+    # the text still renders as the copied line.
+    verdict = "\u200b".join(LONG_LINE)
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is not None, "zero-width spaces between characters do not hide a leak", repr(span))
+
+
+def test_normalize_drops_format_characters():
+    check(
+        source_leak.normalize("a\u200bb\u200cc") == "abc",
+        "normalize removes Unicode Cf characters",
+        repr(source_leak.normalize("a\u200bb\u200cc")),
+    )
+
+
+def test_a_call_path_with_an_ellipsis_is_not_a_leak():
+    # The elided path must not start rejecting the verdict shape this stage asks
+    # for. Identifiers ARE verbatim in source; what makes a path a reference and
+    # not an excerpt is that the connectors are not.
+    verdict = "enqueue ... m.queue <- entry, then the caller returns"
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is None, "an identifier citation around an ellipsis still passes", repr(span))
+
+
+def test_prose_containing_an_ellipsis_is_not_a_leak():
+    verdict = "The path is reachable from the HTTP handler ... and the error is not sanitized."
+    span = source_leak.find_leak(verdict, {"pkg/audit/manager.go": REAL_SOURCE})
+    check(span is None, "ordinary prose with an ellipsis passes", repr(span))
+
+
+def test_punctuation_between_fragments_cannot_pad_the_total():
+    check(
+        source_leak.ELISION_RUN_FLOOR > 0,
+        "a floor exists so short fragments cannot accumulate into a false leak",
+        str(source_leak.ELISION_RUN_FLOOR),
+    )
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
