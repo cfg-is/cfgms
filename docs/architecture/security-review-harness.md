@@ -1732,6 +1732,27 @@ attacker-influenced, even though neither carries finding content. Both route thr
 embedded newline plus a forged log line stays inside that one record's field instead of becoming
 a second, spoofed record.
 
+### Planner reasoning effort
+
+`CFGMS_SECURITY_REVIEW_PLANNER_REASONING`, when set, is passed to the codex planner as
+`--strict-config -c model_reasoning_effort=<value>`. Unset passes no flag and the harness keeps
+whatever the model defaults to, so an operator who has not opted in sees no change.
+
+It exists because the defaults invert the intuition. From `codex debug models`, the two top-tier
+ids — `gpt-6-astra` and `gpt-5.6-sol` — both default to `low`, while the cheaper `gpt-5.6-terra`
+and `gpt-5.6-luna` default to `medium`. Without this variable the harness runs its most capable
+planner at its weakest setting, and a cheaper finder out-reasons it.
+
+Valid values are codex's own: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`. The value is
+validated in `agent-dispatch.sh` before any container starts, because the failure it prevents is
+silent — a value codex does not recognise exits non-zero inside the container after the prompt has
+already been spent. `--strict-config` is what makes an unknown configuration *key* a loud failure
+too: without it codex accepts and ignores one, leaving the planner on its default while the
+operator believes otherwise.
+
+Applies to the planner only. Finder lanes keep their harness defaults; the measured finder roster
+runs `gpt-5.6-luna`, which already defaults to `medium`.
+
 ### Multi-planner plan merge (C6, Issue #3937)
 
 Epic #3927's contract C6: `CFGMS_SECURITY_REVIEW_PLANNERS` selects which model(s) build the
