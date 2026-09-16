@@ -24,6 +24,7 @@ container, a model, or a repository checkout.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # A verbatim run this long, lifted from a file the verifier read, is a code
 # excerpt rather than a reference to one.
@@ -45,13 +46,40 @@ DEFAULT_MIN_LEAK_CHARS = 60
 # miss exactly the case worth catching.
 _WS_RE = re.compile(r"\s+")
 
+# An elision marker: "...", a run of dots, or the ellipsis character, with any
+# surrounding whitespace. A model quoting a long line routinely drops its middle
+# and writes one of these in the gap. That splits the run in two, and two halves
+# of a 106-character line are each under the threshold -- so the whole-span check
+# alone lets an elided quote through. Elided quotes are handled separately below.
+#
+# Deliberately ONLY elision markers. Splitting on other punctuation would break
+# a legitimate call path ("handleListAuditEntries -> store.Query -> fmt.Errorf")
+# into identifiers that ARE each verbatim in source, and start rejecting the
+# exact verdict shape this stage asks for.
+_ELISION_RE = re.compile(r"\s*(?:\.{2,}|\u2026)\s*")
+
+# A run this short, counted toward an elided quote's total, is punctuation or a
+# fragment rather than content: ");", " err != ". Above it, a run is a piece of
+# the line. Kept well under DEFAULT_MIN_LEAK_CHARS because the elided path sums
+# several runs rather than trusting any one of them.
+ELISION_RUN_FLOOR = 12
+
 
 def normalize(text: str) -> str:
-    """Collapse whitespace runs to a single space and strip the ends.
+    r"""Collapse whitespace runs to a single space and strip the ends.
 
     The one normalisation applied to both sides of the comparison, so a leak
-    cannot be disguised by reformatting."""
-    return _WS_RE.sub(" ", text or "").strip()
+    cannot be disguised by reformatting.
+
+    Unicode format characters (category `Cf`) are removed first. A zero-width
+    space is not whitespace to `\s`, so without this a U+200B between every
+    character leaves text that renders as the source line while every verbatim
+    run is one character long. Dropping them costs nothing -- they carry no
+    content a verdict needs -- and they never appear in the source side either,
+    so both sides normalise consistently.
+    """
+    stripped = "".join(c for c in (text or "") if unicodedata.category(c) != "Cf")
+    return _WS_RE.sub(" ", stripped).strip()
 
 
 def find_leak(
@@ -96,6 +124,63 @@ def find_leak(
         for hay in haystacks:
             if span in hay:
                 return span
+
+    return _find_elided_leak(needle, haystacks, min_chars)
+
+
+def _longest_shared_run(segment: str, haystacks: "list[str]") -> str:
+    """The longest substring of `segment` that appears in any of `haystacks`.
+
+    Segments are verdict-sized, so the straightforward scan is fast enough and
+    is preferred over anything cleverer that would be harder to argue about."""
+    best = ""
+    length = len(segment)
+    for start in range(length):
+        # Nothing starting here can beat what we already have.
+        if length - start <= len(best):
+            break
+        for end in range(length, start + len(best), -1):
+            candidate = segment[start:end]
+            if any(candidate in hay for hay in haystacks):
+                best = candidate
+                break
+    return best
+
+
+def _find_elided_leak(
+    needle: str, haystacks: "list[str]", min_chars: int
+) -> "str | None":
+    """Catch a quote whose middle was replaced by an elision marker.
+
+    The whole-span check cannot see this: a 106-character line written as
+    `<50 chars> ... <56 chars>` has no single run reaching `min_chars`, yet both
+    halves are source. Split on elision markers, take each segment's longest
+    verbatim run, and judge the TOTAL -- which is the amount of source text that
+    actually travels onward, however it was chopped up.
+
+    Runs below `ELISION_RUN_FLOOR` are not counted, so punctuation between
+    fragments cannot pad the total.
+
+    Returns the longest contributing run, so the caller names real source text
+    rather than the whole verdict. Text with no elision marker returns None
+    immediately, which is the overwhelmingly common case.
+    """
+    segments = [seg for seg in _ELISION_RE.split(needle) if seg]
+    if len(segments) < 2:
+        return None
+
+    total = 0
+    longest = ""
+    for segment in segments:
+        run = _longest_shared_run(segment, haystacks)
+        if len(run) < ELISION_RUN_FLOOR:
+            continue
+        total += len(run)
+        if len(run) > len(longest):
+            longest = run
+
+    if total >= min_chars and longest:
+        return longest
     return None
 
 
