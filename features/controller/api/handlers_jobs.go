@@ -85,7 +85,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		// err embeds req.Selector via selector.Parse format strings — sanitize before logging.
-		safeParseErr := err.Error()
+		safeParseErr := logging.SanitizeLogValue(err.Error())
 		safeParseErr = strings.ReplaceAll(safeParseErr, "\n", "_")
 		safeParseErr = strings.ReplaceAll(safeParseErr, "\r", "_")
 		s.logger.Info("Invalid selector expression",
@@ -160,7 +160,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 				// execErr may embed job.Selector (user-tainted) via executor error messages.
 				// Sanitize with the sequential-reassignment form that CodeQL's ReplaceSanitizer
 				// recognises; logging.SanitizeLogValue alone is not recognised at call sites.
-				safeExecErr := execErr.Error()
+				safeExecErr := logging.SanitizeLogValue(execErr.Error())
 				safeExecErr = strings.ReplaceAll(safeExecErr, "\n", "_")
 				safeExecErr = strings.ReplaceAll(safeExecErr, "\r", "_")
 				s.logger.Error("Batch job execution failed",

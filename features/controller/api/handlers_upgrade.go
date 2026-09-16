@@ -361,7 +361,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 					onTimeout,
 				); pubErr != nil {
 					s.logger.Error("Failed to dispatch CommandPushStewardBinary",
-						"error", pubErr,
+						"error", logging.SanitizeLogValue(pubErr.Error()),
 						"steward_id", logging.SanitizeLogValue(stewardID),
 						"upgrade_id", upgradeID)
 					_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
@@ -656,7 +656,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 				onTimeout,
 			); pubErr != nil {
 				s.logger.Error("Failed to dispatch rollback CommandPushStewardBinary",
-					"error", pubErr,
+					"error", logging.SanitizeLogValue(pubErr.Error()),
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"rollback_upgrade_id", rollbackUpgradeID)
 				_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,

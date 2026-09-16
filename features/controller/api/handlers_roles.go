@@ -105,7 +105,7 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
+	safeSelector := logging.SanitizeLogValue(strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", ""))
 	if _, _, err := selector.Parse(req.Selector); err != nil {
 		s.logger.Info("Invalid role selector", "selector", safeSelector, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid selector: %s", err.Error()), "INVALID_SELECTOR")

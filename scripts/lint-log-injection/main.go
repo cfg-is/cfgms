@@ -341,48 +341,34 @@ func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structF
 }
 
 // collectTaintedVars returns a set of identifier names that are assigned from
-// a taint source somewhere in the given subtree. Callers pass a function body
-// so taint stays function-scoped — a name reassigned to a safe value in
-// another function doesn't get tainted here.
+// a taint source, or derived from an already-tainted value, somewhere in the
+// given subtree. Callers pass a function body so taint stays function-scoped
+// — a name reassigned to a safe value in another function doesn't get
+// tainted here.
 func collectTaintedVars(root ast.Node) map[string]struct{} {
 	tainted := map[string]struct{}{}
 
+	// `var x = <source>` pins x directly. The general AssignStmt case
+	// (including the direct-source assignment `x := <source>`) is handled by
+	// the unified fixed-point loop below, since taintPropagatesFrom already
+	// recognizes a raw taint source on its first check.
 	ast.Inspect(root, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case *ast.AssignStmt:
-			// Only consider := and = with one Rhs.
-			if len(v.Rhs) == 0 {
-				return true
-			}
-			for idx, lhs := range v.Lhs {
-				if idx >= len(v.Rhs) {
-					break
-				}
-				rhs := v.Rhs[idx]
-				if len(v.Rhs) == 1 && len(v.Lhs) > 1 {
-					rhs = v.Rhs[0]
-				}
-				if !isTaintSourceExpr(rhs) {
-					continue
-				}
-				if id, ok := lhs.(*ast.Ident); ok {
-					tainted[id.Name] = struct{}{}
-				}
-			}
-		case *ast.DeclStmt:
-			gen, ok := v.Decl.(*ast.GenDecl)
+		decl, ok := n.(*ast.DeclStmt)
+		if !ok {
+			return true
+		}
+		gen, ok := decl.Decl.(*ast.GenDecl)
+		if !ok {
+			return true
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
 			if !ok {
-				return true
+				continue
 			}
-			for _, spec := range gen.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for i, name := range vs.Names {
-					if i < len(vs.Values) && isTaintSourceExpr(vs.Values[i]) {
-						tainted[name.Name] = struct{}{}
-					}
+			for i, name := range vs.Names {
+				if i < len(vs.Values) && isTaintSourceExpr(vs.Values[i]) {
+					tainted[name.Name] = struct{}{}
 				}
 			}
 		}
@@ -414,37 +400,68 @@ func collectTaintedVars(root ast.Node) map[string]struct{} {
 		return true
 	})
 
-	// Propagate taint through error returns. An error produced by a call that
-	// received tainted input carries that input back out inside its message
-	// text -- a gRPC status, a store lookup, or a decode all quote the offending
-	// value -- so logging that error bare is the same injection as logging the
-	// value. This is the shape that kept reaching acceptance review: the obvious
-	// taint (a path var) gets sanitized and `err` beside it does not.
+	// Unified propagation pass. A single fixed-point loop covers every shape
+	// a tainted value can flow through on its way to a sink:
 	//
-	// Iterated to a fixed point so a chain (tainted arg -> err -> wrapped err)
-	// resolves. Five rounds is far beyond any real handler's depth and bounds a
-	// pathological input.
+	//   - a direct assignment from a raw taint source (x := mux.Vars(r)["id"])
+	//   - a method call on an already-tainted receiver, chained or not
+	//     (r.URL.Query().Get("id") / q.Get("id") where q := r.URL.Query())
+	//   - a plain alias (alias := id)
+	//   - fmt.Sprintf / string concatenation over a tainted operand
+	//   - any call carrying a tainted argument (fmt.Errorf wraps, gRPC/store
+	//     calls whose error message quotes the offending input) -- regardless
+	//     of what the result is named; an error produced from tainted input
+	//     carries that input back out inside its message text, so logging it
+	//     bare is the same injection as logging the value, whether it's bound
+	//     to `err` or reassigned to something else first
+	//   - a struct-field write (s.Field = tainted) or a composite literal at
+	//     declaration (s := &T{Field: tainted}) taints the whole containing
+	//     variable, not just the field -- deliberately over-approximate, so a
+	//     later bare-identifier use of that variable as a call argument is
+	//     already caught by the existing anyArgTainted machinery
+	//
+	// Iterated to a fixed point so a multi-hop chain (tainted arg -> alias ->
+	// Sprintf -> wrapped err) resolves in one call. Five rounds is far beyond
+	// any real handler's depth and bounds a pathological input.
 	for i := 0; i < 5; i++ {
 		changed := false
 		ast.Inspect(root, func(n ast.Node) bool {
 			assign, ok := n.(*ast.AssignStmt)
-			if !ok || len(assign.Rhs) != 1 {
+			if !ok || len(assign.Rhs) == 0 {
 				return true
 			}
-			call, ok := assign.Rhs[0].(*ast.CallExpr)
-			if !ok || transmitsWithoutEchoing(call) || !anyArgTainted(call.Args, tainted) {
-				return true
-			}
-			for _, lhs := range assign.Lhs {
-				id, ok := lhs.(*ast.Ident)
-				if !ok || !looksLikeErrorVar(id.Name) {
+			for idx, lhs := range assign.Lhs {
+				var rhs ast.Expr
+				switch {
+				case idx < len(assign.Rhs):
+					rhs = assign.Rhs[idx]
+				case len(assign.Rhs) == 1:
+					rhs = assign.Rhs[0]
+				default:
 					continue
 				}
-				if _, already := tainted[id.Name]; already {
-					continue
+				switch l := lhs.(type) {
+				case *ast.SelectorExpr:
+					rootID, ok := l.X.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					if _, already := tainted[rootID.Name]; already {
+						continue
+					}
+					if taintPropagatesFrom(rhs, tainted) {
+						tainted[rootID.Name] = struct{}{}
+						changed = true
+					}
+				case *ast.Ident:
+					if _, already := tainted[l.Name]; already {
+						continue
+					}
+					if taintPropagatesFrom(rhs, tainted) {
+						tainted[l.Name] = struct{}{}
+						changed = true
+					}
 				}
-				tainted[id.Name] = struct{}{}
-				changed = true
 			}
 			return true
 		})
@@ -454,6 +471,66 @@ func collectTaintedVars(root ast.Node) map[string]struct{} {
 	}
 
 	return tainted
+}
+
+// taintPropagatesFrom reports whether assigning rhs to a variable should
+// taint that variable, given the currently-known tainted set. It is the
+// single decision point collectTaintedVars' fixed-point loop calls for every
+// assignment LHS, covering direct taint sources (via isTaintedExpr), method
+// calls on tainted receivers, calls carrying tainted arguments (guarded by
+// transmitsWithoutEchoing the same way the error-wrap rule always was),
+// string concatenation, and composite literals / unary address-of.
+func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}) bool {
+	if isTaintedExpr(rhs, tainted) {
+		return true
+	}
+	switch v := unparen(rhs).(type) {
+	case *ast.CallExpr:
+		if isSanitized(v) || transmitsWithoutEchoing(v) {
+			return false
+		}
+		return anyArgTainted(v.Args, tainted)
+	case *ast.BinaryExpr:
+		if v.Op != token.ADD {
+			return false
+		}
+		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
+	case *ast.CompositeLit:
+		return exprCarriesTaint(v, tainted)
+	case *ast.UnaryExpr:
+		return exprCarriesTaint(v, tainted)
+	}
+	return false
+}
+
+// unparen strips any enclosing parentheses from an expression.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+// isMethodCallOnTaintedReceiver reports whether call is a method call whose
+// receiver (after unwrapping parens) is either an identifier already in the
+// tainted set, or itself a recognized taint source expression. This covers
+// both r.URL.Query().Get("id") (receiver is the source call itself) and
+// q := r.URL.Query(); q.Get("id") (receiver is a tainted identifier).
+func isMethodCallOnTaintedReceiver(call *ast.CallExpr, tainted map[string]struct{}) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	recv := unparen(sel.X)
+	if id, ok := recv.(*ast.Ident); ok {
+		if _, ok := tainted[id.Name]; ok {
+			return true
+		}
+	}
+	return isTaintSourceExpr(recv)
 }
 
 // transmitOnlyMethods send bytes somewhere. Their errors describe the transport
@@ -480,13 +557,6 @@ func transmitsWithoutEchoing(call *ast.CallExpr) bool {
 		return ok
 	}
 	return false
-}
-
-// looksLikeErrorVar reports whether a variable name denotes an error value.
-// Name-based rather than type-based because this linter parses without type
-// information; Go's own naming convention makes it reliable in practice.
-func looksLikeErrorVar(name string) bool {
-	return name == "err" || strings.HasSuffix(name, "Err") || strings.HasSuffix(name, "Error")
 }
 
 // anyArgTainted reports whether any argument carries tainted data, looking
@@ -526,6 +596,9 @@ func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
 			}
 		}
 	case *ast.CallExpr:
+		if isSanitized(v) {
+			return false
+		}
 		return anyArgTainted(v.Args, tainted)
 	case *ast.BinaryExpr:
 		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
@@ -582,6 +655,11 @@ func isTaintedExpr(e ast.Expr, tainted map[string]struct{}) bool {
 	case *ast.CallExpr:
 		// Inline taint sources e.g. mux.Vars(r)["id"]
 		if isTaintSourceExpr(v) {
+			return true
+		}
+		// A method call on an already-tainted receiver, chained or not
+		// (r.URL.Query().Get("id"), or q.Get("id") where q is tainted).
+		if isMethodCallOnTaintedReceiver(v, tainted) {
 			return true
 		}
 	case *ast.IndexExpr:
