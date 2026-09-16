@@ -40,9 +40,18 @@ func (p *DatabaseEntityGraphProvider) RunRetentionGC(ctx context.Context, policy
 		tombstoneDays = historyDays + 7
 	}
 
-	// Acquire advisory lock to prevent double-sweep (AC6).
+	// pg_try_advisory_lock is session-scoped: acquire and release must run on
+	// the same physical connection, or a pooled *sql.DB call could serve each
+	// statement from a different session and the guard would bound nothing.
+	// Pin one connection for the acquire and hold it open for the whole sweep.
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("entitygraph/database: retention gc: acquire connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
 	var lockAcquired bool
-	if err := p.db.QueryRowContext(ctx,
+	if err := conn.QueryRowContext(ctx,
 		`SELECT pg_try_advisory_lock($1)`, gcAdvisoryLockKey,
 	).Scan(&lockAcquired); err != nil {
 		return fmt.Errorf("entitygraph/database: retention gc: acquire lock: %w", err)
@@ -51,7 +60,11 @@ func (p *DatabaseEntityGraphProvider) RunRetentionGC(ctx context.Context, policy
 		return nil // another node is running the sweep; this is not an error
 	}
 	defer func() {
-		_, _ = p.db.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, gcAdvisoryLockKey)
+		// Use a background context so a canceled/timed-out ctx cannot skip the
+		// unlock: the connection stays checked out either way (conn.Close()
+		// below only returns it to the pool), so a failed unlock would leave
+		// the session holding the lock until this connection is reused.
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, gcAdvisoryLockKey)
 	}()
 
 	overrides, err := p.dbLoadRetentionOverrides(ctx)
@@ -213,10 +226,12 @@ func (p *DatabaseEntityGraphProvider) dbSweepTombstones(ctx context.Context, now
 			return fmt.Errorf("entitygraph/database: tombstone delete edges for %s: %w", c.subject, err)
 		}
 		// Remove edge log rows referencing this subject as either endpoint.
+		// c.subject is an arbitrary EID local-id and may itself contain '%' or
+		// '_'; escape it so those are matched literally, not as wildcards.
 		if _, err := p.db.ExecContext(ctx,
 			`DELETE FROM eg_observation_log
-			 WHERE subject LIKE $1 OR subject LIKE $2`,
-			"%|"+c.subject+"|%", "%|"+c.subject,
+			 WHERE subject LIKE $1 ESCAPE '\' OR subject LIKE $2 ESCAPE '\'`,
+			"%|"+interfaces.EscapeLikePattern(c.subject)+"|%", "%|"+interfaces.EscapeLikePattern(c.subject),
 		); err != nil {
 			return fmt.Errorf("entitygraph/database: tombstone delete edge-log for %s: %w", c.subject, err)
 		}

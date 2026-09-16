@@ -91,6 +91,10 @@ func RunEntityGraphContractTests(t *testing.T, factory EntityGraphProviderFactor
 	t.Run("RetentionTombstoneHorizon", func(t *testing.T) { testEGRetentionTombstoneHorizon(t, factory) })   // AC 3
 	t.Run("RetentionPerSubtreePolicy", func(t *testing.T) { testEGRetentionPerSubtreePolicy(t, factory) })   // AC 2
 	t.Run("WatchExpiredCursor", func(t *testing.T) { testEGWatchExpiredCursor(t, factory) })                 // AC 5 REQUIRED
+	// Issue #4074: tombstone sweep's edge-log LIKE cleanup must escape metacharacters.
+	t.Run("RetentionTombstoneEscapesLikeMetacharacters", func(t *testing.T) {
+		testEGRetentionTombstoneEscapesLikeMetacharacters(t, factory)
+	})
 }
 
 // --- Contract test helpers ---
@@ -2408,6 +2412,84 @@ func testEGRetentionPerSubtreePolicy(t *testing.T, factory EntityGraphProviderFa
 		}
 	}
 	assert.True(t, v1InB, "long-tenant V1 (31 days old, override 60d policy) must NOT be pruned by GC")
+}
+
+// testEGRetentionTombstoneEscapesLikeMetacharacters verifies Issue #4074 (2):
+// the tombstone sweep's edge-log cleanup builds a LIKE pattern by concatenating
+// the tombstoned subject's own text. Because that text is an arbitrary EID
+// local-id, it may itself contain the LIKE metacharacters '%' and '_' — left
+// unescaped, they act as wildcards and the DELETE can remove log rows for an
+// unrelated subject whose text happens to fall in the wildcarded range. Each
+// case below picks a sibling subject whose own log row would only be caught by
+// the wildcard, never by a literal-string match, so it survives if and only if
+// the pattern is escaped correctly.
+func testEGRetentionTombstoneEscapesLikeMetacharacters(t *testing.T, factory EntityGraphProviderFactory) {
+	t.Helper()
+	p := factory(t)
+	ctx := context.Background()
+	const src = "enforcing-module:scanner"
+	past := time.Now().UTC().AddDate(-2, 0, 0) // 2 years ago — well past any tombstone horizon
+
+	tombstoneAndCheckSibling := func(t *testing.T, tombstoned, sibling, marker string) {
+		t.Helper()
+
+		// Seed the tombstoned subject: a state observation, then an absence
+		// observation, both far enough in the past to clear a 30-day horizon.
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: src,
+			Observations: []types.Observation{{
+				Source: src, Subject: tombstoned, Kind: types.ObservationKindState,
+				Confidence: types.ConfidenceHigh, ObservedAt: past, RecordedAt: past,
+				Payload: map[string]interface{}{"marker": "tombstoned"},
+			}},
+		}))
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: src,
+			Observations: []types.Observation{{
+				Source: src, Subject: tombstoned, Kind: types.ObservationKindAbsence,
+				Confidence: types.ConfidenceHigh, ObservedAt: past.Add(time.Minute), RecordedAt: past.Add(time.Minute),
+				Payload: map[string]interface{}{},
+			}},
+		}))
+
+		// Seed the sibling: one recent observation so ordinary history pruning
+		// (independent of the LIKE-escaping defect under test) has no reason to
+		// touch it — only the tombstone sweep's edge-log cleanup could.
+		egReport(ctx, t, p, src, sibling, map[string]interface{}{"marker": marker})
+
+		require.NoError(t, p.RunRetentionGC(ctx, interfaces.RetentionPolicy{HistoryDays: 30, TombstoneDays: 30}))
+
+		now := time.Now().UTC()
+		siblingHistory, err := p.GetHistory(ctx, egEID(t, sibling), interfaces.TimeRange{
+			From: past.Add(-time.Hour),
+			To:   now.Add(time.Hour),
+		})
+		require.NoError(t, err)
+		require.Len(t, siblingHistory, 1,
+			"sibling subject %q must survive the tombstone sweep for %q — an unescaped LIKE metacharacter over-deleted it", sibling, tombstoned)
+		assert.Equal(t, marker, siblingHistory[0].Observation.Payload["marker"])
+	}
+
+	// tombstoned subject contains a literal '%'; sibling's own subject text
+	// embeds a pipe followed by the substring the unescaped '%' would wildcard
+	// over ("50" + anything + "off") — the exact shape of the edge-log format
+	// "edge_type|from|to" that the sweep's LIKE patterns are built to match.
+	t.Run("Percent", func(t *testing.T) {
+		tombstoneAndCheckSibling(t,
+			"host:esc-pct-auth/50%off",
+			"host:esc-pct-auth/carrier|host:esc-pct-auth/50wrongoff",
+			"sibling-pct",
+		)
+	})
+	// tombstoned subject contains a literal '_'; sibling's own subject text
+	// substitutes a single arbitrary character for '_' ("ab" + one char + "cd").
+	t.Run("Underscore", func(t *testing.T) {
+		tombstoneAndCheckSibling(t,
+			"host:esc-us-auth/ab_cd",
+			"host:esc-us-auth/carrier|host:esc-us-auth/abXcd",
+			"sibling-us",
+		)
+	})
 }
 
 // testEGWatchExpiredCursor verifies AC5 (REQUIRED): Watch resume from a cursor
