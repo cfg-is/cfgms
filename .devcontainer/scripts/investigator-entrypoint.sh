@@ -268,15 +268,21 @@ case "$MODE" in
         # configuration key outright rather than ignoring it silently, which is
         # what makes a typo a loud failure instead of a setting that never
         # applied.
-        CODEX_REASONING_ARGS=""
+        # An array, not a string: the string form had to be expanded unquoted
+        # to split into its three tokens, which also subjected the *value* to
+        # word splitting and pathname expansion -- a value carrying a space
+        # would have appended extra argv entries to codex. The launcher
+        # whitelists the value, but this script is a second entry point that
+        # reads the environment directly and validates nothing of its own, so
+        # it should not depend on that check. An empty array expands to zero
+        # words, so the opted-out path still passes no flags at all.
+        CODEX_REASONING_ARGS=()
         if [ -n "${CFGMS_SECURITY_REVIEW_PLANNER_REASONING:-}" ]; then
-            CODEX_REASONING_ARGS="--strict-config -c model_reasoning_effort=${CFGMS_SECURITY_REVIEW_PLANNER_REASONING}"
+            CODEX_REASONING_ARGS=(--strict-config -c "model_reasoning_effort=${CFGMS_SECURITY_REVIEW_PLANNER_REASONING}")
         fi
-        # shellcheck disable=SC2086 -- CODEX_REASONING_ARGS is a validated
-        # two-token flag pair or empty; word splitting is the intent.
         exec codex exec \
           --model "$CFGMS_SECURITY_REVIEW_MODEL" \
-          $CODEX_REASONING_ARGS \
+          "${CODEX_REASONING_ARGS[@]}" \
           --sandbox danger-full-access \
           --skip-git-repo-check \
           --output-last-message "${PLAN_OUT_DIR}/.investigator-plan-last-message.txt" \
