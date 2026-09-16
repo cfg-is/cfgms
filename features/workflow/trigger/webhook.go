@@ -160,9 +160,9 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Registering webhook endpoint",
-		"trigger_id", trigger.ID,
-		"path", trigger.Webhook.Path,
-		"methods", trigger.Webhook.Method)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
+		"path", logging.SanitizeLogValue(trigger.Webhook.Path),
+		"methods", logging.SanitizeLogValue(strings.Join(trigger.Webhook.Method, ",")))
 
 	// Store webhook configuration
 	wh.webhooks[trigger.ID] = trigger
@@ -181,8 +181,8 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 	}
 
 	logger.InfoCtx(ctx, "Webhook endpoint registered successfully",
-		"trigger_id", trigger.ID,
-		"path", trigger.Webhook.Path)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
+		"path", logging.SanitizeLogValue(trigger.Webhook.Path))
 
 	return nil
 }
@@ -198,7 +198,7 @@ func (wh *HTTPWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID s
 	trigger, exists := wh.webhooks[triggerID]
 	if !exists {
 		logger.WarnCtx(ctx, "Attempted to unregister non-existent webhook",
-			"trigger_id", triggerID)
+			"trigger_id", logging.SanitizeLogValue(triggerID))
 		return fmt.Errorf("webhook trigger %s is not registered", triggerID)
 	}
 
@@ -210,8 +210,8 @@ func (wh *HTTPWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID s
 	delete(wh.pathToTrigger, trigger.Webhook.Path)
 
 	logger.InfoCtx(ctx, "Webhook endpoint unregistered successfully",
-		"trigger_id", triggerID,
-		"path", trigger.Webhook.Path)
+		"trigger_id", logging.SanitizeLogValue(triggerID),
+		"path", logging.SanitizeLogValue(trigger.Webhook.Path))
 
 	return nil
 }
@@ -230,7 +230,7 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Processing webhook request",
-		"trigger_id", triggerID,
+		"trigger_id", logging.SanitizeLogValue(triggerID),
 		"payload_size", len(payload))
 
 	// Create trigger execution record — store only sanitized headers to prevent
@@ -257,8 +257,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
 		logger.ErrorCtx(ctx, "Webhook payload validation failed",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 
 		return execution, fmt.Errorf("%w: %v", errPayloadValidationFailed, err)
 	}
@@ -272,8 +272,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
 		logger.ErrorCtx(ctx, "Webhook authentication failed",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 
 		return execution, err
 	}
@@ -288,8 +288,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
 		logger.ErrorCtx(ctx, "Webhook payload mapping failed",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 
 		return execution, err
 	}
@@ -332,16 +332,16 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 			execution.Error = err.Error()
 
 			logger.ErrorCtx(execCtx, "Failed to trigger workflow from webhook",
-				"trigger_id", triggerID,
-				"execution_id", execution.ID,
-				"error", err.Error())
+				"trigger_id", logging.SanitizeLogValue(triggerID),
+				"execution_id", logging.SanitizeLogValue(execution.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			execution.Status = TriggerExecutionStatusSuccess
 			execution.WorkflowExecutionID = workflowExecution.ID
 
 			logger.InfoCtx(execCtx, "Workflow triggered successfully from webhook",
-				"trigger_id", triggerID,
-				"execution_id", execution.ID,
+				"trigger_id", logging.SanitizeLogValue(triggerID),
+				"execution_id", logging.SanitizeLogValue(execution.ID),
 				"workflow_execution_id", workflowExecution.ID)
 		}
 
@@ -350,8 +350,8 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	}()
 
 	logger.InfoCtx(ctx, "Webhook request accepted for processing",
-		"trigger_id", triggerID,
-		"execution_id", execution.ID)
+		"trigger_id", logging.SanitizeLogValue(triggerID),
+		"execution_id", logging.SanitizeLogValue(execution.ID))
 
 	return execution, nil
 }
@@ -531,7 +531,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 
 	logger.InfoCtx(ctx, "Webhook request processed successfully",
 		"trigger_id", logging.SanitizeLogValue(triggerID),
-		"execution_id", execution.ID)
+		"execution_id", logging.SanitizeLogValue(execution.ID))
 }
 
 // validatePayload validates the webhook payload

@@ -151,17 +151,17 @@ func (cs *CronScheduler) ScheduleWorkflow(ctx context.Context, trigger *Trigger)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Scheduling workflow trigger",
-		"trigger_id", trigger.ID,
-		"workflow_name", trigger.WorkflowName,
-		"cron_expression", trigger.Schedule.CronExpression)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
+		"workflow_name", logging.SanitizeLogValue(trigger.WorkflowName),
+		"cron_expression", logging.SanitizeLogValue(trigger.Schedule.CronExpression))
 
 	// Parse cron expression
 	cronSchedule, err := cs.parseCronExpression(trigger.Schedule.CronExpression, trigger.Schedule.Timezone)
 	if err != nil {
 		logger.ErrorCtx(ctx, "Failed to parse cron expression",
-			"trigger_id", trigger.ID,
-			"cron_expression", trigger.Schedule.CronExpression,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"cron_expression", logging.SanitizeLogValue(trigger.Schedule.CronExpression),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("invalid cron expression: %w", err)
 	}
 
@@ -203,7 +203,7 @@ func (cs *CronScheduler) ScheduleWorkflow(ctx context.Context, trigger *Trigger)
 	cs.scheduledTriggers[trigger.ID] = scheduledTrig
 
 	logger.InfoCtx(ctx, "Workflow trigger scheduled successfully",
-		"trigger_id", trigger.ID,
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
 		"next_run", nextRun.Format(time.RFC3339),
 		"timezone", cronSchedule.timezone.String())
 

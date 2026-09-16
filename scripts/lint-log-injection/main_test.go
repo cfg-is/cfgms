@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAnalyzeFile_FlagsStringFromDecodedBody is the canonical positive case:
@@ -873,4 +874,289 @@ func analyzeSnippet(t *testing.T, src string) []finding {
 		t.Fatalf("analyzeFile: %v", err)
 	}
 	return findings
+}
+
+// analyzeSnippets writes each named source to the same t.TempDir() directory
+// — one resolution unit, the same way main() groups same-directory files —
+// and runs analyzePackage over all of them together.
+func analyzeSnippets(t *testing.T, srcs map[string]string) []finding {
+	t.Helper()
+	dir := t.TempDir()
+	var paths []string
+	for name, src := range srcs {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		paths = append(paths, path)
+	}
+	findings, err := analyzePackage(paths)
+	if err != nil {
+		t.Fatalf("analyzePackage: %v", err)
+	}
+	return findings
+}
+
+// TestAnalyzePackage_PropagatesTaintThroughParameter is the story's worked
+// example (issue #4089): handle taints id from mux.Vars and passes it,
+// unsanitized, to logIt in a sibling file of the same package. logIt logs its
+// bare parameter. Fails on revert: analyzeFile's per-function analysis never
+// sees the caller's argument, so the callee's parameter is never tainted and
+// this drops to 0 findings (verified directly against origin/develop tip
+// 7150e04d before this story).
+func TestAnalyzePackage_PropagatesTaintThroughParameter(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logIt(id)
+}
+`
+	b := `package api
+func (s *S) logIt(id string) {
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].file, "b.go") {
+		t.Errorf("expected the finding inside logIt (b.go), got %s", findings[0].file)
+	}
+}
+
+// TestAnalyzePackage_AcceptsSanitizedParameter covers the call-site
+// sanitizing shape named explicitly by the story: the caller wraps the
+// argument in logging.SanitizeLogValue before passing it, so the callee's
+// parameter is never tainted even though it still logs it bare.
+func TestAnalyzePackage_AcceptsSanitizedParameter(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logIt(logging.SanitizeLogValue(id))
+}
+`
+	b := `package api
+func (s *S) logIt(id string) {
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_UntaintedParameterNotFlagged guards against an
+// over-broad "any parameter is tainted" regression: logIt's parameter is
+// never passed a tainted argument by any caller in the resolution unit, so
+// logging it bare must not be flagged.
+func TestAnalyzePackage_UntaintedParameterNotFlagged(t *testing.T) {
+	a := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	s.logIt("static-label")
+}
+`
+	b := `package api
+func (s *S) logIt(id string) {
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_BoundsMutualRecursion covers mutual recursion (a calls
+// b, b calls a back) seeded with tainted data at the top of the chain,
+// through the call-graph fixed point in resolveParameterTaint. The test
+// itself fails via timeout if the analysis does not terminate — guarding
+// funcParamTaintRounds' bound against an unbounded fixed point on a
+// mutually-recursive same-package call graph.
+func TestAnalyzePackage_BoundsMutualRecursion(t *testing.T) {
+	done := make(chan []finding, 1)
+	go func() {
+		src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.a(id, 3)
+}
+func (s *S) a(id string, n int) {
+	if n <= 0 {
+		return
+	}
+	s.logger.Info("got", "id", id)
+	s.b(id, n-1)
+}
+func (s *S) b(id string, n int) {
+	if n <= 0 {
+		return
+	}
+	s.a(id, n-1)
+}
+`
+		done <- analyzeSnippets(t, map[string]string{"snippet.go": src})
+	}()
+
+	select {
+	case findings := <-done:
+		if len(findings) != 1 {
+			t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("analysis did not terminate on a mutually recursive call graph")
+	}
+}
+
+// TestAnalyzePackage_SuppressesScalarFromSamePackageCall covers the
+// type-resolution half of the same-package boundary: revokeSessions returns
+// (int, error), so the `revoked` count logged beside it cannot carry an
+// injection payload even though a tainted argument influenced its value.
+// Fails on revert to per-file analysis, which cannot see the callee's result
+// types and so flags the int.
+func TestAnalyzePackage_SuppressesScalarFromSamePackageCall(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	revoked, _ := s.revokeSessions(id)
+	s.logger.Info("revoked", "count", revoked)
+}
+`
+	b := `package api
+func (s *S) revokeSessions(id string) (int, error) {
+	return 0, nil
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_StillFlagsStringFromSamePackageCall is the guard on the
+// test above: the same shape with a string result must stay flagged. Result
+// types are used to suppress findings, so a bug that treated every resolved
+// type as scalar would silently hide real ones.
+func TestAnalyzePackage_StillFlagsStringFromSamePackageCall(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	label, _ := s.describe(id)
+	s.logger.Info("described", "label", label)
+}
+`
+	b := `package api
+func (s *S) describe(id string) (string, error) {
+	return id, nil
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_DoesNotBorrowResultTypesAcrossPackages guards
+// samePackageResultTypes' receiver restriction: `client.Fetch(...)` calls an
+// imported type's method that happens to share a name with a local
+// int-returning function. Borrowing the local function's result type would
+// suppress a real finding on a value of unknown type.
+func TestAnalyzePackage_DoesNotBorrowResultTypesAcrossPackages(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger; client remote }
+type logger interface{ Info(string, ...any) }
+type remote interface{ Fetch(string) string }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	v := s.client.Fetch(id)
+	s.logger.Info("fetched", "value", v)
+}
+func Fetch(id string) int {
+	return len(id)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"snippet.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_SuppressesScalarLocalFromLiteral covers the literal half
+// of local type inference: `tail := 100` pins tail as an int for the whole
+// function, so a later reassignment from a parsed query parameter cannot make
+// it loggable-unsafe. This is the shape at handlers_stewards.go's log-pull
+// handler.
+func TestAnalyzePackage_SuppressesScalarLocalFromLiteral(t *testing.T) {
+	src := `package api
+import "net/http"
+import "strconv"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	tail := 100
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err == nil {
+			tail = v
+		}
+	}
+	s.logger.Info("pull", "tail", tail)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"snippet.go": src})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_AmbiguousLocalTypeStaysFlagged covers collectVarTypes'
+// conflict demotion: a name bound to two different types within one function
+// (a nested-scope re-declaration this flat walk cannot separate) resolves to
+// unknown, not to whichever binding was seen last. Resolving it to the int
+// binding would suppress the finding on the string one.
+func TestAnalyzePackage_AmbiguousLocalTypeStaysFlagged(t *testing.T) {
+	src := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	if true {
+		v := 1
+		_ = v
+	}
+	v := r.URL.Query().Get("v")
+	s.logger.Info("got", "v", v)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"snippet.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
 }

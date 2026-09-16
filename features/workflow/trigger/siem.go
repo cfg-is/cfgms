@@ -161,15 +161,15 @@ func (sp *SIEMProcessor) RegisterSIEMTrigger(ctx context.Context, trigger *Trigg
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Registering SIEM trigger",
-		"trigger_id", trigger.ID,
-		"event_types", trigger.SIEM.EventTypes,
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
+		"event_types", logging.SanitizeLogValue(strings.Join(trigger.SIEM.EventTypes, ",")),
 		"window_size", trigger.SIEM.WindowSize.String())
 
 	// Validate SIEM configuration
 	if err := sp.validateSIEMConfig(trigger.SIEM); err != nil {
 		logger.ErrorCtx(ctx, "Invalid SIEM configuration",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("invalid SIEM configuration: %w", err)
 	}
 
@@ -190,7 +190,7 @@ func (sp *SIEMProcessor) RegisterSIEMTrigger(ctx context.Context, trigger *Trigg
 	}
 
 	logger.InfoCtx(ctx, "SIEM trigger registered successfully",
-		"trigger_id", trigger.ID)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID))
 
 	return nil
 }

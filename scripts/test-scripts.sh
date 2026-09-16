@@ -262,21 +262,33 @@ test_log_injection_linter() {
         log_pass "lint-log-injection.sh: Exits 0 on clean tree from foreign CWD"
     elif [ "$rc" -eq 1 ]; then
         # TEMPORARY (Issue #4088, tracked by follow-up #4103): #4088 widened
-        # the taint model, and its repo-wide run surfaces this exact set of
-        # residual findings — each individually traced during #4088 and
-        # confirmed a false positive (server-generated IDs, crypto-random
-        # values, fixed hardcoded vocabularies, and three named
-        # linter-precision gaps; see the #4088 PR description and #4103 for
-        # the full root-cause breakdown). This is a pinned SNAPSHOT, not a
-        # blanket allowlist: any finding outside this exact set — new OR
-        # missing — still fails the test below, loudly, so this list must be
-        # updated (normally shrunk) as #4103 lands. Delete this branch
-        # entirely once #4103 restores a clean, zero-finding tree.
+        # the taint model, and its repo-wide run surfaced a set of residual
+        # findings — each individually traced during #4088 and confirmed a
+        # false positive (server-generated IDs, crypto-random values, fixed
+        # hardcoded vocabularies, and three named linter-precision gaps; see
+        # the #4088 PR description and #4103 for the full root-cause
+        # breakdown).
+        #
+        # #4089 (same-package interprocedural parameter-taint propagation)
+        # fixed the new findings its own widening surfaced, and — as a side
+        # effect of the same-package result-type resolution that work needed
+        # anyway — shrank this snapshot from 40 to 31: the linter can now pin
+        # the static type of a value returned by a same-package callee, so
+        # scalar counters it previously flagged (handlers_accounts.go's revoked
+        # counts, handlers_stewards.go's page.Total and tail) are suppressed
+        # correctly rather than sanitized at the call site. Two entries also
+        # moved to their true line numbers (handlers_runs.go 519 -> 529,
+        # handlers_upgrade.go 589 -> 593), correcting pre-existing staleness in
+        # the #4088 snapshot. The remaining 31 are the same-package baseline
+        # #4103 is expected to own; none is #4089's to fix.
+        #
+        # This is a pinned SNAPSHOT, not a blanket allowlist: any finding
+        # outside this exact set — new OR missing — still fails the test below,
+        # loudly, so this list must be updated (normally shrunk) as #4103
+        # lands. Delete this branch entirely once #4103 restores a clean,
+        # zero-finding tree.
         local known_findings
         known_findings=$(cat <<'EOF'
-features/controller/api/handlers_accounts.go:888: tainted value "revoked" logged without logging.SanitizeLogValue
-features/controller/api/handlers_accounts.go:1538: tainted value "cliSessionsRevoked" logged without logging.SanitizeLogValue
-features/controller/api/handlers_accounts.go:1539: tainted value "webSessionsRevoked" logged without logging.SanitizeLogValue
 features/controller/api/handlers_certificates.go:135: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_certificates.go:168: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_certificates.go:206: tainted value "err" logged without logging.SanitizeLogValue
@@ -300,11 +312,7 @@ features/controller/api/handlers_scripts.go:433: tainted value "err" logged with
 features/controller/api/handlers_scripts.go:459: tainted value "since" logged without logging.SanitizeLogValue
 features/controller/api/handlers_signing_credential.go:137: tainted value "issuedCert.SerialNumber" logged without logging.SanitizeLogValue
 features/controller/api/handlers_stewards.go:168: tainted value "searchErr" logged without logging.SanitizeLogValue
-features/controller/api/handlers_stewards.go:201: tainted value "page.Total" logged without logging.SanitizeLogValue
-features/controller/api/handlers_stewards.go:266: tainted value "page.Total" logged without logging.SanitizeLogValue
-features/controller/api/handlers_stewards.go:370: tainted value "page.Total" logged without logging.SanitizeLogValue
 features/controller/api/handlers_stewards.go:591: tainted value "matched" logged without logging.SanitizeLogValue
-features/controller/api/handlers_stewards.go:1423: tainted value "tail" logged without logging.SanitizeLogValue
 features/controller/api/handlers_stewards.go:1490: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_test_admin.go:103: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_test_admin.go:110: tainted value "err" logged without logging.SanitizeLogValue
@@ -312,14 +320,12 @@ features/controller/api/handlers_upgrade.go:280: tainted value "createErr" logge
 features/controller/api/handlers_upgrade.go:593: tainted value "createErr" logged without logging.SanitizeLogValue
 features/workflow/debug_api.go:76: tainted value "session.ID" logged without logging.SanitizeLogValue
 features/workflow/debug_api.go:228: tainted value "breakpoint.ID" logged without logging.SanitizeLogValue
-features/workflow/trigger/api.go:320: tainted value "execution.ID" logged without logging.SanitizeLogValue
-features/workflow/trigger/webhook.go:534: tainted value "execution.ID" logged without logging.SanitizeLogValue
 EOF
 )
         local actual_findings
         actual_findings=$(grep -E '^  features/.*: tainted value' "$out_file" | sed 's/^  //' || true)
         if [ "$actual_findings" == "$known_findings" ]; then
-            log_pass "lint-log-injection.sh: only the tracked #4103 false-positive baseline present (40 findings)"
+            log_pass "lint-log-injection.sh: only the tracked #4103 false-positive baseline present (31 findings)"
         else
             log_fail "lint-log-injection.sh: findings differ from the tracked #4103 baseline (rc=$rc) — output below"
             sed 's/^/    /' "$out_file" >&2

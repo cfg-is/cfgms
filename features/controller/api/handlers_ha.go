@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -206,7 +207,7 @@ func (s *Server) respondJSON(w http.ResponseWriter, status int, data interface{}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		s.logger.Error("Failed to encode JSON response", "error", err)
+		s.logger.Error("Failed to encode JSON response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -216,6 +217,6 @@ func (s *Server) respondError(w http.ResponseWriter, status int, message string)
 	w.WriteHeader(status)
 	response := map[string]string{"error": message}
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode error response", "error", err)
+		s.logger.Error("Failed to encode error response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }

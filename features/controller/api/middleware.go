@@ -1052,8 +1052,8 @@ func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKe
 		s.mu.Unlock()
 
 		s.logger.Debug("Loaded API key from secret store",
-			"id", keyInfo.ID,
-			"tenant_id", keyInfo.TenantID)
+			"id", logging.SanitizeLogValue(keyInfo.ID),
+			"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
 
 		return keyInfo, nil
 	}

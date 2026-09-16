@@ -1236,7 +1236,7 @@ func (s *Server) writePendingRegistrationResponse(w http.ResponseWriter, entry *
 		Group:     group,
 		Status:    entry.Status,
 	}); err != nil {
-		s.logger.Error("Failed to encode pending registration response", "error", err)
+		s.logger.Error("Failed to encode pending registration response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -1380,6 +1380,6 @@ func (s *Server) emitRegistrationAudit(
 		b = b.Detail(k, v)
 	}
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit registration audit event", "error", err, "action", action)
+		s.logger.Warn("Failed to emit registration audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }
