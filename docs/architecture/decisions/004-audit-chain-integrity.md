@@ -81,6 +81,20 @@
 > amendment does not touch the chosen mechanism (HMAC-keyed hash chain) or any
 > other part of the Decision — only the three statements struck below.
 
+> **Amended 2026-09-16 (Issue #4101) — Threat Model Row Scope.** The Threat Model
+> table's first row ("Attacker without HMAC key modifies a row | Yes | Checksum
+> mismatch") is this ADR's headline security claim, and it named no scope: read
+> unqualified, it claims that any modification to a row is detected. Before Issue
+> #4098's checksum-widening fix, that was true only for the 11 fields
+> `generateChecksum` HMACed — modifying any of the other 16 fields the amendment
+> above lists (`Details`, `Changes`, `ErrorMessage`, `IPAddress`, `UserAgent`, and
+> eleven more) produced no checksum mismatch at all, so the unqualified "Yes" read
+> as far stronger than the mechanism delivered. After Issue #4098 lands, the row is
+> accurate as originally stated: `generateChecksum` now covers every
+> `business.AuditEntry` field except `Checksum` itself. The row is struck below to
+> record both positions — not because the mechanism changes here, that is Issue
+> #4098's fix; this issue only corrects what the table claimed.
+
 ---
 
 ## Context
@@ -125,7 +139,7 @@ Use a **per-tenant HMAC-keyed hash chain** with the following design:
 
 | Threat | Detected? | Notes |
 |---|---|---|
-| Attacker without HMAC key modifies a row | Yes | Checksum mismatch |
+| Attacker without HMAC key modifies a row | ~~Yes~~ **Amended by Issue #4101** | ~~Checksum mismatch~~ see [Threat Model Row Scope](#amended-2026-09-16-issue-4101--threat-model-row-scope) above — detected for the 11 hashed fields only before Issue #4098; every field except `Checksum` after |
 | Attacker without HMAC key deletes a row | Yes | Sequence gap |
 | Attacker without HMAC key reorders rows | Yes | PreviousChecksum mismatch |
 | Attacker WITH HMAC key recomputes all checksums after modification | No | Inherent limitation of keyed hash chains. By construction this includes **the controller itself when host-compromised** — see [Adversary Bound](#adversary-bound-issue-3727) |
