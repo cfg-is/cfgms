@@ -277,15 +277,32 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TestAnalyzeFile_KnownSitesStayClean is a regression pin for Issue #4073: four
-// production sites (three under features/**/api/, which the linter's default
-// scope covers, plus two outside it — server.go and tenant/manager.go — that
-// only get checked when named explicitly, as the pre-commit hook does for
-// staged files) paired a sanitized value with a bare `err` in the same log
-// call, which CLAUDE.md calls out by name as still a finding. Runs against the
-// real repo files, not a synthetic snippet, so it fails the instant any of the
-// four reverts to a bare error.
-func TestAnalyzeFile_KnownSitesStayClean(t *testing.T) {
+// TestAnalyzeFile_KnownSitesReportNothing records what this linter currently
+// sees at the four Issue #4073 sites: nothing.
+//
+// NOT a regression pin, despite what it looks like. These files report zero
+// findings whether or not they are sanitized — verified by running the linter
+// against the unsanitized copies, which also exits 0 with no output. Reverting
+// any of the four to a bare `err` leaves this test passing. The revert-proof
+// guarantee for those sites lives in their own package tests, which inject a
+// control-character payload and assert the sanitized form reaches the logger:
+//
+//	features/controller/api/handlers_audit_test.go
+//	features/controller/api/handlers_fleet_test.go
+//	features/controller/server/heartbeat_staleness_test.go
+//	pkg/audit/manager_test.go
+//
+// Two gaps in the taint model put these sites out of reach. Sources are matched
+// by exact selector string, so a chained r.URL.Query().Get(...) never taints its
+// result — only the unchained q := r.URL.Query(); q.Get(...) form does. And
+// there is no interprocedural taint, so sid and tenantID, which arrive as
+// function parameters, are never tainted regardless of what the HTTP layer
+// passed in.
+//
+// What this test is good for: it fails if the linter ever starts reporting on
+// these files, which would mean either the taint model grew to reach them (make
+// it a real pin then) or it began false-positiving on already-sanitized code.
+func TestAnalyzeFile_KnownSitesReportNothing(t *testing.T) {
 	files := []string{
 		"../../features/controller/api/handlers_audit.go",
 		"../../features/controller/api/handlers_fleet.go",
