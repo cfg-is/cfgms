@@ -419,16 +419,26 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	// legacy query-param path only.
 	if principal.TenantID != "" {
 		for _, targetID := range filter.IDs {
-			if forbidden := s.enforceExecTenantScope(r.Context(), targetID, principal.TenantID); forbidden {
+			switch s.enforceExecTenantScope(r.Context(), targetID, principal.TenantID) {
+			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				// Scope could not be verified — deny, distinguishably from the
+				// genuine out-of-scope denial above (Issue #4091 AC1).
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 				return
 			}
 		}
 		if filter.DeviceID != "" {
-			if forbidden := s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID); forbidden {
+			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID) {
+			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 				return
 			}
 		}
@@ -687,19 +697,42 @@ func parseRunTarget(target string) (fleet.Filter, error) {
 	return f, err
 }
 
+// execTenantScopeDecision is the three-outcome result of enforceExecTenantScope.
+// A plain bool cannot distinguish "checked and denied" from "could not check" —
+// collapsing the two into one "forbidden" value means the error path either fails
+// open (if mapped to allowed) or is indistinguishable from a genuine out-of-scope
+// denial (if mapped to forbidden). Both are wrong: "I checked and you may not" and
+// "I could not check" are different facts, and the caller must be able to tell them
+// apart (Issue #4091).
+type execTenantScopeDecision int
+
+const (
+	// execScopeAllowed means the caller is in scope, or the steward was not found —
+	// the latter is a deliberate allow (synthesis yields zero jobs; steward IDs are
+	// not secret, admins get them via cfg steward list), not a stand-in for the
+	// error case below.
+	execScopeAllowed execTenantScopeDecision = iota
+	// execScopeForbidden means the steward was found but is outside the principal's
+	// tenant scope — a genuine authorization denial.
+	execScopeForbidden
+	// execScopeIndeterminate means scope could not be established because the fleet
+	// query dependency is absent or the query itself failed. An error is not an
+	// absence: the check cannot tell whether the steward is in scope, so it must
+	// deny rather than permit.
+	execScopeIndeterminate
+)
+
 // enforceExecTenantScope checks whether the principal's tenantID is a path-prefix
-// (or exact match) of the target steward's tenantID. Returns true (forbidden) when
-// the steward is found but is outside the principal's tenant scope.
-// Returns false (allowed) when the steward is not found — synthesis will create a
-// zero-job run, and we return 200 with an empty result rather than 404, because
-// steward IDs are not secret (admins get them via cfg steward list).
-func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principalTenantID string) bool {
+// (or exact match) of the target steward's tenantID. See execTenantScopeDecision
+// for the meaning of each outcome. Callers must deny on execScopeIndeterminate,
+// not treat it as execScopeAllowed.
+func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principalTenantID string) execTenantScopeDecision {
 	if s.fleetQuery == nil {
-		return false
+		return execScopeIndeterminate
 	}
 	results, err := s.fleetQuery.Search(ctx, fleet.Filter{DeviceID: deviceID})
 	if err != nil {
-		return false
+		return execScopeIndeterminate
 	}
 	for _, sr := range results {
 		if sr.ID != deviceID {
@@ -707,14 +740,14 @@ func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principal
 		}
 		// Steward found — check tenant path prefix.
 		if sr.TenantID == principalTenantID {
-			return false
+			return execScopeAllowed
 		}
 		if strings.HasPrefix(sr.TenantID, principalTenantID+"/") {
-			return false
+			return execScopeAllowed
 		}
-		return true // steward exists but outside tenant scope
+		return execScopeForbidden // steward exists but outside tenant scope
 	}
-	return false // steward not found — allow, synthesis yields zero jobs
+	return execScopeAllowed // steward not found — allow, synthesis yields zero jobs
 }
 
 // defaultMaxOperatorPayloadTargets is the blast-radius bound applied when no tenant
@@ -726,11 +759,14 @@ func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principal
 const defaultMaxOperatorPayloadTargets = 1000
 
 // resolveMaxTargetsForTenant resolves the per-tenant maximum-target-count bound for
-// operator payload dispatch (Issue #3698), walking the tenant path root-to-leaf via
-// the identical override-walk pattern as resolveAssuranceRequirement (middleware.go)
-// and resolveAssuranceRequirementForPath (handlers_assurance_policy.go): a parent
-// tenant's MaxTargets is the default, and a tenant closer to the caller's leaf
-// narrows it by setting its own. When blastRadiusPolicyStore or tenantStore is nil,
+// operator payload dispatch (Issue #3698), walking the tenant path root-to-leaf and
+// taking the MINIMUM MaxTargets set anywhere along that path — not the last value
+// seen. This is the control the threat model names for bounding the blast radius of
+// a compromised admin or controller (Issue #4091 AC3): a descendant tenant may lower
+// the bound inherited from an ancestor, but must never be able to raise it above a
+// bound the ancestor set. Overwriting the running value on each iteration (last-wins)
+// would let a leaf tenant's policy widen a bound its ancestor deliberately narrowed,
+// which defeats the purpose of the control. When blastRadiusPolicyStore or tenantStore is nil,
 // or tenantID is empty, it returns defaultMaxOperatorPayloadTargets unchanged —
 // preserving safe behavior for bare Server instances built without these stores.
 //
@@ -763,7 +799,7 @@ func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string
 			)
 			return defaultMaxOperatorPayloadTargets
 		}
-		if policy.MaxTargets != nil {
+		if policy.MaxTargets != nil && *policy.MaxTargets < result {
 			result = *policy.MaxTargets
 		}
 	}

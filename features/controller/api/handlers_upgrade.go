@@ -421,8 +421,10 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant isolation: callers scoped to a tenant can only view records within their
 	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
+	// (Issue #4091) — mirrors the genuine not-found response above.
 	if !isWithinTenantScope(callerTenantID, record.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}
 
@@ -473,8 +475,10 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	// Tenant isolation: callers scoped to a tenant can only roll back records within their
 	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
+	// (Issue #4091) — mirrors the genuine not-found response above.
 	if !isWithinTenantScope(callerTenantID, original.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for

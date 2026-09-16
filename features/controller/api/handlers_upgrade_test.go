@@ -549,9 +549,11 @@ func TestUpgradeStatus_Returns200WithRecord(t *testing.T) {
 	assert.Equal(t, "dispatched", statusData["Status"])
 }
 
-// TestUpgradeStatus_CrossTenantReturns403 verifies that a tenant cannot query
-// another tenant's upgrade record.
-func TestUpgradeStatus_CrossTenantReturns403(t *testing.T) {
+// TestUpgradeStatus_CrossTenantReturns404 verifies that a tenant cannot query
+// another tenant's upgrade record, and that the rejection is a 404 — indistinguishable
+// from a genuinely unknown upgrade_id — rather than a 403 that would disclose the
+// record's existence across tenants (Issue #4091 AC4/AC5).
+func TestUpgradeStatus_CrossTenantReturns404(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -568,7 +570,12 @@ func TestUpgradeStatus_CrossTenantReturns403(t *testing.T) {
 
 	// tenant-b must not see tenant-a's record.
 	statusRec := doUpgradeStatus(server, "tenant-b", upgradeID)
-	assert.Equal(t, http.StatusForbidden, statusRec.Code)
+	assert.Equal(t, http.StatusNotFound, statusRec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &resp))
+	assert.Equal(t, "UPGRADE_NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "Upgrade record not found", resp.Error.Message)
 }
 
 // TestUpgradeStatus_NotFoundReturns404 verifies 404 for unknown upgrade_id.
@@ -682,9 +689,11 @@ func TestUpgradeRollback_MissingTenantReturns401(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-// TestUpgradeRollback_CrossTenantReturns403 verifies that a tenant cannot roll
-// back another tenant's upgrade record.
-func TestUpgradeRollback_CrossTenantReturns403(t *testing.T) {
+// TestUpgradeRollback_CrossTenantReturns404 verifies that a tenant cannot roll
+// back another tenant's upgrade record, and that the rejection is a 404 —
+// indistinguishable from a genuinely unknown upgrade_id — rather than a 403 that
+// would disclose the record's existence across tenants (Issue #4091 AC4/AC5).
+func TestUpgradeRollback_CrossTenantReturns404(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -709,7 +718,12 @@ func TestUpgradeRollback_CrossTenantReturns403(t *testing.T) {
 
 	// tenant-b attempts rollback of tenant-a's record.
 	rollbackRec := doUpgradeRollback(server, "tenant-b", "upgrade-tenant-a", "v0.5.11")
-	assert.Equal(t, http.StatusForbidden, rollbackRec.Code)
+	assert.Equal(t, http.StatusNotFound, rollbackRec.Code)
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rollbackRec.Body.Bytes(), &resp))
+	assert.Equal(t, "UPGRADE_NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "Upgrade record not found", resp.Error.Message)
 }
 
 // TestUpgradeRollback_BinaryNotFoundReturns404 verifies 404 when the rollback
@@ -959,9 +973,10 @@ func TestUpgradeStatus_NonAdminEmptyTenant_Unauthorized(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "AUTHENTICATION_REQUIRED")
 }
 
-// TestUpgradeStatus_NonAdminCrossTenant_StillForbidden verifies that the existing
-// cross-tenant isolation is preserved for scoped (non-admin) callers (Issue #1999).
-func TestUpgradeStatus_NonAdminCrossTenant_StillForbidden(t *testing.T) {
+// TestUpgradeStatus_NonAdminCrossTenant_StillBlocked verifies that the existing
+// cross-tenant isolation is preserved for scoped (non-admin) callers (Issue #1999),
+// now surfaced as 404 rather than 403 to avoid existence disclosure (Issue #4091).
+func TestUpgradeStatus_NonAdminCrossTenant_StillBlocked(t *testing.T) {
 	stewards := []fleet.StewardData{
 		{ID: "steward-1", TenantID: "tenant-a", Status: "online"},
 	}
@@ -974,9 +989,9 @@ func TestUpgradeStatus_NonAdminCrossTenant_StillForbidden(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	upgradeID := resp.Data.(map[string]interface{})["upgrade_id"].(string)
 
-	// tenant-b (scoped non-admin) must still be forbidden from viewing tenant-a's record.
+	// tenant-b (scoped non-admin) must still be blocked from viewing tenant-a's record.
 	statusRec := doUpgradeStatus(server, "tenant-b", upgradeID)
-	assert.Equal(t, http.StatusForbidden, statusRec.Code)
+	assert.Equal(t, http.StatusNotFound, statusRec.Code)
 }
 
 // TestUpgradeRollback_AdminEmptyTenant_NotUnauthorized verifies that an admin mTLS
@@ -1205,7 +1220,8 @@ func TestAdminDispatch_EndToEndDeliveryPath_DefaultNamespace(t *testing.T) {
 // confirming that the Assurance-based tenant-isolation gates in handlers_upgrade.go
 // are byte-for-byte equivalent to the deleted IsAdmin-based checks:
 //   - AssuranceBasic (admin) principal gets global read access regardless of the record's tenant.
-//   - AssuranceMachine (API key) principal sees only same-tenant records (403 otherwise).
+//   - AssuranceMachine (API key) principal sees only same-tenant records (404 otherwise,
+//     Issue #4091 — was 403, which disclosed cross-tenant record existence).
 func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
 	const recordTenant = "tenant-a"
 
@@ -1239,10 +1255,10 @@ func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "AssuranceMachine_cross_tenant_403",
+			name:       "AssuranceMachine_cross_tenant_404",
 			tenantID:   "tenant-b",
 			isAdmin:    false,
-			wantStatus: http.StatusForbidden,
+			wantStatus: http.StatusNotFound,
 		},
 	}
 
@@ -1272,6 +1288,7 @@ func TestUpgradeStatus_AssuranceBoundary(t *testing.T) {
 // middleware even when scoped to a specific tenant. Before the fix, this caused the
 // cross-tenant guard to pass and the session caller could read any tenant's upgrade
 // record. After the fix, callerTenantID from ctxkeys.TenantID governs access.
+// Issue #4091: the block is now a 404 (existence-disclosure closed), not a 403.
 func TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	const recordTenant = "tenant-a"
 
@@ -1311,6 +1328,6 @@ func TestUpgradeStatus_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.handleUpgradeStatus(rec, req)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code,
+	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"session principal scoped to tenant-b must not read tenant-a's upgrade record (body: %s)", rec.Body.String())
 }
