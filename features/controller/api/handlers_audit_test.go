@@ -290,9 +290,11 @@ func TestHandleListAuditEntries_HasMore_False_ExactPageBoundary(t *testing.T) {
 // or decode failure) reached the logger unsanitized. This must fail if the
 // sanitization is ever reverted.
 func TestHandleListAuditEntries_QueryEntriesError_SanitizesErrorLog(t *testing.T) {
-	server := setupTestServer(t)
+	// The logger is injected at construction, never assigned onto a running
+	// server: New() starts startCliLoginRequestSweep, whose goroutine reads
+	// s.logger, so a later `server.logger = ...` is a data race under -race.
 	capLogger := &capturingLogger{}
-	server.logger = capLogger
+	server := setupTestServerWithLogger(t, capLogger)
 
 	const ctrlPayload = "store failure\nInjected: fake log line\rtrailer"
 	failingStore := newTestFailingAuditStore(t, errors.New(ctrlPayload))

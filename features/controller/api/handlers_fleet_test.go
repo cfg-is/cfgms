@@ -198,9 +198,10 @@ func (f *controlCharFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, e
 // site 2: handleFleetHealth logged "error", err bare from s.fleetQuery.Search.
 // This must fail if the sanitization is ever reverted.
 func TestHandleFleetHealth_FleetQueryError_SanitizesErrorLog(t *testing.T) {
-	server := setupTestServer(t)
+	// Injected at construction, not assigned onto a running server -- see the
+	// note in handlers_audit_test.go's equivalent test.
 	capLogger := &capturingLogger{}
-	server.logger = capLogger
+	server := setupTestServerWithLogger(t, capLogger)
 	const ctrlPayload = "fleet query failure\nInjected: fake log line\rtrailer"
 	server.fleetQuery = &controlCharFleetQuery{err: errors.New(ctrlPayload)}
 
