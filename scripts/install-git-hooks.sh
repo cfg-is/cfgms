@@ -201,12 +201,12 @@ if [ $blocked -ne 0 ]; then
 fi
 
 # Log-injection gate — catches CodeQL "Log entries created from user input"
-# at commit time. Only runs on staged .go files under features/**/api/ to
-# keep the pre-commit hook fast.
+# at commit time. Runs on every staged non-test .go file (matches the linter's
+# repo-wide default scope in discoverScope()).
 staged_log_files=()
 while IFS= read -r f; do
     case "$f" in
-        features/*/api/*.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
+        *.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
     esac
 done < <(git diff --cached --name-only --diff-filter=ACMR)
 

@@ -1,0 +1,107 @@
+name: lint-log-injection
+
+# BLOCKING (Issue #4086). Runs the repo-wide log-injection linter
+# (scripts/lint-log-injection) and fails the workflow run on findings. This
+# closes the gap where `git commit --no-verify` skipped the pre-commit hook
+# and nothing downstream noticed (Issue #4085).
+#
+# Not in the branch ruleset's required-status-checks list — promoting it to a
+# required context is a separate decision, not made here (mirrors the same
+# point recorded in golangci-lint.yml for #3442).
+#
+# No PR/merge-queue stub job exists here, and none is needed: stubs exist only
+# to satisfy *required* contexts across the #2595 PR/merge-queue split. This
+# job is not a required context, so there is only ever one run posting this
+# check name, clear of the stub-exclusivity hazard documented in CLAUDE.md.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  merge_group:
+  workflow_dispatch:
+
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GO_VERSION: '1.27.1'
+
+permissions: {}
+
+jobs:
+  lint-log-injection:
+    name: lint-log-injection
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Run lint-log-injection
+        id: lint
+        run: |
+          set +e
+          go run ./scripts/lint-log-injection 2>&1 | tee lint-output.txt
+          rc="${PIPESTATUS[0]}"
+          set -e
+
+          {
+            echo "## lint-log-injection"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$rc" in
+            0)
+              echo "✅ No findings."
+              echo "No findings." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            1)
+              # Findings. Blocking by design (Issue #4086) — fail the step.
+              echo "❌ lint-log-injection reported findings."
+              {
+                echo "Findings reported — blocking (Issue #4086)."
+                echo ""
+                # Indented code block, not a fenced one. Lint output echoes source
+                # text that a fork PR controls, and a backtick fence in that text
+                # would break out of a ``` fence and inject markdown into the job
+                # summary. An indented block has no terminator to forge.
+                tail -n 40 lint-output.txt | sed 's/^/    /'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            *)
+              # Not a findings result: parse/IO error (exit 2) or something else
+              # (missing toolchain, panic). A silent "0 issues" on one of these
+              # would be a false clean, so surface it loudly and distinctly from
+              # the findings case above.
+              echo "❌ lint-log-injection could not complete (exit ${rc})."
+              echo "This is a tooling/parse failure, not a findings result."
+              {
+                echo "**Lint could not run — exit ${rc} (tooling/parse failure, not a findings result).**"
+                echo ""
+                tail -n 40 lint-output.txt | sed 's/^/    /'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit "$rc"
+              ;;
+          esac
+
+      - name: Upload lint-log-injection output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always() && hashFiles('lint-output.txt') != ''
+        with:
+          name: lint-log-injection-output
+          path: lint-output.txt
+          retention-days: 30
