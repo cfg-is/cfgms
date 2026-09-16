@@ -118,7 +118,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	if err != nil {
 		// The error text embeds the caller's query-string values, so it carries
 		// user input into the log line.
-		h.logger.Warn("Invalid session request", "error", logging.SanitizeLogValue(err.Error()), "remote_addr", r.RemoteAddr)
+		h.logger.Warn("Invalid session request", "error", logging.SanitizeLogValue(err.Error()), "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		http.Error(w, fmt.Sprintf("Invalid session request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -126,7 +126,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	// Upgrade HTTP connection to WebSocket
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		h.logger.Error("Failed to upgrade WebSocket connection", "error", err, "remote_addr", r.RemoteAddr)
+		h.logger.Error("Failed to upgrade WebSocket connection", "error", err, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		return
 	}
 	defer func() {
@@ -143,7 +143,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	ctx := r.Context()
 	session, err := h.sessionManager.CreateSession(ctx, sessionReq)
 	if err != nil {
-		h.logger.Error("Failed to create terminal session", "error", logging.SanitizeLogValue(err.Error()), "remote_addr", r.RemoteAddr)
+		h.logger.Error("Failed to create terminal session", "error", logging.SanitizeLogValue(err.Error()), "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		h.sendError(cw, fmt.Sprintf("Failed to create session: %v", err))
 		return
 	}
@@ -152,7 +152,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 		"session_id", logging.RedactedID(session.ID),
 		"steward_id", logging.SanitizeLogValue(session.StewardID),
 		"user_id", logging.SanitizeLogValue(session.UserID),
-		"remote_addr", r.RemoteAddr)
+		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
 	// Handle the WebSocket session
 	h.handleSession(ctx, cw, session)

@@ -1122,3 +1122,61 @@ func TestWebSocketSessionIDRedaction_PingFailure(t *testing.T) {
 	_ = conn.Close()
 	waitForSessionCleanup(t, manager, 0)
 }
+
+// kvValueForKey returns the string value of the given key in the first entry
+// matching msg, and whether it was found.
+func kvValueForKey(entries []kvLogEntry, msg, key string) (string, bool) {
+	for _, e := range entries {
+		if e.msg != msg {
+			continue
+		}
+		for i := 0; i+1 < len(e.kvs); i += 2 {
+			if k, ok := e.kvs[i].(string); ok && k == key {
+				if v, ok := e.kvs[i+1].(string); ok {
+					return v, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// TestWebSocketHandler_SanitizesRemoteAddrOnUpgradeFailure covers the
+// log-injection finding at features/terminal/websocket.go:129 (Issue #4086):
+// r.RemoteAddr is attacker-influenced (a reverse proxy or the client's own
+// connection metadata can smuggle control characters into it) and was logged
+// bare. This drives the upgrade-failure path directly — httptest.ResponseRecorder
+// does not implement http.Hijacker, so h.upgrader.Upgrade always fails against
+// it, deterministically triggering the "Failed to upgrade WebSocket connection"
+// log line without needing a real WebSocket handshake.
+//
+// This fails on revert: removing the logging.SanitizeLogValue wrap at that call
+// site makes the captured remote_addr argument the raw, control-character string.
+func TestWebSocketHandler_SanitizesRemoteAddrOnUpgradeFailure(t *testing.T) {
+	capLogger := &kvCapturingLogger{}
+	config := &Config{
+		SessionTimeout: 30 * time.Minute,
+		MaxSessions:    100,
+	}
+	manager, err := NewSessionManager(config, capLogger)
+	require.NoError(t, err)
+	stopManagerOnCleanup(t, manager)
+
+	handler, err := NewWebSocketHandler(manager, capLogger, nil)
+	require.NoError(t, err)
+
+	const maliciousRemoteAddr = "1.2.3.4\nSTATUS 200 OK"
+	req := httptest.NewRequest(http.MethodGet, "/?steward_id=test-steward&user_id=test-user&shell="+getTestShell(), nil)
+	req.Host = "example.com"
+	req.RemoteAddr = maliciousRemoteAddr
+	req.Header.Set("Origin", "http://example.com")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "test-tenant"))
+
+	rec := httptest.NewRecorder()
+	handler.HandleWebSocket(rec, req)
+
+	got, found := kvValueForKey(capLogger.allEntries(), "Failed to upgrade WebSocket connection", "remote_addr")
+	require.True(t, found, "expected 'Failed to upgrade WebSocket connection' log entry with remote_addr")
+	assert.Equal(t, logging.SanitizeLogValue(maliciousRemoteAddr), got)
+	assert.False(t, capLogger.allKVContains(maliciousRemoteAddr), "raw remote_addr must never appear in a log entry")
+}

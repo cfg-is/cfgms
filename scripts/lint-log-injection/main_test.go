@@ -322,6 +322,97 @@ func TestAnalyzeFile_KnownSitesReportNothing(t *testing.T) {
 	}
 }
 
+// TestDiscoverScope_WidensAcrossRepoLayout fails on revert: reintroducing the
+// `/api/` filter drops the non-`api` paths from the result, leaving only the
+// nested api file.
+func TestDiscoverScope_WidensAcrossRepoLayout(t *testing.T) {
+	root := t.TempDir()
+	want := []string{
+		filepath.Join(root, "features", "foo", "handler.go"),
+		filepath.Join(root, "pkg", "bar", "thing.go"),
+		filepath.Join(root, "cmd", "baz", "main.go"),
+		filepath.Join(root, "features", "foo", "api", "endpoint.go"),
+	}
+	for _, f := range want {
+		mustWriteGoFile(t, f)
+	}
+	// A test file must never appear in scope regardless of location.
+	mustWriteGoFile(t, filepath.Join(root, "features", "foo", "handler_test.go"))
+
+	got, err := discoverScope(root)
+	if err != nil {
+		t.Fatalf("discoverScope: %v", err)
+	}
+	assertContainsAll(t, got, want)
+	for _, f := range got {
+		if strings.HasSuffix(f, "_test.go") {
+			t.Errorf("discoverScope returned a test file: %s", f)
+		}
+	}
+}
+
+// TestDiscoverScope_SkipsNoiseDirectories fails on revert: a bare
+// filepath.WalkDir(root, ...) with the skip-list removed would include all
+// four noise-directory files below alongside the sibling normal-directory file.
+func TestDiscoverScope_SkipsNoiseDirectories(t *testing.T) {
+	root := t.TempDir()
+	noise := []string{
+		filepath.Join(root, ".cache", "go-mod", "vendored.go"),
+		filepath.Join(root, "web", "node_modules", "somepkg", "index.go"),
+		filepath.Join(root, "build", "artifact.go"),
+		filepath.Join(root, ".git", "hooks", "dummy.go"),
+	}
+	for _, f := range noise {
+		mustWriteGoFile(t, f)
+	}
+	wanted := filepath.Join(root, "features", "foo", "handler.go")
+	mustWriteGoFile(t, wanted)
+
+	got, err := discoverScope(root)
+	if err != nil {
+		t.Fatalf("discoverScope: %v", err)
+	}
+	for _, f := range noise {
+		for _, g := range got {
+			if g == f {
+				t.Errorf("discoverScope included noise-directory file: %s", f)
+			}
+		}
+	}
+	found := false
+	for _, g := range got {
+		if g == wanted {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("discoverScope dropped sibling file in a normal directory: %s (got %v)", wanted, got)
+	}
+}
+
+func mustWriteGoFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("package p\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+func assertContainsAll(t *testing.T, got, want []string) {
+	t.Helper()
+	set := map[string]struct{}{}
+	for _, g := range got {
+		set[g] = struct{}{}
+	}
+	for _, w := range want {
+		if _, ok := set[w]; !ok {
+			t.Errorf("discoverScope result missing %s; got %v", w, got)
+		}
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()

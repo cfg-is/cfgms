@@ -48,7 +48,7 @@ func (api *DebugAPI) StartDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	var req StartDebugSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logger.Error("Failed to decode start debug session request", "error", err)
+		logger.Error("Failed to decode start debug session request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -67,7 +67,7 @@ func (api *DebugAPI) StartDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	session, err := api.debugEngine.StartDebugSession(ctx, req.ExecutionID, req.Settings)
 	if err != nil {
-		logger.Error("Failed to start debug session", "error", err, "execution_id", req.ExecutionID)
+		logger.Error("Failed to start debug session", "error", logging.SanitizeLogValue(err.Error()), "execution_id", logging.SanitizeLogValue(req.ExecutionID))
 		http.Error(w, fmt.Sprintf("Failed to start debug session: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -78,7 +78,7 @@ func (api *DebugAPI) StartDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(StartDebugSessionResponse{Session: session}); err != nil {
-		logger.Error("Failed to encode response", "error", err)
+		logger.Error("Failed to encode response", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
@@ -163,7 +163,7 @@ func (api *DebugAPI) StepExecution(w http.ResponseWriter, r *http.Request) {
 
 	var req StepExecutionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.logger.Error("Failed to decode step execution request", "error", err)
+		api.logger.Error("Failed to decode step execution request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -172,7 +172,7 @@ func (api *DebugAPI) StepExecution(w http.ResponseWriter, r *http.Request) {
 	if req.VariableUpdates != nil {
 		for varName, value := range req.VariableUpdates {
 			if err := api.debugEngine.UpdateVariable(sessionID, varName, value); err != nil {
-				api.logger.Error("Failed to update variable", "error", err, "variable", varName)
+				api.logger.Error("Failed to update variable", "error", logging.SanitizeLogValue(err.Error()), "variable", varName)
 				http.Error(w, fmt.Sprintf("Failed to update variable %s: %v", varName, err), http.StatusInternalServerError)
 				return
 			}
@@ -181,12 +181,12 @@ func (api *DebugAPI) StepExecution(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.StepExecution(sessionID, req.Action)
 	if err != nil {
-		api.logger.Error("Failed to execute debug step", "error", err, "session_id", sessionID, "action", req.Action)
+		api.logger.Error("Failed to execute debug step", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "action", logging.SanitizeLogValue(string(req.Action)))
 		http.Error(w, fmt.Sprintf("Failed to execute debug step: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Executed debug step via API", "session_id", sessionID, "action", req.Action)
+	api.logger.Info("Executed debug step via API", "session_id", sessionID, "action", logging.SanitizeLogValue(string(req.Action)))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -208,7 +208,7 @@ func (api *DebugAPI) SetBreakpoint(w http.ResponseWriter, r *http.Request) {
 
 	var req SetBreakpointRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.logger.Error("Failed to decode set breakpoint request", "error", err)
+		api.logger.Error("Failed to decode set breakpoint request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -220,16 +220,16 @@ func (api *DebugAPI) SetBreakpoint(w http.ResponseWriter, r *http.Request) {
 
 	breakpoint, err := api.debugEngine.SetBreakpoint(sessionID, req.StepName, req.Condition)
 	if err != nil {
-		api.logger.Error("Failed to set breakpoint", "error", err, "session_id", sessionID, "step_name", req.StepName)
+		api.logger.Error("Failed to set breakpoint", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "step_name", logging.SanitizeLogValue(req.StepName))
 		http.Error(w, fmt.Sprintf("Failed to set breakpoint: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Set breakpoint via API", "session_id", sessionID, "breakpoint_id", breakpoint.ID, "step_name", req.StepName)
+	api.logger.Info("Set breakpoint via API", "session_id", sessionID, "breakpoint_id", breakpoint.ID, "step_name", logging.SanitizeLogValue(req.StepName))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(breakpoint); err != nil {
-		api.logger.Error("Failed to encode breakpoint response", "error", err)
+		api.logger.Error("Failed to encode breakpoint response", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
@@ -333,14 +333,14 @@ func (api *DebugAPI) UpdateVariable(w http.ResponseWriter, r *http.Request) {
 
 	var req UpdateVariableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.logger.Error("Failed to decode update variable request", "error", err)
+		api.logger.Error("Failed to decode update variable request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	err := api.debugEngine.UpdateVariable(sessionID, variableName, req.Value)
 	if err != nil {
-		api.logger.Error("Failed to update variable", "error", err, "session_id", sessionID, "variable_name", variableName)
+		api.logger.Error("Failed to update variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "variable_name", variableName)
 		http.Error(w, fmt.Sprintf("Failed to update variable: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -371,14 +371,14 @@ func (api *DebugAPI) WatchVariable(w http.ResponseWriter, r *http.Request) {
 
 	var req WatchVariableRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.logger.Error("Failed to decode watch variable request", "error", err)
+		api.logger.Error("Failed to decode watch variable request", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	err := api.debugEngine.WatchVariable(sessionID, variableName, req.BreakOnChange, req.Condition)
 	if err != nil {
-		api.logger.Error("Failed to watch variable", "error", err, "session_id", sessionID, "variable_name", variableName)
+		api.logger.Error("Failed to watch variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "variable_name", variableName)
 		http.Error(w, fmt.Sprintf("Failed to watch variable: %v", err), http.StatusInternalServerError)
 		return
 	}

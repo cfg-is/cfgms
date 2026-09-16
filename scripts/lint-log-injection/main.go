@@ -9,8 +9,11 @@
 // r.URL.Query, r.Header, r.FormValue, decoded request bodies), then verifies
 // every slog/logger call that uses them wraps them in logging.SanitizeLogValue.
 //
-// Scope: by default, every Go file under features/**/api/. Pass file paths as
-// args to limit the check (used by the pre-commit hook for staged files only).
+// Scope: by default, every non-test Go file in the repository, skipping
+// dot-prefixed directories (.cache, .git, ...) and bin/, build/, data/,
+// node_modules/, vendor/ — build/runtime artifacts and vendored third-party
+// source, never CFGMS code under test. Pass file paths as args to limit the
+// check (used by the pre-commit hook for staged files only).
 //
 // Exit codes: 0 = clean, 1 = findings, 2 = parse/IO error.
 package main
@@ -64,7 +67,7 @@ func main() {
 	files := flag.Args()
 
 	if len(files) == 0 {
-		discovered, err := defaultScope()
+		discovered, err := discoverScope(".")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "lint-log-injection: scope discovery: %v\n", err)
 			os.Exit(2)
@@ -99,21 +102,35 @@ func main() {
 	os.Exit(1)
 }
 
-// defaultScope returns all .go files under features/**/api/ that aren't tests.
-func defaultScope() ([]string, error) {
+// noiseDirs are directory names skipped entirely during scope discovery:
+// build/runtime artifacts and vendored third-party source, never CFGMS code.
+var noiseDirs = map[string]struct{}{
+	"bin":          {},
+	"build":        {},
+	"data":         {},
+	"node_modules": {},
+	"vendor":       {},
+}
+
+// discoverScope returns all non-test .go files under root, skipping
+// dot-prefixed directories and the noiseDirs listed above.
+func discoverScope(root string) ([]string, error) {
 	var out []string
-	err := filepath.WalkDir("features", func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			name := d.Name()
+			if name != "." && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			if _, skip := noiseDirs[name]; skip {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		// Only files under .../api/ subtrees.
-		if !strings.Contains(path, "/api/") {
 			return nil
 		}
 		out = append(out, path)
