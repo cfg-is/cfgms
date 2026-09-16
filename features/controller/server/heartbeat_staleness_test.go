@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -167,4 +168,97 @@ func TestHeartbeatOnStatusChange_NoClobberDeregistered(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.StewardStatusDeregistered, rec.Status,
 		"recovery heartbeat must not overwrite Deregistered status")
+}
+
+// controlCharStewardStore wraps a real StewardStore, overriding only GetSteward
+// and UpdateStewardStatus to force deterministic failures carrying a
+// caller-supplied error — used to prove a control-character payload from the
+// durable store cannot reach the logger unsanitized (Issue #4073 site 3).
+// Embedding the business.StewardStore interface (not a concrete provider)
+// promotes every other method unchanged, so it is not subject to the
+// pkg/storage/providers/* import confinement check.
+type controlCharStewardStore struct {
+	business.StewardStore
+	getErr error
+	updErr error
+}
+
+func (s *controlCharStewardStore) GetSteward(ctx context.Context, id string) (*business.StewardRecord, error) {
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	return s.StewardStore.GetSteward(ctx, id)
+}
+
+func (s *controlCharStewardStore) UpdateStewardStatus(ctx context.Context, id string, status business.StewardStatus) error {
+	if s.updErr != nil {
+		return s.updErr
+	}
+	return s.StewardStore.UpdateStewardStatus(ctx, id, status)
+}
+
+// heartbeatCtrlCharPayload is the control-character error text used to prove
+// makeHeartbeatStatusChangeCallback sanitizes store errors before logging.
+const heartbeatCtrlCharPayload = "steward store failure\nInjected: fake log line\rtrailer"
+
+// TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs guards Issue #4073
+// site 3 — the exact shape CLAUDE.md calls out by name: SanitizeLogValue(sid)
+// paired with a bare getErr/updErr in the same log call. Drives all three call
+// sites (server.go:308, 316, 326) with a control-character store error and
+// asserts none of them leak the raw payload. Each sub-test must fail if its
+// site's sanitization is ever reverted.
+func TestMakeHeartbeatStatusChangeCallback_SanitizesErrorLogs(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("GetSteward failure during recovery (line 308)", func(t *testing.T) {
+		store := &controlCharStewardStore{
+			StewardStore: newFlatFileStewardStore(t),
+			getErr:       errors.New(heartbeatCtrlCharPayload),
+		}
+		rec := &recordingLogger{}
+		callback := makeHeartbeatStatusChangeCallback(store, rec)
+
+		callback("hb-ctrlchar-get", true, heartbeat.StewardStatus{})
+
+		assert.True(t, rec.containsAny("Injected"), "expected the sanitized error text to reach the logger")
+		assert.False(t, rec.containsAny("\n"), "raw newline from the store error reached the logger unsanitized")
+		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
+	})
+
+	t.Run("UpdateStewardStatus failure during recovery (line 316)", func(t *testing.T) {
+		base := newFlatFileStewardStore(t)
+		const stewardID = "hb-ctrlchar-upd-active"
+		require.NoError(t, base.RegisterSteward(ctx, &business.StewardRecord{
+			ID:       stewardID,
+			TenantID: "test-tenant",
+			Status:   business.StewardStatusRegistered,
+		}))
+		store := &controlCharStewardStore{
+			StewardStore: base,
+			updErr:       errors.New(heartbeatCtrlCharPayload),
+		}
+		rec := &recordingLogger{}
+		callback := makeHeartbeatStatusChangeCallback(store, rec)
+
+		callback(stewardID, true, heartbeat.StewardStatus{})
+
+		assert.True(t, rec.containsAny("Injected"), "expected the sanitized error text to reach the logger")
+		assert.False(t, rec.containsAny("\n"), "raw newline from the store error reached the logger unsanitized")
+		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
+	})
+
+	t.Run("UpdateStewardStatus failure during loss (line 326)", func(t *testing.T) {
+		store := &controlCharStewardStore{
+			StewardStore: newFlatFileStewardStore(t),
+			updErr:       errors.New(heartbeatCtrlCharPayload),
+		}
+		rec := &recordingLogger{}
+		callback := makeHeartbeatStatusChangeCallback(store, rec)
+
+		callback("hb-ctrlchar-lost", false, heartbeat.StewardStatus{})
+
+		assert.True(t, rec.containsAny("Injected"), "expected the sanitized error text to reach the logger")
+		assert.False(t, rec.containsAny("\n"), "raw newline from the store error reached the logger unsanitized")
+		assert.False(t, rec.containsAny("\r"), "raw carriage return from the store error reached the logger unsanitized")
+	})
 }

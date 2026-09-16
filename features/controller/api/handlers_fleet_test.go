@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -176,6 +177,43 @@ func TestHandleFleetHealth_FleetQueryError_Returns500(t *testing.T) {
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "INTERNAL_ERROR", resp.Error.Code)
+}
+
+// controlCharFleetQuery is a real implementation of fleet.FleetQuery that always
+// fails with a caller-configured error, used to prove a control-character payload
+// in that error cannot reach the logger unsanitized (Issue #4073 site 2).
+type controlCharFleetQuery struct {
+	err error
+}
+
+func (f *controlCharFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, f.err
+}
+
+func (f *controlCharFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, f.err
+}
+
+// TestHandleFleetHealth_FleetQueryError_SanitizesErrorLog guards Issue #4073
+// site 2: handleFleetHealth logged "error", err bare from s.fleetQuery.Search.
+// This must fail if the sanitization is ever reverted.
+func TestHandleFleetHealth_FleetQueryError_SanitizesErrorLog(t *testing.T) {
+	// Injected at construction, not assigned onto a running server -- see the
+	// note in handlers_audit_test.go's equivalent test.
+	capLogger := &capturingLogger{}
+	server := setupTestServerWithLogger(t, capLogger)
+	const ctrlPayload = "fleet query failure\nInjected: fake log line\rtrailer"
+	server.fleetQuery = &controlCharFleetQuery{err: errors.New(ctrlPayload)}
+
+	rec := getFleetHealth(server)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	errorValues := capLogger.loggedValuesForKey("error")
+	require.NotEmpty(t, errorValues, "expected the error log call to have fired")
+	for _, v := range errorValues {
+		assert.NotContains(t, v, "\n", "raw newline from the fleet query error reached the logger unsanitized")
+		assert.NotContains(t, v, "\r", "raw carriage return from the fleet query error reached the logger unsanitized")
+	}
 }
 
 // fleetTestStewardProvider backs MemoryQuery with a fixed steward list for resolve tests.

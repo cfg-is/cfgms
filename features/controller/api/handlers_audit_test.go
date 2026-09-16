@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -281,4 +282,35 @@ func TestHandleListAuditEntries_HasMore_False_ExactPageBoundary(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp.Data.Entries, 2, "all rows must be returned")
 	assert.False(t, resp.Data.HasMore, "has_more must be false when result ends exactly on page boundary")
+}
+
+// TestHandleListAuditEntries_QueryEntriesError_SanitizesErrorLog guards Issue
+// #4073 site 1: handleListAuditEntries logged "error", err bare, so an error
+// message carrying attacker-influenced content (surfaced through a gRPC, store,
+// or decode failure) reached the logger unsanitized. This must fail if the
+// sanitization is ever reverted.
+func TestHandleListAuditEntries_QueryEntriesError_SanitizesErrorLog(t *testing.T) {
+	// The logger is injected at construction, never assigned onto a running
+	// server: New() starts startCliLoginRequestSweep, whose goroutine reads
+	// s.logger, so a later `server.logger = ...` is a data race under -race.
+	capLogger := &capturingLogger{}
+	server := setupTestServerWithLogger(t, capLogger)
+
+	const ctrlPayload = "store failure\nInjected: fake log line\rtrailer"
+	failingStore := newTestFailingAuditStore(t, errors.New(ctrlPayload))
+
+	auditMgr, err := audit.NewManager(failingStore, "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+	server.auditManager = auditMgr
+
+	rec := getAuditEntries(server, "tenant-a", "")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	errorValues := capLogger.loggedValuesForKey("error")
+	require.NotEmpty(t, errorValues, "expected the error log call to have fired")
+	for _, v := range errorValues {
+		assert.NotContains(t, v, "\n", "raw newline from the store error reached the logger unsanitized")
+		assert.NotContains(t, v, "\r", "raw carriage return from the store error reached the logger unsanitized")
+	}
 }

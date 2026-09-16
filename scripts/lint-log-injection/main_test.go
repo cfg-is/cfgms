@@ -277,6 +277,51 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TestAnalyzeFile_KnownSitesReportNothing records what this linter currently
+// sees at the four Issue #4073 sites: nothing.
+//
+// NOT a regression pin, despite what it looks like. These files report zero
+// findings whether or not they are sanitized — verified by running the linter
+// against the unsanitized copies, which also exits 0 with no output. Reverting
+// any of the four to a bare `err` leaves this test passing. The revert-proof
+// guarantee for those sites lives in their own package tests, which inject a
+// control-character payload and assert the sanitized form reaches the logger:
+//
+//	features/controller/api/handlers_audit_test.go
+//	features/controller/api/handlers_fleet_test.go
+//	features/controller/server/heartbeat_staleness_test.go
+//	pkg/audit/manager_test.go
+//
+// Two gaps in the taint model put these sites out of reach. Sources are matched
+// by exact selector string, so a chained r.URL.Query().Get(...) never taints its
+// result — only the unchained q := r.URL.Query(); q.Get(...) form does. And
+// there is no interprocedural taint, so sid and tenantID, which arrive as
+// function parameters, are never tainted regardless of what the HTTP layer
+// passed in.
+//
+// What this test is good for: it fails if the linter ever starts reporting on
+// these files, which would mean either the taint model grew to reach them (make
+// it a real pin then) or it began false-positiving on already-sanitized code.
+func TestAnalyzeFile_KnownSitesReportNothing(t *testing.T) {
+	files := []string{
+		"../../features/controller/api/handlers_audit.go",
+		"../../features/controller/api/handlers_fleet.go",
+		"../../features/controller/server/server.go",
+		"../../features/tenant/manager.go",
+	}
+	for _, f := range files {
+		t.Run(f, func(t *testing.T) {
+			findings, err := analyzeFile(f)
+			if err != nil {
+				t.Fatalf("analyzeFile(%s): %v", f, err)
+			}
+			if len(findings) != 0 {
+				t.Errorf("expected 0 findings in %s, got %d: %v", f, len(findings), findings)
+			}
+		})
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()

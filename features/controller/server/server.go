@@ -305,7 +305,7 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			rec, getErr := store.GetSteward(context.Background(), sid)
 			if getErr != nil {
 				logger.Warn("Heartbeat recovery: failed to read current durable status",
-					"steward_id", logging.SanitizeLogValue(sid), "error", getErr)
+					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(getErr.Error()))
 				return
 			}
 			// Only promote to Active when currently Registered or Lost; never
@@ -313,7 +313,7 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			if rec.Status == business.StewardStatusRegistered || rec.Status == business.StewardStatusLost {
 				if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusActive); updErr != nil {
 					logger.Warn("Heartbeat recovery: failed to persist active status",
-						"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+						"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
 				}
 			}
 		} else {
@@ -323,7 +323,7 @@ func makeHeartbeatStatusChangeCallback(store business.StewardStore, logger loggi
 			}
 			if updErr := store.UpdateStewardStatus(context.Background(), sid, business.StewardStatusLost); updErr != nil {
 				logger.Warn("Heartbeat lost: failed to persist lost status",
-					"steward_id", logging.SanitizeLogValue(sid), "error", updErr)
+					"steward_id", logging.SanitizeLogValue(sid), "error", logging.SanitizeLogValue(updErr.Error()))
 			}
 		}
 	}
