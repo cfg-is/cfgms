@@ -322,6 +322,131 @@ func TestAnalyzeFile_KnownSitesReportNothing(t *testing.T) {
 	}
 }
 
+// TestAnalyzeFile_FlagsTaintedValueViaCtxSuffix covers CFGMS's own
+// context-aware logging convention (InfoCtx/WarnCtx/ErrorCtx/DebugCtx/FatalCtx
+// on logging.Logger and *logging.ModuleLogger), invisible to loggerMethods
+// before this change. Fails on revert: removing "ErrorCtx" from loggerMethods
+// makes analyzeFunc skip the call entirely (the loggerMethods lookup happens
+// before any taint check), so this snippet would drop to 0 findings.
+func TestAnalyzeFile_FlagsTaintedValueViaCtxSuffix(t *testing.T) {
+	src := `package api
+import "context"
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ ErrorCtx(context.Context, string, ...any) }
+func (s *S) handle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	s.logger.ErrorCtx(ctx, "msg", "id", mux.Vars(r)["id"])
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "mux.Vars") {
+		t.Errorf("expected finding to name the mux.Vars value, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedCtxSuffix is the negative half of the
+// ErrorCtx case: the documented remedy (logging.SanitizeLogValue) must still
+// clear the finding on a *Ctx-suffixed sink, or the rule is unsatisfiable for
+// half of CFGMS's own logging convention.
+func TestAnalyzeFile_AcceptsSanitizedCtxSuffix(t *testing.T) {
+	src := `package api
+import "context"
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ ErrorCtx(context.Context, string, ...any) }
+func (s *S) handle(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.ErrorCtx(ctx, "msg", "id", logging.SanitizeLogValue(id))
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected 0 findings for a sanitized *Ctx sink, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_FlagsTaintedValueViaShortLoggerName covers the widened
+// looksLikeLogger tail match. Fails on revert: reverting the widening drops
+// the receiver tail "l" from the accepted set (only "logger"-suffix, "log",
+// and "slog" would remain), so looksLikeLogger(s.l) returns false and this
+// snippet drops to 0 findings.
+func TestAnalyzeFile_FlagsTaintedValueViaShortLoggerName(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ l logger }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.l.Error("msg", "id", id)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"id"`) {
+		t.Errorf("expected the id to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedViaFieldsRecursive covers the second real
+// sanitizer wrapper, logging.SanitizeFieldsRecursive (pkg/logging/sanitize.go),
+// already in production use (features/controller/api/middleware.go:1636) but
+// unrecognized by sanitizerCalls before this change.
+//
+// Pairing note, documented rather than silently assumed: the obvious guard
+// against a vacuous test -- "wrap the same value in an unregistered function
+// name instead and confirm it flags" -- does not hold for this linter as
+// written. isTaintedExpr's *ast.CallExpr case only asks whether the call
+// EXPRESSION ITSELF is a known taint source; it never inspects the call's own
+// arguments. So wrapping a tainted value in any function call -- a registered
+// sanitizer, an unregistered one, or a typo -- already produces 0 findings,
+// and adding an entry to sanitizerCalls does not change that outcome for a
+// wrapped argument. Verified directly: emptying sanitizerCalls to `{}`
+// entirely produces zero regressions across this file's whole existing test
+// suite, before this story's changes. That gap in the taint model (a wrap in
+// any function silences detection, sanitizer or not) is real, predates this
+// story, is not something "sink/sanitizer registry" scope authorizes fixing
+// here, and is filed as follow-up work rather than patched inline.
+//
+// What this test asserts instead, which is genuinely revert-provable and does
+// guard against vacuousness: the same tainted value, logged bare in a sibling
+// field on the very next line, still flags -- proving the value is live and
+// reachable at this sink, not a position that could never have produced a
+// finding regardless of the fix -- while the SanitizeFieldsRecursive-wrapped
+// copy produces none. Fails on revert of the registry entry only in the sense
+// that removing "logging.SanitizeFieldsRecursive" from sanitizerCalls while
+// this exact snippet is otherwise unchanged does NOT reproduce a finding for
+// the wrapped line (see gap above); the test instead pins the currently-true,
+// checkable behavior of both lines together.
+func TestAnalyzeFile_AcceptsSanitizedViaFieldsRecursive(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("sanitized", "fields", logging.SanitizeFieldsRecursive(map[string]interface{}{"id": id}))
+	s.logger.Info("bare", "id", id)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding (the bare id on the second call), got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"id"`) {
+		t.Errorf("expected the bare id to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
 // TestDiscoverScope_WidensAcrossRepoLayout fails on revert: reintroducing the
 // `/api/` filter drops the non-`api` paths from the result, leaving only the
 // nested api file.

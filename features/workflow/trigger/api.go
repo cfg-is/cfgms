@@ -77,7 +77,7 @@ func (api *APIHandler) handleCreateTrigger(w http.ResponseWriter, r *http.Reques
 
 	api.sendJSONResponse(w, http.StatusCreated, trigger)
 	logger.InfoCtx(ctx, "Trigger created successfully via API",
-		"trigger_id", trigger.ID)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID))
 }
 
 // handleListTriggers lists triggers with optional filtering

@@ -3,17 +3,25 @@
 package trigger
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/logging"
+	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // registers the "file" provider used by TestAPIHandler_SanitizesTriggerIDInLogFile
 )
 
 // newTestTriggerRouter wires handler onto a /triggers-prefixed subrouter, matching
@@ -249,6 +257,140 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPIHandler_SanitizesTriggerIDInLogFile covers the log-injection finding
+// at api.go:80 (Issue #4087): "Trigger created successfully via API" logs
+// trigger.ID, and CreateTrigger (manager.go:219-220) only generates a fresh
+// ID `if trigger.ID == ""`, so a client-supplied, non-empty id in the POST
+// body survives unchanged through to that log call.
+//
+// APIHandler.logger is a concrete *logging.ModuleLogger with no injectable
+// interface, and NewAPIHandler takes no logger parameter, so — following
+// #4086's debug_api_test.go pattern rather than constructor-injecting a
+// fake — this points the global logging manager at a real file provider and
+// reads back the written JSON line.
+//
+// Honesty note, matching the same one recorded on
+// TestHTTPWebhookHandler_SanitizesRemoteAddrAndUserAgentInLogFile in
+// webhook_test.go: trigger.ID is a plain Go `string` field
+// (features/workflow/trigger/types.go:60), and every field value passed
+// through a *logging.ModuleLogger's *Ctx methods already runs through
+// pkg/logging's own sanitizeValueRecursive regardless of whether the call
+// site wraps it — verified directly by temporarily reverting the api.go:80
+// wrap and re-running this exact scenario, which still produced a sanitized
+// value in the log file, not the raw control-character id. So this test
+// cannot fail on revert of the call-site wrap alone (the same limitation
+// #4086 documented for this package's execution_id/error-shaped fields); the
+// wrap remains required for `make lint-log-injection` (a static check with
+// no knowledge of this runtime sanitization) and as defense-in-depth. What
+// this test DOES verify, genuinely: the trigger_id field reaches the log
+// file sanitized end-to-end.
+//
+// Global logging state is process-wide; this test cannot run t.Parallel()
+// and must be the only test in this package touching it.
+func TestAPIHandler_SanitizesTriggerIDInLogFile(t *testing.T) {
+	if manager := logging.GetGlobalLoggingManager(); manager != nil {
+		_ = manager.Close()
+	}
+	logging.InitializeGlobalLoggerFactory("", "")
+
+	tmpDir := t.TempDir()
+	loggingConfig := &logging.LoggingConfig{
+		Provider:      "file",
+		Level:         "DEBUG",
+		ServiceName:   "test-service",
+		Component:     "workflow-trigger-api",
+		AsyncWrites:   false,
+		BatchSize:     1,
+		FlushInterval: time.Second,
+		Config: map[string]interface{}{
+			"directory":        tmpDir,
+			"file_prefix":      "test",
+			"max_file_size":    1024 * 1024,
+			"max_files":        5,
+			"compress_rotated": false,
+		},
+	}
+	require.NoError(t, logging.InitializeGlobalLogging(loggingConfig))
+	logging.InitializeGlobalLoggerFactory("test-service", "workflow-trigger-api")
+
+	t.Cleanup(func() {
+		if manager := logging.GetGlobalLoggingManager(); manager != nil {
+			_ = manager.Close()
+		}
+		logging.InitializeGlobalLoggerFactory("", "")
+	})
+
+	handler := NewAPIHandler(newRealTriggerManager())
+	router := newTestTriggerRouter(handler)
+
+	const controlTriggerID = "trigger\x07evil"
+
+	var body bytes.Buffer
+	require.NoError(t, json.NewEncoder(&body).Encode(Trigger{
+		ID:           controlTriggerID,
+		Name:         "Test Trigger",
+		Type:         TriggerTypeManual,
+		WorkflowName: "test-workflow",
+	}))
+
+	req, err := http.NewRequest(http.MethodPost, "/triggers", &body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	require.NoError(t, logging.GetGlobalLoggingManager().Flush(context.Background()))
+
+	entries := readAPILogEntries(t, tmpDir)
+	found := false
+	for _, e := range entries {
+		if e["message"] != "Trigger created successfully via API" {
+			continue
+		}
+		fields, _ := e["fields"].(map[string]interface{})
+		triggerID, _ := fields["trigger_id"].(string)
+		found = true
+
+		if strings.Contains(triggerID, controlTriggerID) || strings.ContainsAny(triggerID, "\x07") {
+			t.Fatalf("log entry contains the raw control-character trigger_id: %q", triggerID)
+		}
+		require.Equal(t, logging.SanitizeLogValue(controlTriggerID), triggerID)
+	}
+	require.True(t, found, "expected a 'Trigger created successfully via API' log entry")
+}
+
+// readAPILogEntries reads every JSON-lines log file under dir and decodes
+// each line into a generic map for field-level assertions.
+func readAPILogEntries(t *testing.T, dir string) []map[string]interface{} {
+	t.Helper()
+	files, err := os.ReadDir(dir)
+	require.NoError(t, err)
+
+	var entries []map[string]interface{}
+	for _, f := range files {
+		if f.IsDir() {
+			continue
+		}
+		file, err := os.Open(filepath.Join(dir, f.Name()))
+		require.NoError(t, err)
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(strings.TrimSpace(string(line))) == 0 {
+				continue
+			}
+			var entry map[string]interface{}
+			require.NoError(t, json.Unmarshal(line, &entry))
+			entries = append(entries, entry)
+		}
+		require.NoError(t, scanner.Err())
+		require.NoError(t, file.Close())
+	}
+	return entries
 }
 
 func TestAPIHandler_HandleGetTrigger(t *testing.T) {

@@ -414,8 +414,8 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	logger.InfoCtx(ctx, "Received webhook request",
 		"trigger_id", triggerID,
 		"method", r.Method,
-		"remote_addr", r.RemoteAddr,
-		"user_agent", r.Header.Get("User-Agent"))
+		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
+		"user_agent", logging.SanitizeLogValue(r.Header.Get("User-Agent")))
 
 	// Get trigger configuration
 	wh.mutex.RLock()
@@ -451,7 +451,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	if !wh.isIPAllowed(trigger.Webhook, r.RemoteAddr) {
 		logger.WarnCtx(ctx, "Webhook request from disallowed IP",
 			"trigger_id", triggerID,
-			"remote_addr", r.RemoteAddr,
+			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
 			"allowed_ips", trigger.Webhook.AllowedIPs)
 		http.Error(w, "Access denied", http.StatusForbidden)
 		return
@@ -461,7 +461,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	if !wh.checkRateLimit(triggerID) {
 		logger.WarnCtx(ctx, "Webhook request rate limited",
 			"trigger_id", triggerID,
-			"remote_addr", r.RemoteAddr)
+			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
@@ -490,21 +490,21 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 		if errors.Is(err, errBearerAuthRateLimited) {
 			logger.WarnCtx(ctx, "Webhook bearer auth rate limit exceeded",
 				"trigger_id", triggerID,
-				"remote_addr", r.RemoteAddr)
+				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 		if errors.Is(err, errBasicAuthUnauthorized) {
 			logger.WarnCtx(ctx, "Webhook basic auth failed",
 				"trigger_id", triggerID,
-				"remote_addr", r.RemoteAddr)
+				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if errors.Is(err, errPayloadValidationFailed) {
 			logger.WarnCtx(ctx, "Webhook payload validation failed",
 				"trigger_id", triggerID,
-				"remote_addr", r.RemoteAddr)
+				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
