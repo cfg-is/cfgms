@@ -770,11 +770,18 @@ const defaultMaxOperatorPayloadTargets = 1000
 // or tenantID is empty, it returns defaultMaxOperatorPayloadTargets unchanged —
 // preserving safe behavior for bare Server instances built without these stores.
 //
-// GetTenantPath or GetPolicy errors are logged at Warn and fall back to the default:
-// consistent with resolveAssuranceRequirement, a storage hiccup must never turn into
-// an unbounded blast radius (fail-open past the default) or a fleet-wide dispatch
-// outage (treating the error as "reject everything") — falling back to the
-// conservative default is safe in both directions.
+// GetTenantPath or GetPolicy errors are logged at Warn. A storage hiccup must never
+// turn into an unbounded blast radius (fail-open past the default) or a fleet-wide
+// dispatch outage (treating the error as "reject everything"), but "fall back to the
+// default" is conservative only for a tenant that never configured a narrower bound.
+// For a tenant that did, defaultMaxOperatorPayloadTargets (1000) is a WIDENING of the
+// bound it set, not a ceiling — so a GetPolicy error partway through the walk does not
+// abandon it: the walk stops at the failure and returns the narrowest MaxTargets
+// already resolved from the path elements visited before it (Issue #4099), which the
+// min-across-path walk above guarantees is never wider than the default. GetTenantPath
+// failing, or the FIRST GetPolicy in the walk failing, means nothing has been resolved
+// yet — there is no narrower bound to clamp to, and rejecting the dispatch is ruled out
+// by the fleet-wide-outage concern above — so those two cases resolve to the default.
 func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string) int {
 	if s.blastRadiusPolicyStore == nil || s.tenantStore == nil || tenantID == "" {
 		return defaultMaxOperatorPayloadTargets
@@ -793,11 +800,11 @@ func (s *Server) resolveMaxTargetsForTenant(ctx context.Context, tenantID string
 	for _, t := range path {
 		policy, err := s.blastRadiusPolicyStore.GetPolicy(ctx, t)
 		if err != nil {
-			s.logger.Warn("resolveMaxTargetsForTenant: failed to get blast-radius policy; using default bound",
+			s.logger.Warn("resolveMaxTargetsForTenant: failed to get blast-radius policy; using narrowest bound resolved so far",
 				"tenant_id", logging.SanitizeLogValue(t),
 				"error", logging.SanitizeLogValue(err.Error()),
 			)
-			return defaultMaxOperatorPayloadTargets
+			break
 		}
 		if policy.MaxTargets != nil && *policy.MaxTargets < result {
 			result = *policy.MaxTargets

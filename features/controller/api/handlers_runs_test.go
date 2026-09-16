@@ -1418,6 +1418,131 @@ func TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins(t *testing.T) {
 			"never be able to raise a bound its ancestor set")
 }
 
+// ---- Issue #4099: a mid-walk policy-lookup error must not discard an already- --
+// ---- resolved narrower bound in favor of the default --------------------------
+
+// failingBlastRadiusPolicyStore wraps a real testBlastRadiusPolicyStore and returns
+// an error from GetPolicy for any tenantID in failOn, modeling a storage hiccup that
+// hits only some elements of a multi-tenant path walk — the shape #4099 exists to
+// fix. Distinct from errorAssurancePolicyStore (assurance_resolve_test.go), which
+// always errors and so cannot express "ancestor succeeded, descendant failed."
+type failingBlastRadiusPolicyStore struct {
+	*testBlastRadiusPolicyStore
+	failOn map[string]bool
+}
+
+func newFailingBlastRadiusPolicyStore(failOn ...string) *failingBlastRadiusPolicyStore {
+	fail := make(map[string]bool, len(failOn))
+	for _, id := range failOn {
+		fail[id] = true
+	}
+	return &failingBlastRadiusPolicyStore{
+		testBlastRadiusPolicyStore: newTestBlastRadiusPolicyStore(),
+		failOn:                     fail,
+	}
+}
+
+func (s *failingBlastRadiusPolicyStore) GetPolicy(ctx context.Context, tenantID string) (*business.BlastRadiusPolicy, error) {
+	if s.failOn[tenantID] {
+		return nil, errors.New("blast-radius policy store unavailable")
+	}
+	return s.testBlastRadiusPolicyStore.GetPolicy(ctx, tenantID)
+}
+
+// TestResolveMaxTargetsForTenant_MidWalkPolicyError_KeepsNarrowerKnownBound is the
+// [REQUIRED TEST] for AC1: when an ancestor earlier in the path has already
+// supplied a bound narrower than the default, and a later path element's
+// GetPolicy call fails, the resolved bound must be the narrower known value, not
+// the default. The pre-fix code abandons the walk on any GetPolicy error and
+// returns defaultMaxOperatorPayloadTargets (1000) unconditionally, discarding the
+// root's already-resolved 50 — this test fails on revert.
+func TestResolveMaxTargetsForTenant_MidWalkPolicyError_KeepsNarrowerKnownBound(t *testing.T) {
+	server := setupTestServer(t)
+
+	blastStore := newFailingBlastRadiusPolicyStore("root/middle")
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(50),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+	}))
+
+	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+	assert.Equal(t, 50, got,
+		"a GetPolicy error at 'root/middle' must not discard the narrower bound (50) "+
+			"already resolved from 'root' in favor of the default (1000)")
+}
+
+// TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault is the
+// [REQUIRED TEST] for AC2: when nothing about the tenant's policy is known yet —
+// GetTenantPath itself fails, or the first GetPolicy in the walk fails — there is
+// no narrower bound to fall back to, so the resolver returns the default.
+func TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault(t *testing.T) {
+	t.Run("GetTenantPath error", func(t *testing.T) {
+		server := setupTestServer(t)
+		server.SetBlastRadiusPolicyStore(newTestBlastRadiusPolicyStore())
+		server.SetTenantStore(errorTenantStore{})
+
+		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
+			"a GetTenantPath error means nothing is known yet; must resolve to the default")
+	})
+
+	t.Run("first GetPolicy in the walk errors", func(t *testing.T) {
+		server := setupTestServer(t)
+		blastStore := newFailingBlastRadiusPolicyStore("root")
+		server.SetBlastRadiusPolicyStore(blastStore)
+		server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+			"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+		}))
+
+		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
+			"a GetPolicy error on the first path element leaves no narrower bound "+
+				"resolved yet; must resolve to the default")
+	})
+}
+
+// TestPostRunCommand_StorageErrorDuringBlastRadiusResolution_DoesNotFailClosed is
+// the [REQUIRED TEST] for AC3: a storage error while resolving the blast-radius
+// bound must still permit a dispatch within the resolved bound — treating any
+// resolution error as "reject everything" is not an acceptable fallback, per the
+// documented rationale resolveMaxTargetsForTenant restates (Issue #4099).
+func TestPostRunCommand_StorageErrorDuringBlastRadiusResolution_DoesNotFailClosed(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "err-steward-1", TenantID: "test-tenant"},
+		{ID: "err-steward-2", TenantID: "test-tenant"},
+	}
+	server, _, queue := setupRunServer(t, stewards)
+
+	server.SetBlastRadiusPolicyStore(newTestBlastRadiusPolicyStore())
+	server.SetTenantStore(errorTenantStore{}) // GetTenantPath always fails
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	targets := []string{"err-steward-1", "err-steward-2"}
+	rawContent := []byte("echo hi")
+	content := base64.StdEncoding.EncodeToString(rawContent)
+
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "all",
+		"content": content,
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", targets)))
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a blast-radius-resolution storage error must not fail the dispatch closed "+
+			"when the request is within the resolved (default) bound; body: %s", rec.Body.String())
+
+	for _, id := range targets {
+		assert.NotEmpty(t, queue.PeekForDevice(id),
+			"dispatch must reach the execution queue for %s despite the resolution error", id)
+	}
+}
+
 // ---- Service unavailable when manager not wired -----------------------------
 
 func TestRunEndpoints_ServiceUnavailable_WhenManagerNotWired(t *testing.T) {
