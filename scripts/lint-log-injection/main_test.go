@@ -538,6 +538,329 @@ func assertContainsAll(t *testing.T, got, want []string) {
 	}
 }
 
+// TestAnalyzeFile_FlagsChainedMethodCallOnTaintSource covers taint gap C: a
+// method call chained directly off a taint-source call is invisible to
+// selectorString, which only collapses a chain of Ident/SelectorExpr nodes.
+// Fails on revert: without isMethodCallOnTaintedReceiver, isTaintSourceExpr
+// never matches r.URL.Query().Get("id") because its receiver is itself a
+// CallExpr, and this snippet drops to 0 findings.
+func TestAnalyzeFile_FlagsChainedMethodCallOnTaintSource(t *testing.T) {
+	src := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"id"`) {
+		t.Errorf("expected the id to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_FlagsUnchainedMethodCallOnTaintedVar covers the other half
+// of gap C: q := r.URL.Query() taints q today, but q.Get("id") collapses to
+// the selector string "q.Get", which is not and can never be a registered
+// taint source key (q is a local variable name, not a package/type). Fails
+// on revert: without the "receiver already tainted" check, this drops to 0
+// findings.
+func TestAnalyzeFile_FlagsUnchainedMethodCallOnTaintedVar(t *testing.T) {
+	src := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	id := q.Get("id")
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzeFile_FlagsPlainAlias covers gap D's first shape: a plain
+// re-assignment of a tainted identifier to a new name. Fails on revert:
+// without the Ident-to-Ident propagation rule, alias never enters the
+// tainted set and this drops to 0 findings.
+func TestAnalyzeFile_FlagsPlainAlias(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	alias := id
+	s.logger.Info("got", "id", alias)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzeFile_FlagsSprintfDerivedValue covers gap D's Sprintf shape: a
+// value built via fmt.Sprintf over a tainted argument. Fails on revert:
+// without the call-with-tainted-argument propagation rule, msg never enters
+// the tainted set and this drops to 0 findings.
+func TestAnalyzeFile_FlagsSprintfDerivedValue(t *testing.T) {
+	src := `package api
+import "fmt"
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	msg := fmt.Sprintf("lookup %s", id)
+	s.logger.Info("got", "msg", msg)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzeFile_FlagsErrorWrapBoundToNonErrorName covers gap D's
+// error-wrap shape reached through a rename: today's looksLikeErrorVar gate
+// only taints error-*named* bindings, so binding an error-wrapping call to a
+// non-error name defeats it. Fails on revert: reintroducing the name gate
+// makes fmt.Errorf's result bind to "wrapped", which the gate rejects, and
+// this drops to 0 findings.
+func TestAnalyzeFile_FlagsErrorWrapBoundToNonErrorName(t *testing.T) {
+	src := `package api
+import "errors"
+import "fmt"
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	err := errors.New("lookup failed")
+	wrapped := fmt.Errorf("lookup %s failed: %w", id, err)
+	s.logger.Error("failed", "error", wrapped)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "wrapped") {
+		t.Errorf("expected wrapped to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_FlagsTaintedStructFieldWrite covers gap D's struct-field
+// shape: collectTaintedVars only ever taints *ast.Ident LHS targets, so a
+// field write has no propagation path today. Fails on revert: without the
+// SelectorExpr-LHS rule tainting the root identifier, s never enters the
+// tainted set and this drops to 0 findings.
+func TestAnalyzeFile_FlagsTaintedStructFieldWrite(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct {
+	logger logger
+	Field  string
+}
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.Field = id
+	s.logger.Info("got", "field", s.Field)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "s.Field") {
+		t.Errorf("expected s.Field to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_FlagsErrorFromCallArgWithTaintedField is the real-world
+// shape found by Tech Lead review of the pre-fix diffs behind issue #4073's
+// motivating sites (mirrors features/controller/api/handlers_audit.go): a
+// struct field is written with tainted data, then the whole struct variable
+// (not a field selector) is passed as a call argument whose returned error
+// is logged bare. Fails on revert: without struct-field-write tainting the
+// containing variable as a whole, `filter` never enters the tainted set, so
+// anyArgTainted never sees it as an argument to QueryEntries, and this drops
+// to 0 findings.
+func TestAnalyzeFile_FlagsErrorFromCallArgWithTaintedField(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type Filter struct{ EventTypes []string }
+type store interface{ QueryEntries(*Filter) ([]string, error) }
+type S struct {
+	logger logger
+	q      store
+}
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	filter := &Filter{}
+	filter.EventTypes = []string{id}
+	_, err := s.q.QueryEntries(filter)
+	s.logger.Error("failed", "error", err)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "err") {
+		t.Errorf("expected err to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_FlagsErrorFromCallArgWithTaintedCompositeLiteralField is the
+// declaration-form sibling of the above: the tainted field is set inside a
+// composite literal at declaration rather than a later field write. Guards
+// against a fix that only handles the x.Field = ... reassignment shape.
+// Fails on revert: without composite-literal taint detection tainting
+// `filter` as a whole, this drops to 0 findings the same way.
+func TestAnalyzeFile_FlagsErrorFromCallArgWithTaintedCompositeLiteralField(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type Filter struct{ EventTypes []string }
+type store interface{ QueryEntries(*Filter) ([]string, error) }
+type S struct {
+	logger logger
+	q      store
+}
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	filter := &Filter{EventTypes: []string{id}}
+	_, err := s.q.QueryEntries(filter)
+	s.logger.Error("failed", "error", err)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "err") {
+		t.Errorf("expected err to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedDerivedValues is the negative counterpart of
+// the five widened-taint-model positive cases above: each one still produces
+// 0 findings once the value is wrapped in logging.SanitizeLogValue at the
+// point it's logged. Without this table, a broken sanitizer-detection path
+// for any of these newly-tainted shapes would silently make the linter
+// unsatisfiable for that shape.
+func TestAnalyzeFile_AcceptsSanitizedDerivedValues(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "alias",
+			src: `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	alias := id
+	s.logger.Info("got", "id", logging.SanitizeLogValue(alias))
+}
+`,
+		},
+		{
+			name: "sprintf",
+			src: `package api
+import "fmt"
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	msg := fmt.Sprintf("lookup %s", id)
+	s.logger.Info("got", "msg", logging.SanitizeLogValue(msg))
+}
+`,
+		},
+		{
+			name: "error-wrap-renamed",
+			src: `package api
+import "errors"
+import "fmt"
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	err := errors.New("lookup failed")
+	wrapped := fmt.Errorf("lookup %s failed: %w", id, err)
+	s.logger.Error("failed", "error", logging.SanitizeLogValue(wrapped.Error()))
+}
+`,
+		},
+		{
+			name: "struct-field",
+			src: `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct {
+	logger logger
+	Field  string
+}
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.Field = id
+	s.logger.Info("got", "field", logging.SanitizeLogValue(s.Field))
+}
+`,
+		},
+		{
+			name: "chained-method-call",
+			src: `package api
+import "net/http"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	s.logger.Info("got", "id", logging.SanitizeLogValue(id))
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if findings := analyzeSnippet(t, tc.src); len(findings) != 0 {
+				t.Errorf("expected 0 findings, got: %v", findings)
+			}
+		})
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()

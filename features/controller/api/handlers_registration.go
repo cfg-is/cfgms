@@ -872,7 +872,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Log token use without exposing the bearer value.
 	s.logger.Info("Token used for registration",
 		"token_prefix", logging.RedactedID(req.Token),
-		"tenant_id", token.TenantID,
+		"tenant_id", logging.SanitizeLogValue(token.TenantID),
 		"steward_id", stewardID)
 
 	// Validate device identity fields (Issue #2095, ADR-010 §1).
@@ -931,8 +931,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		decision, reason, hookErr := s.approvalHook.Evaluate(r.Context(), input)
 		if hookErr != nil {
 			s.logger.Warn("Registration approval hook error, quarantining",
-				"error", hookErr,
-				"tenant_id", token.TenantID)
+				"error", logging.SanitizeLogValue(hookErr.Error()),
+				"tenant_id", logging.SanitizeLogValue(token.TenantID))
 			decision = DecisionQuarantine
 			reason = "admission service unavailable"
 		}
@@ -945,7 +945,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			// which is the broader-exposure surface. The log records only that a
 			// bounded reason exists, so an operator knows where to look.
 			s.logger.Warn("Registration rejected by approval workflow",
-				"tenant_id", token.TenantID,
+				"tenant_id", logging.SanitizeLogValue(token.TenantID),
 				"has_reason", reason != "")
 			// emitRegistrationAudit calls logging.RedactedID internally; raw token is not stored
 			s.emitRegistrationAudit(r.Context(), req.Token, token.TenantID, stewardID,
@@ -959,7 +959,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			// Issue #1696: store the pending entry durably instead of in-memory sync.Map.
 			if s.pendingStore == nil {
 				s.logger.Error("Cannot quarantine registration without durable pending store",
-					"tenant_id", token.TenantID)
+					"tenant_id", logging.SanitizeLogValue(token.TenantID))
 				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
 				return
 			}
@@ -1024,7 +1024,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			}
 
 			s.logger.Info("Registration quarantined by approval workflow",
-				"tenant_id", token.TenantID,
+				"tenant_id", logging.SanitizeLogValue(token.TenantID),
 				"pending_id", pendingID)
 			if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
 				s.logger.Error("Failed to register quarantined steward in controller service",
@@ -1158,8 +1158,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"validity_days", validityDays)
 	s.logger.Info("Steward registered successfully",
 		"steward_id", stewardID,
-		"tenant_id", token.TenantID,
-		"group", token.Group)
+		"tenant_id", logging.SanitizeLogValue(token.TenantID),
+		"group", logging.SanitizeLogValue(token.Group))
 
 	if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, resp.TransportAddress, "registered", initialAttrs); err != nil {
 		s.logger.Error("Failed to register steward in controller service",

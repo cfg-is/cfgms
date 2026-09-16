@@ -484,7 +484,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 	if storeErr := c.credStore.StoreToken(c.partnerTenantID, token); storeErr != nil {
 		c.logger.Warn("failed to persist Partner Center token to credential store",
 			"tenant_id", logging.SanitizeLogValue(c.partnerTenantID),
-			"error", storeErr)
+			"error", logging.SanitizeLogValue(storeErr.Error()))
 	}
 
 	return token, nil

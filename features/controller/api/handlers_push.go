@@ -88,7 +88,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Strip newlines so CodeQL's go/log-injection taint cannot reach log calls.
-	safeSelector := strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", "")
+	safeSelector := logging.SanitizeLogValue(strings.ReplaceAll(strings.ReplaceAll(req.Selector, "\n", ""), "\r", ""))
 
 	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {

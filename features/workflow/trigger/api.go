@@ -70,7 +70,7 @@ func (api *APIHandler) handleCreateTrigger(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := api.triggerManager.CreateTrigger(ctx, &trigger); err != nil {
-		logger.ErrorCtx(ctx, "Failed to create trigger", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to create trigger", "error", logging.SanitizeLogValue(err.Error()))
 		api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to create trigger", err)
 		return
 	}
@@ -167,7 +167,7 @@ func (api *APIHandler) handleUpdateTrigger(w http.ResponseWriter, r *http.Reques
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to update trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to update trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to update trigger", err)
 		}
 		return
@@ -298,7 +298,7 @@ func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Reque
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&executionData); err != nil {
 			// Log error but continue with empty data
-			logger.WarnCtx(ctx, "Failed to decode execution data", "error", err.Error())
+			logger.WarnCtx(ctx, "Failed to decode execution data", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
@@ -307,7 +307,7 @@ func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Reque
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to execute trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to execute trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to execute trigger", err)
 		}
 		return
@@ -354,7 +354,7 @@ func (api *APIHandler) handleGetTriggerExecutions(w http.ResponseWriter, r *http
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to get trigger executions", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to get trigger executions", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to get trigger executions", err)
 		}
 		return

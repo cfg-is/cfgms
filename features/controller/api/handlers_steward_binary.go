@@ -391,7 +391,7 @@ func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Req
 			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Steward binary too large", "BINARY_TOO_LARGE")
 		default:
 			s.logger.Error("Failed to get steward binary (public)",
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 				"version", logging.SanitizeLogValue(version),
 				"platform", logging.SanitizeLogValue(platform),
 				"arch", logging.SanitizeLogValue(arch))

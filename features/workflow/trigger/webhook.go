@@ -412,7 +412,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Received webhook request",
-		"trigger_id", triggerID,
+		"trigger_id", logging.SanitizeLogValue(triggerID),
 		"method", r.Method,
 		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
 		"user_agent", logging.SanitizeLogValue(r.Header.Get("User-Agent")))
@@ -424,7 +424,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 
 	if !exists {
 		logger.WarnCtx(ctx, "Webhook request for unknown trigger",
-			"trigger_id", triggerID)
+			"trigger_id", logging.SanitizeLogValue(triggerID))
 		http.Error(w, "Webhook trigger not found", http.StatusNotFound)
 		return
 	}
@@ -432,7 +432,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	// Check if webhook is enabled
 	if !trigger.Webhook.Enabled {
 		logger.WarnCtx(ctx, "Webhook request for disabled trigger",
-			"trigger_id", triggerID)
+			"trigger_id", logging.SanitizeLogValue(triggerID))
 		http.Error(w, "Webhook trigger is disabled", http.StatusServiceUnavailable)
 		return
 	}
@@ -440,7 +440,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	// Check HTTP method
 	if !wh.isMethodAllowed(trigger.Webhook, r.Method) {
 		logger.WarnCtx(ctx, "Webhook request with disallowed method",
-			"trigger_id", triggerID,
+			"trigger_id", logging.SanitizeLogValue(triggerID),
 			"method", r.Method,
 			"allowed_methods", trigger.Webhook.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -450,7 +450,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	// Check IP allowlist
 	if !wh.isIPAllowed(trigger.Webhook, r.RemoteAddr) {
 		logger.WarnCtx(ctx, "Webhook request from disallowed IP",
-			"trigger_id", triggerID,
+			"trigger_id", logging.SanitizeLogValue(triggerID),
 			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
 			"allowed_ips", trigger.Webhook.AllowedIPs)
 		http.Error(w, "Access denied", http.StatusForbidden)
@@ -460,7 +460,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	// Check rate limit
 	if !wh.checkRateLimit(triggerID) {
 		logger.WarnCtx(ctx, "Webhook request rate limited",
-			"trigger_id", triggerID,
+			"trigger_id", logging.SanitizeLogValue(triggerID),
 			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 		return
@@ -470,8 +470,8 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	payload, err := wh.readPayload(r, trigger.Webhook)
 	if err != nil {
 		logger.ErrorCtx(ctx, "Failed to read webhook payload",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to read payload", http.StatusBadRequest)
 		return
 	}
@@ -489,28 +489,28 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	if err != nil {
 		if errors.Is(err, errBearerAuthRateLimited) {
 			logger.WarnCtx(ctx, "Webhook bearer auth rate limit exceeded",
-				"trigger_id", triggerID,
+				"trigger_id", logging.SanitizeLogValue(triggerID),
 				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 		if errors.Is(err, errBasicAuthUnauthorized) {
 			logger.WarnCtx(ctx, "Webhook basic auth failed",
-				"trigger_id", triggerID,
+				"trigger_id", logging.SanitizeLogValue(triggerID),
 				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if errors.Is(err, errPayloadValidationFailed) {
 			logger.WarnCtx(ctx, "Webhook payload validation failed",
-				"trigger_id", triggerID,
+				"trigger_id", logging.SanitizeLogValue(triggerID),
 				"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
 		logger.ErrorCtx(ctx, "Failed to process webhook",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 		return
 	}
@@ -526,11 +526,11 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		logger.ErrorCtx(ctx, "Failed to encode webhook response", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to encode webhook response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	logger.InfoCtx(ctx, "Webhook request processed successfully",
-		"trigger_id", triggerID,
+		"trigger_id", logging.SanitizeLogValue(triggerID),
 		"execution_id", execution.ID)
 }
 

@@ -488,7 +488,7 @@ func (api *DebugAPI) GetStepHistory(w http.ResponseWriter, r *http.Request) {
 
 	history, err := api.debugEngine.GetStepHistory(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to get step history", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to get step history", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID)
 		http.Error(w, fmt.Sprintf("Failed to get step history: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -503,7 +503,7 @@ func (api *DebugAPI) GetStepHistory(w http.ResponseWriter, r *http.Request) {
 		"steps": history,
 		"total": len(history),
 	}); err != nil {
-		api.logger.Error("Failed to encode step history response", "error", err)
+		api.logger.Error("Failed to encode step history response", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}

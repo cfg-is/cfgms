@@ -185,7 +185,7 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	if r.Header.Get("Accept") == "application/json" {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
-			h.logger.Error("failed to encode callback response", "error", err)
+			h.logger.Error("failed to encode callback response", "error", logging.SanitizeLogValue(err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 		return
@@ -195,7 +195,7 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	html := h.generateCallbackHTML(response)
 	w.Header().Set("Content-Type", "text/html")
 	if _, err := w.Write([]byte(html)); err != nil {
-		h.logger.Error("failed to write callback html", "error", err)
+		h.logger.Error("failed to write callback html", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -216,7 +216,7 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"success": result.Success,
 			"state":   result.State,
 		}); err != nil {
-			h.logger.Error("failed to encode status response", "error", err)
+			h.logger.Error("failed to encode status response", "error", logging.SanitizeLogValue(err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	} else {
@@ -224,7 +224,7 @@ func (h *CallbackHandler) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"ready": false,
 			"state": state,
 		}); err != nil {
-			h.logger.Error("failed to encode status response", "error", err)
+			h.logger.Error("failed to encode status response", "error", logging.SanitizeLogValue(err.Error()))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
