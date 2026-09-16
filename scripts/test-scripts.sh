@@ -294,7 +294,7 @@ features/controller/api/handlers_registration_tokens.go:155: tainted value "err"
 features/controller/api/handlers_registration_tokens.go:171: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_rollout.go:244: tainted value "qErr" logged without logging.SanitizeLogValue
 features/controller/api/handlers_runs.go:399: tainted value "patternName" logged without logging.SanitizeLogValue
-features/controller/api/handlers_runs.go:519: tainted value "err" logged without logging.SanitizeLogValue
+features/controller/api/handlers_runs.go:529: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_scripts.go:321: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_scripts.go:433: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_scripts.go:459: tainted value "since" logged without logging.SanitizeLogValue
@@ -309,7 +309,7 @@ features/controller/api/handlers_stewards.go:1490: tainted value "err" logged wi
 features/controller/api/handlers_test_admin.go:103: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_test_admin.go:110: tainted value "err" logged without logging.SanitizeLogValue
 features/controller/api/handlers_upgrade.go:280: tainted value "createErr" logged without logging.SanitizeLogValue
-features/controller/api/handlers_upgrade.go:589: tainted value "createErr" logged without logging.SanitizeLogValue
+features/controller/api/handlers_upgrade.go:593: tainted value "createErr" logged without logging.SanitizeLogValue
 features/workflow/debug_api.go:76: tainted value "session.ID" logged without logging.SanitizeLogValue
 features/workflow/debug_api.go:228: tainted value "breakpoint.ID" logged without logging.SanitizeLogValue
 features/workflow/trigger/api.go:320: tainted value "execution.ID" logged without logging.SanitizeLogValue
