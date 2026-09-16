@@ -59,14 +59,28 @@ Values whose **key name** (case-insensitive substring match) contains any of the
 | Token | Example keys matched |
 |---|---|
 | `password` | `password`, `user_password`, `OLD_PASSWORD` |
+| `passwd` | `passwd`, `PASSWD`, `old_passwd` |
 | `secret` | `secret`, `client_secret`, `some_secret` |
 | `token` | `token`, `api_token`, `access_token` |
 | `api_key` | `api_key`, `MY_API_KEY` |
 | `apikey` | `apikey`, `apiKey` |
 | `credential` | `credential`, `credentials` |
-| `private_key` | `private_key`, `privateKey` |
+| `private_key` | `private_key`, `PRIVATE_KEY` |
+| `privatekey` | `privateKey`, `myPrivateKey` (the no-underscore spelling `private_key` misses) |
 | `access_key` | `access_key`, `AWS_ACCESS_KEY` |
-| `auth` | `auth`, `authorization`, `x_auth_token` |
+| `auth` | `auth`, `auth_token`, `x-auth`, `Authorization`, `authentication`, `proxy-authorization` — a plain substring match, with a short exact-match exemption for attribution keys (Issue #4098) |
+
+`auth`'s attribution exemption: a key containing `auth` is redacted **unless the
+whole key** is one of the attribution names below, compared after lowercasing and
+stripping non-alphanumeric characters (`Authorized-By`, `authorized_by` and
+`authorizedBy` are therefore one entry):
+
+`author`, `authors`, `authored_by`, `authorized_by`, `authorised_by`,
+`author_name`, `author_email`, `authorized_by_id`
+
+The exemption is exact-match and fail-closed: anything else containing `auth` is
+redacted, including `Authorization` and `authentication` headers. Only the whole
+key is exempt — `author_token` is still redacted, by the `token` term.
 
 ### Checking Whether a Key Will Be Redacted
 
@@ -84,6 +98,11 @@ func willBeRedacted(key string) bool {
 }
 ```
 
+> **Note:** this snippet matches the real check for every token; it differs only
+> in that the real check exempts the handful of exact attribution keys listed
+> above from the `auth` term. It therefore over-predicts redaction for `author`
+> and `authorized_by`, and never under-predicts it.
+
 ### Extending the Deny-List
 
 `audit.RedactedKeys` is exported so callers can append domain-specific terms:
@@ -96,14 +115,20 @@ audit.RedactedKeys = append(audit.RedactedKeys, "msp_license_key")
 
 ### Scope of Redaction
 
+Redaction is not string-only and not one level deep (Issue #4098). A sensitive
+key redacts its value outright regardless of Go type; a non-sensitive key
+holding a nested map or slice is descended into; and a string value under a
+non-sensitive key is itself scanned for an embedded `key=value` secret using
+the same pattern applied to `ErrorMessage`.
+
 | Field | Redacted? | Notes |
 |---|---|---|
-| `Details` | Yes | String values with sensitive key names |
-| `Changes.Before` | Yes | String values with sensitive key names |
-| `Changes.After` | Yes | String values with sensitive key names |
+| `Details` | Yes | Any value under a sensitive key, of any Go type; nested maps and slices are scanned recursively; string values under non-sensitive keys are scanned for embedded `key=value` secrets |
+| `Changes.Before` | Yes | Same as `Details` |
+| `Changes.After` | Yes | Same as `Details` |
 | `Changes.Fields` | No | Field names (not values) are never redacted |
-| `ErrorMessage` | Yes | `key=value` pairs where key matches deny-list |
-| Integer/bool values | No | Only string values are replaced |
+| `ErrorMessage` | Yes | `key=value`, `key: value`, and `"key":"value"` pairs where key matches deny-list; the full value is redacted even if it contains spaces |
+| Non-string values under a sensitive key | Yes | Redacted regardless of Go type (int, bool, float, nested map, slice, ...) |
 
 ## Shutdown Guarantee (Issue #764)
 
@@ -114,8 +139,23 @@ callers that need synchronous durability:
 
 | Method | Semantics |
 |---|---|
-| `Flush(ctx) error` | Blocks until every entry enqueued **before** this call has been written to the store, or `ctx` is cancelled. Does not close the queue — subsequent `RecordEvent` calls continue to work. |
-| `Stop(ctx) error` | `Flush` followed by a one-shot shutdown of the drain goroutine. Idempotent via `sync.Once` — repeated calls return `nil`. After `Stop`, `RecordEvent` returns an error. |
+| `Flush(ctx) error` | Blocks until every entry enqueued **before** this call has been written to the store, or `ctx` is cancelled. Does not close the queue — subsequent `RecordEvent` calls continue to work. On every non-cancelled return, reports a non-nil error naming the cumulative count of permanently lost entries (see below), or `nil` if none have been lost. |
+| `Stop(ctx) error` | `Flush` followed by a one-shot shutdown of the drain goroutine. Idempotent via `sync.Once` — repeated calls are safe. After `Stop`, `RecordEvent` returns an error. Like `Flush`, every call — including calls after the first — reports the current cumulative lost-entry count. |
+
+### Retry and Lost-Entry Reporting (Issue #4098)
+
+A failed `AppendChainedEntry` call is retried with bounded backoff
+(`maxAppendAttempts`, currently 3 attempts total) before the drain goroutine
+gives up on that entry. Once retries are exhausted the entry is counted in an
+internal cumulative counter and logged at `Error`. `RecordEvent` has already
+returned successfully by that point — its asynchronous contract is unchanged —
+so the loss cannot be reported back to the original caller directly. Instead,
+`Flush` and `Stop` both return a non-nil error naming the total count on every
+call, for the life of the `Manager`; the count is never cleared on read, so a
+second `Stop` after a first reported loss still reports it. Callers that need
+to know whether an audit event actually reached durable storage must check the
+error returned by `Flush` or `Stop`, not just the error returned by
+`RecordEvent`.
 
 ### Typical Shutdown Pattern
 
@@ -175,6 +215,22 @@ Every audit entry carries two chain integrity fields:
 
 Together these fields form a **keyed hash chain**: to tamper with, delete, or reorder any entry without detection, an attacker would need to recompute every subsequent entry's checksum using the HMAC key — a key that is never stored alongside the audit log.
 
+The `Checksum` field covers every field of the entry except `Checksum` itself
+(Issue #4098). This is a hard break, not a migration: entries checksummed
+before this change do not verify, and are not re-signed — `VerifyChain`
+reports them as a `checksum mismatch` the same as any other tampered entry.
+
+Each field is fed to the HMAC length-prefixed, as
+`<decimal byte length> ":" <value>`, and `Tags` is written as a length-prefixed
+element count followed by each tag framed the same way. The encoding is
+therefore injective: no two distinct field assignments produce the same hash
+input. This matters because several covered fields are attacker-influenced
+(`UserAgent`, `Path`, `ResourceName`, `ErrorMessage`) and
+`logging.SanitizeLogValue` strips only control characters. Joining the values
+around a delimiter instead would let an attacker who plants that delimiter in
+one field later shift the boundary between two adjacent fields — re-partitioning
+the stored content while the recomputed HMAC still matched.
+
 ### HMAC Key
 
 The signing key is sourced from `pkg/secrets` when a `SecretStore` is wired via `WithSecretsStore(store)`. The key name is `"audit/hmac-key"`. If the key does not exist it is generated and stored automatically.
@@ -206,15 +262,22 @@ for _, b := range breaks {
 }
 ```
 
-`VerifyChain` reports three violation types:
+`VerifyChain` reports four violation types:
 
 | Reason prefix | Description |
 |---|---|
+| `sequence number missing` | An entry has `SequenceNumber == 0` — see below |
 | `checksum mismatch` | An entry's fields were modified after it was written |
 | `previous_checksum mismatch` | An entry does not link to the entry that preceded it |
 | `sequence gap` | One or more entries are missing between two consecutive entries in the slice |
 
-Entries with `SequenceNumber == 0` are pre-chain legacy entries (written before Issue #767) and are silently skipped.
+Entries with `SequenceNumber == 0` are **rejected**, not skipped (Issue #4098):
+`VerifyChain` reports a `ChainBreak` for them rather than passing them through
+unverified. This was previously a silent skip on the theory that such entries
+were pre-chain legacy data (written before Issue #767); the checksum-coverage
+change in Issue #4098 (see below) is a hard break with no migration path, which
+removes that legacy class entirely — there is nothing left to protect by
+special-casing sequence zero.
 
 ### Limitations
 

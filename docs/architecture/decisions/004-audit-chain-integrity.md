@@ -51,6 +51,36 @@
 > longer tracked only as a private draft — it is ADR-033 plus Stories 2–5 of Epic
 > [#4033](https://github.com/cfg-is/cfgms/issues/4033).
 
+> **Amended 2026-09-16 (Issue #4098) — Checksum Coverage and Sequence-Zero Rejection.**
+> Two more statements in this ADR were found false against the shipped code and are
+> struck below, not rewritten. (1) The Decision section's exact HMAC formula lists
+> eleven fields; `generateChecksum` (`pkg/audit/manager.go`) now covers every
+> `business.AuditEntry` field except `Checksum` itself — the eleven-field formula
+> never covered sixteen of the entry's fields (`UserType`, `SessionID`,
+> `ResourceName`, `ErrorCode`, `ErrorMessage`, `RequestID`, `IPAddress`,
+> `UserAgent`, `Method`, `Path`, `Details`, `Changes`, `Tags`, `Severity`,
+> `Source`, `Version`), so content in those fields could be rewritten with no
+> checksum break. This is a hard break: entries checksummed under the old
+> formula are not re-signed and are reported by `VerifyChain` as a checksum
+> mismatch like any other tampered entry — there is no `checksum_version` field
+> or dual-verification path. The widened formula also replaces the delimiter-joined
+> hash input with a length-prefixed (`<decimal byte length> ":" <value>`) encoding,
+> so the input is injective: because attacker-influenced fields (`UserAgent`,
+> `Path`, `ResourceName`, `ErrorMessage`) can carry any delimiter byte — sanitization
+> strips only control characters — a delimiter-joined input would have let a
+> store-write attacker shift the boundary between two adjacent fields and still
+> match the recomputed HMAC, which is the field tampering the row below claims to
+> detect. (2) The "detects all three threat scenarios" claim
+> in "Why HMAC-keyed hash chain instead of alternatives?" was already false
+> before this issue, independent of the fix in (1): field tampering was
+> undetected on those same sixteen fields. (3) The Threat Model table's
+> "Partial" row for pre-chain `SequenceNumber == 0` tampering is superseded:
+> `VerifyChain` now rejects such entries outright as a `ChainBreak` rather than
+> partially detecting them, since (1) makes the checksum change a hard break
+> with no legacy class left to protect by special-casing sequence zero. This
+> amendment does not touch the chosen mechanism (HMAC-keyed hash chain) or any
+> other part of the Decision — only the three statements struck below.
+
 ---
 
 ## Context
@@ -74,7 +104,7 @@ The goal of this ADR is to make **undetected** deletion or reordering of audit e
 Use a **per-tenant HMAC-keyed hash chain** with the following design:
 
 - Each `AuditEntry` carries `SequenceNumber uint64` (monotonically increasing per tenant) and `PreviousChecksum string` (the HMAC-SHA256 checksum of the immediately preceding entry for the same tenant).
-- The `Checksum` field on each entry is computed as `HMAC-SHA256(key, ID|TenantID|Timestamp|EventType|Action|UserID|ResourceType|ResourceID|Result|SequenceNumber|PreviousChecksum)`.
+- ~~The `Checksum` field on each entry is computed as `HMAC-SHA256(key, ID|TenantID|Timestamp|EventType|Action|UserID|ResourceType|ResourceID|Result|SequenceNumber|PreviousChecksum)`.~~ **Amended by Issue #4098:** see [Checksum Coverage and Sequence-Zero Rejection](#amended-2026-09-16-issue-4098--checksum-coverage-and-sequence-zero-rejection) above. The checksum now covers every field of the entry except `Checksum` itself.
 - ~~Sequence numbers are assigned inside the single drain goroutine in `pkg/audit/Manager` — no concurrent writer can interleave, so ordering is guaranteed without a database-side sequence.~~ **Amended by ADR-031 (Issue #3754):** see [Sequence Assignment](#amended-2026-09-01-issue-3754-per-adr-031-decision-1--sequence-assignment) above. Sequence numbers and `previous_checksum` are now assigned by `AuditStore.AppendChainedEntry`, a database-side serializing operation — the drain goroutine no longer computes them.
 - The HMAC key is loaded from `pkg/secrets` (key name `"audit/hmac-key"`) via the optional `WithSecretsStore` functional option on `NewManager`. If no secrets store is wired, a random 32-byte in-process key is used and a warning is logged.
 - `VerifyChain(entries []*AuditEntry) []ChainBreak` is a pure in-memory function that walks a caller-provided, sorted slice and reports gaps, hash mismatches, and `PreviousChecksum` mismatches.
@@ -87,7 +117,7 @@ Use a **per-tenant HMAC-keyed hash chain** with the following design:
 
 **Plain sequence numbers without HMAC:** Detects deletion and reordering but not field-level tampering. Adding HMAC costs nothing at runtime and closes this gap.
 
-**HMAC-keyed hash chain (chosen):** Simple, no external dependencies, detects all three threat scenarios (deletion, reordering, field tampering) for any reader who holds the key, integrates with the existing `pkg/secrets` key management infrastructure.
+**HMAC-keyed hash chain (chosen):** Simple, no external dependencies, ~~detects all three threat scenarios (deletion, reordering, field tampering) for any reader who holds the key~~ **Amended by Issue #4098:** see [Checksum Coverage and Sequence-Zero Rejection](#amended-2026-09-16-issue-4098--checksum-coverage-and-sequence-zero-rejection) above — this claim was false prior to that issue's checksum-coverage fix, integrates with the existing `pkg/secrets` key management infrastructure.
 
 ---
 
@@ -99,7 +129,7 @@ Use a **per-tenant HMAC-keyed hash chain** with the following design:
 | Attacker without HMAC key deletes a row | Yes | Sequence gap |
 | Attacker without HMAC key reorders rows | Yes | PreviousChecksum mismatch |
 | Attacker WITH HMAC key recomputes all checksums after modification | No | Inherent limitation of keyed hash chains. By construction this includes **the controller itself when host-compromised** — see [Adversary Bound](#adversary-bound-issue-3727) |
-| Attacker modifies pre-chain (SequenceNumber==0) legacy entries | Partial | Per-entry checksum mismatch only; no chain linkage for legacy entries |
+| Attacker modifies pre-chain (SequenceNumber==0) legacy entries | ~~Partial~~ **Amended by Issue #4098** | ~~Per-entry checksum mismatch only; no chain linkage for legacy entries~~ see [Checksum Coverage and Sequence-Zero Rejection](#amended-2026-09-16-issue-4098--checksum-coverage-and-sequence-zero-rejection) above — `VerifyChain` now rejects these entries outright as a `ChainBreak` |
 
 The chain does **not** protect against a sufficiently privileged administrator who possesses the HMAC key recomputing all subsequent checksums. Closing this gap would require an external immutable anchor (e.g. a Merkle root published to an external system), which is out of scope for this story.
 
@@ -177,7 +207,7 @@ compromise.
 - All three tampering vectors (modify, delete, reorder) are detectable for entries written after this change.
 - The HMAC key integrates with the existing `pkg/secrets` provider — no new key management infrastructure required.
 - `VerifyChain` is a pure function with no I/O, making it suitable for use in compliance exports and auditor tooling.
-- Backward compatible: entries with `SequenceNumber == 0` (pre-#767) are skipped by `VerifyChain` without false positives.
+- ~~Backward compatible: entries with `SequenceNumber == 0` (pre-#767) are skipped by `VerifyChain` without false positives.~~ **Amended by Issue #4098:** see [Checksum Coverage and Sequence-Zero Rejection](#amended-2026-09-16-issue-4098--checksum-coverage-and-sequence-zero-rejection) above — `VerifyChain` now rejects such entries as a `ChainBreak` instead of skipping them; the hard checksum break in the same issue removes the legacy class this "backward compatible" claim depended on.
 
 ### Negative
 
