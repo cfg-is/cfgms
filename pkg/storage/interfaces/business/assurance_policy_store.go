@@ -58,12 +58,15 @@ type AssurancePolicyStore interface {
 // root-to-leaf tenant path (see resolveMaxTargetsForTenant,
 // features/controller/api/handlers_runs.go), but the walks are NOT identical: since
 // Issue #4091 AC3, resolveMaxTargetsForTenant takes the MINIMUM MaxTargets seen along
-// the path, while resolveAssuranceRequirement/resolveAssuranceRequirementForPath still
-// take the last value seen (last-wins). This is deliberate — a blast-radius bound is a
-// ceiling a descendant tenant must never be able to raise above a value an ancestor
-// set, which last-wins does not enforce. Whether the assurance resolvers should adopt
-// the same clamp is a separate, unresolved question (see Issue #4091's fail-open sweep
-// note) — do not assume the two share a resolution algorithm. Beyond the walk shape,
+// the path, while resolveAssuranceRequirement/resolveAssuranceRequirementForPath take
+// the MAXIMUM MinOverride seen along it and OR RequireUserPresence (once true it is
+// never cleared). Both walks are therefore tighten-only, but in opposite directions,
+// because the two bounds are opposite kinds: a blast-radius bound is a ceiling, so
+// tightening means lowering it and a descendant must never raise it; an assurance
+// requirement is a floor, so tightening means raising it and a descendant must never
+// lower it. Taking the minimum of a floor, or the maximum of a ceiling, would let a
+// descendant loosen what an ancestor set. Do not assume the two share a resolution
+// algorithm — they share a direction of travel, not a formula. Beyond the walk shape,
 // AssurancePolicy's per-permission Overrides list has no natural slot for a single
 // per-tenant scalar, and the two existing AssurancePolicyStore providers (database,
 // sqlite) persist Overrides as one row per permission — bolting a scalar onto that
@@ -85,9 +88,10 @@ type BlastRadiusPolicy struct {
 // walk of the tenant path, resolving to the MINIMUM MaxTargets set anywhere along
 // that path (Issue #4091 AC3) — a parent tenant's MaxTargets is the default, and a
 // child tenant's own value may only narrow it, never widen it. This clamp-to-minimum
-// walk is deliberately DIFFERENT from AssurancePolicyStore's resolution, which takes
-// the last value seen along the same path (last-wins); do not assume the two share
-// a resolution algorithm.
+// walk is deliberately DIFFERENT from AssurancePolicyStore's resolution, which raises
+// to the MAXIMUM MinOverride along the same path and ORs RequireUserPresence; both are
+// tighten-only, but a ceiling tightens downward and a floor tightens upward, so the
+// formulas are opposites. Do not assume the two share a resolution algorithm.
 type BlastRadiusPolicyStore interface {
 	// GetPolicy returns the blast-radius override for the given tenant. When no
 	// record exists, it returns {TenantID: tenantID, MaxTargets: nil} without
