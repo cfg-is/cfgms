@@ -277,6 +277,34 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TestAnalyzeFile_KnownSitesStayClean is a regression pin for Issue #4073: four
+// production sites (three under features/**/api/, which the linter's default
+// scope covers, plus two outside it — server.go and tenant/manager.go — that
+// only get checked when named explicitly, as the pre-commit hook does for
+// staged files) paired a sanitized value with a bare `err` in the same log
+// call, which CLAUDE.md calls out by name as still a finding. Runs against the
+// real repo files, not a synthetic snippet, so it fails the instant any of the
+// four reverts to a bare error.
+func TestAnalyzeFile_KnownSitesStayClean(t *testing.T) {
+	files := []string{
+		"../../features/controller/api/handlers_audit.go",
+		"../../features/controller/api/handlers_fleet.go",
+		"../../features/controller/server/server.go",
+		"../../features/tenant/manager.go",
+	}
+	for _, f := range files {
+		t.Run(f, func(t *testing.T) {
+			findings, err := analyzeFile(f)
+			if err != nil {
+				t.Fatalf("analyzeFile(%s): %v", f, err)
+			}
+			if len(findings) != 0 {
+				t.Errorf("expected 0 findings in %s, got %d: %v", f, len(findings), findings)
+			}
+		})
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()

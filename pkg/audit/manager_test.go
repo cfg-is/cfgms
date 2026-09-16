@@ -702,6 +702,40 @@ func TestAuditEventBuilder(t *testing.T) {
 	assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 }
 
+// TestAuditEventBuilder_NeutralizesRequestDerivedFields guards Issue #4073: build()
+// used to copy UserAgent, Path, IPAddress, Method and ResourceName straight onto the
+// persisted entry with no treatment at all — only Details, Changes and ErrorMessage
+// were redacted. Those five fields carry raw HTTP request data (header, URL path,
+// caller-supplied resource name) into a durable audit record, so a control character
+// (e.g. a newline smuggled in a User-Agent header) would land in storage unneutralized.
+// This must fail if that neutralization is ever reverted.
+func TestAuditEventBuilder_NeutralizesRequestDerivedFields(t *testing.T) {
+	const ctrl = "before\nafter\rend"
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventAuthentication).
+		Action("login").
+		User("test-user", business.AuditUserTypeHuman).
+		Resource("session", "session123", ctrl).
+		Result(business.AuditResultSuccess).
+		Request("req123", ctrl, ctrl, ctrl, ctrl)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	for name, got := range map[string]string{
+		"Method":       entry.Method,
+		"Path":         entry.Path,
+		"IPAddress":    entry.IPAddress,
+		"UserAgent":    entry.UserAgent,
+		"ResourceName": entry.ResourceName,
+	} {
+		if strings.ContainsAny(got, "\n\r") {
+			t.Errorf("entry.%s retained a raw control character: %q", name, got)
+		}
+	}
+}
+
 // TestPredefinedEventBuilders tests predefined event builder functions
 func TestPredefinedEventBuilders(t *testing.T) {
 	t.Run("AuthenticationEvent", func(t *testing.T) {

@@ -526,14 +526,14 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	if m.rbacManager != nil {
 		if err := m.rbacManager.DeleteSubjectsByTenant(ctx, tenantID); err != nil {
 			slog.Warn("tenant: failed to list subjects for RBAC cascade cleanup",
-				"tenant_id", tenantID,
-				"error", err,
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 		}
 		if err := m.rbacManager.DeleteRolesByTenant(ctx, tenantID); err != nil {
 			slog.Warn("tenant: failed to list roles for RBAC cascade cleanup",
-				"tenant_id", tenantID,
-				"error", err,
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 		}
 	}

@@ -8,6 +8,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -42,6 +43,30 @@ func newTestStewardDurableStore(t *testing.T) (business.StewardStore, string) {
 	st, err := flatfile.NewFlatFileStewardStore(root)
 	require.NoError(t, err, "creating flat-file steward store")
 	return st, root
+}
+
+// controlCharAuditStore wraps a real flat-file AuditStore, overriding only
+// ListAuditEntries to force a deterministic failure carrying a caller-supplied
+// error — used to prove a control-character payload surfaced from the store
+// cannot reach the logger unsanitized (Issue #4073 site 1).
+type controlCharAuditStore struct {
+	*flatfile.FlatFileAuditStore
+	err error
+}
+
+func (s *controlCharAuditStore) ListAuditEntries(_ context.Context, _ *business.AuditFilter) ([]*business.AuditEntry, error) {
+	return nil, s.err
+}
+
+// newTestFailingAuditStore returns a real flat-file AuditStore rooted at
+// t.TempDir() whose ListAuditEntries always fails with err. The concrete
+// flatfile import is confined to this allowlisted */providers_test.go path
+// (see scripts/check-providers.sh).
+func newTestFailingAuditStore(t *testing.T, err error) business.AuditStore {
+	t.Helper()
+	st, ferr := flatfile.NewFlatFileAuditStore(t.TempDir(), 30)
+	require.NoError(t, ferr, "creating flat-file audit store")
+	return &controlCharAuditStore{FlatFileAuditStore: st, err: err}
 }
 
 // newTestFlatFileAlertStore returns a real flat-file AlertStore rooted at t.TempDir().

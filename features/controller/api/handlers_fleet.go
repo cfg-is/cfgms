@@ -165,7 +165,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet health query failed", "error", err)
+		s.logger.Error("Fleet health query failed", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
 		return
 	}

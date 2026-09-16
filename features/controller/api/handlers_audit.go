@@ -109,7 +109,7 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.logger.Error("Failed to query audit entries",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve audit entries", "INTERNAL_ERROR")
 		return
