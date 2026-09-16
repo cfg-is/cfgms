@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -1313,6 +1314,108 @@ func TestRunCommandSingle_RejectsCrossTenantSteward(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Error)
 	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// ---- Issue #4091: exec tenant scoping must deny on error, not permit --------
+
+// errorRunFleetQuery is a real FleetQuery implementation whose Search always
+// fails, modeling a transient fleet-store outage. Not a mock — it satisfies the
+// fleet.FleetQuery interface exactly like staticRunFleetQuery.
+type errorRunFleetQuery struct{}
+
+func (errorRunFleetQuery) Search(_ context.Context, _ fleet.Filter) ([]fleet.StewardResult, error) {
+	return nil, errors.New("fleet store unavailable")
+}
+
+func (errorRunFleetQuery) Count(_ context.Context, _ fleet.Filter) (int, error) {
+	return 0, errors.New("fleet store unavailable")
+}
+
+// TestEnforceExecTenantScope_FleetQueryError_DeniesDistinguishablyFromForbidden
+// is the [REQUIRED TEST] for AC1: when the fleet query dependency errors,
+// enforceExecTenantScope cannot establish whether the target steward is in
+// scope, so it must deny — and the HTTP surface (handlePostRunCommand) must
+// carry that denial as 503/SERVICE_UNAVAILABLE, not the 403/FORBIDDEN shape used
+// for a genuine out-of-scope steward. Collapsing the two into one response would
+// pass a fix that just swaps "allow" for "forbidden" on error, which is exactly
+// the failure this AC guards against: a transient store outage would then look
+// to real users like a permissions problem instead of a service outage.
+func TestEnforceExecTenantScope_FleetQueryError_DeniesDistinguishablyFromForbidden(t *testing.T) {
+	server, _, _ := setupRunServer(t, nil)
+	server.fleetQuery = errorRunFleetQuery{}
+
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "test-tenant")
+	rawContent := []byte("hostname")
+	rec := postRunCommand(t, server, execPrincipal, withEnvelopeFields(map[string]interface{}{
+		"target":  "id:some-steward",
+		"content": base64.StdEncoding.EncodeToString(rawContent),
+		"shell":   "bash",
+	}, signedOperatorEnvelopeFields(t, server, rawContent, "bash", []string{"some-steward"})))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a fleet-query error must deny, surfaced as 503 (could-not-verify), not silently permit; body: %s", rec.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Error)
+	assert.Equal(t, "SERVICE_UNAVAILABLE", resp.Error.Code,
+		"the error-path denial must be distinguishable from the out-of-scope FORBIDDEN denial "+
+			"asserted by TestRunCommandSingle_RejectsCrossTenantSteward — \"could not check\" and "+
+			"\"checked and denied\" are different facts")
+	assert.NotEqual(t, "FORBIDDEN", resp.Error.Code)
+}
+
+// TestEnforceExecTenantScope_NilFleetQuery_Denies is the [REQUIRED TEST] for AC2:
+// enforceExecTenantScope must deny, not allow, when its fleetQuery dependency is
+// nil. This is called directly (not through the HTTP handler) because the only
+// two call sites are inside handlePostRunCommand, which already returns 503 on
+// s.fleetQuery == nil before either call is reached — the helper's nil branch is
+// unreachable in production today, but that must not make it unsafe: a future
+// caller that does not have the same guard would otherwise fail open.
+func TestEnforceExecTenantScope_NilFleetQuery_Denies(t *testing.T) {
+	server := &Server{} // fleetQuery is nil
+
+	decision := server.enforceExecTenantScope(context.Background(), "some-steward", "test-tenant")
+
+	assert.Equal(t, execScopeIndeterminate, decision,
+		"a nil fleetQuery must deny (indeterminate), not allow")
+	assert.NotEqual(t, execScopeAllowed, decision)
+}
+
+// ---- Issue #4091: blast-radius inheritance must take the minimum, not the last --
+
+// TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins is the [REQUIRED TEST]
+// for AC3, using the pinned three-level shape where the strictest bound is held
+// by the ROOT, not the leaf: root=100, middle=5000 (the widening attempt this
+// item exists to stop), leaf=2000 (wider than root, narrower than middle).
+// Last-wins (the pre-fix behavior) resolves to the leaf's 2000; min-across-path
+// (the fix) resolves to the root's 100. A test where the leaf holds the minimum
+// would pass both implementations and prove nothing — this shape is required
+// specifically because it only agrees with the fixed implementation.
+func TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins(t *testing.T) {
+	server := setupTestServer(t)
+
+	blastStore := newTestBlastRadiusPolicyStore()
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root", MaxTargets: ptrInt(100),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/middle", MaxTargets: ptrInt(5000),
+	}))
+	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
+		TenantID: "root/middle/leaf", MaxTargets: ptrInt(2000),
+	}))
+	server.SetBlastRadiusPolicyStore(blastStore)
+	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
+		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+	}))
+
+	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+
+	assert.Equal(t, 100, got,
+		"inheritance must resolve to the root's strictest bound (100), not the leaf's "+
+			"wider one (2000) or the middle tenant's widening attempt (5000) — a leaf must "+
+			"never be able to raise a bound its ancestor set")
 }
 
 // ---- Service unavailable when manager not wired -----------------------------

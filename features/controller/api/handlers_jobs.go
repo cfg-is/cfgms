@@ -230,8 +230,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 // handleGetJob handles GET /api/v1/jobs/{id}.
 //
-// Returns the full BatchJob JSON for the caller's tenant. Rejects with 404
-// when the job does not exist and 403 when the job belongs to a different tenant.
+// Returns the full BatchJob JSON for the caller's tenant. Returns 404, with the
+// same body and error code, both when the job does not exist and when it belongs
+// to a different tenant — a 403 on the cross-tenant case would let any authenticated
+// caller learn that a given job ID exists somewhere in the fleet (Issue #4091).
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	if s.batchJobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Batch job service not available", "SERVICE_UNAVAILABLE")
@@ -260,7 +262,10 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isWithinTenantScope(tenantID, job.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+		// 404 instead of 403 to avoid disclosing job existence across tenants
+		// (Issue #4091) — mirrors the genuine not-found response above so a caller
+		// cannot distinguish "absent" from "exists in another tenant".
+		s.writeErrorResponse(w, http.StatusNotFound, "Job not found", "NOT_FOUND")
 		return
 	}
 

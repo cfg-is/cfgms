@@ -360,9 +360,12 @@ func TestHandleGetJob_UnknownID_Returns404(t *testing.T) {
 	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
 }
 
-// TestHandleGetJob_WrongTenant_Returns403 is the AC test: GET /api/v1/jobs/{id}
-// must return 403 when the caller's tenant does not match the job's tenant.
-func TestHandleGetJob_WrongTenant_Returns403(t *testing.T) {
+// TestHandleGetJob_WrongTenant_Returns404 is the AC test: GET /api/v1/jobs/{id}
+// must return 404 — not 403 — when the caller's tenant does not match the job's
+// tenant, indistinguishable from the genuine not-found response (Issue #4091 AC4/AC5).
+// A 403 here would let any authenticated caller learn that a given job ID exists
+// somewhere in the fleet.
+func TestHandleGetJob_WrongTenant_Returns404(t *testing.T) {
 	server := setupTestServer(t)
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
@@ -379,11 +382,12 @@ func TestHandleGetJob_WrongTenant_Returns403(t *testing.T) {
 
 	// Caller is authenticated as tenant-b.
 	rec := getJobWithTenant(server, "job-owned-by-tenant-a", "tenant-b")
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
+	assert.Equal(t, "Job not found", resp.Error.Message)
 }
 
 // TestHandleGetJob_SameTenant_Returns200 verifies that a caller with the correct
@@ -448,6 +452,7 @@ func TestHandleGetJob_NilStore_Returns503(t *testing.T) {
 // Issue #3143: a web-session caller (GlobalScope=true set by middleware, TenantID="tenant-a")
 // must not be able to read a job belonging to "tenant-b". Before the fix, GlobalScope=true
 // caused the cross-tenant guard to be bypassed for every session-authenticated caller.
+// Issue #4091: the block is now a 404 (existence-disclosure closed), not a 403.
 func TestHandleGetJob_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	server := setupTestServer(t)
 	store := newTestBatchJobStoreForAPI()
@@ -473,12 +478,12 @@ func TestHandleGetJob_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	}
 
 	rec := getJobAs(server, sessionCaller, "job-owned-by-tenant-b")
-	require.Equal(t, http.StatusForbidden, rec.Code,
+	require.Equal(t, http.StatusNotFound, rec.Code,
 		"session principal scoped to tenant-a must not access tenant-b's job (body: %s)", rec.Body.String())
 
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "FORBIDDEN", resp.Error.Code)
+	assert.Equal(t, "NOT_FOUND", resp.Error.Code)
 }
 
 // TestHandleGetJob_SessionPrincipal_OwnTenantAllowed verifies that the fix does not
@@ -536,15 +541,18 @@ func TestJobsTenantIsolation_AssuranceBoundary(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			// Issue #4091: cross-tenant reads are now 404, not 403 — the 403 shape
+			// disclosed job existence across tenants.
 			name:       "machine_AssuranceMachine_cross_tenant_blocked",
 			principal:  &Principal{ID: "api-key-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"},
 			jobTenant:  "tenant-b",
-			wantStatus: http.StatusForbidden,
+			wantStatus: http.StatusNotFound,
 		},
 		{
 			// Relay-grant principals carry AssuranceMachine; this case confirms that even
 			// a relay-grant principal with tenant-a scoping cannot access tenant-b's jobs —
-			// the handler's Assurance check is the defense-in-depth barrier.
+			// the handler's Assurance check is the defense-in-depth barrier. Issue #4091:
+			// the block is 404, not 403, to avoid existence disclosure.
 			name: "relay_grant_AssuranceMachine_cross_tenant_blocked",
 			principal: &Principal{
 				ID:        "relay:device-1:exec-001",
@@ -553,7 +561,7 @@ func TestJobsTenantIsolation_AssuranceBoundary(t *testing.T) {
 				TenantID:  "tenant-a",
 			},
 			jobTenant:  "tenant-b",
-			wantStatus: http.StatusForbidden,
+			wantStatus: http.StatusNotFound,
 		},
 	}
 
