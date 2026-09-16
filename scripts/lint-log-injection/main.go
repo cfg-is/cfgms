@@ -48,12 +48,19 @@ var taintSourceCalls = map[string]struct{}{
 // loggerMethods are the slog/logger methods we treat as logging sinks.
 var loggerMethods = map[string]struct{}{
 	"Debug": {}, "Info": {}, "Warn": {}, "Error": {}, "Fatal": {}, "Panic": {},
+	// CFGMS's own context-aware logging convention (logging.Logger,
+	// *logging.ModuleLogger).
+	"DebugCtx": {}, "InfoCtx": {}, "WarnCtx": {}, "ErrorCtx": {}, "FatalCtx": {},
+	// stdlib log/slog's context-aware convention — distinct spelling, same sink class.
+	"DebugContext": {}, "InfoContext": {}, "WarnContext": {}, "ErrorContext": {},
 }
 
 // sanitizerCalls are wrappers that neutralize taint.
 var sanitizerCalls = map[string]struct{}{
-	"logging.SanitizeLogValue": {},
-	"SanitizeLogValue":         {}, // dot-imported case
+	"logging.SanitizeLogValue":        {},
+	"SanitizeLogValue":                {}, // dot-imported case
+	"logging.SanitizeFieldsRecursive": {},
+	"SanitizeFieldsRecursive":         {}, // dot-imported case
 }
 
 type finding struct {
@@ -619,7 +626,7 @@ func looksLikeLogger(e ast.Expr) bool {
 		tail = s[i+1:]
 	}
 	tail = strings.ToLower(tail)
-	return strings.HasSuffix(tail, "logger") || tail == "log" || tail == "slog"
+	return strings.HasSuffix(tail, "logger") || tail == "log" || tail == "slog" || tail == "l"
 }
 
 // isCallTo returns true if expr is a call to fn (dotted name like "json.NewDecoder").

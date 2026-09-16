@@ -74,7 +74,7 @@ func (api *DebugAPI) StartDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	logger.InfoCtx(ctx, "Started debug session via API",
 		"session_id", session.ID,
-		"execution_id", req.ExecutionID)
+		"execution_id", logging.SanitizeLogValue(req.ExecutionID))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(StartDebugSessionResponse{Session: session}); err != nil {
