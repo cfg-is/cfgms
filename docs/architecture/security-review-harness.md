@@ -2840,6 +2840,53 @@ the per-lane coverage table — `PASS`, or `FAIL (<N> file(s) unassigned/short)`
 a G-2 path was never planned into any step at all; a G-3 path was reviewed, but only from one
 angle, or from two angles that turned out to ask the same question.
 
+## Finding verification (Issue #4071)
+
+`CFGMS_SECURITY_REVIEW_VERIFIER` names one `harness:model` pair, parsed by the same
+`roster.py` the lane roster uses. The stage runs after every finder lane has exited and
+**before** the adjudicator; unset, it does not run and the report says findings were not
+verified.
+
+**Why it exists.** The adjudicator receives findings only, never source, so it can rate
+severity but can never establish whether a finding is real — and it pays for that. Its own
+rationale from sweep `bench-finders-02`: *"the precondition here is unconfirmed … an
+unconfirmed prerequisite moves severity down from the medium anchor to low."* Measured over
+the same sweep, only 46% of finder evidence connects concrete code to an untrusted source
+and 53% hedges (`could`/`may`/`might`). Verifying first converts the adjudicator's largest
+source of uncertainty into an input rather than a guess.
+
+**What it reads.** An 81-line window around each finding, one read per distinct
+`file:line` — the locations findings name, never whole subtrees.
+
+**What it emits.** A verdict from a closed vocabulary — `reachable_from_untrusted`,
+`reachable_internal_only`, `guarded`, `not_reachable`, `undetermined` — plus an entry
+point, a call path of symbol names, any guard, and `path:line` citations. `undetermined`
+is a first-class answer: such a finding keeps the severity its finder gave it, so an honest
+uncertain answer costs nothing while a confident wrong one buries a real defect.
+
+**The boundary, and how it is held.** This is the only stage after the finder lanes that
+mounts the sweep's real snapshot; the adjudicator is deliberately dispatched against an
+empty one. Source never leaves the container: every verdict's free text and citations are
+compared against the excerpts that verdict was shown (`source_leak.py`), and an answer
+carrying a verbatim run of 60 characters or more is withheld — recorded `undetermined`
+with the reason — rather than passed on. Validated against 224 real occurrence-level
+evidence strings, of which 10 (4.5%) trip the guard, the sampled catches being genuine
+pasted code.
+
+Keeping verification and adjudication as separate stages is what puts the trust boundary
+between them: this stage sees source and emits facts; that stage sees facts and never
+source. Merging them would put a hosted model on the source side of that line.
+
+**It annotates, never deletes.** A finding with no verdict stays in the report and says so.
+`not_reachable` and "no verdict" mean opposite things and render differently — a reader
+must be able to tell "checked, nothing reaches it" from "nobody checked" at a glance.
+
+**It fails open.** An unparseable roster, a failed prepare, absent credentials, a non-zero
+dispatch, or a container that writes nothing all leave findings unverified and the sweep
+intact. A verification stage must never fail a sweep its finder lanes completed — which is
+why, alone among the dispatch functions in `security-review.sh`, `dispatch_verifier` never
+returns non-zero.
+
 ## Severity adjudication and cross-step re-aggregation (Issue #3984)
 
 Consolidation used to be pure de-duplication: two lanes reporting the same defect at `low` and
