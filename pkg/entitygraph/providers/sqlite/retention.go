@@ -208,11 +208,13 @@ func (p *SQLiteEntityGraphProvider) sweepTombstones(ctx context.Context, now tim
 			return fmt.Errorf("entitygraph/sqlite: tombstone delete edges for %s: %w", c.subject, err)
 		}
 		// Remove log rows whose edge-subject string contains this subject as either endpoint.
-		// Edge subject format: "edge_type|from_eid|to_eid".
+		// Edge subject format: "edge_type|from_eid|to_eid". c.subject is an
+		// arbitrary EID local-id and may itself contain '%' or '_'; escape it
+		// so those are matched literally, not as wildcards.
 		if _, err := p.db.ExecContext(ctx,
 			`DELETE FROM eg_observation_log
-			 WHERE subject LIKE ? OR subject LIKE ?`,
-			"%|"+c.subject+"|%", "%|"+c.subject,
+			 WHERE subject LIKE ? ESCAPE '\' OR subject LIKE ? ESCAPE '\'`,
+			"%|"+interfaces.EscapeLikePattern(c.subject)+"|%", "%|"+interfaces.EscapeLikePattern(c.subject),
 		); err != nil {
 			return fmt.Errorf("entitygraph/sqlite: tombstone delete edge-log for %s: %w", c.subject, err)
 		}
