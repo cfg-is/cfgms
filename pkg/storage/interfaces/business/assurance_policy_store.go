@@ -54,14 +54,21 @@ type AssurancePolicyStore interface {
 
 // BlastRadiusPolicy is the per-tenant maximum-target-count override for operator
 // payload dispatch (Issue #3698, epic #3571). It is a sibling to AssurancePolicy
-// rather than an extra field on it — the two are resolved by the identical
-// root-to-leaf override walk (see resolveMaxTargetsForTenant,
-// features/controller/api/handlers_runs.go, which copies the walk shape of
-// resolveAssuranceRequirement/resolveAssuranceRequirementForPath), but AssurancePolicy's
-// per-permission Overrides list has no natural slot for a single per-tenant scalar,
-// and the two existing AssurancePolicyStore providers (database, sqlite) persist
-// Overrides as one row per permission — bolting a scalar onto that shape would mean
-// a schema change to unrelated assurance-policy code for a concept it doesn't own.
+// rather than an extra field on it — the two are resolved by walks over the same
+// root-to-leaf tenant path (see resolveMaxTargetsForTenant,
+// features/controller/api/handlers_runs.go), but the walks are NOT identical: since
+// Issue #4091 AC3, resolveMaxTargetsForTenant takes the MINIMUM MaxTargets seen along
+// the path, while resolveAssuranceRequirement/resolveAssuranceRequirementForPath still
+// take the last value seen (last-wins). This is deliberate — a blast-radius bound is a
+// ceiling a descendant tenant must never be able to raise above a value an ancestor
+// set, which last-wins does not enforce. Whether the assurance resolvers should adopt
+// the same clamp is a separate, unresolved question (see Issue #4091's fail-open sweep
+// note) — do not assume the two share a resolution algorithm. Beyond the walk shape,
+// AssurancePolicy's per-permission Overrides list has no natural slot for a single
+// per-tenant scalar, and the two existing AssurancePolicyStore providers (database,
+// sqlite) persist Overrides as one row per permission — bolting a scalar onto that
+// shape would mean a schema change to unrelated assurance-policy code for a concept
+// it doesn't own.
 type BlastRadiusPolicy struct {
 	// TenantID identifies the tenant this override applies to.
 	TenantID string
@@ -74,10 +81,13 @@ type BlastRadiusPolicy struct {
 }
 
 // BlastRadiusPolicyStore defines the storage interface for per-tenant blast-radius
-// overrides (Issue #3698). A conforming implementation is read via the same
-// root-to-leaf override walk as AssurancePolicyStore — a parent tenant's MaxTargets
-// is the default, and a child tenant's own value narrows it — rather than a new
-// resolution algorithm.
+// overrides (Issue #3698). A conforming implementation is read via a root-to-leaf
+// walk of the tenant path, resolving to the MINIMUM MaxTargets set anywhere along
+// that path (Issue #4091 AC3) — a parent tenant's MaxTargets is the default, and a
+// child tenant's own value may only narrow it, never widen it. This clamp-to-minimum
+// walk is deliberately DIFFERENT from AssurancePolicyStore's resolution, which takes
+// the last value seen along the same path (last-wins); do not assume the two share
+// a resolution algorithm.
 type BlastRadiusPolicyStore interface {
 	// GetPolicy returns the blast-radius override for the given tenant. When no
 	// record exists, it returns {TenantID: tenantID, MaxTargets: nil} without
