@@ -64,7 +64,15 @@
       "SlashCommand(/isoagents)",
       "SlashCommand(/isoagents:*)",
       "Skill(isoagents)",
-      "Skill(isoagents:*)"
+      "Skill(isoagents:*)",
+      "Bash(./.claude/scripts/pipeline-watch.sh watch)",
+      "Bash(./.claude/scripts/pipeline-watch.sh state)",
+      "Bash(./.claude/scripts/pipeline-watch.sh status)",
+      "Bash(./.claude/scripts/pipeline-watch.sh reset)",
+      "Bash(./.claude/scripts/pipeline-watch.sh record-cycle *)",
+      "Bash(/home/jrdn/git/cfg.is/cfgms/.claude/scripts/pipeline-watch.sh watch)",
+      "Bash(/home/jrdn/git/cfg.is/cfgms/.claude/scripts/pipeline-watch.sh state)",
+      "Bash(/home/jrdn/git/cfg.is/cfgms/.claude/scripts/pipeline-watch.sh record-cycle *)"
     ]
   },
   "hooks": {
