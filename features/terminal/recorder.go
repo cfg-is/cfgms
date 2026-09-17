@@ -324,9 +324,14 @@ func (r *DefaultSessionRecorder) StartRecording(sessionID string, metadata *Sess
 
 	r.activeWrites[sessionID] = writer
 
+	// sessionID is already rejected above unless it matches
+	// recordingSessionIDPattern, and filePath is derived from it, so neither
+	// can carry a CR/LF payload here. Wrapped anyway: the guard lives 45 lines
+	// up and a later refactor that moves or relaxes it would silently turn
+	// these two into real findings. Defence in depth, not a bug fix.
 	r.logger.Info("Started recording session",
-		"session_id", sessionID,
-		"file", filePath,
+		"session_id", logging.SanitizeLogValue(sessionID),
+		"file", logging.SanitizeLogValue(filePath),
 		"compression", r.config.Compression)
 
 	return nil
@@ -378,7 +383,7 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	}
 
 	if err := writer.close(); err != nil {
-		r.logger.Warn("Error closing recording writer", "session_id", sessionID, "error", err)
+		r.logger.Warn("Error closing recording writer", "session_id", sessionID, "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	delete(r.activeWrites, sessionID)
@@ -618,7 +623,7 @@ func (r *DefaultSessionRecorder) Close() error {
 	for sessionID, writer := range r.activeWrites {
 		if err := writer.close(); err != nil {
 			r.logger.Warn("Error closing writer during recorder shutdown",
-				"session_id", sessionID, "error", err)
+				"session_id", sessionID, "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 

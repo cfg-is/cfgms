@@ -279,7 +279,7 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, cw *connWrit
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					h.logger.Warn("WebSocket read error", "session_id", logging.RedactedID(session.ID), "error", err)
+					h.logger.Warn("WebSocket read error", "session_id", logging.RedactedID(session.ID), "error", logging.SanitizeLogValue(err.Error()))
 				}
 				return
 			}

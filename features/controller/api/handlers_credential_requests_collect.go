@@ -308,7 +308,9 @@ func (s *Server) handleCollectCredentialRequest(w http.ResponseWriter, r *http.R
 	s.logger.Info("Credential request collected",
 		"request_id", logging.SanitizeLogValue(claimed.ID),
 		"account_id", logging.SanitizeLogValue(acct.ID),
-		"serial", issued.SerialNumber)
+		// CA-produced serial, never caller input — wrapped for consistency with
+		// the sibling fields and to keep the gate green without an allowlist.
+		"serial", logging.SanitizeLogValue(issued.SerialNumber))
 	s.emitCredentialRequestAudit(r.Context(), "credential_request.collected", claimed.TenantID, claimed.ID,
 		business.AuditUserTypeSystem, "credential_request", claimed.ID,
 		business.AuditResultSuccess, business.AuditSeverityHigh,

@@ -1747,3 +1747,192 @@ func (s *S) newSession(req *SessionRequest, raw string) {
 		t.Fatalf("expected 2 findings (ambiguous req type suppresses nothing), got %d: %v", len(findings), findings)
 	}
 }
+
+// ── Issue #4126: a provably-clean contributor must not taint its container ──
+//
+// All five fixtures below reproduce one symptom seen on PR #4125:
+// flattenFieldsToKV(auditFields) at features/controller/api/middleware.go:1640
+// and :1642 reported a finding although every value in that map was sanitized,
+// a number, a formatted timestamp or a fixed literal. Neither #4123 nor #4109
+// produces it alone -- it needs #4123's exprCarriesTaint recursion and #4109's
+// helper-derived source model to meet.
+
+// TestAnalyzePackage_ScalarFieldDoesNotTaintContainer covers AC1. The scalar
+// rule already refused to flag a tainted struct's bool field AT THE SINK, but
+// was never applied when the value was STORED, so the bool tainted the map on
+// the way in and its scalar origin was gone by the time the map reached a log
+// call. Fails on revert of the store-time suppression.
+func TestAnalyzePackage_ScalarFieldDoesNotTaintContainer(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+type decision struct {
+	Reason  string
+	Granted bool
+}
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	var d decision
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	fields := map[string]interface{}{
+		"reason":  logging.SanitizeLogValue(d.Reason),
+		"granted": d.Granted,
+	}
+	s.logger.Info("audit", flattenFieldsToKV(fields)...)
+}
+func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
+	out := make([]interface{}, 0, len(fields)*2)
+	for k, v := range fields {
+		out = append(out, k, v)
+	}
+	return out
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings: a bool field cannot encode a forged log record, got: %v", findings)
+	}
+}
+
+// TestAnalyzePackage_PassthroughHelperStillFlagged is the load-bearing half of
+// AC2 and the specific hazard the joint fixed point introduces. Making a
+// funcReturnsTaint "no" trustworthy is only safe if the "no" is computed with a
+// parameter seed; without one, collectFuncReturnsTaint cannot see that echo
+// returns its caller's taint and records "no" for a function that plainly
+// carries it. This fixture fails if that seed is dropped.
+func TestAnalyzePackage_PassthroughHelperStillFlagged(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "id", echo(id))
+}
+func echo(s string) string { return s }
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding: echo returns its caller's taint, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_FixedVocabularyHelperNotFlagged is the other half of AC2.
+// getAuditSeverity returns only CRITICAL/HIGH-class literals, never caller
+// input, but exprCarriesTaint's CallExpr case used to fall straight through to
+// anyArgTainted -- so passing the tainted struct tainted the result. The
+// linter already computed funcReturnsTaint and then only ever used it to say
+// yes. Fails on revert of the definitive-no path.
+func TestAnalyzePackage_FixedVocabularyHelperNotFlagged(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+type decision struct {
+	Reason  string
+	Granted bool
+}
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	var d decision
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	s.logger.Info("audit", "severity", s.getAuditSeverity(d))
+}
+func (s *S) getAuditSeverity(d decision) string {
+	if d.Granted {
+		return "LOW"
+	}
+	return "CRITICAL"
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings: the helper returns a fixed vocabulary, got: %v", findings)
+	}
+}
+
+// TestAnalyzeFile_AcceptsTimeSinceOfTaintedValue covers AC3, the real call site
+// being features/terminal/websocket.go:167. A bare tainted time.Time field was
+// already suppressed as scalar, but wrapping it in time.Since made it a
+// CallExpr, which fell through to anyArgTainted. time.Since returns a
+// time.Duration whatever its argument was, for the same reason len(...) always
+// returns an int. Fails on revert of the scalar-returning-call suppression.
+func TestAnalyzeFile_AcceptsTimeSinceOfTaintedValue(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+import "time"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+type session struct {
+	ID        string
+	CreatedAt time.Time
+}
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	var sess session
+	_ = json.NewDecoder(r.Body).Decode(&sess)
+	s.logger.Info("ended", "duration", time.Since(sess.CreatedAt))
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings: time.Since returns a time.Duration, got: %v", findings)
+	}
+}
+
+// TestAnalyzePackage_AuditFieldsFlattenIsClean covers AC5 -- the original
+// symptom, with both bugs present in one shape: the map carries a sanitized
+// string, a provably-scalar bool field (bug 1) and a fixed-vocabulary helper
+// call (bug 2), and is logged through a variadic flatten. Fails if EITHER fix
+// is reverted, which is why the two are asserted together here as well as
+// separately above.
+func TestAnalyzePackage_AuditFieldsFlattenIsClean(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+}
+type decision struct {
+	Reason  string
+	Granted bool
+}
+func (s *S) audit(w http.ResponseWriter, r *http.Request) {
+	var d decision
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	auditFields := map[string]interface{}{
+		"reason":   logging.SanitizeLogValue(d.Reason),
+		"granted":  d.Granted,
+		"severity": s.getAuditSeverity(d),
+	}
+	if d.Granted {
+		s.logger.Info("Authorization audit", flattenFieldsToKV(auditFields)...)
+	} else {
+		s.logger.Warn("Authorization audit - access denied", flattenFieldsToKV(auditFields)...)
+	}
+}
+func (s *S) getAuditSeverity(d decision) string {
+	if d.Granted {
+		return "LOW"
+	}
+	return "CRITICAL"
+}
+func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
+	out := make([]interface{}, 0, len(fields)*2)
+	for k, v := range fields {
+		out = append(out, k, v)
+	}
+	return out
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for the middleware.go:1640/:1642 shape, got: %v", findings)
+	}
+}

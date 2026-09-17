@@ -340,7 +340,7 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 		// Restore old trigger on storage failure
 		tm.triggers[trigger.ID] = existingTrigger
 		if regErr := tm.registerTriggerWithHandler(ctx, existingTrigger); regErr != nil {
-			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", regErr.Error())
+			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(regErr.Error()))
 		}
 		logger.ErrorCtx(ctx, "Failed to save updated trigger to storage",
 			"trigger_id", logging.SanitizeLogValue(trigger.ID),
@@ -353,10 +353,10 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 		// Restore old trigger on registration failure
 		tm.triggers[trigger.ID] = existingTrigger
 		if saveErr := tm.saveTriggerToStorage(ctx, existingTrigger); saveErr != nil {
-			logger.ErrorCtx(ctx, "Failed to restore trigger to storage during rollback", "trigger_id", existingTrigger.ID, "error", saveErr.Error())
+			logger.ErrorCtx(ctx, "Failed to restore trigger to storage during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(saveErr.Error()))
 		}
 		if regErr := tm.registerTriggerWithHandler(ctx, existingTrigger); regErr != nil {
-			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", regErr.Error())
+			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(regErr.Error()))
 		}
 		logger.ErrorCtx(ctx, "Failed to register updated trigger",
 			"trigger_id", logging.SanitizeLogValue(trigger.ID),
