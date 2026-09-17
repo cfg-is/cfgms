@@ -172,7 +172,7 @@ func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request
 func (s *Server) resolveModuleAddress(w http.ResponseWriter, rawAddr string) (bundle.ContentAddress, bool) {
 	addr, err := parseModuleAddress(rawAddr)
 	if err != nil {
-		s.logger.Debug("Malformed module address", "address", logging.SanitizeLogValue(rawAddr), "error", err)
+		s.logger.Debug("Malformed module address", "address", logging.SanitizeLogValue(rawAddr), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid module address format", "INVALID_ADDRESS")
 		return bundle.ContentAddress{}, false
 	}

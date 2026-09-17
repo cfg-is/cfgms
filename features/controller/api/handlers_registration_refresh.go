@@ -460,7 +460,7 @@ func (s *Server) handleRefreshByPolicy(
 		// No stored provenance baseline, or sufficient provenance match: issue cert immediately.
 		resp, err := s.buildRefreshClaimResponse(r.Context(), record, csrPEM)
 		if err != nil {
-			s.logger.Error("Failed to issue refresh certificate", "steward_id", record.ID, "error", err)
+			s.logger.Error("Failed to issue refresh certificate", "steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 			s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 				business.AuditEventSystemEvent, "refresh_error",
 				business.AuditResultError, business.AuditSeverityMedium,
@@ -478,7 +478,7 @@ func (s *Server) handleRefreshByPolicy(
 		// no private key is ever generated or held by the controller for this
 		// credential (Issue #3781).
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			s.logger.Error("Failed to encode refresh complete response", "error", err)
+			s.logger.Error("Failed to encode refresh complete response", "error", logging.SanitizeLogValue(err.Error()))
 		}
 
 	default: // require_approval (and unknown modes)
@@ -515,7 +515,7 @@ func (s *Server) handleRefreshQueueEntry(
 		ExpiresAt:               time.Now().UTC().Add(7 * 24 * time.Hour),
 	}
 	if err := s.pendingRefreshStore.AddPendingRefresh(r.Context(), entry); err != nil {
-		s.logger.Error("Failed to add pending refresh", "steward_id", record.ID, "error", err)
+		s.logger.Error("Failed to add pending refresh", "steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_error",
 			business.AuditResultError, business.AuditSeverityMedium,
@@ -540,7 +540,7 @@ func (s *Server) handleRefreshQueueEntry(
 		Status:    "queued",
 		PendingID: pendingID,
 	}); err != nil {
-		s.logger.Error("Failed to encode refresh queued response", "error", err)
+		s.logger.Error("Failed to encode refresh queued response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -600,18 +600,18 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 	if s.stewardStore != nil {
 		if err := s.stewardStore.UpdateStewardStatus(ctx, record.ID, business.StewardStatusRegistered); err != nil {
 			s.logger.Warn("Failed to persist steward status after refresh cert issuance",
-				"steward_id", record.ID, "error", err)
+				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 	if s.controllerService != nil {
 		if err := s.controllerService.UpdateStewardStatus(record.ID, "registered"); err != nil {
 			s.logger.Warn("Failed to update steward status after refresh cert issuance",
-				"steward_id", record.ID, "error", err)
+				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 
 	s.logger.Info("Issued refresh certificate",
-		"steward_id", record.ID,
+		"steward_id", logging.SanitizeLogValue(record.ID),
 		"validity_days", validityDays)
 
 	return resp, nil
@@ -1052,6 +1052,6 @@ func (s *Server) emitRefreshAudit(
 		b = b.Detail(k, v)
 	}
 	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
-		s.logger.Warn("Failed to emit refresh audit event", "error", err, "action", action)
+		s.logger.Warn("Failed to emit refresh audit event", "error", logging.SanitizeLogValue(err.Error()), "action", action)
 	}
 }

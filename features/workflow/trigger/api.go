@@ -131,7 +131,7 @@ func (api *APIHandler) handleGetTrigger(w http.ResponseWriter, r *http.Request) 
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to get trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to get trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to get trigger", err)
 		}
 		return
@@ -175,7 +175,7 @@ func (api *APIHandler) handleUpdateTrigger(w http.ResponseWriter, r *http.Reques
 
 	api.sendJSONResponse(w, http.StatusOK, trigger)
 	logger.InfoCtx(ctx, "Trigger updated successfully via API",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 }
 
 // handleDeleteTrigger deletes a trigger
@@ -196,7 +196,7 @@ func (api *APIHandler) handleDeleteTrigger(w http.ResponseWriter, r *http.Reques
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to delete trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to delete trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to delete trigger", err)
 		}
 		return
@@ -208,7 +208,7 @@ func (api *APIHandler) handleDeleteTrigger(w http.ResponseWriter, r *http.Reques
 	})
 
 	logger.InfoCtx(ctx, "Trigger deleted successfully via API",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 }
 
 // handleEnableTrigger enables a trigger
@@ -229,7 +229,7 @@ func (api *APIHandler) handleEnableTrigger(w http.ResponseWriter, r *http.Reques
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to enable trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to enable trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to enable trigger", err)
 		}
 		return
@@ -242,7 +242,7 @@ func (api *APIHandler) handleEnableTrigger(w http.ResponseWriter, r *http.Reques
 	})
 
 	logger.InfoCtx(ctx, "Trigger enabled successfully via API",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 }
 
 // handleDisableTrigger disables a trigger
@@ -263,7 +263,7 @@ func (api *APIHandler) handleDisableTrigger(w http.ResponseWriter, r *http.Reque
 		if strings.Contains(err.Error(), "not found") {
 			api.sendErrorResponse(w, http.StatusNotFound, "Trigger not found", err)
 		} else {
-			logger.ErrorCtx(ctx, "Failed to disable trigger", "trigger_id", triggerID, "error", err.Error())
+			logger.ErrorCtx(ctx, "Failed to disable trigger", "trigger_id", logging.SanitizeLogValue(triggerID), "error", logging.SanitizeLogValue(err.Error()))
 			api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to disable trigger", err)
 		}
 		return
@@ -276,7 +276,7 @@ func (api *APIHandler) handleDisableTrigger(w http.ResponseWriter, r *http.Reque
 	})
 
 	logger.InfoCtx(ctx, "Trigger disabled successfully via API",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 }
 
 // handleExecuteTrigger manually executes a trigger
@@ -316,8 +316,8 @@ func (api *APIHandler) handleExecuteTrigger(w http.ResponseWriter, r *http.Reque
 	api.sendJSONResponse(w, http.StatusOK, execution)
 
 	logger.InfoCtx(ctx, "Trigger executed successfully via API",
-		"trigger_id", triggerID,
-		"execution_id", execution.ID)
+		"trigger_id", logging.SanitizeLogValue(triggerID),
+		"execution_id", logging.SanitizeLogValue(execution.ID))
 }
 
 // handleGetTriggerExecutions retrieves execution history for a trigger
@@ -456,7 +456,7 @@ func (api *APIHandler) sendJSONResponse(w http.ResponseWriter, statusCode int, d
 	w.WriteHeader(statusCode)
 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		api.logger.Error("Failed to encode JSON response", "error", err.Error())
+		api.logger.Error("Failed to encode JSON response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

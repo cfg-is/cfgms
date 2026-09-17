@@ -372,7 +372,7 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 			business.RolloutStatusInProgress, ring.Name, i, nil, ""); updErr != nil {
 			s.logger.Warn("Failed to update rollout current ring",
-				"rollout_id", record.ID, "ring", ring.Name, "error", updErr)
+				"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
 		}
 
 		// Soak: wait the ring's configured soak duration; skip if zero.
@@ -393,15 +393,15 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		onVersion, failed, pending, err := s.queryRingHealthCounts(ctx, ring.Name, record.TargetVersion, record.TenantID)
 		if err != nil {
 			s.logger.Error("Ring health query failed, halting rollout",
-				"rollout_id", record.ID,
+				"rollout_id", logging.SanitizeLogValue(record.ID),
 				"ring", ring.Name,
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 			now := time.Now().UTC()
 			if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 				business.RolloutStatusHalted, ring.Name, i, &now,
 				"ring health query failed: "+err.Error()); updErr != nil {
 				s.logger.Error("Failed to persist halted rollout status after ring health query failure",
-					"rollout_id", record.ID, "ring", ring.Name, "error", updErr)
+					"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
 			}
 			s.notifyRolloutTerminal(record.ID)
 			return
@@ -412,7 +412,7 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		if len(failedIDs) > 0 {
 			if appendErr := s.rolloutStore.AppendDeferredStewards(ctx, record.ID, failedIDs); appendErr != nil {
 				s.logger.Warn("Failed to append deferred stewards",
-					"rollout_id", record.ID, "ring", ring.Name, "error", appendErr)
+					"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(appendErr.Error()))
 			}
 		}
 
@@ -435,7 +435,7 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 				pending,
 			)
 			s.logger.Error("Rollout halted: failure rate exceeded threshold",
-				"rollout_id", record.ID,
+				"rollout_id", logging.SanitizeLogValue(record.ID),
 				"ring", ring.Name,
 				"failed", failed,
 				"on_version", onVersion,
@@ -443,7 +443,7 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 			if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 				business.RolloutStatusHalted, ring.Name, i, &now, haltMsg); updErr != nil {
 				s.logger.Error("Failed to persist halted rollout status after failure-rate threshold exceeded",
-					"rollout_id", record.ID, "ring", ring.Name, "error", updErr)
+					"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
 			}
 			s.notifyRolloutTerminal(record.ID)
 			return
@@ -453,10 +453,10 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 		if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 			business.RolloutStatusInProgress, "", i+1, nil, ""); updErr != nil {
 			s.logger.Warn("Failed to advance rollout ring count",
-				"rollout_id", record.ID, "ring", ring.Name, "error", updErr)
+				"rollout_id", logging.SanitizeLogValue(record.ID), "ring", ring.Name, "error", logging.SanitizeLogValue(updErr.Error()))
 		}
 		s.logger.Info("Ring advanced successfully",
-			"rollout_id", record.ID,
+			"rollout_id", logging.SanitizeLogValue(record.ID),
 			"ring", ring.Name,
 			"on_version", onVersion,
 			"failed", failed,
@@ -467,10 +467,10 @@ func (s *Server) runRollout(ctx context.Context, record *business.RolloutRecord,
 	if updErr := s.rolloutStore.UpdateRolloutProgress(ctx, record.ID,
 		business.RolloutStatusCompleted, "", len(rings), nil, ""); updErr != nil {
 		s.logger.Error("Failed to persist completed rollout status",
-			"rollout_id", record.ID, "error", updErr)
+			"rollout_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(updErr.Error()))
 	}
 	s.logger.Info("Rollout completed",
-		"rollout_id", record.ID,
+		"rollout_id", logging.SanitizeLogValue(record.ID),
 		"target_version", logging.SanitizeLogValue(record.TargetVersion))
 	s.notifyRolloutTerminal(record.ID)
 }
@@ -492,7 +492,7 @@ func (s *Server) rolloutShouldStop(ctx context.Context, haltCh <-chan struct{}, 
 	record, err := s.rolloutStore.GetRollout(ctx, rolloutID)
 	if err != nil {
 		s.logger.Error("Failed to re-read rollout record; stopping rollout goroutine fail-closed",
-			"rollout_id", rolloutID, "error", err)
+			"rollout_id", logging.SanitizeLogValue(rolloutID), "error", logging.SanitizeLogValue(err.Error()))
 		return true
 	}
 	return record.Status == business.RolloutStatusHalted || record.Status == business.RolloutStatusCompleted

@@ -672,7 +672,7 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 			p.logger.Warn("failed to store delegated token",
 				"user_id", logging.SanitizeLogValue(userContext.UserID),
 				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 
 		// Store user context
@@ -680,7 +680,7 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 			p.logger.Warn("failed to store user context",
 				"user_id", logging.SanitizeLogValue(userContext.UserID),
 				"tenant_id", logging.SanitizeLogValue(tenantID),
-				"error", err)
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 
 		// Cache as delegated token
@@ -689,7 +689,7 @@ func (p *OAuth2Provider) ExchangeCodeForDelegatedToken(ctx context.Context, tena
 	} else {
 		// Store as application token
 		if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
-			p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+			p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 
 		// Cache the token

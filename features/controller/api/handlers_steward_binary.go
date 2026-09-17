@@ -308,7 +308,7 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		s.logger.Error("Failed to get steward binary",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"version", logging.SanitizeLogValue(version),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
@@ -317,7 +317,7 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
-			s.logger.Warn("failed to close steward binary reader", "error", cerr)
+			s.logger.Warn("failed to close steward binary reader", "error", logging.SanitizeLogValue(cerr.Error()))
 		}
 	}()
 
@@ -331,7 +331,7 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(http.StatusOK)
 	if _, copyErr := io.Copy(w, rc); copyErr != nil {
-		s.logger.Warn("Failed to stream steward binary to client", "error", copyErr)
+		s.logger.Warn("Failed to stream steward binary to client", "error", logging.SanitizeLogValue(copyErr.Error()))
 	}
 }
 
@@ -413,7 +413,7 @@ func (s *Server) buildPublicStewardBinary(
 	}
 	defer func() {
 		if cerr := rc.Close(); cerr != nil {
-			s.logger.Warn("failed to close steward binary reader (public)", "error", cerr)
+			s.logger.Warn("failed to close steward binary reader (public)", "error", logging.SanitizeLogValue(cerr.Error()))
 		}
 	}()
 	if meta.Size > maxBinaryRequestBodyBytes {
