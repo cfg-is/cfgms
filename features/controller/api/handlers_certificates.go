@@ -132,7 +132,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		// Filter by steward ID (common name)
 		certInfos, err := s.certManager.GetCertificateByCommonName(stewardID)
 		if err != nil {
-			s.logger.Error("Failed to get certificates for steward", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			s.logger.Error("Failed to get certificates for steward", "steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificates", "INTERNAL_ERROR")
 			return
 		}
@@ -165,7 +165,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	} else {
 		certInfos, err := s.certManager.ListCertificates()
 		if err != nil {
-			s.logger.Error("Failed to list certificates", "error", err)
+			s.logger.Error("Failed to list certificates", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
 			return
 		}
@@ -203,7 +203,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 			// The scope filter could not be evaluated. Returning the unfiltered
 			// list would disclose other tenants' certificates, so fail the request.
 			s.logger.Error("Failed to apply tenant scope to certificate list",
-				"caller_tenant", logging.SanitizeLogValue(callerTenant), "error", err)
+				"caller_tenant", logging.SanitizeLogValue(callerTenant), "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
 			return
 		}

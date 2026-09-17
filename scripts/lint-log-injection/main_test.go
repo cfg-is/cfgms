@@ -1055,9 +1055,12 @@ func (s *S) revokeSessions(id string) (int, error) {
 }
 
 // TestAnalyzePackage_StillFlagsStringFromSamePackageCall is the guard on the
-// test above: the same shape with a string result must stay flagged. Result
-// types are used to suppress findings, so a bug that treated every resolved
-// type as scalar would silently hide real ones.
+// test above: a resolved string result must stay flagged. Result types are
+// used to suppress findings, so a bug that treated every resolved type as
+// scalar would silently hide real ones. Single-return, unlike the sibling
+// tests below: this call has no multi-value LHS to isolate, so root cause
+// A's broadcast fix (see TestAnalyzePackage_MultiReturnDoesNotTaintUnrelatedSibling)
+// does not change its outcome.
 func TestAnalyzePackage_StillFlagsStringFromSamePackageCall(t *testing.T) {
 	a := `package api
 import "net/http"
@@ -1066,18 +1069,56 @@ type S struct{ logger logger }
 type logger interface{ Info(string, ...any) }
 func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
-	label, _ := s.describe(id)
+	label := s.describe(id)
 	s.logger.Info("described", "label", label)
 }
 `
 	b := `package api
-func (s *S) describe(id string) (string, error) {
-	return id, nil
+func (s *S) describe(id string) string {
+	return id
 }
 `
 	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_MultiReturnDoesNotTaintUnrelatedSibling is root cause
+// A's core regression test (issue #4103): a multi-return call broadcasting
+// taint from a tainted argument to EVERY result, not just the plausible
+// error-carrying one, was the bug behind the majority of the 40 residual
+// findings traced during #4088 — a crypto-random ID or a fixed-vocabulary
+// label returned alongside a legitimately tainted-derived error. issueCert
+// returns (string, error); only "err" (the last, error-named position)
+// should inherit taint from the tainted id argument. "serial" is a sibling
+// result structurally unrelated to that argument and must not be swept in.
+// Fails on revert: without plausibleErrorReturnIndices restricting the
+// broadcast, "serial" enters the tainted set too and this drops to 2
+// findings (serial AND err) instead of 1.
+func TestAnalyzePackage_MultiReturnDoesNotTaintUnrelatedSibling(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	serial, err := s.issueCert(id)
+	s.logger.Info("issued", "serial", serial, "error", err)
+}
+`
+	b := `package api
+func (s *S) issueCert(id string) (string, error) {
+	return "crypto-random-serial", nil
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (err only), got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"err"`) {
+		t.Errorf("expected the finding to name err, not the unrelated serial sibling, got %q", findings[0].msg)
 	}
 }
 
@@ -1158,5 +1199,162 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	findings := analyzeSnippets(t, map[string]string{"snippet.go": src})
 	if len(findings) != 1 {
 		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzeFile_LaterBlockRedeclarationClearsStaleTaint is root cause B's
+// core regression test (issue #4103): two structurally unrelated variables
+// sharing the name "err" — one genuinely tainted inside the if-block, a
+// different one freshly declared via `:=` in the mutually-exclusive
+// else-block — must not be conflated by collectTaintedVars' flat,
+// name-keyed map. The real-world shape is handlers_certificates.go's
+// handleListCertificates before this story: a tainted-argument call in one
+// branch and a zero-argument call in the sibling branch, both binding "err".
+// Fails on revert: without the reassignment-clears-taint rule, the if-block's
+// tainted "err" leaks into the else-block's unrelated "err" and this reports
+// a finding instead of 0.
+func TestAnalyzeFile_LaterBlockRedeclarationClearsStaleTaint(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+func lookup(id string) (int, error) { return 0, nil }
+func ping() (int, error) { return 0, nil }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if id != "" {
+		_, err := lookup(id)
+		if err != nil {
+			return
+		}
+	} else {
+		_, err := ping()
+		if err != nil {
+			s.logger.Error("ping failed", "error", err)
+		}
+	}
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected 0 findings: the else-block's err is a different, untainted variable, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_ReassignmentClearsStaleTaint covers the AC's literal
+// minimum for root cause B: a plain `=` reassignment of an established name
+// from a demonstrably-untainted source clears its prior taint, not just the
+// `:=`-redeclaration shape above. Fails on revert: without the clearing
+// rule, "err" stays in the tainted set after the reassignment and this
+// reports a finding instead of 0.
+func TestAnalyzeFile_ReassignmentClearsStaleTaint(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+func lookup(id string) error { return nil }
+func ping() error { return nil }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	err := lookup(id)
+	_ = err
+	err = ping()
+	s.logger.Error("done", "error", err)
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected 0 findings after the untainted reassignment clears err, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_SuppressesBareIdentifierScalarArgument covers root cause
+// C's first gap: a bare identifier argument was never checked against its
+// own resolved type at all — analyzeFunc's finding loop only ever called
+// isProvablyScalar on a *ast.SelectorExpr field access. An int or time.Time
+// local cannot carry a log-injection payload regardless of what tainted the
+// variable name. Fails on revert of the bare-Ident branch in analyzeFunc:
+// both cases would report a finding instead of 0.
+func TestAnalyzeFile_SuppressesBareIdentifierScalarArgument(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{
+			name: "int",
+			src: `package api
+import "net/http"
+import "strconv"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	tail := 100
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil {
+			tail = v
+		}
+	}
+	s.logger.Info("pull", "tail", tail)
+}
+`,
+		},
+		{
+			name: "time.Time",
+			src: `package api
+import "net/http"
+import "time"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	since := time.Now().Add(-24 * time.Hour)
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			since = parsed
+		}
+	}
+	s.logger.Info("pull", "since", since)
+}
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if findings := analyzeSnippet(t, tc.src); len(findings) != 0 {
+				t.Errorf("expected 0 findings for bare-identifier scalar %s, got: %v", tc.name, findings)
+			}
+		})
+	}
+}
+
+// TestAnalyzePackage_ResolvesFieldTypeOnFunctionReturnAssignedStruct covers
+// root cause C's second gap: a variable assigned from a same-package
+// function-call return (not a `var x T` declaration or a `x := T{...}`
+// composite literal) was invisible to collectVarTypes, so a field access on
+// it could never resolve to its real, locally-defined field type. Total is
+// an int field on Page, defined in the same file as buildPage; page.Total
+// must be suppressed while q, the genuinely tainted argument, still flags.
+// Fails on revert: without collectVarTypes recording page's return-derived
+// type, isProvablyScalar can't resolve Page.Total and this reports 2
+// findings instead of 1.
+func TestAnalyzePackage_ResolvesFieldTypeOnFunctionReturnAssignedStruct(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type Page struct{ Total int }
+func buildPage(n int) Page { return Page{Total: n} }
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	q := mux.Vars(r)["q"]
+	page := buildPage(len(q))
+	s.logger.Info("listed", "q", q, "total", page.Total)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"snippet.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (q only; page.Total resolves to int and is suppressed), got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"q"`) {
+		t.Errorf("expected q to be the one flagged, not page.Total, got %q", findings[0].msg)
 	}
 }

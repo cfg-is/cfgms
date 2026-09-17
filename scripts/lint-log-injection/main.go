@@ -241,8 +241,8 @@ func analyzePackage(paths []string) ([]finding, error) {
 		delete(funcs, name)
 	}
 
-	paramTaint := resolveParameterTaint(funcs)
 	funcResults := collectFuncResultTypes(funcs)
+	paramTaint := resolveParameterTaint(funcs, funcResults)
 
 	var findings []finding
 	for _, fn := range order {
@@ -331,7 +331,7 @@ const funcParamTaintRounds = 5
 // Findings behind an ambiguous name remain the caller's responsibility to
 // catch by review. Unambiguous names keep the conservative bias described
 // above: those over-approximations only add findings a human must dismiss.
-func resolveParameterTaint(funcs map[string]*ast.FuncDecl) map[string]map[string]struct{} {
+func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string) map[string]map[string]struct{} {
 	paramTaint := map[string]map[string]struct{}{}
 	// Iterate a sorted name list, not the map: Go randomizes map iteration
 	// order per run, which would make the bounded fixed point's per-round
@@ -348,7 +348,8 @@ func resolveParameterTaint(funcs map[string]*ast.FuncDecl) map[string]map[string
 	for round := 0; round < funcParamTaintRounds; round++ {
 		localTainted := map[string]map[string]struct{}{}
 		for _, name := range names {
-			localTainted[name] = collectTaintedVars(funcs[name].Body, paramTaint[name])
+			fn := funcs[name]
+			localTainted[name] = collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults)
 		}
 
 		changed := false
@@ -489,7 +490,7 @@ func isScalarType(typ string) bool {
 // result-type registry (nil when fn is analyzed in isolation), used only to
 // pin local variable types for scalar suppression.
 func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string, paramTaint map[string]struct{}, funcResults map[string][]string) []finding {
-	tainted := collectTaintedVars(fn.Body, paramTaint)
+	tainted := collectTaintedVars(fn.Body, paramTaint, receiverName(fn), funcResults)
 	varTypes := collectVarTypes(fn, funcResults)
 
 	var findings []finding
@@ -664,6 +665,53 @@ func staticTypeOf(e ast.Expr, recv string, funcResults map[string][]string) stri
 		if results, ok := samePackageResultTypes(v, recv, funcResults); ok && len(results) == 1 {
 			return results[0]
 		}
+		if t := stdlibTimeExprType(v); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// stdlibTimeKnownReturns maps well-known zero-knowledge-required stdlib calls
+// (no receiver-type resolution needed) to their return type. Narrow and
+// hand-picked: this exists only to resolve the common `since :=
+// time.Now().Add(...)` local-scalar idiom (root cause C) that predates any
+// composite-literal or same-package-call form collectVarTypes already
+// understands, not to become a general stdlib type oracle.
+var stdlibTimeKnownReturns = map[string]string{
+	"time.Now":   "time.Time",
+	"time.Unix":  "time.Time",
+	"time.Date":  "time.Time",
+	"time.Since": "time.Duration",
+}
+
+// timeTimeChainMethods are *time.Time methods that return another time.Time,
+// so a chain like time.Now().Add(-24*time.Hour) still resolves to time.Time
+// rather than falling back to "unknown" the moment a method is appended.
+var timeTimeChainMethods = map[string]struct{}{
+	"Add": {}, "AddDate": {}, "Truncate": {}, "Round": {},
+	"UTC": {}, "Local": {}, "In": {},
+}
+
+// stdlibTimeExprType resolves the narrow set of time.Time/time.Duration-
+// producing stdlib call shapes described above, recursing through a
+// time.Time method chain. Returns "" on anything else, the same
+// conservative-on-uncertainty default every other type-inference helper here
+// uses.
+func stdlibTimeExprType(e ast.Expr) string {
+	call, ok := unparen(e).(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if t, ok := stdlibTimeKnownReturns[selectorString(call.Fun)]; ok {
+		return t
+	}
+	if _, ok := timeTimeChainMethods[sel.Sel.Name]; ok && stdlibTimeExprType(sel.X) == "time.Time" {
+		return "time.Time"
 	}
 	return ""
 }
@@ -736,7 +784,11 @@ func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structF
 // a function's own parameters as tainted when a same-package caller passes a
 // tainted argument (see resolveParameterTaint). A nil seed analyzes the body
 // in isolation, matching this function's original single-argument behavior.
-func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]struct{} {
+// recv and funcResults resolve same-package call result types (see
+// samePackageResultTypes) so a multi-return call site can tell its error
+// return apart from an unrelated sibling; both may be zero-valued when that
+// resolution isn't available (e.g. analyzeFile's isolated, no-package view).
+func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, funcResults map[string][]string) map[string]struct{} {
 	tainted := map[string]struct{}{}
 	for name := range seed {
 		tainted[name] = struct{}{}
@@ -824,6 +876,19 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]stru
 			if !ok || len(assign.Rhs) == 0 {
 				return true
 			}
+
+			// Multi-return broadcast guard (root cause A): a single call
+			// supplying every LHS positionally must not let a tainted
+			// argument taint every result — only the position(s) that
+			// plausibly carry the error contract may inherit taint from
+			// the call's arguments. See plausibleErrorReturnIndices.
+			var argTaintEligible map[int]bool
+			if len(assign.Rhs) == 1 && len(assign.Lhs) > 1 {
+				if call, ok := unparen(assign.Rhs[0]).(*ast.CallExpr); ok {
+					argTaintEligible = plausibleErrorReturnIndices(assign.Lhs, call, recv, funcResults)
+				}
+			}
+
 			for idx, lhs := range assign.Lhs {
 				var rhs ast.Expr
 				switch {
@@ -834,8 +899,20 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]stru
 				default:
 					continue
 				}
+				allowArgTaint := true
+				if argTaintEligible != nil {
+					allowArgTaint = argTaintEligible[idx]
+				}
+				derived := taintPropagatesFrom(rhs, tainted, allowArgTaint)
+
 				switch l := lhs.(type) {
 				case *ast.SelectorExpr:
+					// Struct-field writes only ever ADD taint to the
+					// containing variable, never clear it: the taint is
+					// deliberately whole-variable and over-approximate (see
+					// this function's doc comment), so an unrelated later
+					// field write on the same variable must not erase taint
+					// a different field already established.
 					rootID, ok := l.X.(*ast.Ident)
 					if !ok {
 						continue
@@ -843,16 +920,35 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]stru
 					if _, already := tainted[rootID.Name]; already {
 						continue
 					}
-					if taintPropagatesFrom(rhs, tainted) {
+					if derived {
 						tainted[rootID.Name] = struct{}{}
 						changed = true
 					}
 				case *ast.Ident:
-					if _, already := tainted[l.Name]; already {
+					// Root cause B: unlike the struct-field case above, a
+					// plain identifier's taint status is re-derived on every
+					// assignment to it — `:=` or `=` alike — so a
+					// demonstrably-untainted reassignment (or a same-named
+					// `:=` redeclaration in a sibling/later block, which Go
+					// scoping would treat as a distinct variable but this
+					// flat, scope-blind map cannot) clears stale taint
+					// instead of leaving it stuck once set. This is
+					// necessarily order-sensitive against the function's
+					// textual layout, not true control flow: a safe
+					// reassignment that appears AFTER a genuinely tainted use
+					// in source order clears taint only for what follows it,
+					// which is the accepted, documented tradeoff of a
+					// flow-insensitive, AST-only linter (see issue #4103).
+					if l.Name == "_" {
 						continue
 					}
-					if taintPropagatesFrom(rhs, tainted) {
+					_, was := tainted[l.Name]
+					switch {
+					case derived && !was:
 						tainted[l.Name] = struct{}{}
+						changed = true
+					case !derived && was:
+						delete(tainted, l.Name)
 						changed = true
 					}
 				}
@@ -867,6 +963,61 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]stru
 	return tainted
 }
 
+// looksLikeErrorName reports whether name follows the codebase's overwhelming
+// convention for an error-carrying binding (err, qErr, searchErr, createErr,
+// ...): a case-insensitive "err" substring.
+func looksLikeErrorName(name string) bool {
+	return strings.Contains(strings.ToLower(name), "err")
+}
+
+// plausibleErrorReturnIndices identifies which positions of a multi-value
+// LHS may inherit taint from a tainted argument to the single call on the
+// RHS (root cause A). A multi-return call broadcasting taint to every result
+// the instant any argument is tainted was the bug: a crypto-random serial
+// number, a database-generated ID, or an unrelated int count returned
+// alongside a genuinely tainted-derived error has nothing to do with that
+// argument, and over-tainting the whole tuple bathes every sibling in the
+// same false positive.
+//
+// Resolution is type-first, name-fallback:
+//   - When the callee's result types are known (same-package resolution via
+//     samePackageResultTypes), only the position(s) whose declared type is
+//     literally "error" are eligible — that's positive evidence, and it is
+//     authoritative: a known non-error type never inherits taint through this
+//     path even if it's the last position or looks error-named.
+//   - When the callee's types are not resolvable (the common case for the
+//     cross-package store/client calls this linter mostly sees), fall back
+//     to the conventional Go idiom: only the LAST position is eligible, and
+//     only if its own identifier looks like an error binding
+//     (looksLikeErrorName). An unresolvable multi-return call with no
+//     error-looking name lets nothing inherit taint via this mechanism —
+//     conservative in the direction of fewer false positives, matching this
+//     story's mandate.
+//
+// This intentionally does not attempt to prove a non-error, non-last
+// position echoes the argument (e.g. a same-package helper that returns its
+// own input unchanged): that requires interprocedural return-value dataflow,
+// which is out of scope here (see issue #4103, "Out of Scope").
+func plausibleErrorReturnIndices(lhs []ast.Expr, call *ast.CallExpr, recv string, funcResults map[string][]string) map[int]bool {
+	out := map[int]bool{}
+	if results, ok := samePackageResultTypes(call, recv, funcResults); ok && len(results) == len(lhs) {
+		for i, t := range results {
+			if t == "error" {
+				out[i] = true
+			}
+		}
+		return out
+	}
+	last := len(lhs) - 1
+	if last < 0 {
+		return out
+	}
+	if id, ok := lhs[last].(*ast.Ident); ok && looksLikeErrorName(id.Name) {
+		out[last] = true
+	}
+	return out
+}
+
 // taintPropagatesFrom reports whether assigning rhs to a variable should
 // taint that variable, given the currently-known tainted set. It is the
 // single decision point collectTaintedVars' fixed-point loop calls for every
@@ -874,13 +1025,22 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}) map[string]stru
 // calls on tainted receivers, calls carrying tainted arguments (guarded by
 // transmitsWithoutEchoing the same way the error-wrap rule always was),
 // string concatenation, and composite literals / unary address-of.
-func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}) bool {
+//
+// allowArgTaint gates only the "any argument is tainted" call-broadcast rule.
+// It is always true for an ordinary single-value assignment; for a
+// multi-value assignment from one call, collectTaintedVars sets it per LHS
+// position via plausibleErrorReturnIndices, so an argument's taint doesn't
+// broadcast to every sibling result (root cause A).
+func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}, allowArgTaint bool) bool {
 	if isTaintedExpr(rhs, tainted) {
 		return true
 	}
 	switch v := unparen(rhs).(type) {
 	case *ast.CallExpr:
 		if isSanitized(v) || transmitsWithoutEchoing(v) {
+			return false
+		}
+		if !allowArgTaint {
 			return false
 		}
 		return anyArgTainted(v.Args, tainted)

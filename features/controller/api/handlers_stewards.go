@@ -588,7 +588,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if matched := isDNAAttributeDenylisted(attrKey); matched != "" {
-			s.logger.Info("attribute key matches denylist; returning 404", "matched_pattern", matched)
+			s.logger.Info("attribute key matches denylist; returning 404", "matched_pattern", logging.SanitizeLogValue(matched))
 			s.writeErrorResponse(w, http.StatusNotFound, "attribute not found", "DNA_ATTRIBUTE_REDACTED")
 			return
 		}
