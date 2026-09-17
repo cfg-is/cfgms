@@ -448,6 +448,135 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TestAnalyzeFile_FlagsTaintedValueViaUnrecognizedWrapper is the story #4097
+// regression guard: the gap TestAnalyzeFile_AcceptsSanitizedViaFieldsRecursive
+// documents above (isTaintedExpr's *ast.CallExpr case never looks at a call's
+// own arguments, so wrapping a tainted value in ANY function -- sanitizer or
+// not -- silenced the finding) is exactly what this fix closes. Wrapping id in
+// an unregistered function name must still be flagged. Fails on revert:
+// reverting the sink-check fix (back to isTaintedExpr) drops this to 0
+// findings, identical to the pre-fix behavior documented above.
+func TestAnalyzeFile_FlagsTaintedValueViaUnrecognizedWrapper(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func someUnrecognizedWrapper(s string) string { return s }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "id", someUnrecognizedWrapper(id))
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "someUnrecognizedWrapper") {
+		t.Errorf("expected the wrapped call to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_StillAcceptsRecognizedWrapperAfterFix is the regression
+// guard paired with the test above: the same snippet, with the unrecognized
+// wrapper replaced by the real sanitizer, must still clear. Without this test,
+// a fix that makes any call-wrapped argument tainted (dropping the sanitizer
+// short-circuit) would flag every legitimate logging.SanitizeLogValue call in
+// the repository.
+func TestAnalyzeFile_StillAcceptsRecognizedWrapperAfterFix(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "id", logging.SanitizeLogValue(id))
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for sanitized wrapper, got: %v", findings)
+	}
+}
+
+// TestAnalyzeFile_AcceptsComparisonOfTaintedValue guards a false positive the
+// #4097 sink-check fix surfaced repo-wide (features/controller/api/handlers_
+// accounts.go, handlers_credential_requests.go): wiring the sink check to
+// exprCarriesTaint exposed that its *ast.BinaryExpr case, unlike
+// taintPropagatesFrom's identical case, did not restrict itself to token.ADD
+// (string concatenation) — so a boolean comparison of a tainted operand
+// (`tenantID == ""`) was treated as carrying taint even though `==` always
+// produces a bool. Fails on revert of that ADD-only guard.
+func TestAnalyzeFile_AcceptsComparisonOfTaintedValue(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "is_empty", id == "")
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for a boolean comparison of a tainted value, got: %v", findings)
+	}
+}
+
+// TestAnalyzeFile_AcceptsLenOfTaintedValue guards a false positive the #4097
+// sink-check fix surfaced repo-wide (features/controller/api/handlers_push.go,
+// handlers_tags.go): len(...) always returns an int, which cannot carry a
+// log-injection payload no matter what it counted, but exprCarriesTaint's
+// generic call-argument recursion would otherwise treat len(taintedSlice) as
+// tainted purely because one of its arguments is. Fails on revert of the
+// len(...) special case.
+func TestAnalyzeFile_AcceptsLenOfTaintedValue(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	ids := []string{mux.Vars(r)["id"]}
+	s.logger.Info("got", "count", len(ids))
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for len() of a tainted slice, got: %v", findings)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedViaRedactedID guards a false positive the
+// #4097 sink-check fix surfaced repo-wide (features/controller/api/handlers_
+// registration.go, four call sites): logging.RedactedID (pkg/logging/
+// sanitize.go) is a genuine, CodeQL-recognized sanitizer that truncates and
+// runs its result through SanitizeLogValue internally, but was missing from
+// sanitizerCalls — its production call sites were previously masked by the
+// same bug this story fixes (any unregistered wrapper silenced detection
+// identically to a real sanitizer), not actually covered by a registry entry.
+// Fails on revert of the registry addition.
+func TestAnalyzeFile_AcceptsSanitizedViaRedactedID(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "id_prefix", logging.RedactedID(id))
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Errorf("expected 0 findings for logging.RedactedID-wrapped value, got: %v", findings)
+	}
+}
+
 // TestDiscoverScope_WidensAcrossRepoLayout fails on revert: reintroducing the
 // `/api/` filter drops the non-`api` paths from the result, leaving only the
 // nested api file.

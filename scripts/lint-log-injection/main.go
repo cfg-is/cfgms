@@ -62,6 +62,18 @@ var sanitizerCalls = map[string]struct{}{
 	"SanitizeLogValue":                {}, // dot-imported case
 	"logging.SanitizeFieldsRecursive": {},
 	"SanitizeFieldsRecursive":         {}, // dot-imported case
+	// RedactedID (pkg/logging/sanitize.go) truncates and runs its result
+	// through SanitizeLogValue internally, and is CodeQL-recognized as a
+	// sanitizer for the same reason. It was never reachable through the
+	// sink-check's isTaintedExpr call before this story (issue #4097) — any
+	// unregistered wrapper silenced detection identically to a real
+	// sanitizer — so its absence here was masked rather than caught. Wiring
+	// the sink check to exprCarriesTaint surfaced every production call site
+	// (features/controller/api/handlers_registration.go) as a new finding;
+	// registering it here is the correct fix, not scope creep, since those
+	// call sites are genuinely sanitized.
+	"logging.RedactedID": {},
+	"RedactedID":         {}, // dot-imported case
 }
 
 type finding struct {
@@ -515,7 +527,17 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]
 					continue
 				}
 			}
-			if !isTaintedExpr(arg, tainted) {
+			// exprCarriesTaint, not the flatter isTaintedExpr: a call-wrapped
+			// argument whose own function name is neither a recognized
+			// sanitizer nor a recognized taint source must still be resolved
+			// by recursing into the call's own arguments (issue #4097) —
+			// isTaintedExpr's *ast.CallExpr case only asks whether the call
+			// expression itself is a taint source, so any wrapper silenced
+			// detection identically to a real sanitizer. exprCarriesTaint's
+			// own *ast.CallExpr case already short-circuits on isSanitized
+			// before recursing (see #4088), so a genuine sanitizer call still
+			// clears here.
+			if !exprCarriesTaint(arg, tainted) {
 				continue
 			}
 			// Type-aware suppression: a tainted struct's bool/int/etc. field
@@ -1153,11 +1175,37 @@ func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
 		if isSanitized(v) {
 			return false
 		}
+		if isKnownScalarBuiltinCall(v) {
+			return false
+		}
 		return anyArgTainted(v.Args, tainted)
 	case *ast.BinaryExpr:
+		// Only string concatenation (+) can carry an operand's taint into the
+		// result — a comparison (==, !=, <, ...) always produces a bool, which
+		// cannot encode a forged log record regardless of which operand it
+		// compared. Mirrors taintPropagatesFrom's identical ADD-only guard
+		// (main.go) for the same reason.
+		if v.Op != token.ADD {
+			return false
+		}
 		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
 	}
 	return false
+}
+
+// isKnownScalarBuiltinCall reports whether call is a call to a builtin or
+// stdlib function whose result is provably a non-string scalar regardless of
+// whether its arguments carry taint — len(...) always returns an int, which
+// cannot carry a CR/LF injection payload no matter what it counted. Narrow
+// and hand-picked, like isScalarType's other callers: distinguishing a
+// sanitizing wrapper from a merely non-echoing one in general (e.g.
+// strconv.Itoa, which is scalar-safe for a different reason — its result is a
+// digit string, not a pass-through of its argument) needs a broader design
+// than this story's wiring fix and is deliberately out of scope (issue #4097,
+// "Files In Scope").
+func isKnownScalarBuiltinCall(call *ast.CallExpr) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "len"
 }
 
 // isTaintSourceExpr returns true if the expression is a known HTTP taint source.
