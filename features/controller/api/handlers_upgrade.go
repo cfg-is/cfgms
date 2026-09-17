@@ -277,7 +277,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		if createErr := s.upgradeStore.CreateUpgrade(r.Context(), record); createErr != nil {
 			s.logger.Error("Failed to create upgrade record",
-				"error", createErr,
+				"error", logging.SanitizeLogValue(createErr.Error()),
 				"steward_id", logging.SanitizeLogValue(st.ID))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record upgrade", "CREATE_RECORD_ERROR")
 			return
@@ -590,7 +590,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	if createErr := s.upgradeStore.CreateUpgrade(r.Context(), record); createErr != nil {
 		s.logger.Error("Failed to create rollback upgrade record",
-			"error", createErr,
+			"error", logging.SanitizeLogValue(createErr.Error()),
 			"steward_id", logging.SanitizeLogValue(original.StewardID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record rollback upgrade", "CREATE_RECORD_ERROR")
 		return

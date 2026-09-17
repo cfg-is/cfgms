@@ -1,10 +1,19 @@
 name: lint-log-injection
 
-# BLOCKING (Issue #4086) — TEMPORARILY non-blocking via continue-on-error,
-# see the job-level comment below (Issue #4088 / follow-up #4103). Runs the
-# repo-wide log-injection linter (scripts/lint-log-injection) and fails the
-# workflow run on findings. This closes the gap where `git commit --no-verify`
-# skipped the pre-commit hook and nothing downstream noticed (Issue #4085).
+# BLOCKING (Issue #4086). Runs the repo-wide log-injection linter
+# (scripts/lint-log-injection) and fails the workflow run on findings. This
+# closes the gap where `git commit --no-verify` skipped the pre-commit hook
+# and nothing downstream noticed (Issue #4085).
+#
+# #4088 widened the taint model (method calls on tainted receivers, aliases,
+# Sprintf/concat, error-wraps regardless of variable name, struct-field
+# writes) and, as anticipated by epic #4085 ("a staged rollout may become
+# necessary here"), the widened model's repo-wide run surfaced 40 residual
+# false-positive findings. This job ran with continue-on-error: true from
+# #4088 until #4103 fixed the taint model's precision gaps (root causes A/B/C:
+# multi-return broadcast, name-keyed taint surviving a scope change, and
+# incomplete scalar-type resolution) and restored the repo to 0 findings —
+# see #4103 for the full root-cause writeup.
 #
 # Not in the branch ruleset's required-status-checks list — promoting it to a
 # required context is a separate decision, not made here (mirrors the same
@@ -39,18 +48,6 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # TEMPORARY (Issue #4088, tracked by follow-up #4103): #4088 widened the
-    # taint model (method calls on tainted receivers, aliases, Sprintf/concat,
-    # error-wraps regardless of variable name, struct-field writes) and, as
-    # anticipated by epic #4085 ("a staged rollout may become necessary
-    # here"), the widened model's repo-wide run surfaces 40 residual findings.
-    # Every one was individually traced during #4088 and confirmed a false
-    # positive (server-generated IDs, crypto-random values, fixed hardcoded
-    # vocabularies, and three named linter-precision gaps) — see the #4088 PR
-    # description and #4103 for the full numbered list and root causes. No
-    # file/rule allowlist was added; #4103 fixes the precision gaps and
-    # removes this line.
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

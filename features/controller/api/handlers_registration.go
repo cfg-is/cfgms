@@ -1015,17 +1015,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			if err := s.pendingStore.AddPending(r.Context(), pendingEntry); err != nil {
 				if releaseErr := s.registrationTokenStore.ReleaseTokenClaim(r.Context(), req.Token, claimID); releaseErr != nil {
 					s.logger.Error("Failed to release registration token claim after pending-store failure",
-						"pending_id", pendingID, "error", logging.SanitizeLogValue(releaseErr.Error()))
+						"pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(releaseErr.Error()))
 				}
 				s.logger.Error("Failed to persist pending registration",
-					"pending_id", pendingID, "steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
+					"pending_id", logging.SanitizeLogValue(pendingID), "steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
 				http.Error(w, "Registration admission service unavailable", http.StatusServiceUnavailable)
 				return
 			}
 
 			s.logger.Info("Registration quarantined by approval workflow",
 				"tenant_id", logging.SanitizeLogValue(token.TenantID),
-				"pending_id", pendingID)
+				"pending_id", logging.SanitizeLogValue(pendingID))
 			if err := s.controllerService.RegisterStewardWithAttributes(stewardID, token.TenantID, quarantineTransportAddr, "quarantined", initialAttrs); err != nil {
 				s.logger.Error("Failed to register quarantined steward in controller service",
 					"steward_id", stewardID, "error", logging.SanitizeLogValue(err.Error()))
