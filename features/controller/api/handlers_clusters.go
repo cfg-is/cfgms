@@ -386,7 +386,7 @@ func (s *Server) clusterDeclaredResources(ctx context.Context, tenantID, cluster
 	if err != nil {
 		s.logger.Warn("Failed to load cluster-policies config; create-coverage detection disabled",
 			"cluster_name", logging.SanitizeLogValue(clusterName),
-			"error", err.Error())
+			"error", logging.SanitizeLogValue(err.Error()))
 		return nil
 	}
 	if len(resources) == 0 {

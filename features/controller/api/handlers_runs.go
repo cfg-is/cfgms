@@ -171,9 +171,13 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	if err != nil {
 		return "", fmt.Errorf("controller signing roots unavailable: %w", err)
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(caPEM) {
-		return "", fmt.Errorf("controller signing roots are invalid")
+	// Build the verification pool through pkg/cert, the single construction point
+	// for CA pools in CFGMS (CLAUDE.md §Central Provider System). The helper fails
+	// closed on empty or unparseable PEM, so this can never hold an empty pool that
+	// would reject every operator chain it is asked to verify.
+	roots, err := cert.NewCertPoolFromPEM(caPEM)
+	if err != nil {
+		return "", fmt.Errorf("controller signing roots are invalid: %w", err)
 	}
 	block, _ := pem.Decode([]byte(sig.PublicKey))
 	if block == nil {
@@ -563,7 +567,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get run", "INTERNAL_ERROR")
 		return
 	}
@@ -603,7 +607,7 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
@@ -614,7 +618,7 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 
 	jobs, err := s.runManager.ListRunJobs(r.Context(), runID)
 	if err != nil {
-		s.logger.Error("Failed to list run jobs", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to list run jobs", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
@@ -653,7 +657,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to get run for cancel", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to get run for cancel", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}
@@ -677,7 +681,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusConflict, "Run is already in a terminal state", "ALREADY_TERMINAL")
 			return
 		}
-		s.logger.Error("Failed to cancel run", "run_id", logging.SanitizeLogValue(runID), "error", err)
+		s.logger.Error("Failed to cancel run", "run_id", logging.SanitizeLogValue(runID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}

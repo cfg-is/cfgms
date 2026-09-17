@@ -568,7 +568,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	// Call gRPC service
 	dnaResp, err := s.controllerService.GetStewardDNA(context.Background(), req)
 	if err != nil {
-		s.logger.Error("Failed to get steward DNA", "steward_id", stewardIDForLog, "error", err)
+		s.logger.Error("Failed to get steward DNA", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get steward DNA", "INTERNAL_ERROR")
 		return
 	}
@@ -737,7 +737,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	// Read body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.logger.Error("Failed to read request body", "error", err)
+		s.logger.Error("Failed to read request body", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Failed to read request body", "READ_ERROR")
 		return
 	}
@@ -746,7 +746,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	if strings.Contains(contentType, "yaml") || strings.Contains(contentType, "x-yaml") {
 		// YAML format (production .cfg files)
 		if err := yaml.Unmarshal(bodyBytes, &config); err != nil {
-			s.logger.Error("Failed to decode config YAML", "error", err)
+			s.logger.Error("Failed to decode config YAML", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid YAML body", "INVALID_YAML")
 			return
 		}
@@ -754,7 +754,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	} else {
 		// JSON format (legacy/backward compatibility)
 		if err := json.Unmarshal(bodyBytes, &config); err != nil {
-			s.logger.Error("Failed to decode config JSON", "error", err)
+			s.logger.Error("Failed to decode config JSON", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_YAML")
 			return
 		}
@@ -1003,7 +1003,7 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 			s.logger.Debug("Configuration not found for deletion", "steward_id", stewardIDForLog)
 			s.writeErrorResponse(w, http.StatusNotFound, "Configuration not found", "CONFIG_NOT_FOUND")
 		} else {
-			s.logger.Error("Failed to delete configuration", "steward_id", stewardIDForLog, "error", err)
+			s.logger.Error("Failed to delete configuration", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete configuration", "INTERNAL_ERROR")
 		}
 		return
@@ -1039,7 +1039,7 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if !errors.Is(err, business.ErrStewardNotFound) {
 			s.logger.Error("decommission failed: store lookup error",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+				"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up steward", "INTERNAL_ERROR")
 			return
 		}
@@ -1487,7 +1487,7 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Failed to query steward event log",
 			"steward_id", stewardIDForLog,
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query event log", "QUERY_ERROR")
 		return
@@ -1884,7 +1884,7 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 			s.logger.Debug("No effective configuration found", "steward_id", stewardIDForLog)
 			s.writeErrorResponse(w, http.StatusNotFound, "No effective configuration found for steward", "NOT_FOUND")
 		} else {
-			s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", err)
+			s.logger.Error("Failed to get effective configuration", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve effective configuration", "INTERNAL_ERROR")
 		}
 		return

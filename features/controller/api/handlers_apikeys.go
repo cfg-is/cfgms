@@ -301,7 +301,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	credentialRef := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
 	if err := s.secretStore.DeleteSecret(r.Context(), credentialRef); err != nil {
 		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
-			"error", err, "id", keyID)
+			"error", err, "id", logging.SanitizeLogValue(keyID))
 		// Continue anyway - key is removed from memory
 	}
 

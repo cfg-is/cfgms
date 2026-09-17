@@ -92,7 +92,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 
 	if err := s.blobStore.PutBlob(r.Context(), key, r.Body, blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil {
 		s.logger.Error("Failed to store installer artifact",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
@@ -106,7 +106,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 	rc, storedMeta, err := s.blobStore.GetBlob(r.Context(), key)
 	if err != nil {
 		s.logger.Error("Failed to retrieve stored artifact metadata",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve artifact metadata", "METADATA_ERROR")
@@ -207,7 +207,7 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		s.logger.Error("Failed to get installer artifact",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get artifact", "GET_ERROR")
@@ -263,7 +263,7 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 
 	if err := s.blobStore.DeleteBlob(r.Context(), key); err != nil {
 		s.logger.Error("Failed to delete installer artifact",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"platform", logging.SanitizeLogValue(platform),
 			"arch", logging.SanitizeLogValue(arch))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete artifact", "DELETE_ERROR")
@@ -369,7 +369,7 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 			s.writeErrorResponse(w, http.StatusRequestEntityTooLarge, "Installer artifact too large", "ARTIFACT_TOO_LARGE")
 		default:
 			s.logger.Error("Failed to build installer artifact for public download",
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 				"platform", logging.SanitizeLogValue(platform),
 				"arch", logging.SanitizeLogValue(arch))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build install package", "BUILD_ERROR")

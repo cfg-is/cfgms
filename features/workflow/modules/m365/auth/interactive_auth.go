@@ -351,7 +351,7 @@ func (ia *InteractiveAuthenticator) getUserInfo(ctx context.Context, token *Acce
 	roles, err := ia.getUserRoles(ctx, token)
 	if err != nil {
 		// Log warning but don't fail - roles are nice-to-have
-		ia.logger.Warn("could not retrieve user roles", "error", err)
+		ia.logger.Warn("could not retrieve user roles", "error", logging.SanitizeLogValue(err.Error()))
 		roles = []string{}
 	}
 

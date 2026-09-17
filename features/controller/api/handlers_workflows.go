@@ -441,7 +441,7 @@ func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Requ
 		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
 		safeErrStr := ""
 		if err != nil {
-			safeErrStr = err.Error()
+			safeErrStr = logging.SanitizeLogValue(err.Error())
 			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
 			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
 		}
@@ -504,7 +504,7 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
 		safeErrStr := ""
 		if err != nil {
-			safeErrStr = err.Error()
+			safeErrStr = logging.SanitizeLogValue(err.Error())
 			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
 			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
 		}
@@ -537,7 +537,8 @@ func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.R
 	}
 
 	if cancelErr := h.engine.CancelExecution(execID); cancelErr != nil {
-		h.logger.Error("Failed to cancel execution", "name", nameForLog, "exec_id", execIDForLog, "error", cancelErr)
+		h.logger.Error("Failed to cancel execution", "name", nameForLog, "exec_id", execIDForLog,
+			"error", logging.SanitizeLogValue(cancelErr.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to cancel execution")
 		return
 	}
