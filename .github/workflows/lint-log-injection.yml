@@ -15,6 +15,14 @@ name: lint-log-injection
 # incomplete scalar-type resolution) and restored the repo to 0 findings —
 # see #4103 for the full root-cause writeup.
 #
+# #4109 then widened the taint SOURCE model (the two-step `mux.Vars` idiom and
+# helper-extracted path variables). Its repo-wide run surfaced 29 further
+# findings; all 29 were resolved in #4109 itself — 27 by sanitizing the logged
+# value, and two (`req.Cols`/`req.Rows`, both `int`) by teaching the linter to
+# resolve a parameter's declared type so its existing non-string scalar
+# suppression applies. The repo is back to 0 findings and this job stays fully
+# blocking: no continue-on-error, no file or rule allowlist.
+#
 # Not in the branch ruleset's required-status-checks list — promoting it to a
 # required context is a separate decision, not made here (mirrors the same
 # point recorded in golangci-lint.yml for #3442).

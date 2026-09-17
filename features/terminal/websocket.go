@@ -126,7 +126,7 @@ func (h *DefaultWebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http
 	// Upgrade HTTP connection to WebSocket
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		h.logger.Error("Failed to upgrade WebSocket connection", "error", err, "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
+		h.logger.Error("Failed to upgrade WebSocket connection", "error", logging.SanitizeLogValue(err.Error()), "remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 		return
 	}
 	defer func() {
@@ -279,7 +279,7 @@ func (h *DefaultWebSocketHandler) readMessages(ctx context.Context, cw *connWrit
 			err := conn.ReadJSON(&msg)
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					h.logger.Warn("WebSocket read error", "session_id", logging.RedactedID(session.ID), "error", err)
+					h.logger.Warn("WebSocket read error", "session_id", logging.RedactedID(session.ID), "error", logging.SanitizeLogValue(err.Error()))
 				}
 				return
 			}
@@ -357,6 +357,6 @@ func (h *DefaultWebSocketHandler) sendError(cw *connWriter, errorMsg string) {
 	}
 
 	if err := cw.writeJSON(msg); err != nil {
-		h.logger.Warn("Failed to send error message", "error", err)
+		h.logger.Warn("Failed to send error message", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }

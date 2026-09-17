@@ -101,7 +101,7 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 	// Store the new token
 	if err := p.credentialStore.StoreToken(tenantID, token); err != nil {
 		// Log warning but don't fail - we can still return the token
-		p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", err)
+		p.logger.Warn("failed to store token", "tenant_id", logging.SanitizeLogValue(tenantID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Cache the token
@@ -258,7 +258,7 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 		p.logger.Warn("failed to store delegated token",
 			"user_id", logging.SanitizeLogValue(userContext.UserID),
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Store updated user context
@@ -266,7 +266,7 @@ func (p *OAuth2Provider) RefreshDelegatedToken(ctx context.Context, refreshToken
 		p.logger.Warn("failed to store user context",
 			"user_id", logging.SanitizeLogValue(userContext.UserID),
 			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Cache the token

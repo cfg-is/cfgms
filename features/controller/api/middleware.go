@@ -1525,7 +1525,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				"subject_id", userID,
 				"assurance_sufficient", principal.Assurance >= session.AssuranceBasic,
 				"permission_id", permissionID,
-				"resource", resource,
+				"resource", logging.SanitizeLogValue(resource),
 			)
 
 			// Audit the authorization decision

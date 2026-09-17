@@ -241,7 +241,7 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("Ring health query failed for rollout status; reporting metrics as unavailable",
 				"rollout_id", logging.SanitizeLogValue(rolloutID),
 				"ring", logging.SanitizeLogValue(record.CurrentRing),
-				"error", qErr)
+				"error", logging.SanitizeLogValue(qErr.Error()))
 			resp.HealthMetricsError = "ring health metrics are unavailable: the fleet query failed"
 		} else {
 			total := onVersion + failed + pending

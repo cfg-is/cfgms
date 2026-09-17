@@ -435,7 +435,10 @@ func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Credential renewed",
 		"account_id", logging.SanitizeLogValue(boundAcct.ID),
 		"old_serial", logging.SanitizeLogValue(principal.CertSerial),
-		"new_serial", issued.SerialNumber,
+		// Serial of the cert this call just issued — produced by the CA, never
+		// caller input. Wrapped to match every other field in this record and
+		// so the gate stays green without an allowlist.
+		"new_serial", logging.SanitizeLogValue(issued.SerialNumber),
 		"old_serial_cleaned_up", oldSerialCleanedUp)
 	s.emitAccountAudit(r.Context(), "account.cert_binding.renewed", boundAcct.TenantID, principal.ID, boundAcct.Username,
 		map[string]interface{}{
