@@ -256,7 +256,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to retrieve batch job",
-			"job_id", logging.SanitizeLogValue(jobID), "error", err)
+			"job_id", logging.SanitizeLogValue(jobID), "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve job", "INTERNAL_ERROR")
 		return
 	}

@@ -218,7 +218,7 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode compliance status response", "error", err)
+		s.logger.Error("Failed to encode compliance status response", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -321,7 +321,7 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode compliance report response", "error", err)
+		s.logger.Error("Failed to encode compliance report response", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}

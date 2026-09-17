@@ -95,7 +95,7 @@ func (api *APIHandler) handleListTriggers(w http.ResponseWriter, r *http.Request
 
 	triggers, err := api.triggerManager.ListTriggers(ctx, filter)
 	if err != nil {
-		logger.ErrorCtx(ctx, "Failed to list triggers", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to list triggers", "error", logging.SanitizeLogValue(err.Error()))
 		api.sendErrorResponse(w, http.StatusInternalServerError, "Failed to list triggers", err)
 		return
 	}

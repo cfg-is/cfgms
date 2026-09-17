@@ -991,6 +991,185 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TestAnalyzeFile_FlagsTwoStepMuxVarsIdiom covers issue #4109 AC1: the
+// two-step idiom (`vars := mux.Vars(r); id := vars["id"]`) is the majority
+// form in this repo (91 occurrences under features/ vs. 65 for the inline
+// `mux.Vars(r)["id"]` form), but isTaintSourceExpr's *ast.IndexExpr case only
+// ever matched the inline form (X being the mux.Vars(r) call itself), not an
+// IndexExpr on an already-tainted identifier. Fails on revert: without the
+// tainted-identifier check on IndexExpr.X, `vars` is tainted (mux.Vars(r)
+// itself is a recognized source) but `vars["id"]` is not, and id never enters
+// the tainted set — this drops to 0 findings.
+func TestAnalyzeFile_FlagsTwoStepMuxVarsIdiom(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	s.logger.Info("got", "id", id)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"id"`) {
+		t.Errorf("expected id to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedTwoStepMuxVarsIdiom is the negative half of
+// AC1: the documented remedy must still clear the finding once the source
+// model recognizes the two-step idiom, or the rule becomes unsatisfiable for
+// the majority form in this repo.
+func TestAnalyzeFile_AcceptsSanitizedTwoStepMuxVarsIdiom(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	s.logger.Info("got", "id", logging.SanitizeLogValue(id))
+}
+`
+	if findings := analyzeSnippet(t, src); len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %v", findings)
+	}
+}
+
+// TestAnalyzeFile_FlagsTriggerAPITwoStepShape is the AC3 revert-proof anchor.
+// It mirrors the exact shape that lived at
+// features/workflow/trigger/api.go:319 at the time this issue was filed
+// (`vars := mux.Vars(r); triggerID := vars["id"]`, logged bare). That specific
+// call site was independently sanitized by issue #4089 (merged the same day,
+// commit ad4f1ad8) before this story landed, so a live repo-wide run no
+// longer reports it — the vulnerability there is already fixed. This fixture
+// keeps the AC's guarantee checkable anyway: if AC1's two-step recognition is
+// ever reverted, this drops to 0 findings.
+func TestAnalyzeFile_FlagsTriggerAPITwoStepShape(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ InfoCtx(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	triggerID := vars["id"]
+	s.logger.InfoCtx("Trigger executed successfully via API", "trigger_id", triggerID)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"triggerID"`) {
+		t.Errorf("expected triggerID to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzePackage_FlagsValueFromHelperReadingTaintSource covers issue
+// #4109 AC2: extractSessionID in features/workflow/debug_api.go reads
+// r.URL.Path (already a recognized taint source) and returns a path segment,
+// with no tainted parameter of its own — the caller's variable must still be
+// seeded as tainted. Fails on revert of funcReturnsTaint: analyzeFunc has no
+// way to know a same-package call's result is intrinsically tainted, and
+// sessionID never enters the tainted set, dropping this to 0 findings.
+func TestAnalyzePackage_FlagsValueFromHelperReadingTaintSource(t *testing.T) {
+	a := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	sessionID := extractSessionID(r)
+	s.logger.Info("got", "session_id", sessionID)
+}
+`
+	b := `package api
+import "net/http"
+import "strings"
+func extractSessionID(r *http.Request) string {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "sessions" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "sessionID") {
+		t.Errorf("expected sessionID to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzePackage_AcceptsSanitizedValueFromHelper is the negative half of
+// AC2: sanitizing the helper's result at the log call site must still clear
+// the finding.
+func TestAnalyzePackage_AcceptsSanitizedValueFromHelper(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/cfgis/cfgms/pkg/logging"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	sessionID := extractSessionID(r)
+	s.logger.Info("got", "session_id", logging.SanitizeLogValue(sessionID))
+}
+`
+	b := `package api
+import "net/http"
+import "strings"
+func extractSessionID(r *http.Request) string {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i, p := range parts {
+		if p == "sessions" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_HelperNotCallingTaintSourceNotFlagged guards against an
+// over-broad funcReturnsTaint implementation ("any same-package function
+// return is tainted"): a helper that returns a plain static computation must
+// not taint its callers.
+func TestAnalyzePackage_HelperNotCallingTaintSourceNotFlagged(t *testing.T) {
+	a := `package api
+import "net/http"
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	label := describeStatus()
+	s.logger.Info("got", "label", label)
+}
+`
+	b := `package api
+func describeStatus() string {
+	return "static-label"
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
 func analyzeSnippet(t *testing.T, src string) []finding {
 	t.Helper()
 	dir := t.TempDir()
@@ -1485,5 +1664,86 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if !strings.Contains(findings[0].msg, `"q"`) {
 		t.Errorf("expected q to be the one flagged, not page.Total, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzePackage_SuppressesScalarFieldOfTaintedParameter covers the
+// parameter half of collectVarTypes' type resolution. A parameter's type is
+// written out in the signature, but collectVarTypes only walked the body, so
+// `param.Field` could never resolve and analyzeFunc's non-string scalar
+// suppression never applied to it. features/terminal's newSession is the
+// motivating shape: a caller builds a *SessionRequest carrying a tainted
+// string, which taints the whole parameter, and the handler then logs the
+// request's Cols/Rows — both `int`, neither able to carry a forged log
+// record, and neither sanitizable (SanitizeLogValue takes a string). Shell,
+// the string field on the same tainted parameter, must still flag.
+// Fails on revert: without parameter types recorded, this reports 3 findings
+// instead of 1.
+func TestAnalyzePackage_SuppressesScalarFieldOfTaintedParameter(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type SessionRequest struct {
+	Shell string
+	Cols  int
+	Rows  int
+}
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	req := &SessionRequest{Shell: mux.Vars(r)["shell"]}
+	s.newSession(req)
+}
+`
+	b := `package api
+func (s *S) newSession(req *SessionRequest) {
+	s.logger.Info("created", "shell", req.Shell, "cols", req.Cols, "rows", req.Rows)
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding (req.Shell only; Cols/Rows are ints), got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, `"req.Shell"`) {
+		t.Errorf("expected req.Shell to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzePackage_ScalarFieldSuppressionSkipsShadowedParameter guards the
+// parameter-type recording against the shadowing case collectVarTypes'
+// flat walk cannot distinguish. `req` names the pointer parameter in the
+// signature and a different, locally-built struct inside the if block, so its
+// type is ambiguous within the function — record demotes it to unknown and
+// both selectors stay flagged rather than silently inheriting the signature's
+// type and being suppressed.
+func TestAnalyzePackage_ScalarFieldSuppressionSkipsShadowedParameter(t *testing.T) {
+	a := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type SessionRequest struct {
+	Cols int
+}
+type Other struct {
+	Cols string
+}
+type S struct{ logger logger }
+type logger interface{ Info(string, ...any) }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	req := &SessionRequest{Cols: len(mux.Vars(r)["cols"])}
+	s.newSession(req, mux.Vars(r)["raw"])
+}
+`
+	b := `package api
+func (s *S) newSession(req *SessionRequest, raw string) {
+	s.logger.Info("first", "cols", req.Cols)
+	if raw != "" {
+		req := Other{Cols: raw}
+		s.logger.Info("second", "cols", req.Cols)
+	}
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": a, "b.go": b})
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (ambiguous req type suppresses nothing), got %d: %v", len(findings), findings)
 	}
 }

@@ -318,7 +318,7 @@ func (s *Server) handleGetScriptExecutions(w http.ResponseWriter, r *http.Reques
 	fetchLimit := limit + offset
 	records, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, fetchLimit)
 	if err != nil {
-		s.logger.Error("Failed to query script executions", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to query script executions", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve executions", "INTERNAL_ERROR")
 		return
 	}
@@ -388,7 +388,7 @@ func (s *Server) handleGetScriptExecution(w http.ResponseWriter, r *http.Request
 	// 0 = no limit: scan all records for this device to locate the execution.
 	records, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, 0)
 	if err != nil {
-		s.logger.Error("Failed to query script executions", "steward_id", sanitizedStewardID, "error", err)
+		s.logger.Error("Failed to query script executions", "steward_id", sanitizedStewardID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve execution", "INTERNAL_ERROR")
 		return
 	}
@@ -430,7 +430,7 @@ func (s *Server) handleGetScriptMetrics(w http.ResponseWriter, r *http.Request) 
 
 	aggregated, err := s.scriptAuditLogger.GetExecutionMetrics(stewardID, since)
 	if err != nil {
-		s.logger.Error("Failed to get script metrics", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to get script metrics", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve metrics", "INTERNAL_ERROR")
 		return
 	}
@@ -480,7 +480,7 @@ func (s *Server) handleGetScriptStatus(w http.ResponseWriter, r *http.Request) {
 	// Most-recent completed execution provides the "last execution" summary.
 	recent, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, 1)
 	if err != nil {
-		s.logger.Error("Failed to get script status", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to get script status", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve script status", "INTERNAL_ERROR")
 		return
 	}

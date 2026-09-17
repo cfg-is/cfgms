@@ -190,7 +190,7 @@ func analyzeFile(path string) ([]finding, error) {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		findings = append(findings, analyzeFunc(fset, fn, structFields, nil, nil)...)
+		findings = append(findings, analyzeFunc(fset, fn, structFields, nil, nil, nil)...)
 	}
 	return findings, nil
 }
@@ -254,13 +254,90 @@ func analyzePackage(paths []string) ([]finding, error) {
 	}
 
 	funcResults := collectFuncResultTypes(funcs)
-	paramTaint := resolveParameterTaint(funcs, funcResults)
+	funcReturnsTaint := collectFuncReturnsTaint(funcs, funcResults)
+	paramTaint := resolveParameterTaint(funcs, funcResults, funcReturnsTaint)
 
 	var findings []finding
 	for _, fn := range order {
-		findings = append(findings, analyzeFunc(fset, fn, structFields, paramTaint[fn.Name.Name], funcResults)...)
+		findings = append(findings, analyzeFunc(fset, fn, structFields, paramTaint[fn.Name.Name], funcResults, funcReturnsTaint)...)
 	}
 	return findings, nil
+}
+
+// funcReturnsTaintRounds bounds collectFuncReturnsTaint's fixed point the
+// same way funcParamTaintRounds bounds resolveParameterTaint's: a helper that
+// itself calls another taint-returning helper needs one extra round per hop
+// to see that transitively, and five is far beyond any real same-package
+// helper chain depth.
+const funcReturnsTaintRounds = 5
+
+// collectFuncReturnsTaint computes, for each function in the resolution
+// unit, whether calling it can yield a tainted value (issue #4109 AC2). A
+// helper that itself reads a taint source (e.g. mux.Vars(r), r.URL.Path) and
+// returns the result taints its callers even when the caller supplies no
+// tainted argument of its own — extractSessionID in
+// features/workflow/debug_api.go is the motivating shape: it takes
+// *http.Request, not a tainted string, and derives its return value entirely
+// from reading the request itself.
+//
+// Each function's body is analyzed in isolation (collectTaintedVars is
+// seeded with nil, not any caller-supplied parameter taint): the property
+// being computed here is intrinsic to the function, not derived from what
+// any one caller happens to pass in.
+//
+// The result is a plain map[string]bool, not positional per return value.
+// This is a deliberate simplification, consistent with this file's existing
+// bias toward over-approximation (see resolveParameterTaint's doc comment):
+// a multi-return helper with any tainted return position taints its name
+// entirely, which can over-flag an unrelated sibling result on a multi-value
+// assignment. No shape in scope for this story produces that case — pin
+// positional precision then, if it's ever needed.
+func collectFuncReturnsTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string) map[string]bool {
+	funcReturnsTaint := map[string]bool{}
+	// Sorted iteration for the same reason resolveParameterTaint sorts:
+	// deterministic convergence for a linter whose tests assert exact
+	// findings.
+	names := make([]string, 0, len(funcs))
+	for name := range funcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for round := 0; round < funcReturnsTaintRounds; round++ {
+		changed := false
+		for _, name := range names {
+			if funcReturnsTaint[name] {
+				continue
+			}
+			fn := funcs[name]
+			tainted := collectTaintedVars(fn.Body, nil, receiverName(fn), funcResults, funcReturnsTaint)
+			returnsTaint := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if returnsTaint {
+					return false
+				}
+				ret, ok := n.(*ast.ReturnStmt)
+				if !ok {
+					return true
+				}
+				for _, res := range ret.Results {
+					if exprCarriesTaint(res, tainted, funcReturnsTaint) {
+						returnsTaint = true
+						return false
+					}
+				}
+				return true
+			})
+			if returnsTaint {
+				funcReturnsTaint[name] = true
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return funcReturnsTaint
 }
 
 // collectFuncResultTypes records, for every function in the resolution unit,
@@ -343,7 +420,7 @@ const funcParamTaintRounds = 5
 // Findings behind an ambiguous name remain the caller's responsibility to
 // catch by review. Unambiguous names keep the conservative bias described
 // above: those over-approximations only add findings a human must dismiss.
-func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string) map[string]map[string]struct{} {
+func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string, funcReturnsTaint map[string]bool) map[string]map[string]struct{} {
 	paramTaint := map[string]map[string]struct{}{}
 	// Iterate a sorted name list, not the map: Go randomizes map iteration
 	// order per run, which would make the bounded fixed point's per-round
@@ -361,7 +438,7 @@ func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[strin
 		localTainted := map[string]map[string]struct{}{}
 		for _, name := range names {
 			fn := funcs[name]
-			localTainted[name] = collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults)
+			localTainted[name] = collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults, funcReturnsTaint)
 		}
 
 		changed := false
@@ -390,7 +467,7 @@ func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[strin
 					if _, already := paramTaint[calleeName][pname]; already {
 						continue
 					}
-					if exprCarriesTaint(arg, caller) {
+					if exprCarriesTaint(arg, caller, funcReturnsTaint) {
 						paramTaint[calleeName][pname] = struct{}{}
 						changed = true
 					}
@@ -501,8 +578,8 @@ func isScalarType(typ string) bool {
 // a taint-source assignment would. funcResults is the resolution unit's
 // result-type registry (nil when fn is analyzed in isolation), used only to
 // pin local variable types for scalar suppression.
-func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string, paramTaint map[string]struct{}, funcResults map[string][]string) []finding {
-	tainted := collectTaintedVars(fn.Body, paramTaint, receiverName(fn), funcResults)
+func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string, paramTaint map[string]struct{}, funcResults map[string][]string, funcReturnsTaint map[string]bool) []finding {
+	tainted := collectTaintedVars(fn.Body, paramTaint, receiverName(fn), funcResults, funcReturnsTaint)
 	varTypes := collectVarTypes(fn, funcResults)
 
 	var findings []finding
@@ -537,7 +614,11 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]
 			// own *ast.CallExpr case already short-circuits on isSanitized
 			// before recursing (see #4088), so a genuine sanitizer call still
 			// clears here.
-			if !exprCarriesTaint(arg, tainted) {
+			//
+			// funcReturnsTaint threaded through per #4109: a helper that reads
+			// a path variable and returns it is a taint source in its own
+			// right, and exprCarriesTaint needs that map to recognize one.
+			if !exprCarriesTaint(arg, tainted, funcReturnsTaint) {
 				continue
 			}
 			// Type-aware suppression: a tainted struct's bool/int/etc. field
@@ -572,12 +653,24 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]
 
 // collectVarTypes returns a function-scoped map from variable name to its
 // declared type name. Only patterns that pin a type unambiguously are
-// recorded: `var x T`, `x := T{...}`, `x := <untyped literal>`, and a
-// short-decl whose right-hand side is a call to a function in the same
-// resolution unit (`n, err := s.countThings(...)` → n is that function's
-// first result type). Cross-package types remain dotted (`pkg.T`) —
-// collectStructFields keys on simple names, so they won't match and the
-// linter stays conservative on imports.
+// recorded: the function's own parameters (`func f(req *SessionRequest)`),
+// `var x T`, `x := T{...}`, `x := <untyped literal>`, and a short-decl whose
+// right-hand side is a call to a function in the same resolution unit
+// (`n, err := s.countThings(...)` → n is that function's first result type).
+// Cross-package types remain dotted (`pkg.T`) — collectStructFields keys on
+// simple names, so they won't match and the linter stays conservative on
+// imports.
+//
+// A parameter's type is the most reliable binding there is: it is written out
+// in the signature, so no inference is involved. Omitting it left every
+// `param.Field` selector unresolvable, which is what made the scalar
+// suppression in analyzeFunc miss `req.Cols`/`req.Rows` (both `int` in
+// features/terminal) once a same-package caller marked `req` tainted — an int
+// cannot encode a forged log record, and SanitizeLogValue takes a string, so
+// there is no sanitizer to apply at such a call site. Pointer parameters
+// record the pointed-to type name (`*SessionRequest` → `SessionRequest`)
+// because Go auto-dereferences field selection and collectStructFields keys
+// on the bare struct name.
 //
 // A name that resolves to two different types within the function (a
 // shadowing re-declaration in a nested scope, which this flat walk cannot
@@ -603,6 +696,17 @@ func collectVarTypes(fn *ast.FuncDecl, funcResults map[string][]string) map[stri
 			return
 		}
 		out[name] = typ
+	}
+
+	// Parameters first, so a body binding that shadows a parameter name still
+	// demotes the entry to unknown via record's ambiguity rule.
+	if fn.Type != nil && fn.Type.Params != nil {
+		for _, field := range fn.Type.Params.List {
+			typ := exprString(derefType(field.Type))
+			for _, name := range field.Names {
+				record(name.Name, typ)
+			}
+		}
 	}
 
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -810,7 +914,7 @@ func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structF
 // samePackageResultTypes) so a multi-return call site can tell its error
 // return apart from an unrelated sibling; both may be zero-valued when that
 // resolution isn't available (e.g. analyzeFile's isolated, no-package view).
-func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, funcResults map[string][]string) map[string]struct{} {
+func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, funcResults map[string][]string, funcReturnsTaint map[string]bool) map[string]struct{} {
 	tainted := map[string]struct{}{}
 	for name := range seed {
 		tainted[name] = struct{}{}
@@ -925,7 +1029,7 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 				if argTaintEligible != nil {
 					allowArgTaint = argTaintEligible[idx]
 				}
-				derived := taintPropagatesFrom(rhs, tainted, allowArgTaint)
+				derived := taintPropagatesFrom(rhs, tainted, allowArgTaint, funcReturnsTaint)
 
 				switch l := lhs.(type) {
 				case *ast.SelectorExpr:
@@ -1053,8 +1157,8 @@ func plausibleErrorReturnIndices(lhs []ast.Expr, call *ast.CallExpr, recv string
 // multi-value assignment from one call, collectTaintedVars sets it per LHS
 // position via plausibleErrorReturnIndices, so an argument's taint doesn't
 // broadcast to every sibling result (root cause A).
-func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}, allowArgTaint bool) bool {
-	if isTaintedExpr(rhs, tainted) {
+func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}, allowArgTaint bool, funcReturnsTaint map[string]bool) bool {
+	if isTaintedExpr(rhs, tainted, funcReturnsTaint) {
 		return true
 	}
 	switch v := unparen(rhs).(type) {
@@ -1065,16 +1169,16 @@ func taintPropagatesFrom(rhs ast.Expr, tainted map[string]struct{}, allowArgTain
 		if !allowArgTaint {
 			return false
 		}
-		return anyArgTainted(v.Args, tainted)
+		return anyArgTainted(v.Args, tainted, funcReturnsTaint)
 	case *ast.BinaryExpr:
 		if v.Op != token.ADD {
 			return false
 		}
-		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
+		return exprCarriesTaint(v.X, tainted, funcReturnsTaint) || exprCarriesTaint(v.Y, tainted, funcReturnsTaint)
 	case *ast.CompositeLit:
-		return exprCarriesTaint(v, tainted)
+		return exprCarriesTaint(v, tainted, funcReturnsTaint)
 	case *ast.UnaryExpr:
-		return exprCarriesTaint(v, tainted)
+		return exprCarriesTaint(v, tainted, funcReturnsTaint)
 	}
 	return false
 }
@@ -1138,36 +1242,36 @@ func transmitsWithoutEchoing(call *ast.CallExpr) bool {
 // anyArgTainted reports whether any argument carries tainted data, looking
 // through the wrappers a request argument is normally built with: `&pb.Req{...}`,
 // a composite literal's field values, and nested calls like `proto.String(id)`.
-func anyArgTainted(args []ast.Expr, tainted map[string]struct{}) bool {
+func anyArgTainted(args []ast.Expr, tainted map[string]struct{}, funcReturnsTaint map[string]bool) bool {
 	for _, a := range args {
-		if exprCarriesTaint(a, tainted) {
+		if exprCarriesTaint(a, tainted, funcReturnsTaint) {
 			return true
 		}
 	}
 	return false
 }
 
-func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
+func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}, funcReturnsTaint map[string]bool) bool {
 	if e == nil {
 		return false
 	}
-	if isTaintedExpr(e, tainted) {
+	if isTaintedExpr(e, tainted, funcReturnsTaint) {
 		return true
 	}
 	switch v := e.(type) {
 	case *ast.UnaryExpr:
-		return exprCarriesTaint(v.X, tainted)
+		return exprCarriesTaint(v.X, tainted, funcReturnsTaint)
 	case *ast.ParenExpr:
-		return exprCarriesTaint(v.X, tainted)
+		return exprCarriesTaint(v.X, tainted, funcReturnsTaint)
 	case *ast.CompositeLit:
 		for _, el := range v.Elts {
 			if kv, ok := el.(*ast.KeyValueExpr); ok {
-				if exprCarriesTaint(kv.Value, tainted) {
+				if exprCarriesTaint(kv.Value, tainted, funcReturnsTaint) {
 					return true
 				}
 				continue
 			}
-			if exprCarriesTaint(el, tainted) {
+			if exprCarriesTaint(el, tainted, funcReturnsTaint) {
 				return true
 			}
 		}
@@ -1178,7 +1282,7 @@ func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
 		if isKnownScalarBuiltinCall(v) {
 			return false
 		}
-		return anyArgTainted(v.Args, tainted)
+		return anyArgTainted(v.Args, tainted, funcReturnsTaint)
 	case *ast.BinaryExpr:
 		// Only string concatenation (+) can carry an operand's taint into the
 		// result — a comparison (==, !=, <, ...) always produces a bool, which
@@ -1188,7 +1292,7 @@ func exprCarriesTaint(e ast.Expr, tainted map[string]struct{}) bool {
 		if v.Op != token.ADD {
 			return false
 		}
-		return exprCarriesTaint(v.X, tainted) || exprCarriesTaint(v.Y, tainted)
+		return exprCarriesTaint(v.X, tainted, funcReturnsTaint) || exprCarriesTaint(v.Y, tainted, funcReturnsTaint)
 	}
 	return false
 }
@@ -1235,7 +1339,14 @@ func isTaintSourceExpr(e ast.Expr) bool {
 
 // isTaintedExpr returns true if the expression evaluates to user-controlled data
 // AND is not wrapped in a sanitizer.
-func isTaintedExpr(e ast.Expr, tainted map[string]struct{}) bool {
+//
+// funcReturnsTaint (issue #4109 AC2) names same-package functions whose
+// return value can be intrinsically tainted — a helper that itself reads a
+// taint source, independent of whatever the caller happens to pass in (see
+// collectFuncReturnsTaint). May be nil, matching every other funcResults-style
+// parameter in this file, for callers with no package-level resolution unit
+// (e.g. analyzeFile's isolated, single-file view).
+func isTaintedExpr(e ast.Expr, tainted map[string]struct{}, funcReturnsTaint map[string]bool) bool {
 	if isSanitized(e) {
 		return false
 	}
@@ -1264,9 +1375,30 @@ func isTaintedExpr(e ast.Expr, tainted map[string]struct{}) bool {
 		if isMethodCallOnTaintedReceiver(v, tainted) {
 			return true
 		}
+		// A call to a same-package function whose own return value is
+		// intrinsically tainted (issue #4109 AC2), matched by name alone —
+		// the same over-approximate, no-receiver-type-checking convention
+		// resolveParameterTaint's calleeFuncName already uses for same-package
+		// call resolution in this AST-only linter.
+		if name := calleeFuncName(v.Fun); name != "" && funcReturnsTaint[name] {
+			return true
+		}
 	case *ast.IndexExpr:
 		if isTaintSourceExpr(v) {
 			return true
+		}
+		// The two-step mux.Vars idiom (issue #4109 AC1): `vars := mux.Vars(r)`
+		// taints vars via the unified propagation pass in collectTaintedVars
+		// (mux.Vars(r) itself is a recognized *ast.CallExpr taint source), but
+		// `vars["id"]` was invisible here because isTaintSourceExpr only ever
+		// matched an IndexExpr whose X is the source call itself, never an
+		// IndexExpr on an already-tainted identifier. Indexing into a tainted
+		// map/slice yields a tainted result regardless of what taints the
+		// container, so this isn't specific to mux.Vars.
+		if id, ok := v.X.(*ast.Ident); ok {
+			if _, t := tainted[id.Name]; t {
+				return true
+			}
 		}
 	}
 	return false
@@ -1328,6 +1460,18 @@ func selectorString(e ast.Expr) string {
 		return left + "." + v.Sel.Name
 	}
 	return ""
+}
+
+// derefType strips a single pointer indirection from a type expression, so a
+// `*T` parameter records the same bare type name a `T` parameter would.
+// Anything else — including `**T`, which no signature in this repo uses —
+// is returned unchanged and resolves to a name no struct registry holds,
+// keeping the caller conservative.
+func derefType(e ast.Expr) ast.Expr {
+	if star, ok := e.(*ast.StarExpr); ok {
+		return star.X
+	}
+	return e
 }
 
 // exprString is a small printer for diagnostic messages.

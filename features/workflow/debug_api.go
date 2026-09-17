@@ -94,7 +94,7 @@ func (api *DebugAPI) GetDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	session, err := api.debugEngine.GetDebugSession(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to get debug session", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to get debug session", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to get debug session: %v", err), http.StatusNotFound)
 		return
 	}
@@ -136,12 +136,12 @@ func (api *DebugAPI) StopDebugSession(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.StopDebugSession(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to stop debug session", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to stop debug session", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to stop debug session: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Stopped debug session via API", "session_id", sessionID)
+	api.logger.Info("Stopped debug session via API", "session_id", logging.SanitizeLogValue(sessionID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -181,12 +181,12 @@ func (api *DebugAPI) StepExecution(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.StepExecution(sessionID, req.Action)
 	if err != nil {
-		api.logger.Error("Failed to execute debug step", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "action", logging.SanitizeLogValue(string(req.Action)))
+		api.logger.Error("Failed to execute debug step", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "action", logging.SanitizeLogValue(string(req.Action)))
 		http.Error(w, fmt.Sprintf("Failed to execute debug step: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Executed debug step via API", "session_id", sessionID, "action", logging.SanitizeLogValue(string(req.Action)))
+	api.logger.Info("Executed debug step via API", "session_id", logging.SanitizeLogValue(sessionID), "action", logging.SanitizeLogValue(string(req.Action)))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -220,12 +220,12 @@ func (api *DebugAPI) SetBreakpoint(w http.ResponseWriter, r *http.Request) {
 
 	breakpoint, err := api.debugEngine.SetBreakpoint(sessionID, req.StepName, req.Condition)
 	if err != nil {
-		api.logger.Error("Failed to set breakpoint", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "step_name", logging.SanitizeLogValue(req.StepName))
+		api.logger.Error("Failed to set breakpoint", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "step_name", logging.SanitizeLogValue(req.StepName))
 		http.Error(w, fmt.Sprintf("Failed to set breakpoint: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Set breakpoint via API", "session_id", sessionID, "breakpoint_id", breakpoint.ID, "step_name", logging.SanitizeLogValue(req.StepName))
+	api.logger.Info("Set breakpoint via API", "session_id", logging.SanitizeLogValue(sessionID), "breakpoint_id", breakpoint.ID, "step_name", logging.SanitizeLogValue(req.StepName))
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(breakpoint); err != nil {
@@ -245,7 +245,7 @@ func (api *DebugAPI) ListBreakpoints(w http.ResponseWriter, r *http.Request) {
 
 	breakpoints, err := api.debugEngine.ListBreakpoints(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to list breakpoints", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to list breakpoints", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to list breakpoints: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -276,12 +276,12 @@ func (api *DebugAPI) RemoveBreakpoint(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.RemoveBreakpoint(sessionID, breakpointID)
 	if err != nil {
-		api.logger.Error("Failed to remove breakpoint", "error", err, "session_id", sessionID, "breakpoint_id", breakpointID)
+		api.logger.Error("Failed to remove breakpoint", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "breakpoint_id", logging.SanitizeLogValue(breakpointID))
 		http.Error(w, fmt.Sprintf("Failed to remove breakpoint: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Removed breakpoint via API", "session_id", sessionID, "breakpoint_id", breakpointID)
+	api.logger.Info("Removed breakpoint via API", "session_id", logging.SanitizeLogValue(sessionID), "breakpoint_id", logging.SanitizeLogValue(breakpointID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -297,7 +297,7 @@ func (api *DebugAPI) InspectVariables(w http.ResponseWriter, r *http.Request) {
 
 	variables, err := api.debugEngine.InspectVariables(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to inspect variables", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to inspect variables", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to inspect variables: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -340,12 +340,12 @@ func (api *DebugAPI) UpdateVariable(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.UpdateVariable(sessionID, variableName, req.Value)
 	if err != nil {
-		api.logger.Error("Failed to update variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "variable_name", variableName)
+		api.logger.Error("Failed to update variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 		http.Error(w, fmt.Sprintf("Failed to update variable: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Updated variable via API", "session_id", sessionID, "variable_name", variableName)
+	api.logger.Info("Updated variable via API", "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -378,12 +378,12 @@ func (api *DebugAPI) WatchVariable(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.WatchVariable(sessionID, variableName, req.BreakOnChange, req.Condition)
 	if err != nil {
-		api.logger.Error("Failed to watch variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID, "variable_name", variableName)
+		api.logger.Error("Failed to watch variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 		http.Error(w, fmt.Sprintf("Failed to watch variable: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Added variable watch via API", "session_id", sessionID, "variable_name", variableName)
+	api.logger.Info("Added variable watch via API", "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -403,12 +403,12 @@ func (api *DebugAPI) UnwatchVariable(w http.ResponseWriter, r *http.Request) {
 
 	err := api.debugEngine.UnwatchVariable(sessionID, variableName)
 	if err != nil {
-		api.logger.Error("Failed to unwatch variable", "error", err, "session_id", sessionID, "variable_name", variableName)
+		api.logger.Error("Failed to unwatch variable", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 		http.Error(w, fmt.Sprintf("Failed to unwatch variable: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Removed variable watch via API", "session_id", sessionID, "variable_name", variableName)
+	api.logger.Info("Removed variable watch via API", "session_id", logging.SanitizeLogValue(sessionID), "variable_name", logging.SanitizeLogValue(variableName))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -424,7 +424,7 @@ func (api *DebugAPI) GetAPICallHistory(w http.ResponseWriter, r *http.Request) {
 
 	history, err := api.debugEngine.GetAPICallHistory(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to get API call history", "error", err, "session_id", sessionID)
+		api.logger.Error("Failed to get API call history", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to get API call history: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -455,12 +455,12 @@ func (api *DebugAPI) ReplayAPICall(w http.ResponseWriter, r *http.Request) {
 
 	replayCall, err := api.debugEngine.ReplayAPICall(sessionID, callID)
 	if err != nil {
-		api.logger.Error("Failed to replay API call", "error", err, "session_id", sessionID, "call_id", callID)
+		api.logger.Error("Failed to replay API call", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID), "call_id", logging.SanitizeLogValue(callID))
 		http.Error(w, fmt.Sprintf("Failed to replay API call: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	api.logger.Info("Replayed API call via API", "session_id", sessionID, "call_id", callID, "replay_id", replayCall.ID)
+	api.logger.Info("Replayed API call via API", "session_id", logging.SanitizeLogValue(sessionID), "call_id", logging.SanitizeLogValue(callID), "replay_id", replayCall.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(replayCall); err != nil {
@@ -488,7 +488,7 @@ func (api *DebugAPI) GetStepHistory(w http.ResponseWriter, r *http.Request) {
 
 	history, err := api.debugEngine.GetStepHistory(sessionID)
 	if err != nil {
-		api.logger.Error("Failed to get step history", "error", logging.SanitizeLogValue(err.Error()), "session_id", sessionID)
+		api.logger.Error("Failed to get step history", "error", logging.SanitizeLogValue(err.Error()), "session_id", logging.SanitizeLogValue(sessionID))
 		http.Error(w, fmt.Sprintf("Failed to get step history: %v", err), http.StatusInternalServerError)
 		return
 	}
