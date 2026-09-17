@@ -324,7 +324,22 @@ EOF
 )
         local actual_findings
         actual_findings=$(grep -E '^  features/.*: tainted value' "$out_file" | sed 's/^  //' || true)
-        if [ "$actual_findings" == "$known_findings" ]; then
+
+        # Compare on (file, message) only, never the embedded line number.
+        # Unrelated merges routinely shift line numbers within these files
+        # without touching the flagged statement itself (Issue #4113 — this
+        # exact drift broke `make test` on a clean develop twice: #4088's
+        # snapshot going stale between PRs, corrected by #4089, then drifting
+        # again). Baking the line number into the compared key means the next
+        # unrelated edit to either file reintroduces the same false failure,
+        # so strip it from both sides before comparing; sort so a same-file
+        # reordering of findings doesn't register as a diff either.
+        local strip_line='s/^([^:]+):[0-9]+:/\1:/'
+        local known_normalized actual_normalized
+        known_normalized=$(echo "$known_findings" | sed -E "$strip_line" | sort)
+        actual_normalized=$(echo "$actual_findings" | sed -E "$strip_line" | sort)
+
+        if [ "$actual_normalized" == "$known_normalized" ]; then
             log_pass "lint-log-injection.sh: only the tracked #4103 false-positive baseline present (31 findings)"
         else
             log_fail "lint-log-injection.sh: findings differ from the tracked #4103 baseline (rc=$rc) — output below"
@@ -3915,6 +3930,39 @@ test_tier1_bootstrap() {
     rm -f "$out_file"
 }
 
+# Regression test (Issue #4113): asserts the script-test suite itself never
+# mutates tracked files. Compares the git status snapshot taken before any
+# test ran (GIT_STATUS_BEFORE_TESTS, captured just above the "Main execution"
+# block) against the status now, after every other test function has run. A
+# test must report drift in tracked files, never silently rewrite and stage
+# them — that silent staging is what let a hand-edited baseline fix ride along
+# into an unrelated commit --amend during a story promotion.
+test_no_tracked_file_mutation() {
+    log_test "Testing script-test suite does not mutate tracked files..."
+
+    local git_status_after
+    git_status_after=$(git status --porcelain)
+
+    if [ "$GIT_STATUS_BEFORE_TESTS" == "$git_status_after" ]; then
+        log_pass "test-scripts.sh: working tree and index unchanged after full run"
+    else
+        log_fail "test-scripts.sh: working tree or index was modified during the run"
+        echo "  git status --porcelain before run:" >&2
+        echo "$GIT_STATUS_BEFORE_TESTS" | sed 's/^/    /' >&2
+        echo "  git status --porcelain after run:" >&2
+        echo "$git_status_after" | sed 's/^/    /' >&2
+    fi
+}
+
+# Regression guard (Issue #4113): the suite as a whole must never leave the
+# working tree or index dirty as a side effect of running. A staged edit left
+# behind by a test is invisible until the next unrelated `git commit -a` or
+# `--amend` sweeps it in — which is exactly how a hand-fixed baseline drift
+# once rode along into an unrelated pin-bump commit during story promotion.
+# Snapshot status before any test runs and diff it against the snapshot taken
+# after the last one, right before the pass/fail summary below.
+GIT_STATUS_BEFORE_TESTS=$(git status --porcelain)
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
@@ -4027,6 +4075,8 @@ test_resource_sampler_no_placeholder
 echo ""
 test_claude_pipeline_suites
 echo ""
+
+test_no_tracked_file_mutation
 
 echo ""
 echo "📊 Test Summary"
