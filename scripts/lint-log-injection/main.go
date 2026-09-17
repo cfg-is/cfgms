@@ -190,7 +190,7 @@ func analyzeFile(path string) ([]finding, error) {
 		if !ok || fn.Body == nil {
 			continue
 		}
-		findings = append(findings, analyzeFunc(fset, fn, structFields, nil, nil, nil)...)
+		findings = append(findings, analyzeFunc(fset, fn, structFields, nil, nil, nil, nil)...)
 	}
 	return findings, nil
 }
@@ -254,12 +254,37 @@ func analyzePackage(paths []string) ([]finding, error) {
 	}
 
 	funcResults := collectFuncResultTypes(funcs)
-	funcReturnsTaint := collectFuncReturnsTaint(funcs, funcResults)
-	paramTaint := resolveParameterTaint(funcs, funcResults, funcReturnsTaint)
+
+	// Joint fixed point over return-taint and parameter-taint.
+	//
+	// These two passes used to run once each, in sequence: return-taint was
+	// computed with NO parameter seed, then parameter-taint was resolved using
+	// it. That ordering makes a `true` from funcReturnsTaint trustworthy but a
+	// `false` meaningless — an unseeded pass cannot see that
+	// `func echo(s string) string { return s }` returns its caller's taint, so
+	// it records NO for a function that plainly does carry taint.
+	//
+	// compositeTaintIsOnlyScalar needs a trustworthy NO (issue #4109: a call
+	// returning a fixed vocabulary must not inherit its argument's taint), so
+	// the two are now iterated together until neither changes. Both maps only
+	// ever grow — taint is added, never removed, within a round — so this
+	// converges; the bound is a backstop for pathological call graphs, matching
+	// the bounded-round convention the individual passes already use.
+	funcReturnsTaint := collectFuncReturnsTaint(funcs, funcResults, structFields, nil)
+	paramTaint := resolveParameterTaint(funcs, funcResults, funcReturnsTaint, structFields)
+	for round := 0; round < funcParamTaintRounds; round++ {
+		nextReturns := collectFuncReturnsTaint(funcs, funcResults, structFields, paramTaint)
+		if len(nextReturns) == len(funcReturnsTaint) {
+			break
+		}
+		funcReturnsTaint = nextReturns
+		paramTaint = resolveParameterTaint(funcs, funcResults, funcReturnsTaint, structFields)
+	}
+
 
 	var findings []finding
 	for _, fn := range order {
-		findings = append(findings, analyzeFunc(fset, fn, structFields, paramTaint[fn.Name.Name], funcResults, funcReturnsTaint)...)
+		findings = append(findings, analyzeFunc(fset, fn, structFields, paramTaint[fn.Name.Name], funcResults, funcReturnsTaint, funcs)...)
 	}
 	return findings, nil
 }
@@ -292,7 +317,7 @@ const funcReturnsTaintRounds = 5
 // entirely, which can over-flag an unrelated sibling result on a multi-value
 // assignment. No shape in scope for this story produces that case — pin
 // positional precision then, if it's ever needed.
-func collectFuncReturnsTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string) map[string]bool {
+func collectFuncReturnsTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string, structFields map[string]map[string]string, paramTaint map[string]map[string]struct{}) map[string]bool {
 	funcReturnsTaint := map[string]bool{}
 	// Sorted iteration for the same reason resolveParameterTaint sorts:
 	// deterministic convergence for a linter whose tests assert exact
@@ -310,7 +335,7 @@ func collectFuncReturnsTaint(funcs map[string]*ast.FuncDecl, funcResults map[str
 				continue
 			}
 			fn := funcs[name]
-			tainted := collectTaintedVars(fn.Body, nil, receiverName(fn), funcResults, funcReturnsTaint)
+			tainted := collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults, funcReturnsTaint, collectVarTypes(fn, funcResults), structFields, funcs)
 			returnsTaint := false
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				if returnsTaint {
@@ -420,7 +445,7 @@ const funcParamTaintRounds = 5
 // Findings behind an ambiguous name remain the caller's responsibility to
 // catch by review. Unambiguous names keep the conservative bias described
 // above: those over-approximations only add findings a human must dismiss.
-func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string, funcReturnsTaint map[string]bool) map[string]map[string]struct{} {
+func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[string][]string, funcReturnsTaint map[string]bool, structFields map[string]map[string]string) map[string]map[string]struct{} {
 	paramTaint := map[string]map[string]struct{}{}
 	// Iterate a sorted name list, not the map: Go randomizes map iteration
 	// order per run, which would make the bounded fixed point's per-round
@@ -438,7 +463,7 @@ func resolveParameterTaint(funcs map[string]*ast.FuncDecl, funcResults map[strin
 		localTainted := map[string]map[string]struct{}{}
 		for _, name := range names {
 			fn := funcs[name]
-			localTainted[name] = collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults, funcReturnsTaint)
+			localTainted[name] = collectTaintedVars(fn.Body, paramTaint[name], receiverName(fn), funcResults, funcReturnsTaint, collectVarTypes(fn, funcResults), structFields, funcs)
 		}
 
 		changed := false
@@ -578,9 +603,9 @@ func isScalarType(typ string) bool {
 // a taint-source assignment would. funcResults is the resolution unit's
 // result-type registry (nil when fn is analyzed in isolation), used only to
 // pin local variable types for scalar suppression.
-func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string, paramTaint map[string]struct{}, funcResults map[string][]string, funcReturnsTaint map[string]bool) []finding {
-	tainted := collectTaintedVars(fn.Body, paramTaint, receiverName(fn), funcResults, funcReturnsTaint)
+func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]map[string]string, paramTaint map[string]struct{}, funcResults map[string][]string, funcReturnsTaint map[string]bool, knownFuncs map[string]*ast.FuncDecl) []finding {
 	varTypes := collectVarTypes(fn, funcResults)
+	tainted := collectTaintedVars(fn.Body, paramTaint, receiverName(fn), funcResults, funcReturnsTaint, varTypes, structFields, knownFuncs)
 
 	var findings []finding
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -880,6 +905,71 @@ func samePackageResultTypes(call *ast.CallExpr, recv string, funcResults map[str
 // determined from same-file declarations AND that type is a non-string scalar
 // (bool, int*, float*, time.Time, etc.). Returns false on any uncertainty so
 // the caller falls through to the normal flag path.
+// compositeTaintIsOnlyScalar reports whether rhs is a composite literal whose
+// taint comes exclusively from provably-scalar contributors — a tainted
+// struct's bool/int/time field, or a variable whose own type is a non-string
+// scalar. Such a value cannot encode a forged log record, so it must not taint
+// the container it is placed into.
+//
+// Returns false for anything that is not a composite literal, and false the
+// moment one non-scalar tainted element is found, so a map holding even one
+// genuinely tainted string stays tainted. Deliberately conservative: it only
+// ever CLEARS taint that the existing sink-side suppression would have
+// refused to report anyway.
+func compositeTaintIsOnlyScalar(rhs ast.Expr, tainted map[string]struct{}, funcReturnsTaint map[string]bool, varTypes map[string]string, structFields map[string]map[string]string, knownFuncs map[string]*ast.FuncDecl) bool {
+	lit, ok := unparen(rhs).(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	sawScalarTaint := false
+	for _, el := range lit.Elts {
+		val := el
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			val = kv.Value
+		}
+		if !exprCarriesTaint(val, tainted, funcReturnsTaint) {
+			continue
+		}
+		switch v := unparen(val).(type) {
+		case *ast.SelectorExpr:
+			if !isProvablyScalar(v, varTypes, structFields) {
+				return false
+			}
+		case *ast.Ident:
+			if !isScalarType(varTypes[v.Name]) {
+				return false
+			}
+		case *ast.CallExpr:
+			// A same-package call whose return-taint was resolved to a
+			// definitive NO cannot carry taint out, however tainted its
+			// arguments are. Measured case (issue #4109):
+			// `s.getAuditSeverity(decision)` takes a tainted struct and
+			// returns one of a fixed vocabulary of severity literals, yet the
+			// CallExpr fell through to anyArgTainted and tainted the audit map.
+			//
+			// Safe only because funcReturnsTaint is now resolved to a joint
+			// fixed point WITH parameter taint (see analyzePackage): a
+			// passthrough like `func echo(s string) string { return s }` is
+			// seeded with its callers' taint and correctly resolves to YES, so
+			// a NO here really does mean "cannot return taint".
+			name := calleeFuncName(v.Fun)
+			if name == "" {
+				return false
+			}
+			if _, known := knownFuncs[name]; !known {
+				return false
+			}
+			if funcReturnsTaint[name] {
+				return false
+			}
+		default:
+			return false
+		}
+		sawScalarTaint = true
+	}
+	return sawScalarTaint
+}
+
 func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structFields map[string]map[string]string) bool {
 	id, ok := sel.X.(*ast.Ident)
 	if !ok {
@@ -914,7 +1004,7 @@ func isProvablyScalar(sel *ast.SelectorExpr, varTypes map[string]string, structF
 // samePackageResultTypes) so a multi-return call site can tell its error
 // return apart from an unrelated sibling; both may be zero-valued when that
 // resolution isn't available (e.g. analyzeFile's isolated, no-package view).
-func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, funcResults map[string][]string, funcReturnsTaint map[string]bool) map[string]struct{} {
+func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, funcResults map[string][]string, funcReturnsTaint map[string]bool, varTypes map[string]string, structFields map[string]map[string]string, knownFuncs map[string]*ast.FuncDecl) map[string]struct{} {
 	tainted := map[string]struct{}{}
 	for name := range seed {
 		tainted[name] = struct{}{}
@@ -1030,6 +1120,29 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 					allowArgTaint = argTaintEligible[idx]
 				}
 				derived := taintPropagatesFrom(rhs, tainted, allowArgTaint, funcReturnsTaint)
+				// Root cause D: the sink already refuses to flag a tainted
+				// struct's bool/int/time field (isProvablyScalar, see
+				// analyzeFunc) because a scalar cannot encode a forged log
+				// record. That suppression was only ever applied at the log
+				// call, never here — so a scalar field placed into a container
+				// tainted the WHOLE container on the way in, and by the time
+				// the container reached a sink the scalar origin was lost.
+				//
+				// Measured case (issue #4109): auditAuthorizationDecision
+				// builds an audit map whose every string value is wrapped in
+				// logging.SanitizeLogValue, plus `"granted": decision.Granted`
+				// — a bool. That bool alone tainted the map, and the map then
+				// flagged at `flattenFieldsToKV(auditFields)`, where neither
+				// the SelectorExpr nor the Ident suppression could apply
+				// because the sink argument is a CallExpr.
+				//
+				// Applying the same rule at propagation time is the narrow
+				// fix: it changes nothing about which values are tainted, only
+				// whether a provably-scalar contributor is allowed to taint
+				// its container.
+				if derived && compositeTaintIsOnlyScalar(rhs, tainted, funcReturnsTaint, varTypes, structFields, knownFuncs) {
+					derived = false
+				}
 
 				switch l := lhs.(type) {
 				case *ast.SelectorExpr:
