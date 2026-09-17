@@ -383,7 +383,7 @@ func (r *DefaultSessionRecorder) EndRecording(sessionID string) error {
 	}
 
 	if err := writer.close(); err != nil {
-		r.logger.Warn("Error closing recording writer", "session_id", sessionID, "error", logging.SanitizeLogValue(err.Error()))
+		r.logger.Warn("Error closing recording writer", "session_id", logging.SanitizeLogValue(sessionID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	delete(r.activeWrites, sessionID)
@@ -623,7 +623,7 @@ func (r *DefaultSessionRecorder) Close() error {
 	for sessionID, writer := range r.activeWrites {
 		if err := writer.close(); err != nil {
 			r.logger.Warn("Error closing writer during recorder shutdown",
-				"session_id", sessionID, "error", logging.SanitizeLogValue(err.Error()))
+				"session_id", logging.SanitizeLogValue(sessionID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
 

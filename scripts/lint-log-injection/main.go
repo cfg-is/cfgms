@@ -264,7 +264,7 @@ func analyzePackage(paths []string) ([]finding, error) {
 	// `func echo(s string) string { return s }` returns its caller's taint, so
 	// it records NO for a function that plainly does carry taint.
 	//
-	// compositeTaintIsOnlyScalar needs a trustworthy NO (issue #4109: a call
+	// compositeTaintIsOnlyScalar needs a trustworthy NO (issue #4126: a call
 	// returning a fixed vocabulary must not inherit its argument's taint), so
 	// the two are now iterated together until neither changes. Both maps only
 	// ever grow — taint is added, never removed, within a round — so this
@@ -274,10 +274,20 @@ func analyzePackage(paths []string) ([]finding, error) {
 	paramTaint := resolveParameterTaint(funcs, funcResults, funcReturnsTaint, structFields)
 	for round := 0; round < funcParamTaintRounds; round++ {
 		nextReturns := collectFuncReturnsTaint(funcs, funcResults, structFields, paramTaint)
-		if len(nextReturns) == len(funcReturnsTaint) {
+		grew := len(nextReturns) != len(funcReturnsTaint)
+		// Assign BEFORE deciding to stop. The seeded result is always at least
+		// as complete as the unseeded one it replaces, so keeping it is never
+		// wrong — whereas breaking first would discard round 0's seeded map and
+		// leave the unseeded one in place, silently undoing the very seeding
+		// that makes a NO trustworthy for callCannotReturnTaint. Size is a
+		// sound convergence test only because collectFuncReturnsTaint records
+		// YES entries exclusively, so the map is monotone in the seed and equal
+		// size implies equal contents; recording a NO entry there would break
+		// that and this test with it.
+		funcReturnsTaint = nextReturns
+		if !grew {
 			break
 		}
-		funcReturnsTaint = nextReturns
 		paramTaint = resolveParameterTaint(funcs, funcResults, funcReturnsTaint, structFields)
 	}
 
@@ -671,7 +681,7 @@ func analyzeFunc(fset *token.FileSet, fn *ast.FuncDecl, structFields map[string]
 			// into a map and still flagged when logged directly — the same
 			// value, two verdicts (issue #4126 AC2).
 			if call, ok := arg.(*ast.CallExpr); ok {
-				if callCannotReturnTaint(call, funcReturnsTaint, knownFuncs) {
+				if callCannotReturnTaint(call, receiverName(fn), funcReturnsTaint, knownFuncs) {
 					continue
 				}
 			}
@@ -930,9 +940,30 @@ func samePackageResultTypes(call *ast.CallExpr, recv string, funcResults map[str
 // `func echo(s string) string { return s }` is seeded with its callers' taint
 // and correctly resolves to YES, so a NO here really does mean "cannot return
 // taint". Without that seed this function would silently clear real findings.
-func callCannotReturnTaint(call *ast.CallExpr, funcReturnsTaint map[string]bool, knownFuncs map[string]*ast.FuncDecl) bool {
-	name := calleeFuncName(call.Fun)
-	if name == "" {
+//
+// Callee resolution is deliberately narrower than calleeFuncName's: a bare
+// identifier, or a selector on the ENCLOSING RECEIVER only. This mirrors
+// samePackageResultTypes exactly, and for the same stated reason — this
+// registry feeds finding SUPPRESSION, so borrowing an unrelated same-named
+// function's verdict hides a real finding rather than adding a spurious one.
+// Resolving by selector tail alone would mean a package that declares any
+// `Error() string` method silences `logger.Error("x", "error", err.Error())`
+// on a tainted err — the exact shape CLAUDE.md names as a finding — and
+// `client.Get(id)` on an imported type would borrow a local `Get`'s verdict.
+// Receiver calls must stay resolvable: `s.getAuditSeverity(decision)`, the
+// original #4126 symptom, is one.
+func callCannotReturnTaint(call *ast.CallExpr, recv string, funcReturnsTaint map[string]bool, knownFuncs map[string]*ast.FuncDecl) bool {
+	var name string
+	switch fun := unparen(call.Fun).(type) {
+	case *ast.Ident:
+		name = fun.Name
+	case *ast.SelectorExpr:
+		id, ok := unparen(fun.X).(*ast.Ident)
+		if !ok || recv == "" || id.Name != recv {
+			return false
+		}
+		name = fun.Sel.Name
+	default:
 		return false
 	}
 	if _, known := knownFuncs[name]; !known {
@@ -952,7 +983,7 @@ func callCannotReturnTaint(call *ast.CallExpr, funcReturnsTaint map[string]bool,
 // genuinely tainted string stays tainted. Deliberately conservative: it only
 // ever CLEARS taint that the existing sink-side suppression would have
 // refused to report anyway.
-func compositeTaintIsOnlyScalar(rhs ast.Expr, tainted map[string]struct{}, funcReturnsTaint map[string]bool, varTypes map[string]string, structFields map[string]map[string]string, knownFuncs map[string]*ast.FuncDecl) bool {
+func compositeTaintIsOnlyScalar(rhs ast.Expr, tainted map[string]struct{}, recv string, funcReturnsTaint map[string]bool, varTypes map[string]string, structFields map[string]map[string]string, knownFuncs map[string]*ast.FuncDecl) bool {
 	lit, ok := unparen(rhs).(*ast.CompositeLit)
 	if !ok {
 		return false
@@ -978,7 +1009,7 @@ func compositeTaintIsOnlyScalar(rhs ast.Expr, tainted map[string]struct{}, funcR
 		case *ast.CallExpr:
 			// A same-package call whose return-taint was resolved to a
 			// definitive NO cannot carry taint out, however tainted its
-			// arguments are. Measured case (issue #4109):
+			// arguments are. Measured case (issue #4126):
 			// `s.getAuditSeverity(decision)` takes a tainted struct and
 			// returns one of a fixed vocabulary of severity literals, yet the
 			// CallExpr fell through to anyArgTainted and tainted the audit map.
@@ -988,7 +1019,7 @@ func compositeTaintIsOnlyScalar(rhs ast.Expr, tainted map[string]struct{}, funcR
 			// passthrough like `func echo(s string) string { return s }` is
 			// seeded with its callers' taint and correctly resolves to YES, so
 			// a NO here really does mean "cannot return taint".
-			if !callCannotReturnTaint(v, funcReturnsTaint, knownFuncs) {
+			if !callCannotReturnTaint(v, recv, funcReturnsTaint, knownFuncs) {
 				return false
 			}
 		default:
@@ -1157,7 +1188,7 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 				// tainted the WHOLE container on the way in, and by the time
 				// the container reached a sink the scalar origin was lost.
 				//
-				// Measured case (issue #4109): auditAuthorizationDecision
+				// Measured case (issue #4126): auditAuthorizationDecision
 				// builds an audit map whose every string value is wrapped in
 				// logging.SanitizeLogValue, plus `"granted": decision.Granted`
 				// — a bool. That bool alone tainted the map, and the map then
@@ -1169,7 +1200,7 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 				// fix: it changes nothing about which values are tainted, only
 				// whether a provably-scalar contributor is allowed to taint
 				// its container.
-				if derived && compositeTaintIsOnlyScalar(rhs, tainted, funcReturnsTaint, varTypes, structFields, knownFuncs) {
+				if derived && compositeTaintIsOnlyScalar(rhs, tainted, recv, funcReturnsTaint, varTypes, structFields, knownFuncs) {
 					derived = false
 				}
 

@@ -1936,3 +1936,63 @@ func flattenFieldsToKV(fields map[string]interface{}) []interface{} {
 		t.Errorf("expected 0 findings for the middleware.go:1640/:1642 shape, got: %v", findings)
 	}
 }
+
+// TestAnalyzePackage_SameNamedMethodOnOtherTypeStillFlagged is the negative
+// half AC2 was missing, and the review of PR #4125 caught its absence by
+// finding the defect it would have prevented.
+//
+// callCannotReturnTaint feeds finding SUPPRESSION, so resolving a callee by
+// selector tail alone is unsafe: a package that declares ANY `Error() string`
+// method would silence `logger.Error("x", "error", err.Error())` on a tainted
+// err -- the exact shape CLAUDE.md names as a finding, in most of features/.
+// samePackageResultTypes already refuses selector calls on anything but the
+// enclosing receiver, for this stated reason; callCannotReturnTaint now
+// matches it.
+func TestAnalyzePackage_SameNamedMethodOnOtherTypeStillFlagged(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+type S struct{ logger logger }
+type logger interface{ Error(string, ...any) }
+type validationError struct{ msg string }
+func (e *validationError) Error() string { return "invalid request" }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	err := s.validate(mux.Vars(r)["id"])
+	if err != nil {
+		s.logger.Error("bad", "error", err.Error())
+	}
+}
+func (s *S) validate(id string) error { return &validationError{msg: id} }
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding: err.Error() must not borrow the verdict of an unrelated same-named method, got %d: %v", len(findings), findings)
+	}
+}
+
+// TestAnalyzePackage_SameNamedCrossPackageCallStillFlagged is the other shape
+// of the same defect: a call on an IMPORTED type's value must not borrow a
+// local function's verdict just because the method name matches. Mirrors
+// samePackageResultTypes' own documented `client.Get(...)` example.
+func TestAnalyzePackage_SameNamedCrossPackageCallStillFlagged(t *testing.T) {
+	src := `package api
+import "net/http"
+import "github.com/gorilla/mux"
+import "github.com/cfgis/cfgms/pkg/cache"
+type S struct {
+	logger logger
+	client *cache.Cache
+}
+type logger interface{ Info(string, ...any) }
+type catalog struct{}
+func (c *catalog) Get(k string) string { return "fixed" }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	s.logger.Info("got", "value", s.client.Get(id))
+}
+`
+	findings := analyzeSnippets(t, map[string]string{"a.go": src})
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding: an imported type's Get must not borrow the local catalog.Get verdict, got %d: %v", len(findings), findings)
+	}
+}
