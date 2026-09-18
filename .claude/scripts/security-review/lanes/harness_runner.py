@@ -199,9 +199,11 @@ def _build_output_schema_description() -> str:
         # stops that at the source.
         '"line" is a hint; get it close. Report each defect once -- duplicates '
         'are matched on "file" + "symbol" + "cwe", so two findings that share '
-        'all three are one finding. Two genuinely different defects in the '
-        'same symbol with the same "cwe" are still two findings: report both, '
-        'with the "line" of each.'
+        'all three are treated as one. If one symbol really does hold two '
+        'distinct defects of the same "cwe", say so in a SINGLE finding rather '
+        'than splitting it: name both locations in "evidence" and give the '
+        'more serious one as "line". Splitting them loses the second one -- '
+        'see `consolidate._group_findings`.'
     )
 
 

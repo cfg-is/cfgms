@@ -511,10 +511,12 @@ was considered and rejected, so a later reader can see it was weighed, not misse
   core lists 25 CWE identifiers CFGMS actually cares about (certificate validation,
   authentication and authorization, signature verification, secret handling, logging, injection,
   path and link handling, deserialization, races, resource consumption) and instructs a lane to
-  set `vuln_class` to exactly one of them or to `other: <short label>`. The escape is stated
+  set the identifier to exactly one of them or to `other: <short label>`. The escape is stated
   explicitly, not implied — it is what stops the shortlist suppressing a real finding it did not
-  anticipate. This story chooses the vocabulary and carries it in the existing `vuln_class`
-  field; a dedicated CWE field is a separate schema story.
+  anticipate. This story chose the vocabulary and first carried it in the existing `vuln_class`
+  field. **The dedicated `cwe` field landed in Issue #3983 and now holds it**, and since Issue
+  #4134 that normalised `cwe` is what findings de-duplicate on; `vuln_class` kept its original
+  job as the short human-readable class name.
 - **D3 — The assumed attacker per level.** Named tiers — T0, a network party with no credential;
   T1, a compromised steward (root on one enrolled endpoint); T2, a compromised tenant admin for a
   short window; T3, a compromised controller or root admin; P, an untrusted module publisher —
@@ -2580,8 +2582,20 @@ discarding the disagreement. The consolidated finding's own top-level `cwe`/`lin
 (`consolidate.py::_first_occurrence_field`) are taken from the first occurrence in `(lane,
 step_id)` order — a deterministic pick, never a merge — since these are a reader's hint, not part
 of what makes two findings the same finding; `consolidated.md` renders the picked location
-immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` beside
-`vuln_class`.
+immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` beside a prose
+class label.
+
+That label is **not** the consolidated finding's `vuln_class`. Since Issue #4134 that field holds
+the normalised class that keyed the group, so printing it beside `cwe` renders `CWE-863
+(CWE-863)`. `consolidate.py::_prose_label()` instead picks the first occurrence whose own
+`vuln_class` is readable prose, stripping an identifier prefix (`CWE-863: Incorrect
+authorization` → `Incorrect authorization`) and skipping an occurrence that carries nothing but
+an identifier. It tests the label's SHAPE, not whether it is in the vocabulary — an out-of-list
+`CWE-99999` is still an identifier and still not a heading. When no occurrence carries prose it
+falls back to the key, because a heading must not be empty. The same helper renders the
+cross-step group member list, which is why `_cross_step_groups()` projects each member's
+occurrence labels — labels only, never whole occurrences, since those members travel to the
+adjudicator and Issue #4080 keeps finder evidence out of that payload.
 
 **Findings are sorted by agreement, then severity, then confidence (Issue #3960, F6).**
 `_finalize_findings()` orders `report["findings"]` -- and therefore `render_markdown()`'s

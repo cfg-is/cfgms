@@ -98,9 +98,10 @@ signatures).
 
 ## Vulnerability classes in scope
 
-Set `vuln_class` to exactly one identifier from this list, or to `other: <short label>`
-when none fits. The escape is allowed and expected. Never force a finding into the
-nearest identifier, and never drop a finding because no identifier fits.
+Set `cwe` to one identifier from this list, or to `other: <short label>` when none
+fits. The escape is allowed and expected. Never force a finding into the nearest
+identifier, and never drop one because no identifier fits. Set `vuln_class` to the
+Class column below: prose, never a bare identifier.
 
 | Identifier | Class | Typical CFGMS surface |
 |---|---|---|

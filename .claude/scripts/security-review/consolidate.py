@@ -120,10 +120,10 @@ sweep regardless of how much of the sweep actually ran.
 from __future__ import annotations
 
 import argparse
-import collections
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -395,12 +395,7 @@ def _is_valid_repo_file(
 
 def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> dict:
     tree_cache: dict[str, frozenset] = {}
-    groups: dict[tuple[str, str, str, int], dict] = {}
-    # How many findings this lane has already reported at a given
-    # file/symbol/class -- the ordinal that keeps same-lane findings apart.
-    # Insertion order is the lane's own report order, which is deterministic
-    # because `findings` arrives sorted by lane then step.
-    lane_finding_counts: dict[tuple[str, str, str, str], int] = collections.defaultdict(int)
+    groups: dict[tuple[str, str, str], dict] = {}
 
     for lane, step_id, finding in findings:
         file_value = finding["file"]
@@ -464,22 +459,31 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
         # ::acquireCASLock, both CWE-362: one race window at line 83 and
         # another at line 103. Two defects, twenty lines apart, one record.
         #
-        # An ordinal per lane keeps them apart: the Nth finding a lane reports
-        # at a key pairs with the Nth from every other lane. Cross-lane
-        # agreement is unaffected in the case that matters -- each lane
-        # reporting one finding still meets at ordinal 0.
+        # THIS IS A KNOWN GAP, LEFT OPEN DELIBERATELY. The fix tried first was
+        # a per-lane ordinal in the key -- the Nth finding a lane reports at a
+        # key pairs with the Nth from every other lane. It does stop the
+        # over-merge. It was REVERTED, because it breaks finding IDENTITY,
+        # which two downstream stages depend on:
         #
-        # This also removes a fabricated disagreement. `_severity_range`'s
-        # `by_lane` is last-write-wins per lane, so two same-lane findings at
-        # `low` and `critical` rendered "DISAGREEMENT low -> critical ... until
-        # a human resolves it" from ONE lane, with `low` unattributable in
-        # `by_lane` while `lowest` still reported it. A group can now hold at
-        # most one finding per lane, so that shape is unreachable rather than
-        # merely unlikely.
-        lane_ordinal = lane_finding_counts[(lane, file_value, finding["symbol"], defect_class)]
-        lane_finding_counts[(lane, file_value, finding["symbol"], defect_class)] += 1
-
-        key = (file_value, finding["symbol"], defect_class, lane_ordinal)
+        #   - `_finding_key` re-derives this key from an already-consolidated
+        #     finding to attach the adjudicator's verdict and the verifier's.
+        #     An ordinal is not recoverable from the consolidated record, so
+        #     keys collided and a verdict attached to the WRONG finding. A
+        #     `guarded` verdict landing on a different defect reads as CLEAN.
+        #   - the adjudication response schema rejects duplicate keys, so a
+        #     correct adjudicator reply was rejected and the whole envelope
+        #     invalidated.
+        #
+        # Losing a second same-lane finding is bad. Silently marking an
+        # unrelated real finding as guarded is worse, so the merge stays until
+        # findings carry an explicit `finding_id` end to end.
+        #
+        # What IS fixed: `_severity_range` no longer fabricates a disagreement
+        # out of this. It reads the per-lane values, so two same-lane findings
+        # at `low` and `critical` can no longer render "DISAGREEMENT low ->
+        # critical ... until a human resolves it" from ONE lane. Both
+        # severities stay visible on `occurrences`.
+        key = (file_value, finding["symbol"], defect_class)
         group = groups.setdefault(key, {"lanes": set(), "step_ids": set(), "occurrences": []})
         group["lanes"].add(lane)
         group["step_ids"].add(step_id)
@@ -586,7 +590,7 @@ def _first_occurrence_field(occurrences: list[dict], field: str) -> object:
 
 def _finalize_findings(groups: dict, lane_step_state: dict[str, dict[str, str]]) -> list[dict]:
     consolidated = []
-    for (file_value, symbol, defect_class, _lane_ordinal), group in sorted(groups.items()):
+    for (file_value, symbol, defect_class), group in sorted(groups.items()):
         step_ids = sorted(group["step_ids"])
         reported_lanes = sorted(group["lanes"])
         eligible_lanes = _eligible_lanes(step_ids, lane_step_state)
@@ -641,22 +645,50 @@ def _severity_range(occurrences: list[dict]) -> dict:
     """The deterministic severity record for one consolidated finding (Issue
     #3984): the lowest and highest severity any occurrence carries, the
     highest severity each lane reported (a lane can report the same key from
-    two steps), and whether the lanes disagree at all. Computed from the
-    occurrences alone, never from an adjudication, so it always says what the
-    lanes actually reported."""
+    two steps), and whether the LANES disagree. Computed from the occurrences
+    alone, never from an adjudication, so it always says what the lanes
+    actually reported.
+
+    Every value it names is attributable to a lane (Issue #4134). `by_lane`
+    keeps the highest severity per lane, so a lane that reported the same key
+    twice at `low` and `critical` contributes only `critical` -- but `lowest`
+    used to be computed from the raw occurrence list, so it reported a `low`
+    that `by_lane` had already dropped. The result rendered "DISAGREEMENT low
+    -> critical ... until a human resolves it" with `by_lane: {codex:
+    critical}`: a dispute with one participant, and an unattributable number
+    beside it. A reader was told to escalate something that did not exist.
+
+    `lowest`/`highest`/`disagreement` are therefore taken from the per-lane
+    values, which is what "the lanes disagree" means. A single lane can never
+    disagree with itself, and the span shown is always a span between lanes.
+    The full set of raw occurrence severities is unchanged and still carried on
+    `occurrences`, so nothing is lost -- it just stops being presented as a
+    conflict.
+    """
     by_lane: dict[str, int] = {}
     for occ in occurrences:
         rank = _SEVERITY_RANK[occ["severity"]]
         if rank > by_lane.get(occ["lane"], -1):
             by_lane[occ["lane"]] = rank
-    ranks = [_SEVERITY_RANK[occ["severity"]] for occ in occurrences]
-    lowest, highest = min(ranks), max(ranks)
+    lane_ranks = list(by_lane.values())
+    lowest, highest = min(lane_ranks), max(lane_ranks)
     return {
         "lowest": _SEVERITY_BY_RANK[lowest],
         "highest": _SEVERITY_BY_RANK[highest],
         "disagreement": lowest != highest,
         "by_lane": {lane: _SEVERITY_BY_RANK[rank] for lane, rank in sorted(by_lane.items())},
     }
+
+
+# Identifier SHAPE, not vocabulary membership -- see `_prose_label`.
+# `CWE-863: Incorrect authorization`, `cwe_863 - incorrect authorization`,
+# `CWE 863` all match; `prose` is whatever readable tail follows, empty when
+# the label is nothing but the identifier.
+_IDENTIFIER_PREFIX_RE = re.compile(
+    r"^\s*cwe[\s_-]*\d+\s*[:.,;)\]\s-]*(?P<prose>.*)$", re.IGNORECASE
+)
+# A bare number with no `CWE` at all, which is still not a heading.
+_BARE_IDENTIFIER_RE = re.compile(r"^\s*\d+\s*$")
 
 
 def _prose_label(finding: dict) -> str:
@@ -674,13 +706,41 @@ def _prose_label(finding: dict) -> str:
     the identifier wins again. That is luck, not design, and this is the line
     that removes the luck.
 
+    "Is this an identifier" is a question about SHAPE, and asking
+    `schema.normalize_cwe(label) is None` asked about VOCABULARY instead. The
+    two disagree in both directions, and each way is a real defect:
+
+    - `"CWE-863: Incorrect authorization"` normalises, so it was skipped --
+      throwing away "Incorrect authorization", the one piece of prose the
+      finding had. Measured on sweep 2026-09-16T1843Z-a17e6fcc, this is the
+      commonest label shape codex writes.
+    - `"CWE-99999"` and `"CWE_863 Incorrect authorization"` do NOT normalise
+      (out of the vocabulary; underscore-and-space punctuation), so they were
+      taken as prose and rendered verbatim -- producing exactly the
+      "CWE-99999 (CWE-863)" heading this helper exists to prevent. So did the
+      bare `"295"`.
+
+    So the label is stripped of an identifier prefix and the prose tail kept
+    when there is one, and skipped when what remains is only an identifier.
+
     Falls back to the key when no occurrence carries prose -- a finding with no
     human label anywhere still needs a non-empty heading.
     """
     for occurrence in finding.get("occurrences") or []:
         label = occurrence.get("vuln_class")
-        if isinstance(label, str) and label and schema.normalize_cwe(label) is None:
-            return label
+        if not isinstance(label, str) or not label.strip():
+            continue
+        prefixed = _IDENTIFIER_PREFIX_RE.match(label)
+        if prefixed:
+            tail = prefixed.group("prose").strip()
+            # "CWE-863: Incorrect authorization" -> "Incorrect authorization".
+            # A bare "CWE-863" matches with an empty tail and is skipped.
+            if tail:
+                return tail
+            continue
+        if _BARE_IDENTIFIER_RE.match(label):
+            continue
+        return label
     return finding["vuln_class"]
 
 
@@ -743,6 +803,22 @@ def build_cross_step_groups(findings: list[dict]) -> list[dict]:
                         "file": member["file"],
                         "symbol": member["symbol"],
                         "vuln_class": member["vuln_class"],
+                        # LABELS ONLY, never the whole occurrence. `_prose_label`
+                        # reads `occurrences[].vuln_class`, and without this the
+                        # helper was wired in at the render site but INERT here:
+                        # it iterated an absent list and fell through to the
+                        # normalised cwe, rendering the "CWE-863 (CWE-863)" it
+                        # exists to prevent (Issue #4134).
+                        #
+                        # These members travel to the adjudicator (see
+                        # `adjudication_input`), and Issue #4080 keeps finder
+                        # evidence out of that payload. Copying `occurrences`
+                        # wholesale would carry `evidence` straight past that
+                        # guard, so only the class label is projected.
+                        "occurrences": [
+                            {"vuln_class": occurrence["vuln_class"]}
+                            for occurrence in member.get("occurrences") or []
+                        ],
                         "step_ids": member["step_ids"],
                     }
                     for member in members

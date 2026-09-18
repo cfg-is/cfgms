@@ -2065,21 +2065,139 @@ def test_heading_falls_back_when_every_lane_wrote_an_identifier():
         )
 
 
-def test_two_findings_from_ONE_lane_at_the_same_key_stay_two():
-    """REQUIRED TEST (Issue #4134): de-duplication reconciles DIFFERENT lanes
-    and must never collapse two findings from the same one.
+def test_heading_label_tests_identifier_SHAPE_not_vocabulary_membership():
+    """REQUIRED TEST (Issue #4134): `_prose_label` decides "is this an
+    identifier" by SHAPE. Asking `schema.normalize_cwe(label) is None` asked
+    about VOCABULARY, and the two disagree in BOTH directions -- each way a
+    real defect that reached the report.
 
-    A lane reporting two findings is that lane asserting they are two things.
-    Merging them overrules the only judgement in the system that read the code,
-    and loses a defect: the second survives as an occurrence bullet while the
-    consolidated record -- title, line, and the count itself -- describes only
-    the first.
+    A vocabulary test is wrong going in: `CWE-863: Incorrect authorization`
+    normalises, so it was SKIPPED and the finding's only prose was thrown away.
+    It is wrong coming out too: `CWE-99999` (out of the list) and
+    `CWE_863 Incorrect authorization` (underscore, no colon) do NOT normalise,
+    so they were taken for prose and rendered verbatim -- producing exactly the
+    `CWE-99999 (CWE-863)` heading the helper exists to prevent.
 
-    Not a contrived shape, and the likelier one. Measured on sweep
-    2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held two or more findings,
-    swallowing 116 of 2,133 -- 5.4% of everything reported. The fixture below
-    is a real example from it, codex on `acquireCASLock`: two race windows
-    twenty lines apart, both CWE-362.
+    Each case is asserted on `_prose_label` directly rather than through a
+    rendered report, because the point is the decision, not the formatting.
+    """
+    cases = [
+        # (label, expected, what this case is about)
+        ("CWE-863: Incorrect authorization", "Incorrect authorization",
+         "an identifier prefix is stripped and the prose tail kept"),
+        ("CWE_863 Incorrect authorization", "Incorrect authorization",
+         "punctuation the vocabulary does not accept is still an identifier prefix"),
+        ("cwe 863 - incorrect authorization", "incorrect authorization",
+         "case and separator do not change the decision"),
+        ("CWE-863", "CWE-863 (fallback)",
+         "a bare in-vocabulary identifier is skipped"),
+        ("CWE-99999", "CWE-863 (fallback)",
+         "an OUT-of-vocabulary identifier is skipped too -- shape, not membership"),
+        ("295", "CWE-863 (fallback)",
+         "a bare number is an identifier and never a heading"),
+        ("Incorrect authorization", "Incorrect authorization",
+         "plain prose is returned unchanged"),
+        ("   ", "CWE-863 (fallback)",
+         "a whitespace-only label is not prose"),
+    ]
+    for label, expected, description in cases:
+        got = consolidate._prose_label(
+            {"occurrences": [{"vuln_class": label}], "vuln_class": "CWE-863 (fallback)"}
+        )
+        check(got == expected, f"heading label: {description}", f"{label!r} -> {got!r}")
+
+    # The skip must be a CONTINUE, not a return: a later occurrence still wins.
+    got = consolidate._prose_label({
+        "occurrences": [{"vuln_class": "CWE-863"}, {"vuln_class": "Missing authorization check"}],
+        "vuln_class": "CWE-863",
+    })
+    check(got == "Missing authorization check",
+          "heading label: skipping an identifier occurrence does not abandon the search", got)
+
+
+def test_cross_step_group_members_render_prose_and_carry_no_evidence():
+    """REQUIRED TEST (Issue #4134): `_prose_label` is used at the cross-step
+    member site, and it must actually WORK there.
+
+    It did not. `_cross_step_groups()` projects four fields onto each member
+    and `occurrences` was not one of them, so the helper iterated an absent
+    list and fell straight through to the key -- rendering the
+    `CWE-117 (CWE-117)` it was called to prevent. Wired in, but inert: a test
+    that only checked the helper was CALLED would have passed.
+
+    The projection is labels only. These members travel to the adjudicator in
+    `build_adjudication_input`, and Issue #4080 keeps finder evidence out of
+    that payload, so copying whole occurrences would carry `evidence` straight
+    past that guard. Both halves are asserted here -- the label is present AND
+    the evidence is not -- because fixing the first by copying everything would
+    silently break the second.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/a/a.go": "a" * 200, "pkg/b/b.go": "b" * 200})
+        write_plan_step(sweep, "step-001", sha)
+        write_plan_step(sweep, "step-002", sha)
+        write(
+            os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"),
+            complete_envelope(sha, "laneA", "step-001", [
+                finding(sha, "laneA", "step-001", file="pkg/a/a.go", symbol="A",
+                        vuln_class="Log output neutralization", cwe="CWE-117"),
+            ]),
+        )
+        write(
+            os.path.join(sweep, "lanes", "laneA", "step-002.findings.json"),
+            complete_envelope(sha, "laneA", "step-002", [
+                finding(sha, "laneA", "step-002", file="pkg/b/b.go", symbol="B",
+                        vuln_class="CWE-117", cwe="CWE-117"),
+            ]),
+        )
+        report = consolidate.consolidate(sweep, repo)
+        md = consolidate.render_markdown(report)
+        section = md.split("## Cross-step groups")[1].split("## Findings")[0]
+        check("`pkg/a/a.go` :: A (Log output neutralization;" in section,
+              "cross-step members: a member with prose renders that prose", section)
+        # Member B's ONLY label anywhere is the identifier, so the documented
+        # fallback applies and it renders the key -- a heading must not be
+        # blank. That is the fallback firing, not the inert-helper bug: before
+        # the projection, member A rendered `CWE-117` too, and A is the
+        # assertion that tells the two apart.
+        check("`pkg/b/b.go` :: B (CWE-117;" in section,
+              "cross-step members: a member with no prose anywhere falls back to the key, not blank",
+              section)
+
+        members = report["cross_step_groups"][0]["members"]
+        check(all("occurrences" in m for m in members),
+              "cross-step members: the class labels are projected, so the helper is not inert",
+              str(members))
+        serialized = json.dumps(members)
+        check("evidence" not in serialized and "suggested_fix" not in serialized,
+              "cross-step members: labels ONLY -- finder evidence never reaches the adjudicator here",
+              serialized[:200])
+
+
+def test_same_lane_findings_at_one_key_merge_KNOWN_GAP():
+    """Two findings from ONE lane at the same file+symbol+cwe still merge, and
+    that is a KNOWN, UNFIXED gap -- pinned here so it cannot change silently.
+
+    Measured on sweep 2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held two or
+    more findings, swallowing 116 of 2,133 -- 5.4% of everything reported. Real
+    example, codex on `acquireCASLock`, both CWE-362: race windows at line 83
+    and line 103. The second survives as an occurrence, so the evidence is
+    visible, but the top-level record and the finding COUNT describe only the
+    first.
+
+    A per-lane ordinal in the key fixed this and was REMOVED, because it broke
+    something worse. `_finding_key()` stays a three-tuple, and
+    `_merge_verification` and `_apply_adjudication` both assume it is unique;
+    with an ordinal, two consolidated findings shared one `_finding_key`, so a
+    verdict written about line 83 was applied to line 103 as well. A fabricated
+    `guarded` is a false CLEAN in a security artifact -- worse than a merge,
+    whose loss is at least visible in the occurrences. `schema.py`'s duplicate
+    rule also rejected the correct adjudicator response, invalidating the
+    envelope and losing adjudication for the WHOLE sweep.
+
+    Fixing it properly means giving a consolidated finding an explicit identity
+    the adjudicator and verifier can echo, rather than a semantic tuple. That
+    is a deliberate design decision across six files, not a patch to make here.
     """
     with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
         sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
@@ -2095,22 +2213,23 @@ def test_two_findings_from_ONE_lane_at_the_same_key_stay_two():
         )
         report = consolidate.consolidate(sweep, repo)
         check(
-            len(report["findings"]) == 2,
-            "same-lane: two findings at one key from one lane stay two",
-            str([(f["vuln_class"], f["occurrences"][0].get("title")) for f in report["findings"]]),
+            len(report["findings"]) == 1,
+            "known gap: same-lane findings at one key still merge (see docstring)",
+            str(len(report["findings"])),
         )
-        titles = {f["occurrences"][0].get("title") for f in report["findings"]}
         check(
-            titles == {"first window", "second window"},
-            "same-lane: BOTH survive as findings, not one as a bullet under the other",
-            str(titles),
+            len(report["findings"][0]["occurrences"]) == 2,
+            "known gap: BOTH remain visible as occurrences, so the evidence is not lost",
+            str(len(report["findings"][0]["occurrences"])),
         )
-        for f in report["findings"]:
-            check(
-                len(f["occurrences"]) == 1 and f["agreement"]["reported"] == 1,
-                "same-lane: neither is credited with agreement it never had",
-                str((f["agreement"], len(f["occurrences"]))),
-            )
+        # Identity stays unique, which is the property the ordinal broke.
+        keys = [consolidate._finding_key(f) for f in report["findings"]]
+        check(
+            len(keys) == len(set(keys)),
+            "known gap: every consolidated finding still has a UNIQUE key, so no "
+            "verdict can cross-apply between findings",
+            str(keys),
+        )
 
 
 def test_same_lane_findings_never_fabricate_a_severity_disagreement():
@@ -2806,9 +2925,7 @@ def test_the_consolidated_finding_carries_its_evidence():
     occ = [{"lane": "l", "step_id": "s", "severity": "high", "confidence": "high",
             "cwe": "CWE-89", "line": 4, "end_line": None, "title": "t",
             "evidence": "the proof", "suggested_fix": "f"}]
-    # The 4th key element is the per-lane ordinal added in Issue #4134, which
-    # is what keeps two findings from ONE lane from collapsing into one.
-    groups = {("a.go", "S", "v", 0): {"step_ids": {"s"}, "lanes": {"l"}, "occurrences": occ}}
+    groups = {("a.go", "S", "v"): {"step_ids": {"s"}, "lanes": {"l"}, "occurrences": occ}}
     got = consolidate._finalize_findings(groups, {"l": {"s": "complete"}})
     check(got[0]["evidence"] == "the proof",
           "evidence: the consolidated finding carries it", str(got[0].get("evidence")))
