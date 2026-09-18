@@ -89,6 +89,9 @@ All sweep state lives outside the repository, under a base directory resolved by
       lanes/
         adjudicator/
           adjudication.json            one lane-shaped envelope: the adjudicator's verdicts
+          .adjudication-checkpoint.json  per-batch progress (Issue #4144). Internal harness
+                                        state, never a report artifact; survives prepare(),
+                                        removed on a complete run
     report/
       consolidated.json                machine-readable, de-duplicated; adjudication merged beside
                                         the raw lane values, never instead of them
@@ -3065,13 +3068,58 @@ re-checked against real data rather than re-argued.
 - **It is a lane-shaped citizen.** `lanes/adjudicator.py` writes one envelope with the same
   four terminal states, classified the same way: a rate-limit signal is `parked`, a non-zero
   harness exit is `failed`, no output file is `refused`, unparseable or schema-invalid output is
-  `failed`. A non-`complete` envelope carries no adjudications at all (all-or-nothing across
-  batches — partial adjudication would leave a reader unable to tell which severities were
-  judged). `consolidate.load_adjudication()` treats an envelope that is missing after a recorded
+  `failed`. **A non-`complete` envelope carries the batches that did finish** (Issue #4144); the
+  verdict lists are present and may be empty, never absent, so "no verdicts survived" and "this
+  envelope predates the fix" are distinguishable. They are validated by the same schema rules that
+  apply on a `complete` envelope — a verdict on the failure path is the one nobody re-reads, so it
+  is exactly where an unvalidated value would do its damage.
+
+  This replaced an all-or-nothing rule whose stated reason was that partial adjudication would
+  leave a reader unable to tell which severities were judged. That reason does not survive
+  contact with the mechanism: the partial verdicts are **not** applied to any finding, so no
+  severity renders as adjudicated on a non-`complete` envelope, and nothing becomes ambiguous.
+  What the old rule actually cost was measurable — on sweep `2026-09-16T1843Z-a17e6fcc` the stage
+  completed 7 of 57 batches over 28 minutes and all 7 were discarded. It was also not only a crash
+  path: `finish()` attached verdicts only when the state was `complete`, so every clean early exit
+  threw the finished work away with no container restart involved.
+
+  `consolidate.load_adjudication()` still treats an envelope that is missing after a recorded
   dispatch, schema-invalid, non-`complete`, from another sweep, or `stale` exactly like a failed
   lane: raw severities render, the status and reason land in `## Incomplete`, and the opening
   sentence says the sweep is incomplete. "No parseable output means it did not run" holds here as
-  it does for every lane.
+  it does for every lane. What the preserved verdicts add is a count in the report — how much
+  survived — and a checkpoint a resume can skip past, not an adjudication the report pretends to
+  have.
+- **Progress is checkpointed per batch, and resumed.** After each batch completes,
+  `lanes/adjudicator.py` writes `.adjudication-checkpoint.json` beside its envelope through
+  `atomic_write.write_json_atomic`. It is internal harness state, never a report artifact: a
+  dotfile, and in the adjudication sub-sweep tree, which `consolidate._discover_lanes()` never
+  walks. `adjudicate.prepare()` removes only the stale `adjudication.json`, so the checkpoint
+  survives to the next `resume` deliberately. A `complete` run removes it, since a spent
+  checkpoint could only ever be applied to some later, different run.
+
+  A checkpoint records batch **indices**, so it is bound to the plan that produced them by two
+  independent keys, and a mismatch on either discards the whole file rather than applying part of
+  it. `input_hash` catches an input whose content changed; `plan_fingerprint` — a hash over which
+  findings and groups sit in which batch, in order — catches a plan that changed for any other
+  reason, including `harness`, `batch_size`, `max_prompt_bytes` and edits to `plan_batches()`
+  itself. Neither subsumes the other: change only a report's evidence text and every finding key
+  is identical, so the fingerprint matches and only the input hash notices. A checkpoint whose
+  stored verdicts fail validation is also discarded entirely — redoing a batch costs model time,
+  while trusting a corrupt one puts an unchecked verdict in the report.
+- **A revoked credential is named as such.** `call_<harness>_harness` returns a sanitized output
+  tail as its third element; `run_adjudication()` was unpacking only the first two, so the
+  harness's own error text never reached the envelope, and it could not be recovered from the
+  exit code either because `lanes/adjudicator.py`'s `main()` returns 0 unconditionally. The tail
+  now lands in `stop_reason_raw`, trimmed from the **front** — `sanitize_harness_output_tail()`
+  keeps the last 4,000 characters because that is where the explanation is, and `stop_reason_raw`
+  caps at 500, so head-truncation would discard exactly the text the tail exists to carry.
+  `consolidate.looks_auth_revoked()` classifies that text as the `auth_revoked` status, which
+  `_adjudication_incomplete_lines()` renders as a distinctly labelled known-recoverable cause
+  naming the remedy. It is deliberately **not** in `ADJUDICATION_OK_STATUSES`: the stage produced
+  no verdicts, so the severities are still raw and the sweep is still incomplete. The status
+  distinguishes "restore the credential and resume" from "investigate this", and claims nothing
+  more.
 - **Determinism is lost, so record provenance.** Every envelope carries `harness`, `model_id`,
   `prompt_version` (a digest over the adjudicator's system prompt, the methodology core, every
   anchor, and the output shape), `harness_identity`, and `input_hash` — the SHA-256 of the exact
