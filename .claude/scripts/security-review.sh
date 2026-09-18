@@ -193,6 +193,7 @@ import sys
 sec_dir, repo_root, ref, lane_dir_names = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 paths = [p for p in sys.argv[5:] if p]
 sys.path.insert(0, sec_dir)
+import harness_snapshot  # noqa: E402
 import manifest  # noqa: E402
 import snapshot  # noqa: E402
 
@@ -216,7 +217,37 @@ if not (os.path.isdir(snapshot_dir) and os.listdir(snapshot_dir)):
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-print(f"{sweep_dir}\t{m['commit_sha']}")
+# Pin the HARNESS beside the target (Issue #4136). Two independent pins: one
+# on the code under review, one on the code doing the reviewing. Without this
+# second one a sweep has no single harness version -- every container mounts
+# whatever is in the working tree at the moment it launches -- so a mid-sweep
+# edit silently changes what later steps ran, against the same pinned commit.
+#
+# Idempotent, exactly like create_snapshot() above: a second `launch` against
+# an existing sweep id keeps the original pin, and a `resume` never re-pins
+# against a newer tree. Re-pinning on resume would be the original defect
+# wearing a different hat.
+#
+# Hard-fails the sweep, like a snapshot failure: a sweep that cannot say which
+# harness produced it is not worth running.
+try:
+    pin = harness_snapshot.create_harness_pin(repo_root, sweep_dir)
+except harness_snapshot.HarnessPinError as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+# Recorded in manifest.json beside commit_sha so the two pins a sweep carries
+# -- what was reviewed, and what did the reviewing -- are legible from one
+# file. The pin's own manifest under harness/ stays the authority on which
+# files it covers; this is the summary an operator reads first.
+if m.get("harness_hash") != pin["hash"]:
+    m["harness_hash"] = pin["hash"]
+    manifest_path = os.path.join(sweep_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(m, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+print(f"{sweep_dir}\t{m['commit_sha']}\t{pin['hash']}")
 PYEOF
 }
 

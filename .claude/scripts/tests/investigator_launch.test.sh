@@ -1370,6 +1370,86 @@ check_not_contains "missing agent profile never reaches docker run" "$(cat "$DOC
 printf 'investigator agent profile v1\n' > "$AGENT_PROFILE_FIXTURE"
 
 echo ""
+echo "== REQUIRED TEST (Issue #4136) — a PINNED sweep resolves its harness from"
+echo "   the pin, so editing the live tree mid-sweep changes neither what runs"
+echo "   nor the recorded identity =="
+
+# Baseline from the live tree, before any pin exists.
+printf '#!/usr/bin/env bash\necho entrypoint-v1\n' > "$ENTRYPOINT_FIXTURE"
+printf 'sibling module v1\n' > "$SIBLING_FIXTURE"
+printf 'investigator agent profile v1\n' > "$AGENT_PROFILE_FIXTURE"
+hid_unpinned="$(run_hid_launch plan "")"
+
+# Pin the sweep with content DELIBERATELY DIFFERENT from the live tree. Pinning
+# identical bytes would make "pinned digest == live digest" the correct answer
+# and prove nothing about which tree was read.
+PIN_DIR="${HID_SWEEP_DIR}/harness"
+mkdir -p "${PIN_DIR}/.devcontainer/scripts" "${PIN_DIR}/.claude/agents"
+printf '#!/usr/bin/env bash\necho entrypoint-PINNED\n' \
+  > "${PIN_DIR}/.devcontainer/scripts/investigator-entrypoint.sh"
+printf 'investigator agent profile PINNED\n' \
+  > "${PIN_DIR}/.claude/agents/investigator.md"
+# The manifest is what marks a pin as real -- a directory alone is a
+# half-written pin and must not be honoured.
+printf '{"algorithm":"sha256","hash":"fixture","files":[],"pinned_at":"2026-01-01T00:00:00+00:00"}\n' \
+  > "${PIN_DIR}/harness_pin.json"
+
+hid_pinned_before="$(run_hid_launch plan "")"
+pinned_run_call="$(grep '^run -d' "$DOCKER_CALL_LOG" | tail -1)"
+
+# The digest must differ from the unpinned baseline, or the pin was ignored --
+# which is the exact bug being fixed, and would let the stability check below
+# pass for the wrong reason.
+if [[ -n "$hid_pinned_before" && "$hid_pinned_before" != "$hid_unpinned" ]]; then
+  ok "pinned sweep: the pin is what was hashed, not the live tree"
+else
+  bad "pinned sweep: the pin is what was hashed, not the live tree" \
+    "pinned=${hid_pinned_before} unpinned=${hid_unpinned}"
+fi
+
+# And the container must MOUNT the pin, not merely hash it.
+check_contains "pinned sweep: the entrypoint is mounted from the pin" "$pinned_run_call" \
+  "${PIN_DIR}/.devcontainer/scripts/investigator-entrypoint.sh"
+check_contains "pinned sweep: the agent profile is mounted from the pin" "$pinned_run_call" \
+  "${PIN_DIR}/.claude/agents/investigator.md"
+check_not_contains "pinned sweep: the live entrypoint is not mounted" "$pinned_run_call" \
+  "${ENTRYPOINT_FIXTURE}:"
+
+# Now move the live tree on, exactly as an edit during a running sweep does.
+printf '#!/usr/bin/env bash\necho entrypoint-EDITED\n' > "$ENTRYPOINT_FIXTURE"
+printf 'sibling module EDITED\n' > "$SIBLING_FIXTURE"
+printf 'investigator agent profile EDITED\n' > "$AGENT_PROFILE_FIXTURE"
+hid_pinned_after="$(run_hid_launch plan "")"
+
+if [[ "$hid_pinned_after" == "$hid_pinned_before" ]]; then
+  ok "pinned sweep: editing the live tree does not change the recorded identity"
+else
+  bad "pinned sweep: editing the live tree does not change the recorded identity" \
+    "before=${hid_pinned_before} after=${hid_pinned_after}"
+fi
+
+# An unpinned sweep -- one created before this existed -- must still work, and
+# must track the live tree it is reading.
+rm -rf "$PIN_DIR"
+hid_unpinned_edited="$(run_hid_launch plan "")"
+if [[ -n "$hid_unpinned_edited" && "$hid_unpinned_edited" != "$hid_pinned_before" ]]; then
+  ok "unpinned sweep: falls back to the live tree and still records an identity"
+else
+  bad "unpinned sweep: falls back to the live tree and still records an identity" \
+    "got '${hid_unpinned_edited}'"
+fi
+if [[ "$hid_unpinned_edited" != "$hid_unpinned" ]]; then
+  ok "unpinned sweep: still tracks live-tree edits, exactly as before"
+else
+  bad "unpinned sweep: still tracks live-tree edits, exactly as before" \
+    "digest unchanged across an edit (${hid_unpinned_edited})"
+fi
+
+printf '#!/usr/bin/env bash\necho entrypoint-v1\n' > "$ENTRYPOINT_FIXTURE"
+printf 'sibling module v1\n' > "$SIBLING_FIXTURE"
+printf 'investigator agent profile v1\n' > "$AGENT_PROFILE_FIXTURE"
+
+echo ""
 echo "== REQUIRED TEST evidence — planner mode loads the investigator agent"
 echo "   profile FROM THE CONTAINER FILESYSTEM (Issue #4003): since Issue #3979"
 echo "   moved plan mode's /workspace from a repo checkout to the read-only"

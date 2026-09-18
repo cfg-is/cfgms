@@ -2916,6 +2916,26 @@ PROMPT_EOF
     fi
 
     inv_sweep_id="$(basename "$inv_sweep_dir")"
+
+    # Where every harness file this command mounts is resolved from
+    # (Issue #4136).
+    #
+    # The sweep pins the harness at creation, exactly as it pins the target
+    # tree, so that a sweep runs ONE harness version from launch through every
+    # resume. Before this, each container mounted whatever happened to be in
+    # the working tree at the moment it launched -- so a mid-sweep edit changed
+    # what later steps ran, against the same pinned commit, and nothing
+    # recorded that it had.
+    #
+    # Falls back to REPO_ROOT when a sweep carries no pin. That is not a
+    # loophole: a sweep created before pinning existed has nothing to resolve
+    # against and must stay resumable, and failing those closed would strand
+    # in-flight work to fix a problem they already have.
+    inv_harness_root="$REPO_ROOT"
+    if [[ -f "${inv_sweep_dir}/harness/harness_pin.json" ]]; then
+      inv_harness_root="${inv_sweep_dir}/harness"
+    fi
+
     inv_mode_safe=$(printf '%s' "$inv_mode" | tr -c 'a-zA-Z0-9._-' '-')
     inv_sweep_id_safe=$(printf '%s' "$inv_sweep_id" | tr -c 'a-zA-Z0-9._-' '-')
     container_name="cfg-agent-investigator-${inv_sweep_id_safe}-${inv_mode_safe}"
@@ -3042,7 +3062,7 @@ PROMPT_EOF
       # not planner output. Lane mode never passes --agent (claude_lane.py)
       # and its /workspace is the snapshot, which already contains this file,
       # so this mount is plan-mode-only.
-      inv_agent_profile_host_path="${REPO_ROOT}/.claude/agents/investigator.md"
+      inv_agent_profile_host_path="${inv_harness_root}/.claude/agents/investigator.md"
       if [[ ! -f "$inv_agent_profile_host_path" ]]; then
         echo "ERROR: investigator agent profile not found: ${inv_agent_profile_host_path}"
         exit 1
@@ -3297,6 +3317,17 @@ PROMPT_EOF
 
     inv_lane_entrypoint_mount=()
     if [[ -n "$inv_lane_entrypoint" ]]; then
+      # Re-root the caller's lane entrypoint into the pin (Issue #4136). The
+      # caller names it under REPO_ROOT; when the sweep is pinned, the file
+      # that must actually run is the pinned copy of that same relative path.
+      # A caller-supplied path from outside REPO_ROOT (a test's own fixture)
+      # has no relative form to re-root, so it is used as given.
+      if [[ "$inv_harness_root" != "$REPO_ROOT" && "$inv_lane_entrypoint" == "${REPO_ROOT}/"* ]]; then
+        inv_lane_entrypoint_pinned="${inv_harness_root}/${inv_lane_entrypoint#"${REPO_ROOT}/"}"
+        if [[ -f "$inv_lane_entrypoint_pinned" ]]; then
+          inv_lane_entrypoint="$inv_lane_entrypoint_pinned"
+        fi
+      fi
       if [[ ! -f "$inv_lane_entrypoint" ]]; then
         echo "ERROR: --lane-entrypoint not found: ${inv_lane_entrypoint}"
         exit 1
@@ -3309,7 +3340,7 @@ PROMPT_EOF
       # audited snapshot at /workspace. Mounted read-only at a fixed trusted
       # path; the lane bootstraps consult CFGMS_SECURITY_REVIEW_HARNESS_DIR
       # ahead of any /workspace fallback.
-      inv_harness_dir_host="${REPO_ROOT}/.claude/scripts/security-review"
+      inv_harness_dir_host="${inv_harness_root}/.claude/scripts/security-review"
       if [[ ! -d "$inv_harness_dir_host" ]]; then
         echo "ERROR: trusted harness directory not found: ${inv_harness_dir_host}"
         exit 1
@@ -3319,7 +3350,7 @@ PROMPT_EOF
       # The review methodology (docs/security-review/methodology.md) is
       # review POLICY and is loaded by harness_runner at import; it comes from
       # the same trusted host tree, beside the harness, never from /workspace.
-      inv_methodology_dir_host="${REPO_ROOT}/docs/security-review"
+      inv_methodology_dir_host="${inv_harness_root}/docs/security-review"
       if [[ ! -f "${inv_methodology_dir_host}/methodology.md" ]]; then
         echo "ERROR: trusted methodology not found: ${inv_methodology_dir_host}/methodology.md"
         exit 1
@@ -3347,13 +3378,15 @@ PROMPT_EOF
     # lane entrypoint, agent profile), so a rename with unchanged content
     # still changes the recorded identity -- the path is part of what
     # actually got mounted where. Runs on the host, before the docker run
-    # call, using the same $REPO_ROOT the mount flags above are already built
-    # from. This is recording, not freezing: the value is written fresh on
-    # every call and never compared against a prior one -- binding it into a
-    # step envelope and quarantining a mismatch on resume is STORY-12 (D6),
-    # which consumes this value; it is not produced here.
-    inv_entrypoint_host_path="${REPO_ROOT}/.devcontainer/scripts/investigator-entrypoint.sh"
-    inv_harness_identity_hash=$(python3 - "$REPO_ROOT" "$inv_entrypoint_host_path" "$inv_lane_entrypoint" "$inv_agent_profile_host_path" "${inv_sweep_dir}/harness_identity.json" <<'PY'
+    # call, using the same $inv_harness_root the mount flags above are already
+    # built from -- the sweep's PIN when it has one, else REPO_ROOT
+    # (Issue #4136). Hashing the pin rather than the live tree is what makes
+    # this value stable for the life of a sweep: recomputed on every dispatch
+    # it now yields the same digest every time, so `resume`'s mismatch
+    # quarantine fires when the harness genuinely differs and not merely
+    # because the working tree moved on while the sweep was running.
+    inv_entrypoint_host_path="${inv_harness_root}/.devcontainer/scripts/investigator-entrypoint.sh"
+    inv_harness_identity_hash=$(python3 - "$inv_harness_root" "$inv_entrypoint_host_path" "$inv_lane_entrypoint" "$inv_agent_profile_host_path" "${inv_sweep_dir}/harness_identity.json" <<'PY'
 import hashlib
 import json
 import os
@@ -3443,7 +3476,7 @@ PY
       "${inv_harness_creds_mount[@]}" \
       "${inv_harness_extra_run_args[@]}" \
       "${inv_lane_entrypoint_mount[@]}" \
-      -v "${REPO_ROOT}/.devcontainer/scripts/investigator-entrypoint.sh:/usr/local/bin/investigator-entrypoint.sh:ro" \
+      -v "${inv_entrypoint_host_path}:/usr/local/bin/investigator-entrypoint.sh:ro" \
       "${AGENT_METRICS_MOUNT_ARGS[@]}" \
       "${AGENT_MODEL_ROUTING_MOUNT_ARGS[@]}" \
       "${inv_session_mount[@]}" \
