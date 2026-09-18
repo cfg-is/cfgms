@@ -647,10 +647,17 @@ def build_envelope(
     refused or failed still ran against a specific frozen plan step, system
     prompt, and harness code, and that record is what makes a sweep readable
     after the fact. Only `plan_hash` drives the re-run decision (Issue #4136);
-    `prompt_version` and `harness_identity` are recorded for provenance and
-    read back through `resume.provenance_by_step()`, never compared against a
-    current value. All three are written for the non-`complete` states too,
-    which `resume.missing_steps` already always retries.
+    `prompt_version` and `harness_identity` are recorded for provenance, never
+    compared against a current value.
+
+    All three are written for the non-`complete` states too, which
+    `resume.missing_steps` already always retries -- but note
+    `resume.provenance_by_step()` reads only `complete` envelopes, so a
+    non-complete step's recorded values are kept on disk and are NOT part of
+    the provenance answer. That is deliberate: a parked or failed step produced
+    no reading, so counting its instrument would report a lane as having
+    "changed instrument partway" when only one instrument ever produced a
+    result.
     Sourced from `context` rather than being separate parameters -- like
     `sweep_id`/`commit_sha`/`lane`/`step_id`, they are identity the caller
     already owns for this step, never invented here.

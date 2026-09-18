@@ -23,7 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import basedir  # noqa: E402
-import consolidate  # noqa: E402
+import consolidate
+import resume  # noqa: E402
 import schema  # noqa: E402
 
 FAILURES: list[str] = []
@@ -221,6 +222,39 @@ def test_two_lanes_with_different_identities_and_no_drift_is_NOT_mixed():
             section,
         )
 
+        # The TABLE is the artifact AC5 is about -- "naming which steps ran
+        # under which version". Asserting `mixed` and the headline leaves it
+        # entirely unchecked: render every row under `rows[0]["lane"]` and the
+        # table attributes one lane's values to another, showing that lane with
+        # two identities directly beneath a sentence saying each ran one. Same
+        # self-contradiction this fixture's sibling exists to prevent, mirrored
+        # into the rows.
+        for row in report["provenance"]:
+            for field in ("harness_identity", "prompt_version"):
+                for value, steps in row[field].items():
+                    expected = "| {} | `{}` | `{}` | {} |".format(
+                        row["lane"], field, value, len(steps)
+                    )
+                    check(
+                        expected in section,
+                        f"provenance table: {row['lane']}/{field} is attributed to its OWN lane",
+                        section,
+                    )
+        # And no lane is given a value it did not produce.
+        for row in report["provenance"]:
+            foreign = [
+                other for other in report["provenance"]
+                if other["lane"] != row["lane"]
+                for v in other["harness_identity"]
+                if v not in row["harness_identity"]
+                and f"| {row['lane']} | `harness_identity` | `{v}` |" in section
+            ]
+            check(
+                not foreign,
+                f"provenance table: {row['lane']} is never shown another lane's identity",
+                section,
+            )
+
 
 def test_only_the_lane_that_actually_drifted_is_named():
     """REQUIRED TEST (Issue #4136): the companion to the case above. When one
@@ -362,6 +396,165 @@ def test_a_mixed_sweep_names_which_steps_ran_which_instrument():
             )
 
 
+def test_every_drifted_lane_is_named_not_just_the_first():
+    """REQUIRED TEST (Issue #4136): the CONVERSE of the clean-lane property.
+
+    `test_only_the_lane_that_actually_drifted_is_named` asserts that no clean
+    lane appears in the drift sentence. That is one direction. Truncate the
+    sentence to the first drifted lane --
+
+        mixed_rows = [row for row in rows if row["mixed"]][:1]
+
+    -- and every existing check still passes, because no fixture had TWO
+    drifted lanes. A lane changes instrument and the report says nothing about
+    it, which is worse than the false alarm the other direction guards: a false
+    alarm is visible and annoying, a silent omission is invisible and trusted.
+
+    Three lanes here on purpose -- two drifted, one clean -- so the assertion
+    is "every mixed lane appears AND no clean lane does", both derived from the
+    rows rather than hardcoded.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write_plan_step(sweep, "step-002", sha, scope="pkg/example")
+
+        # Two lanes that each changed harness between their two steps.
+        for lane, second_identity in (("lane-one", "d" * 64), ("lane-two", "e" * 64)):
+            write(
+                os.path.join(sweep, "lanes", lane, "step-001.findings.json"),
+                complete_envelope(sha, lane, "step-001", []),
+            )
+            drifted = complete_envelope(sha, lane, "step-002", [])
+            drifted["harness_identity"] = second_identity
+            write(os.path.join(sweep, "lanes", lane, "step-002.findings.json"), drifted)
+        # One that did not.
+        for step in ("step-001", "step-002"):
+            write(
+                os.path.join(sweep, "lanes", "lane-steady", f"{step}.findings.json"),
+                complete_envelope(sha, "lane-steady", step, []),
+            )
+
+        report = consolidate.consolidate(sweep, repo)
+        rows = {row["lane"]: row for row in report["provenance"]}
+        check(
+            sum(1 for r in rows.values() if r["mixed"]) == 2,
+            "provenance: exactly two lanes drifted (else this proves nothing)",
+            str({k: v["mixed"] for k, v in rows.items()}),
+        )
+
+        md = consolidate.render_markdown(report)
+        section = md.split("## Provenance")[1].split("\n## ")[0]
+        headline = section.split("Drift is measured")[0]
+        for lane, row in sorted(rows.items()):
+            if row["mixed"]:
+                check(
+                    f"`{lane}`" in headline,
+                    f"provenance: {lane} drifted, so it MUST be named in the drift sentence",
+                    headline,
+                )
+            else:
+                check(
+                    f"`{lane}`" not in headline,
+                    f"provenance: {lane} did not drift, so it is not named",
+                    headline,
+                )
+
+
+def test_only_COMPLETE_steps_count_as_provenance():
+    """REQUIRED TEST (Issue #4136): a step that parked or failed produced no
+    reading, so its recorded instrument is not a version this lane ran ON.
+
+    Drop the `state != "complete"` filter and a lane that PARKED under one
+    harness and then COMPLETED under the next is reported as "changed
+    instrument partway" -- when only one instrument ever produced a result.
+    That is the cry-wolf false alarm this section's own prose warns about,
+    manufactured out of a step that read nothing.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write_plan_step(sweep, "step-002", sha, scope="pkg/example")
+
+        # step-001 PARKED under the original harness -- it reviewed nothing.
+        #
+        # Written to the `.findings.json` PATH deliberately. `provenance_by_step`
+        # only opens that path, so a parked envelope at `.status.json` is
+        # already invisible to it and proves nothing about the state filter --
+        # an earlier version of this fixture made exactly that mistake and the
+        # mutation survived. The filter guards a non-complete envelope sitting
+        # where a complete one would, which is the case that can actually reach
+        # it.
+        parked = status_envelope(sha, "laneA", "step-001", "parked")
+        parked["harness_identity"] = "c" * 64
+        write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), parked)
+        # step-002 COMPLETED under a newer harness.
+        done = complete_envelope(sha, "laneA", "step-002", [])
+        done["harness_identity"] = "d" * 64
+        write(os.path.join(sweep, "lanes", "laneA", "step-002.findings.json"), done)
+
+        report = consolidate.consolidate(sweep, repo)
+        row = report["provenance"][0]
+        check(
+            row["harness_identity"] == {"d" * 64: ["step-002"]},
+            "provenance: only the COMPLETE step's instrument is recorded",
+            str(row["harness_identity"]),
+        )
+        check(
+            row["mixed"] is False,
+            "provenance: a parked step under an older harness is not drift -- it produced no reading",
+            str(row),
+        )
+
+
+def test_harness_versions_by_step_DELEGATES_rather_than_re_walking():
+    """REQUIRED TEST (Issue #4136): `harness_versions_by_step()` must agree
+    with `provenance_by_step()` because it IS it, not because both happen to
+    be written correctly.
+
+    The docstring claims "delegates rather than re-walking the lane, so the
+    two answers cannot disagree about the same artifacts". That claim was
+    load-bearing and lived only in the docstring: replace the delegation with
+    an independent walk using different rules and every test still passed,
+    because the existing coverage exercises it on complete-only fixtures where
+    any reasonable walk agrees.
+
+    A caption is not a check. This drives the two functions over artifacts a
+    divergent re-walk would treat differently -- a parked step, and an
+    envelope with no recorded identity -- and asserts equality of the results
+    rather than of their values.
+    """
+    with tempfile.TemporaryDirectory() as lane_dir:
+        # A completed step, a parked one, and a completed one with no identity:
+        # exactly the cases where two independent walks tend to diverge.
+        write(
+            os.path.join(lane_dir, "step-001.findings.json"),
+            {"state": "complete", "harness_identity": "a" * 64, "prompt_version": "b" * 64},
+        )
+        write(
+            os.path.join(lane_dir, "step-002.status.json"),
+            {"state": "parked", "harness_identity": "c" * 64, "prompt_version": "b" * 64},
+        )
+        write(
+            os.path.join(lane_dir, "step-003.findings.json"),
+            {"state": "complete", "prompt_version": "b" * 64},
+        )
+        step_ids = ["step-001", "step-002", "step-003"]
+
+        delegated = resume.harness_versions_by_step(lane_dir, step_ids)
+        full = resume.provenance_by_step(lane_dir, step_ids)["harness_identity"]
+        check(
+            delegated == full,
+            "provenance: harness_versions_by_step IS provenance_by_step's harness half, not a second walk",
+            f"{delegated!r} vs {full!r}",
+        )
+        check(
+            delegated == {"a" * 64: ["step-001"], "unrecorded": ["step-003"]},
+            "provenance: and both agree on the parked step (excluded) and the unrecorded one (kept)",
+            str(delegated),
+        )
+
+
 def test_prompt_version_drift_alone_is_mixed():
     """REQUIRED TEST (Issue #4136): a lane whose PROMPT changed but whose
     harness did not is still a mixed lane.
@@ -455,18 +648,30 @@ def test_a_step_with_no_recorded_provenance_is_a_row_not_a_silence():
     """An envelope missing the field records `unrecorded` rather than being
     skipped. "We do not know which version produced these steps" is itself a
     fact about the sweep, and dropping the step would make an unknown look
-    like an absence of steps."""
-    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
-        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
-        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
-        env = complete_envelope(sha, "laneA", "step-001", [])
-        del env["harness_identity"]
-        write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), env)
-        report = consolidate.consolidate(sweep, repo)
-        row = report["provenance"][0]
-        check(row["harness_identity"] == {"unrecorded": ["step-001"]},
-              "provenance: a missing identity is recorded as unrecorded, never dropped",
-              str(row))
+    like an absence of steps.
+
+    Asserted for EVERY tracked field, driven off `resume.PROVENANCE_FIELDS`
+    rather than naming one. Deleting only `harness_identity` left the same
+    asymmetry that made a `harness_identity`-only `mixed` invisible: the
+    guarantee held for the field that happened to be tested and nothing
+    noticed when it stopped holding for the other. Driving the loop off the
+    tuple also means a field added later is covered without anyone
+    remembering to extend this.
+    """
+    for field in resume.PROVENANCE_FIELDS:
+        with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+            sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+            write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+            env = complete_envelope(sha, "laneA", "step-001", [])
+            del env[field]
+            write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), env)
+            report = consolidate.consolidate(sweep, repo)
+            row = report["provenance"][0]
+            check(
+                row[field] == {"unrecorded": ["step-001"]},
+                f"provenance: a missing {field} is recorded as unrecorded, never dropped",
+                str(row),
+            )
 
 
 def test_dedup_across_lanes_on_file_symbol_vuln_class():

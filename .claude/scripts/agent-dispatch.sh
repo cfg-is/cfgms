@@ -3349,9 +3349,13 @@ PROMPT_EOF
     # actually got mounted where. Runs on the host, before the docker run
     # call, using the same $REPO_ROOT the mount flags above are already built
     # from. This is recording, not freezing: the value is written fresh on
-    # every call and never compared against a prior one -- binding it into a
-    # step envelope and quarantining a mismatch on resume is STORY-12 (D6),
-    # which consumes this value; it is not produced here.
+    # every call and never compared against a prior one. STORY-12 (D6) landed
+    # the envelope side -- every step envelope now carries this value -- but
+    # Issue #4136 removed the quarantine-on-mismatch half deliberately: the
+    # harness is the instrument, not the specimen, so its drift is REPORTED
+    # (`resume.provenance_by_step`, the report's `## Provenance` section) and
+    # never gated on. Nothing anywhere compares this value against a prior
+    # dispatch.
     inv_entrypoint_host_path="${REPO_ROOT}/.devcontainer/scripts/investigator-entrypoint.sh"
     inv_harness_identity_hash=$(python3 - "$REPO_ROOT" "$inv_entrypoint_host_path" "$inv_lane_entrypoint" "$inv_agent_profile_host_path" "${inv_sweep_dir}/harness_identity.json" <<'PY'
 import hashlib

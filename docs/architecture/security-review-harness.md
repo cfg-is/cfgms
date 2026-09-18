@@ -281,7 +281,7 @@ explicit `CFGMS_SECURITY_REVIEW_METHODOLOGY` path wins; the checkout root is the
 tests). Every non-test `.py` in the harness tree plus `methodology.md` is hashed into
 `harness_identity.json`, so a resume after a harness or policy change can SAY which harness
 produced which steps. Since Issue #4136 it does not re-run them -- see
-[Binding an envelope](#binding-an-envelope-to-its-plan-and-harness) below for why the harness is
+[Provenance fields](#provenance-fields-and-the-one-that-quarantines-on-resume-issues-3962-4136) below for why the harness is
 recorded but not gated on. Lane
 startup is verified with exactly the production mounts and environment (no repo-root override). Verified in the
 rebuilt image: with a `scan_profiles.py` planted in the snapshot that raises on import, the lane
@@ -666,9 +666,8 @@ binding stays visible on the envelope exactly like `refusal_attempts` does.
 `plan_hash`, `prompt_version`, and `harness_identity` record the exact plan step, system prompt,
 and harness code an envelope was produced against. **Only `plan_hash` is checked on resume.** The
 other two are recorded and read back through `resume.provenance_by_step()`; neither gates. The
-split is deliberate and is the subject of [Binding an envelope](#binding-an-envelope-to-its-plan-and-harness)
-below: `plan_hash` describes the *question* a step answered, while the other two describe the
-*instrument* that answered it.
+split is deliberate: `plan_hash` describes the *question* a step answered, while the other two
+describe the *instrument* that answered it.
 
 - **`plan_hash`** — a SHA-256 hex digest of `plan_dir/<step_id>.json`'s own raw bytes on disk
   (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization
@@ -1018,9 +1017,11 @@ still changes the recorded value. The result is written to `<sweep-dir>/harness_
 call — this value is recorded per dispatch, never frozen at sweep creation the way `commit_sha`
 is) and injected into the container as `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`, on every call,
 plan mode and lane mode alike. This is recording only: nothing compares the value against a prior
-dispatch, and no earlier snapshot of the harness code itself is taken or verified — binding this
-value into a per-step result envelope and quarantining a mismatch on resume is STORY-12 (D6),
-which consumes the value this command produces.
+dispatch, and no earlier snapshot of the harness code itself is taken or verified. STORY-12 (D6)
+landed the envelope side — every step envelope carries this value — but **Issue #4136 removed the
+quarantine-on-mismatch half on purpose.** The harness is the instrument, not the specimen, so its
+drift is reported (`resume.provenance_by_step()`, and the report's `## Provenance` section) and
+never gated on.
 
 **`--harness`/`--model` (Issue #3932, epic #3927's contract C2) — the only credential path
 (Issue #3933).** The architectural correction in epic #3927 — model access by subscription
@@ -2619,7 +2620,7 @@ failed one — without this, a sweep where every step was parked or refused, wit
 would render as a clean full sweep), any `dispatch_report.json` entry recorded an outcome other
 than `dispatched`, or `plan/rejected_proposals.json` recorded anything at all. When
 `False`, the report's opening sentence says the sweep is incomplete, a dedicated `## Incomplete`
-section — placed directly after `## Coverage`, before `## Dispatch` — lists every one of those
+section — placed after `## Coverage` and `## Provenance`, before `## Scanner coverage` — lists every one of those
 gaps by lane name (or points at `## Dispatch` for a dispatch/rejection gap, so the identity detail
 is not printed twice), and the `## Findings` section's empty case reads "No candidates reported in
 the tasks that completed." instead of the unconditional "_No findings after de-duplication and
