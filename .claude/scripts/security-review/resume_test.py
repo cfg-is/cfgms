@@ -257,7 +257,7 @@ def test_plan_hash_mismatch_quarantines_and_returns_outstanding():
         )
 
 
-def test_harness_identity_mismatch_quarantines_independently_of_plan_hash():
+def test_a_changed_harness_identity_alone_does_NOT_quarantine():
     # REQUIRED TEST (Issue #4136): the plan is unchanged but the harness code
     # has moved on. The step MUST be kept.
     #
@@ -278,9 +278,10 @@ def test_harness_identity_mismatch_quarantines_independently_of_plan_hash():
             complete_envelope("step-001", plan_hash=matching_hash, harness_identity="abc123"),
         )
 
-        missing = resume.missing_steps(
-            lane_dir, ["step-001"], plan_dir=plan_dir, current_harness_identity="def456"
-        )
+        # No `current_harness_identity` argument exists any more -- the
+        # parameter was removed rather than left as an accepted no-op, so this
+        # call cannot express the old binding even by accident.
+        missing = resume.missing_steps(lane_dir, ["step-001"], plan_dir=plan_dir)
         check(
             missing == [],
             "missing_steps: a harness_identity change alone does NOT re-run the step",
@@ -314,7 +315,7 @@ def test_harness_identity_mismatch_quarantines_independently_of_plan_hash():
             complete_envelope("step-001", plan_hash="stale" + "0" * 59, harness_identity="abc123"),
         )
         missing = resume.missing_steps(
-            lane_dir, ["step-001"], plan_dir=plan_dir, current_harness_identity="abc123"
+            lane_dir, ["step-001"], plan_dir=plan_dir
         )
         check(
             missing == ["step-001"],
@@ -359,7 +360,7 @@ def test_matching_bindings_are_not_quarantined():
         )
 
         missing = resume.missing_steps(
-            lane_dir, ["step-001"], plan_dir=plan_dir, current_harness_identity="abc123"
+            lane_dir, ["step-001"], plan_dir=plan_dir
         )
         check(missing == [], "missing_steps: matching plan_hash and harness_identity is not quarantined", str(missing))
         check(
@@ -369,7 +370,7 @@ def test_matching_bindings_are_not_quarantined():
 
 
 def test_binding_checks_are_skipped_when_both_params_are_none():
-    # Behavior-preserving default: no plan_dir, no current_harness_identity
+    # Behavior-preserving default: no plan_dir
     # given -- a caller not yet updated for #3962 sees no change at all,
     # even though the envelope's recorded bindings would not match anything.
     with tempfile.TemporaryDirectory() as lane_dir:
@@ -380,7 +381,7 @@ def test_binding_checks_are_skipped_when_both_params_are_none():
         missing = resume.missing_steps(lane_dir, ["step-001"])
         check(
             missing == [],
-            "missing_steps: plan_dir=None, current_harness_identity=None performs no binding check",
+            "missing_steps: plan_dir=None performs no binding check",
             str(missing),
         )
 

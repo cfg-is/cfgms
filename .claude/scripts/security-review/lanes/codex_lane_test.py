@@ -183,9 +183,9 @@ def test_run_lane_writes_matching_plan_hash_and_harness_identity() -> None:
         )
 
 
-def test_changed_binding_quarantines_and_reruns_the_step() -> None:
+def test_a_changed_PLAN_quarantines_and_reruns_the_step() -> None:
     """[REQUIRED TEST] (Issue #3962) Proves this lane actually passes
-    `plan_dir` and `current_harness_identity` into `resume.missing_steps()`,
+    `plan_dir` into `resume.missing_steps()`,
     which no value check on a single envelope can show: dropping either
     argument leaves the pre-#3962 default (`None`, check skipped) in place, so
     the stale `complete` envelope would be accepted and the step never re-run.

@@ -673,19 +673,25 @@ system prompt, and harness code it was produced against:
   the methodology core, the anchor-section wording, every anchor's id/severity/tags/text, and
   `OUTPUT_SCHEMA_DESCRIPTION`
   (`harness_runner.compute_prompt_version()`; widened from `SYSTEM_PROMPT` alone by Issue #3981 so
-  a rubric or worked-example edit is visible on the envelope). Recorded for provenance; `resume.py` does not
-  check it against a current value the way it does the other two fields.
+  a rubric or worked-example edit is visible on the envelope). Recorded for provenance and **not** checked
+  against a current value — the same treatment `harness_identity` now gets (Issue #4136).
+  `plan_hash` is the only field `resume.py` still binds on.
 - **`harness_identity`** — read verbatim from the `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`
   env var (falling back to `"unknown"` when absent, e.g. a standalone invocation outside the
   investigator container) — the trusted-harness identity [`launch-investigator`
   computes and injects](#investigator-launch-primitive) (Issue #3952).
 
-`resume.py::missing_steps()` takes two additional optional parameters, `plan_dir` and
-`current_harness_identity`, both defaulting to `None` (skipping this check entirely — the
-pre-#3962 behavior, preserved for any caller that has not been updated). Every real caller —
-`claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — always passes both. When
-given, an otherwise schema-valid `complete` envelope is additionally checked against ONE of them:
-its `plan_hash` must equal a fresh hash of the current `plan_dir/<step_id>.json`.
+`resume.py::missing_steps()` takes one additional optional parameter, `plan_dir`, defaulting to
+`None` (skipping the check entirely — the pre-#3962 behavior). Every real caller —
+`claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — passes it. When given, an
+otherwise schema-valid `complete` envelope is additionally checked: its `plan_hash` must equal a
+fresh hash of the current `plan_dir/<step_id>.json`.
+
+The `current_harness_identity` parameter that sat beside it is **removed**, not retained as an
+accepted no-op (Issue #4136). Keeping a parameter every caller still passes and nothing reads
+would be the same present-but-unwired trap this change exists to close: it reads as a live binding
+to anyone skimming the signature. `provenance_by_step()` answers the reporting question from the
+value recorded on each envelope, so it never needed a "current" value to compare against.
 
 **`harness_identity` is recorded but never gated on (Issue #4136).** It was a binding, and that
 was a category error. The two values are not the same kind of thing:
@@ -742,9 +748,9 @@ report that misreads two legitimate values as a problem is worse than no report 
 A changed **plan** still re-runs the step, and must: different files and different hypotheses mean
 the recorded answer answers a different question. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
 (see [Writes are atomic](#writes-are-atomic)) and the step is returned as outstanding, exactly
-like a schema-invalid envelope — never silently treated as `complete` for a task whose plan or
-harness code has since changed shape. The log event recording the quarantine names which
-binding(s) mismatched.
+like a schema-invalid envelope — never silently treated as `complete` for a task whose **plan**
+has since changed shape. Changed harness code no longer quarantines anything; see the section
+above for why. The log event recording the quarantine names which binding mismatched.
 
 ### Disposition
 

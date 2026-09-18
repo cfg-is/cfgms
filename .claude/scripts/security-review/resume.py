@@ -24,15 +24,19 @@ this module only reports "still needs work".
 ## Binding checks on resume (Issue #3962)
 
 A `complete` envelope that is otherwise schema-valid is still quarantined,
-rather than accepted, if its recorded `plan_hash` or `harness_identity`
-(both required fields since Issue #3962, see `schema.py`) no longer matches
-the current sweep's values -- a `complete` envelope produced under a plan
-step or harness code that has since changed is exactly the "schema-valid
-result from an earlier plan may not satisfy a changed task" case, applied to
-the code that ran rather than only to the plan. `missing_steps()`'s optional
-`plan_dir`/`current_harness_identity` parameters gate this: `None` (the
-default, and every pre-#3962 caller) skips the corresponding half of the
-check entirely. A mismatched file is renamed to
+rather than accepted, if its recorded `plan_hash` no longer matches a fresh
+hash of the current plan step: a `complete` envelope produced under a plan
+that has since changed is exactly the "schema-valid result from an earlier
+plan may not satisfy a changed task" case. `missing_steps()`'s optional
+`plan_dir` parameter gates this; `None` (the default) skips the check.
+
+**`harness_identity` is recorded but NOT checked (Issue #4136.)** It was a
+binding and that was a category error -- the target tree is the specimen and
+is pinned, the harness is the instrument, and improving an instrument does
+not invalidate readings already taken. See `_binding_mismatches` below for
+the full reasoning, and `provenance_by_step()` for how the record is queried
+now that nothing gates on it. `prompt_version` is likewise recorded and not
+checked. A mismatched file is renamed to
 `<step_id>.findings.json.quarantined-<timestamp>` -- never deleted, never
 left in place under its original name -- so `load_sweep()` finds no
 `.findings.json` at the expected path any more and the step counts as
@@ -82,7 +86,6 @@ def _binding_mismatches(
     envelope: dict,
     plan_dir: "str | None",
     step_id: str,
-    current_harness_identity: "str | None",
 ) -> list[str]:
     """Return the bindings `envelope` fails that justify re-running the step.
 
@@ -116,8 +119,13 @@ def _binding_mismatches(
     answers "which steps ran under which harness". Dropping the gate without
     keeping the record would trade a false gate for a blind spot.
 
-    `current_harness_identity` is still accepted so callers need not change,
-    and is used for reporting rather than gating.
+    The `current_harness_identity` parameter this function used to take is
+    GONE rather than kept as a no-op. Keeping it would have been the same
+    present-but-unwired trap this story exists to close: a parameter every
+    caller still passes, that nothing reads, reads as a live binding to
+    anyone skimming the signature. `provenance_by_step()` answers the
+    reporting question from the value recorded on each envelope, so it never
+    needed a "current" value to compare against.
     """
     mismatches: list[str] = []
 
@@ -225,21 +233,22 @@ def missing_steps(
     lane_dir: str,
     step_ids: list[str],
     plan_dir: "str | None" = None,
-    current_harness_identity: "str | None" = None,
 ) -> list[str]:
     """Return the subset of `step_ids` not yet resolved to a skip-on-resume
     state for this lane, per the four-terminal-state rule above.
 
-    `plan_dir` and `current_harness_identity` (Issue #3962), when given, add
-    a binding check ahead of that rule: a `complete` envelope whose recorded
-    `plan_hash` no longer matches a fresh hash of the current
-    `plan_dir/<step_id>.json`, or whose recorded `harness_identity` no
-    longer matches `current_harness_identity`, is quarantined (see
+    `plan_dir` (Issue #3962), when given, adds a binding check ahead of that
+    rule: a `complete` envelope whose recorded `plan_hash` no longer matches a
+    fresh hash of the current `plan_dir/<step_id>.json` is quarantined (see
     `_quarantine`) and the step is returned as outstanding -- never silently
-    treated as `complete` for a task whose plan or harness code has since
-    changed shape. Both default to `None`, which skips this check entirely
-    -- behavior-preserving for any caller without a `plan_dir`/harness
-    identity to check against.
+    treated as `complete` for a task whose PLAN has since changed shape. It
+    defaults to `None`, which skips the check entirely.
+
+    A changed **harness** no longer quarantines anything (Issue #4136). That
+    check existed, discarded 611 completed steps of one real sweep on any
+    harness edit, and rested on a category error; `_binding_mismatches` carries
+    the reasoning. The identity is still recorded on every envelope and is
+    readable through `provenance_by_step()`.
     """
     missing: list[str] = []
 
@@ -251,7 +260,7 @@ def missing_steps(
                 "findings file did not contain a JSON object"
             ]
             if isinstance(envelope, dict) and envelope.get("state") == "complete" and not errors:
-                mismatches = _binding_mismatches(envelope, plan_dir, step_id, current_harness_identity)
+                mismatches = _binding_mismatches(envelope, plan_dir, step_id)
                 if not mismatches:
                     continue
                 _quarantine(findings_path, step_id, mismatches)

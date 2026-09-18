@@ -2642,19 +2642,24 @@ def run_lane(
     call_harness_fn = call_harness_fn or spec.call_harness
     step_ids = discover_step_ids(plan_dir)
 
-    # Issue #3962: the two resume-time binding checks. `harness_identity`
-    # comes straight from the env var #3952's `launch-investigator` injects
-    # (falling back to "unknown" for a standalone invocation outside the
-    # container, e.g. these tests) -- the same value this lane records on
-    # every envelope it writes below, so a later invocation launched under
-    # different harness code sees a mismatch against envelopes this run
-    # writes. `prompt_version` is recorded on every envelope but is not
-    # itself a resume-time check (see `compute_prompt_version`).
+    # Issue #3962 added two resume-time binding checks here; since Issue #4136
+    # there is ONE. `plan_hash` still binds, because a changed plan means
+    # different files and different hypotheses, so a recorded answer answers a
+    # different question.
+    #
+    # `harness_identity` and `prompt_version` are both RECORDED on every
+    # envelope below and neither is checked. They describe the instrument, not
+    # the question, and quarantining on the instrument discarded 611 completed
+    # steps of one real sweep on any harness edit. `resume.provenance_by_step()`
+    # is how they are read back; `resume._binding_mismatches` carries the full
+    # reasoning.
+    #
+    # `harness_identity` comes straight from the env var #3952's
+    # `launch-investigator` injects, falling back to "unknown" for a standalone
+    # invocation outside the container (e.g. these tests).
     harness_identity = os.environ.get("CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY", "unknown")
     prompt_version = compute_prompt_version()
-    outstanding = resume.missing_steps(
-        out_dir, step_ids, plan_dir=plan_dir, current_harness_identity=harness_identity
-    )
+    outstanding = resume.missing_steps(out_dir, step_ids, plan_dir=plan_dir)
 
     written: list = []
     for step_id in outstanding:
