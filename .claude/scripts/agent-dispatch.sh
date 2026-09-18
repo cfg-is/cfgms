@@ -1124,11 +1124,18 @@ gate_credentials_for_launch() {
 # Stream an investigator container's log to disk for the container's lifetime.
 #
 # Writes to <sweep_dir>/container-logs/<mode>.log, where sweep_dir is whatever
-# the CALLER passed as --sweep-dir -- which is a sub-sweep directory for three
-# of the four modes (verify.py passes <sweep>/verification, adjudicate.py
-# <sweep>/adjudication, multi-planner <sweep>/planners/<lane>). Only finder
-# lanes and the legacy single planner land at the sweep root. That is also what
-# makes the fixed <mode>.log filename collision-free.
+# the CALLER passed as --sweep-dir. Five dispatch sites, and `plan` mode is
+# split across both shapes -- planner.py is one file with two behaviours:
+#
+#   security-review.sh:724  finder lane    sweep root
+#   planner.py:874          legacy planner sweep root
+#   planner.py:921          multi-planner  <sweep>/planners/<lane>
+#   verify.py:180           verifier       <sweep>/verification
+#   adjudicate.py:187       adjudicator    <sweep>/adjudication
+#
+# The sub-sweep layout is what makes the fixed <mode>.log filename
+# collision-free: every multi-planner lane writes plan.log, kept apart solely
+# by its own sub-directory.
 #
 # A container's log lives exactly as long as the container, and an investigator
 # container's lifetime is not the sweep's to decide. This `docker run -d`

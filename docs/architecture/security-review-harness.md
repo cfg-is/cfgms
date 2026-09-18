@@ -61,12 +61,14 @@ All sweep state lives outside the repository, under a base directory resolved by
                                         --lane-entrypoint script from the LAST launch-investigator
                                         call (Issue #3952) -- recorded, not frozen
     container-logs/
-      <lane-id>.log                    each investigator container's stdout+stderr, streamed to
-                                        disk for the container's lifetime (Issue #4132). Written
-                                        under whichever directory that launch was given as
-                                        --sweep-dir, so only finder lanes and the legacy single
-                                        planner land HERE; the verifier, the adjudicator and each
-                                        multi-planner write under their own sub-sweep dir below
+      <mode>.log                       each investigator container's stdout+stderr, streamed to
+                                        disk for the container's lifetime (Issue #4132). <mode> is
+                                        a lane dir name for a finder lane, else plan / verifier /
+                                        adjudicator. Written under whichever directory that launch
+                                        was given as --sweep-dir, so only finder lanes and the
+                                        LEGACY SINGLE planner land HERE (plan.log); the verifier,
+                                        the adjudicator and each MULTI-planner write under their
+                                        own sub-sweep dir below
     plan/
       step-001.json                    step prompt + scope (generated from metadata only)
       step-002.json
@@ -880,7 +882,7 @@ credential-delivery mechanics are documented at the files themselves rather than
 | Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist-base.conf` + `.devcontainer/dnsmasq-allowlist.d/` |
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
 | Plan-mode-only mount of that same file at `/home/agent/.claude/agents/investigator.md:ro`, so `claude --agent investigator` resolves it (Issue #4003) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm, plan branch) |
-| Streaming each container's log to `<sweep>/container-logs/<mode>.log` for its lifetime, so the event stream outlives the container (Issue #4132) | `.claude/scripts/agent-dispatch.sh` (`start_investigator_log_capture`) |
+| Streaming each container's log to `<--sweep-dir>/container-logs/<mode>.log` for its lifetime, so the event stream outlives the container (Issue #4132) — under whichever directory that launch was given, which is a sub-sweep dir for the verifier, the adjudicator and each multi-planner | `.claude/scripts/agent-dispatch.sh` (`start_investigator_log_capture`) |
 | Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
@@ -3348,12 +3350,19 @@ or whether a step's scanners ran.
 
 `start_investigator_log_capture` (Issue #4132) therefore streams `docker logs -f --timestamps`
 into `<--sweep-dir>/container-logs/<mode>.log` for the container's lifetime — under whichever
-directory that launch was given, not the sweep root. Three of the four launchers pass a SUB-sweep
-directory: `verify.py` passes `<sweep>/verification`, `adjudicate.py` passes
-`<sweep>/adjudication`, and multi-planner dispatch passes `<sweep>/planners/<lane-dir-name>` (the
-same sub-dirs those stages already use for their own `plan/` and `lanes/`). Only finder lanes and
-the legacy single planner land at `<sweep>/container-logs/`. That is also why no two modes can
-collide on a filename. The follow ends by itself when the container exits, so
+directory that launch was given, not the sweep root. Five dispatch sites, and `plan` mode is split
+across both shapes:
+
+| Dispatch site | Mode | `--sweep-dir` | Log |
+|---|---|---|---|
+| `security-review.sh:724` | finder lane | sweep root | `<sweep>/container-logs/<lane-dir-name>.log` |
+| `planner.py:874` | legacy single planner | sweep root | `<sweep>/container-logs/plan.log` |
+| `planner.py:921` | multi-planner | `<sweep>/planners/<lane>` | `<sweep>/planners/<lane>/container-logs/plan.log` |
+| `verify.py:180` | verifier | `<sweep>/verification` | `<sweep>/verification/container-logs/verifier.log` |
+| `adjudicate.py:187` | adjudicator | `<sweep>/adjudication` | `<sweep>/adjudication/container-logs/adjudicator.log` |
+
+The sub-sweep layout is also why a fixed `<mode>.log` filename cannot collide: every
+multi-planner lane writes `plan.log`, kept apart solely by its own sub-directory. The follow ends by itself when the container exits, so
 there is nothing to clean up. It starts in the launch's success branch before the launch is
 announced, so a short run cannot outrun its own capture, and every failure path returns 0 with a
 warning: an unpersisted log is a diagnostic loss, never a reason to fail an otherwise healthy
