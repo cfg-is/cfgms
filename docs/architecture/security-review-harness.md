@@ -879,7 +879,6 @@ credential-delivery mechanics are documented at the files themselves rather than
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
 | Plan-mode-only mount of that same file at `/home/agent/.claude/agents/investigator.md:ro`, so `claude --agent investigator` resolves it (Issue #4003) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm, plan branch) |
 | Streaming each container's log to `<sweep>/container-logs/<mode>.log` for its lifetime, so the event stream outlives the container (Issue #4132) | `.claude/scripts/agent-dispatch.sh` (`start_investigator_log_capture`) |
-
 | Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
@@ -3311,7 +3310,8 @@ meant to catch), then asserts `resume` exits non-zero, names the tampered path, 
 container at all — no new step file appears under any `lanes/<lane>/`.
 
 **Reap-before-relaunch (Issue #3930).** `launch-investigator`'s `docker run -d` carries no `--rm`,
-so a container's name stays taken after it exits — nothing else removes it. Before Issue #3930,
+so a container's name stays taken after it exits until something removes it explicitly — the three
+paths that do are enumerated below. Before Issue #3930,
 `agent-dispatch.sh` refused to launch whenever ANY container by that name existed in ANY state, so
 once a sweep's investigator container had exited, `resume` could never dispatch that lane again:
 every retry hit the same name collision and silently no-op'd forever. The container-exists check
@@ -3321,10 +3321,24 @@ exactly `exited` is removed and the launch proceeds; a container that is `runnin
 or `created` — or in any state this script cannot positively identify as `exited` — is refused
 exactly as before, never reaped, never raced.
 
-A container's log lives exactly as long as the container, so reaping one destroys it — and the
-reap happens on the NEXT launch for that sweep and mode, which is to say while the sweep is still
-running and before anyone has necessarily read it. (`cleanup-container` / `cleanup-issue` remove
-them on request too.) Step outcomes survive independently in
+A container's log lives exactly as long as the container, so whichever path removes one destroys
+its log with it. Three paths remove an investigator container, and none of them waits for anyone
+to have read it:
+
+- **Reap-before-relaunch**, described above — the next launch for that sweep and mode, which is to
+  say while the sweep is still running.
+- **The stale-investigator reaper** (Issue #4055, `agent-dispatch.sh`'s `cleanup-stale` arm) —
+  `docker ps -a --filter name=cfg-agent-investigator- --filter status=exited`, then `docker rm`
+  after a grace window (`CFGMS_INVESTIGATOR_REAP_MINUTES`, default 30). This is the routine
+  garbage collector and the path that removes containers belonging to FINISHED sweeps, so it is
+  the one that most often takes a log nobody has read yet. Note its own comment asserts an exited
+  investigator "holds nothing of value" — true only because of the capture described here.
+- **`cleanup-container <name>`** — on request, for an arbitrary container name.
+
+`cleanup-issue` is NOT one of them: it only ever constructs `cfg-agent-<num>` or
+`cfg-agent-item-<id>`, neither of which can match `cfg-agent-investigator-*`.
+
+Step outcomes survive independently in
 `lanes/<lane>/step-*.findings.json`; what is lost is the event stream — `step_written`,
 `step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and the timing between those events,
 which is exactly what is needed to work out why a lane was slow, how often a repair round fired,

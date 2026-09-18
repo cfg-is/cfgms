@@ -1126,11 +1126,19 @@ gate_credentials_for_launch() {
 # A container's log lives exactly as long as the container, and an investigator
 # container's lifetime is not the sweep's to decide. This `docker run -d`
 # carries NO `--rm` -- see the container-conflict gate's own comment further
-# down -- but two things remove an exited container anyway: that gate reaps one
-# (`docker rm -f`) before reusing its name, which is what makes `resume` work
-# rather than refuse forever, and `cleanup-container`/`cleanup-issue` remove
-# them on request. Either can happen while the sweep is still running, and
-# neither waits for anyone to have read the log.
+# down -- but three paths remove an exited one anyway, none of which waits for
+# anyone to have read the log:
+#
+#   1. the conflict gate reaps one (`docker rm -f`) before reusing its name,
+#      which is what makes `resume` work rather than refuse forever;
+#   2. the stale-investigator reaper in the `cleanup-stale` arm (Issue #4055)
+#      removes any exited `cfg-agent-investigator-*` past a grace window
+#      (`CFGMS_INVESTIGATOR_REAP_MINUTES`, default 30) -- the routine garbage
+#      collector, and the path that takes containers from FINISHED sweeps;
+#   3. `cleanup-container <name>`, on request.
+#
+# NOT `cleanup-issue`: it only builds `cfg-agent-<num>` / `cfg-agent-item-<id>`,
+# neither of which can match an investigator container's name.
 #
 # Step results survive independently in
 # `lanes/<lane>/step-*.findings.json`; what is lost is the event stream —
@@ -3734,6 +3742,10 @@ PY
     # 2026-09-11: ten exited investigators had accumulated over 40 hours,
     # holding ~179MB. Their findings are written to the host sweep directory,
     # never kept inside the container, so an exited one holds nothing of value.
+    # Since Issue #4132 that is true BECAUSE its log is streamed to
+    # <sweep>/container-logs/<mode>.log while it runs -- see
+    # start_investigator_log_capture. Without that capture this reap is
+    # the main path by which a finished sweep's lane log is lost.
     #
     # Grace window rather than immediate: a just-exited investigator may still
     # be being read by the sweep that launched it.
