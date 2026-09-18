@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -435,9 +435,19 @@ test: fix-git-bare
 #	bound on a genuine hang is `timeout-minutes: 15` on the unit-tests job in
 #	.github/workflows/test-suite.yml. Do not tighten this to track how long the
 #	suite currently takes — that turns a hang detector into a false ceiling that
-#	any growing package eventually crosses (features/controller/api did, at 863
-#	tests, with a 2.46s slowest test and a 0.130s median).
-	@go test -race -short -timeout=10m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
+#	any growing package eventually crosses.
+#
+#	features/controller/api is excluded here and run separately by
+#	test-framework-api-sharded (Issue #4151): it grew from 863 tests (Issue #2887)
+#	to 2,006 top-level `go test -list` entries (measured 2026-09-18) — every test
+#	builds a fresh SQLite business-store schema, ~7ms plain but ~164ms under the
+#	race detector's amplification, so per-test cost times test count made this one
+#	package alone ~322s of the unit-tests job's ~625s Go-test phase (CI run
+#	35371727977), more than half. No single test dominates (slowest 4.6s, median
+#	0.05s under -race), so splitting evenly by test name is representative rather
+#	than papering over one pathological test.
+	@go test -race -short -timeout=10m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$$')
+	@$(MAKE) test-framework-api-sharded
 	@echo "  Testing core modules (smoke test)..."
 	@for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
@@ -461,6 +471,72 @@ test: fix-git-bare
 	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
 	@echo ""
 	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
+
+# Runs features/controller/api's tests as N parallel `go test` processes instead
+# of one (Issue #4151). The package is a single flat directory (2,006 top-level
+# tests as of 2026-09-18, see comment on the `test` target above), so there is
+# no sub-package boundary to matrix on and no per-test hotspot to fix — Go only
+# parallelizes within a package via t.Parallel(), which this suite doesn't use.
+# Splitting by test name into N separate `go test -run` invocations and running
+# them as background shell jobs gets real OS-level parallelism across CPU cores
+# without touching test source, and without adding a CI job/matrix leg (which
+# would require its own required-status-check handling — see CLAUDE.md "Stub
+# exclusivity" for why a needs:-gated fan-in job is the wrong tool here).
+#
+# CFGMS_API_TEST_SHARDS overrides the shard count (defaults to nproc, capped to
+# a sane range so a huge build host doesn't spawn dozens of `go test` binaries
+# for ~2,000 tests). CFGMS_API_TEST_SHARD_PLAN_ONLY=1 prints each shard's test
+# count and exits without running anything — used by
+# scripts/test-scripts.sh's test_api_shard_partition_covers_all_tests to verify
+# the partition is complete and even without paying for a full -race run.
+.PHONY: test-framework-api-sharded
+test-framework-api-sharded:
+	@shards="$${CFGMS_API_TEST_SHARDS:-}"; \
+	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
+	if [ "$$shards" -gt 8 ] 2>/dev/null; then shards=8; fi; \
+	if [ "$$shards" -lt 1 ] 2>/dev/null; then shards=1; fi; \
+	list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
+	list_rc=$$?; \
+	if [ $$list_rc -ne 0 ]; then \
+		echo "$$list_out"; \
+		echo "❌ failed to enumerate features/controller/api tests"; \
+		exit 1; \
+	fi; \
+	names=$$(echo "$$list_out" | grep -E '^Test'); \
+	total=$$(echo "$$names" | grep -c .); \
+	if [ "$$total" -eq 0 ]; then \
+		echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
+		exit 1; \
+	fi; \
+	echo "  Sharding $$total features/controller/api tests across $$shards parallel go test processes..."; \
+	if [ -n "$${CFGMS_API_TEST_SHARD_PLAN_ONLY:-}" ]; then \
+		for i in $$(seq 0 $$((shards - 1))); do \
+			n=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | grep -c .); \
+			echo "shard $$i: $$n tests"; \
+		done; \
+		exit 0; \
+	fi; \
+	tmpdir=$$(mktemp -d); \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	pids=""; \
+	for i in $$(seq 0 $$((shards - 1))); do \
+		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
+		if [ -n "$$pattern" ]; then \
+			( go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
+			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
+			pids="$$pids $$!"; \
+		fi; \
+	done; \
+	wait $$pids; \
+	fail=0; \
+	for i in $$(seq 0 $$((shards - 1))); do \
+		if [ -f "$$tmpdir/shard-$$i.exit" ]; then \
+			cat "$$tmpdir/shard-$$i.log"; \
+			code=$$(cat "$$tmpdir/shard-$$i.exit"); \
+			if [ "$$code" != "0" ]; then fail=1; fi; \
+		fi; \
+	done; \
+	exit $$fail
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 

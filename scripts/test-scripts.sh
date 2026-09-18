@@ -3619,7 +3619,8 @@ SCRIPTEOF
 # Runs report against a fixture samples file and asserts the emitted
 # RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
 test_claude_pipeline_suites() {
-    # The 21 self-contained suites under .claude/scripts/tests/ guard the dispatch
+    # The self-contained suites under .claude/scripts/tests/ (30 as of
+    # 2026-09-18, up from the 21 measured 2026-08-20) guard the dispatch
     # machinery: the Files-In-Scope path parser, lease handling, capacity gating,
     # per-agent credential injection, stalled-dispatch detection, merge-group
     # diagnosis. Every one shipped with a "Run: ..." line in its header and was
@@ -3635,6 +3636,13 @@ test_claude_pipeline_suites() {
     #
     # Each suite owns its own assertions and exits non-zero on failure; this
     # records one pass/fail per suite rather than per assertion.
+    #
+    # Suites run CPU-count-wide batches in parallel rather than one after
+    # another (Issue #4151: this loop alone was ~218s of the ~244s script-test
+    # phase). Safe because every suite here uses its own `mktemp -d` rather
+    # than a fixed shared path or real repo mutation (verified by inspection
+    # 2026-09-18) — confirm that still holds before raising the batch size or
+    # adding a suite that touches shared state.
     local tests_dir
     tests_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/scripts/tests"
 
@@ -3644,21 +3652,55 @@ test_claude_pipeline_suites() {
         return
     fi
 
-    local suite base out rc found=0
+    local suite base found=0
+    local -a suites=()
     for suite in "$tests_dir"/*.test.sh "$tests_dir"/test-*.sh "$tests_dir"/test-*.py; do
         [[ -f "$suite" ]] || continue
-        base="$(basename "$suite")"
-        found=$((found + 1))
-        log_test "Testing ${base}..."
+        suites+=("$suite")
+    done
+    found=${#suites[@]}
 
-        set +e
-        if [[ "$suite" == *.py ]]; then
-            out=$(timeout 180 python3 "$suite" 2>&1)
-        else
-            out=$(timeout 180 bash "$suite" 2>&1)
+    if [[ $found -eq 0 ]]; then
+        log_test "Testing .claude pipeline suites..."
+        log_fail "no suites matched in ${tests_dir} — the glob or the layout changed"
+        return
+    fi
+
+    local parallel
+    parallel=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        (
+            set +e
+            if [[ "$suite" == *.py ]]; then
+                out=$(timeout 180 python3 "$suite" 2>&1)
+            else
+                out=$(timeout 180 bash "$suite" 2>&1)
+            fi
+            rc=$?
+            set -e
+            printf '%s' "$rc" > "$tmpdir/$i.rc"
+            printf '%s' "$out" > "$tmpdir/$i.out"
+        ) &
+        if (( i % parallel == 0 )); then
+            wait
         fi
-        rc=$?
-        set -e
+    done
+    wait
+
+    local rc out
+    i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        base="$(basename "$suite")"
+        log_test "Testing ${base}..."
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo 1)
+        out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
 
         if [[ $rc -eq 0 ]]; then
             log_pass "${base}"
@@ -3671,10 +3713,7 @@ test_claude_pipeline_suites() {
         fi
     done
 
-    if [[ $found -eq 0 ]]; then
-        log_test "Testing .claude pipeline suites..."
-        log_fail "no suites matched in ${tests_dir} — the glob or the layout changed"
-    fi
+    rm -rf "$tmpdir"
 }
 
 test_resource_sampler_no_placeholder() {
