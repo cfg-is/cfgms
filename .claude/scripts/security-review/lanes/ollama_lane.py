@@ -205,14 +205,29 @@ def _ollama_generate_url() -> str:
     return f"{host.rstrip('/')}/api/generate"
 
 
-# How long a single step may spend obeying a server-supplied `Retry-After`.
+# The threshold between "absorb this wait here" and "this belongs to the
+# scheduler". NOT a truncation.
 #
-# The header is the server stating exactly how long to wait, which beats the
-# shared backoff's 30s-doubling guess -- but an unbounded sleep on a number
-# this process does not control is how one step swallows a whole sweep. A
-# server asking for longer than this is not refused: the wait is capped, the
-# request is retried anyway, and a still-limited response falls through to the
-# shared backoff exactly as it would have without the header.
+# A longer `Retry-After` is deferred whole to
+# `harness_runner.call_with_rate_limit_backoff`, never waited partially. That
+# distinction matters more than the number: `Retry-After` is the server saying
+# when it will accept us again, so waiting 120s of a named 300s and retrying is
+# retrying too early BY CONSTRUCTION -- disobeying the instruction while
+# appearing to honour it, and spending 120s of the sweep's budget to earn a
+# guaranteed second 429. Handing the long case to the component that owns the
+# long-wait budget is the honest move, and it reads correctly at any value of
+# this constant.
+#
+# STATUS OF THE NUMBER: chosen, not derived. The only hard constraint is
+# staying well under `CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS`
+# (default 900) so an in-place wait cannot starve the outer budget. No real
+# `Retry-After` has ever been observed through this path -- the one sweep that
+# exercised rate limiting ran on the CLI transport, which cannot read headers
+# -- so there is no measurement behind 120 and a future reader should not
+# assume one. `retry_after_deferred_seconds` in the step meta is what will
+# retire this question: it records every header too long to absorb, so a run
+# of "we keep being told to wait 5 minutes" becomes visible and the threshold
+# can then be set from data.
 RETRY_AFTER_MAX_SLEEP_SECONDS = 120.0
 
 
@@ -533,6 +548,7 @@ def call_ollama_harness(
     http_status = None
     retry_after = None
     retry_after_slept = None
+    retry_after_deferred = None
     rate_limited_recovered = False
     metrics = {}
 
@@ -596,18 +612,30 @@ def call_ollama_harness(
         # step sleeping away a sweep on a number this process does not control.
         if http_status == 429:
             wait = _parse_retry_after(retry_after)
-            if wait is not None:
-                slept = min(wait, RETRY_AFTER_MAX_SLEEP_SECONDS)
-                time.sleep(slept)
-                retry_after_slept = slept
+            if wait is None:
+                # No header, or one this code cannot parse. Nothing to obey;
+                # the shared backoff handles it exactly as before headers were
+                # readable at all.
+                pass
+            elif wait > RETRY_AFTER_MAX_SLEEP_SECONDS:
+                # Too long to absorb here -- defer the WHOLE wait to the
+                # scheduler rather than serving part of it. Recorded separately
+                # from an absorbed one: this case neither slept nor recovered,
+                # and collapsing it into an ordinary 429 would hide the very
+                # signal that tells us what the threshold should be.
+                retry_after_deferred = wait
+            else:
+                time.sleep(wait)
+                retry_after_slept = wait
                 # A handled 429 must still be VISIBLE. `retry_after` keeps the
                 # header that was obeyed rather than being overwritten by the
-                # retry's (absent on a 200), and the first status is recorded
-                # beside the final one. Otherwise a lane being throttled on
-                # every single call recovers every time and looks untroubled --
-                # "invisible because it was handled" is how a slow lane stops
-                # being diagnosable, and slow-with-no-reason is exactly the
-                # symptom that took a day to explain before the API move.
+                # retry's (absent on a 200). Otherwise a lane being throttled
+                # on every single call recovers every time and looks
+                # untroubled -- "invisible because it was handled" is how a
+                # slow lane stops being diagnosable, and slow-with-no-reason is
+                # exactly the symptom that took a day to explain before the API
+                # move. A retry reusing the same result variables erases the
+                # first attempt unless something explicitly preserves it.
                 rate_limited_recovered = True
                 http_status, _retry_header_after, body, reason = _post()
 
@@ -679,6 +707,12 @@ def call_ollama_harness(
                 "http_status": http_status,
                 "retry_after": retry_after,
                 "retry_after_slept_seconds": retry_after_slept,
+                # Set when the server named a wait too long to absorb in place,
+                # so the whole wait went to the shared backoff. Distinct from
+                # `retry_after_slept_seconds` on purpose: a run of these is the
+                # evidence that would let RETRY_AFTER_MAX_SLEEP_SECONDS be set
+                # from measurement instead of judgement.
+                "retry_after_deferred_seconds": retry_after_deferred,
                 # True when a 429 was waited out in place and the retry
                 # succeeded. `rate_limited` is False in that case -- correctly,
                 # since the shared backoff must not charge the sweep a second

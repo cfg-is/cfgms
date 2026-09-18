@@ -1164,25 +1164,32 @@ def test_retry_after_is_honoured_on_429_not_merely_recorded():
             )
 
 
-def test_retry_after_is_capped_and_a_second_429_defers_to_the_backoff():
-    """[REQUIRED TEST] A server may name a number this process should not obey
-    unbounded, and a retry may still be refused.
+def test_an_oversized_retry_after_is_deferred_whole_never_truncated():
+    """[REQUIRED TEST] A wait longer than the threshold goes to the scheduler
+    ENTIRELY -- it is never served in part.
 
-    Capping keeps one step from sleeping away a sweep. Deferring a second 429
-    to the shared backoff is what keeps the existing wait budget in charge of
-    the total -- the in-place retry is an improvement on the FIRST guess, not a
-    replacement for the mechanism.
+    This is the property, not the constant. `Retry-After` is the server saying
+    when it will accept us again, so waiting 120s of a named 300s and retrying
+    is retrying too early BY CONSTRUCTION: the instruction is disobeyed while
+    appearing to be honoured, and 120s of the sweep's budget buys a guaranteed
+    second 429. Truncation is wrong at every value of the threshold; deferral
+    is right at every value -- which is what you want from a number nobody has
+    measured.
+
+    So: no sleep, no retry, one call, and the shared backoff told about it.
     """
     with tempfile.TemporaryDirectory() as out_dir:
         raw_path = os.path.join(out_dir, "raw.json")
         slept: list = []
         calls: list = []
+        oversized = ollama_lane.RETRY_AFTER_MAX_SLEEP_SECONDS * 10
 
         def _urlopen(request, *a, **k):
             calls.append(request.full_url)
             raise ollama_lane.urllib.error.HTTPError(
                 url=request.full_url, code=429, msg="Too Many Requests",
-                hdrs=_FakeHeaders({"Retry-After": "99999"}), fp=io.BytesIO(b"still limited"),
+                hdrs=_FakeHeaders({"Retry-After": str(int(oversized))}),
+                fp=io.BytesIO(b"still limited"),
             )
 
         real_urlopen = ollama_lane.urllib.request.urlopen
@@ -1195,14 +1202,34 @@ def test_retry_after_is_capped_and_a_second_429_defers_to_the_backoff():
             ollama_lane.urllib.request.urlopen = real_urlopen
             ollama_lane.time.sleep = real_sleep
 
+        check(slept == [], "retry-after: an oversized header is never served in part", str(slept))
+        check(len(calls) == 1, "retry-after: an oversized header triggers no in-place retry", str(len(calls)))
+        check(rate_limited is True, "retry-after: the deferred 429 is handed to the shared backoff")
+        check(exit_code != 0, "retry-after: a deferred 429 reports a non-zero code", str(exit_code))
+
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if not meta:
+            check(False, "retry-after: a meta file is written for a deferred 429", str(names))
+            return
+        with open(os.path.join(diag, meta[0])) as f:
+            parsed = json.load(f)
+        # Recorded SEPARATELY from an absorbed wait. This case neither slept
+        # nor recovered, and collapsing it into an ordinary 429 would hide the
+        # one signal that could set the threshold from data: a run of "we keep
+        # being told to wait five minutes".
         check(
-            slept == [ollama_lane.RETRY_AFTER_MAX_SLEEP_SECONDS],
-            "retry-after: an oversized header is capped, never obeyed unbounded",
-            str(slept),
+            parsed.get("retry_after_deferred_seconds") == oversized,
+            "retry-after: the deferred wait is recorded with the number the server named",
+            repr(parsed.get("retry_after_deferred_seconds")),
         )
-        check(len(calls) == 2, "retry-after: still retried exactly once, not repeatedly", str(len(calls)))
-        check(rate_limited is True, "retry-after: a second 429 is reported rate limited")
-        check(exit_code != 0, "retry-after: a second 429 reports a non-zero code", str(exit_code))
+        check(
+            parsed.get("retry_after_slept_seconds") is None
+            and parsed.get("rate_limited_recovered") is False,
+            "retry-after: a deferral is not recorded as an absorbed wait or a recovery",
+            repr(parsed),
+        )
 
 
 def test_malformed_retry_after_falls_back_to_the_shared_backoff():
