@@ -19,7 +19,7 @@ Runs one full autonomous Pipeline Cycle (`.claude/agents/po.md` §4) as a clean-
 
 Route on `$ARGUMENTS`:
 
-- **`watch`** — arm the event watcher. See [`watch` — event-driven mode](#watch--event-driven-mode-no-fixed-loop) below, and do **not** run a cycle here; the watcher's `full_cycle reason=startup` event kicks the first one.
+- **`watch`** — arm the event watcher. See [`watch` — event-driven mode](#watch--event-driven-mode-no-fixed-loop) below, and do **not** run a cycle here. On a **first** arm the watcher's `full_cycle reason=startup` event kicks the first one; a re-arm is a resume and emits nothing unless state moved while it was down (`reason=resume_gap`). Run a cycle for the event you actually get, never for one you expected.
 - **anything else (including no argument)** — run exactly one full cycle, as follows.
 
 Spawn a **`po` subagent** to run the full Pipeline Cycle (§4, **skip Step 7 — Planning Team**), same as `/po cron` Path B. Fresh context every invocation — the cycle is stateless, re-derived from GitHub each run. The subagent is on the same host, so it has full Docker access for dispatch/review/fix containers.
@@ -47,8 +47,14 @@ Cost/usage reporting (`token_report.py`) attributes a session to a segment keyed
 Monitor tool:
   command: ./.claude/scripts/pipeline-watch.sh watch
   description: pipeline state changes (merges, PR checks, containers, board)
-  persistent: true
+  timeout_ms: 1800000
 ```
+
+`Monitor` has no "persistent" option — it caps a watch at 30 minutes and kills it at the deadline. So set `timeout_ms` to that maximum and **re-arm on each expiry**: a long-lived watch is a chain of restarts, not one process.
+
+A re-arm is a **resume**, not a fresh arm. The watcher keeps its `last_full` and `drained_streak` and emits no `full_cycle reason=startup`. Only a genuine first arm — no persisted state, after `reset`, or a `last_full` dated in the future — asks for the startup cycle. Do not run a cycle for a startup event you did not get.
+
+Every start re-baselines the probes against current reality. That is a **drop, not a deferral**: whatever changed while the watcher was down is consumed and never reported line by line. A cold start's startup cycle covers it; a resume emits one `full_cycle reason=resume_gap` instead, but only when the baseline actually found something moved. A quiet resume stays silent. Replaying the gap event by event was the rejected alternative — it wakes the session with a burst of stale lines.
 
 The watcher refuses to start if another instance is already running on this host (PID file in the PO cache dir), so double-arming is safe.
 
@@ -72,7 +78,7 @@ Each event justifies a **bundle** of §4 steps, not a single step. The bundles a
 
 | Event line | Steps to run (`.claude/agents/po.md` §4.1) |
 |------------|--------------------------------------------|
-| `full_cycle reason=startup\|interval` | Every step, skipping Step 7 (Planning Team). Identical to the no-arg path. |
+| `full_cycle reason=startup\|interval\|resume_gap` | Every step, skipping Step 7 (Planning Team). Identical to the no-arg path. `resume_gap` means a re-arm found state already moved while the watcher was down — one cycle covers the whole gap, instead of replaying it event by event. |
 | `merged develop_sha=<sha>` | Step 7.5 pipeline sweep, Step 1 unblock check, Step 3 rebase stuck PRs, Step 1.5 agent cleanup, Step 6 dispatch |
 | `checks_green pr=<N>` | Step 4 acceptance review for that PR |
 | `checks_red pr=<N>` | Step 5 fix cycle for that PR |
@@ -99,7 +105,9 @@ After relaying a cycle summary, record the outcome so the watcher knows whether 
 
 ### Drained shutdown
 
-Two consecutive `record-cycle drained full_cycle` reports mean two scheduled full cycles in a row found an empty pipeline. The watcher then emits `EVENT stop reason=drained` and exits, which ends the Monitor. Tell the founder the pipeline is drained and that `/pipeline watch` will re-arm it.
+Two consecutive `record-cycle drained full_cycle` reports mean two scheduled full cycles in a row found an empty pipeline. The watcher then emits `EVENT stop reason=drained` and exits, which ends the Monitor. Report that to the founder and **do not re-arm on your own** — the pipeline is empty, and re-arming it is their call.
+
+The streak is cleared as the watcher stops, so `/pipeline watch` does start cleanly whenever they ask for it. Without that, the stop would be a sticky terminal state: the next arm would resume, hit the drained check on its first tick and exit again, having already baselined away whatever change prompted the re-arm.
 
 Only the 2-hourly full cycle counts toward that streak — a bundle that happens to find nothing is inert — so a quiet hour between merges cannot shut the watcher down. Any `record-cycle work` resets the streak to 0.
 
