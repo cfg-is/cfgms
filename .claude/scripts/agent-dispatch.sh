@@ -2493,8 +2493,28 @@ case "$cmd" in
     # Runs until killed. `stop_creds_mirror_watcher` is the intended way,
     # and `creds_mirror_watcher_alive` is how a later dispatch discovers
     # whether one is already running.
+    # SIGTERM is caught, but bash runs a trap only between commands -- so a
+    # watcher sitting in `sleep` exits up to one poll interval after the
+    # signal. `stop_creds_mirror_watcher` is therefore not instantaneous, and
+    # a caller that needs certainty should poll for absence rather than
+    # assume the kill landed.
     trap 'exit 0' TERM INT
     while true; do
+      # Exit when the mirror directory is gone.
+      #
+      # Without this an ORPHANED watcher runs forever against a path that no
+      # longer exists, refreshing nothing on a timer. Measured, on this
+      # host: eight such processes accumulated across one day of test runs,
+      # each spinning against a deleted fixture directory, none of them
+      # reachable through `stop_creds_mirror_watcher` because the pidfile
+      # they were recorded in had been deleted along with the directory.
+      #
+      # The mirror directory disappearing is unambiguous -- nothing in normal
+      # operation removes it -- unlike the host credential file, which can be
+      # briefly absent mid-rotation and must NOT end the watcher.
+      if [[ ! -d "$CREDS_MIRROR_DIR" ]]; then
+        exit 0
+      fi
       refresh_creds_mirror || true
       creds_mirror_heartbeat
       sleep "$CREDS_MIRROR_POLL_SECONDS"

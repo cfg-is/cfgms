@@ -1345,6 +1345,18 @@ Concurrent orchestrators are fine: the pidfile check means a second finds the fi
 returns, and even if two ran, both copy the same source to the same path, so a duplicate is a
 redundant write rather than a conflict.
 
+**A watcher exits by itself when its mirror directory is removed.** Outliving the dispatch is the
+point, but it means nothing reaps a watcher whose directory is gone — and the pidfile
+`stop_creds_mirror_watcher` needs is deleted along with it, so such a process is unreachable by
+the stop path and loops forever. Measured on the dev host: eight accumulated across one day of
+test runs. The directory disappearing is unambiguous; the host credential file is not, since it
+can be briefly absent mid-rotation and must *not* end the watcher.
+
+**Stopping one is not instantaneous.** Bash runs a trap only between commands, so a watcher
+sitting in `sleep` exits up to one poll interval after the signal. Poll for absence rather than
+assuming a `kill` has landed — a check that samples once will report a watcher still running when
+it is already on its way out.
+
 **A dead watcher is not allowed to be silent** — but it is not allowed to brick dispatch either,
 and those are different requirements. `ensure_creds_mirror_for_mount` restarts a watcher that is
 absent or dead, says so when the heartbeat had gone stale, and proceeds. Refusing instead, as an

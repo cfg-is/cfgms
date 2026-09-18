@@ -437,6 +437,39 @@ assert_contains "$heal_out" "restarting it" \
     "self-heal: and says so -- a dead watcher must not be silent, which is different from must not be survivable"
 teardown_fixture
 
+# An ORPHANED watcher must exit on its own.
+#
+# A watcher outlives its dispatch by design, so nothing reaps it if the
+# directory it serves is removed -- and the pidfile that `stop_creds_mirror_watcher`
+# needs is removed along with it. Measured on the dev host: eight such
+# processes accumulated across one day of test runs, each spinning against a
+# deleted fixture directory and unreachable by the stop path.
+setup_fixture
+bash -c "
+    export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
+    export CFGMS_CREDS_MIRROR_DIR='$CREDS_MIRROR_DIR'
+    export CFGMS_CREDS_MIRROR_POLL_SECONDS=1
+    source '$DISPATCH'
+    start_creds_mirror_watcher
+" >/dev/null 2>&1
+orphan_pid=$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)
+if [[ -n "$orphan_pid" ]] && kill -0 "$orphan_pid" 2>/dev/null; then
+    _pass "orphan: precondition -- a watcher is running"
+else
+    _fail "orphan: precondition -- no watcher started"
+fi
+
+# Remove the directory out from under it, exactly as a deleted fixture does.
+rm -rf "$CREDS_MIRROR_DIR"
+orphan_gone="no"
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$orphan_pid" 2>/dev/null || { orphan_gone="yes"; break; }
+    sleep 0.5
+done
+assert_eq "$orphan_gone" "yes" \
+    "orphan: a watcher whose mirror directory is removed exits by itself, rather than spinning forever"
+teardown_fixture
+
 # No watcher may outlive the SUITE, even though one must outlive a dispatch.
 #
 # Waits rather than samples once: `kill` is asynchronous, so a process that is
