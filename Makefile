@@ -489,12 +489,36 @@ test: fix-git-bare
 # count and exits without running anything — used by
 # scripts/test-scripts.sh's test_api_shard_partition_covers_all_tests to verify
 # the partition is complete and even without paying for a full -race run.
+#
+# The shard count is validated as a decimal integer before it reaches any
+# arithmetic context. Bash evaluates the contents of a variable used inside
+# $(( )) as an arithmetic expression, so an unvalidated value is both command
+# execution (an array-subscript payload runs) and a fail-open: a non-numeric
+# value makes `seq 0 $((shards - 1))` emit nothing, so zero shards launch and
+# the target exits 0 with the whole suite silently unrun.
+#
+# Aggregation fails closed: every shard that was launched must produce a
+# readable exit status, and at least one shard must have been launched. A
+# shard subshell killed before it records one (OOM kill under N concurrent
+# -race binaries, any signal, a full or unwritable temp dir) counts as a
+# failure, because a skipped shard is a whole slice of the suite that
+# silently never ran - see test_api_shard_aggregation_fails_closed and
+# test_api_shard_count_rejects_non_integer for the regression guards.
 .PHONY: test-framework-api-sharded
 test-framework-api-sharded:
 	@shards="$${CFGMS_API_TEST_SHARDS:-}"; \
 	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
-	if [ "$$shards" -gt 8 ] 2>/dev/null; then shards=8; fi; \
-	if [ "$$shards" -lt 1 ] 2>/dev/null; then shards=1; fi; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ shard count must be a positive integer, got '$$shards' (set CFGMS_API_TEST_SHARDS to a decimal number)"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ shard count must be a positive integer, got '$$shards' (set CFGMS_API_TEST_SHARDS to a decimal number)"; \
+		exit 1; \
+	fi; \
+	if [ "$$shards" -gt 8 ]; then shards=8; fi; \
 	list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
 	list_rc=$$?; \
 	if [ $$list_rc -ne 0 ]; then \
@@ -517,23 +541,38 @@ test-framework-api-sharded:
 		exit 0; \
 	fi; \
 	tmpdir=$$(mktemp -d); \
+	if [ -z "$$tmpdir" ] || [ ! -d "$$tmpdir" ]; then \
+		echo "❌ could not create a temp dir for shard output - refusing to report a pass"; \
+		exit 1; \
+	fi; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	pids=""; \
+	launched=""; \
 	for i in $$(seq 0 $$((shards - 1))); do \
 		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
 		if [ -n "$$pattern" ]; then \
 			( go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
 			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
 			pids="$$pids $$!"; \
+			launched="$$launched $$i"; \
 		fi; \
 	done; \
 	wait $$pids; \
+	if [ -z "$$launched" ]; then \
+		echo "❌ no shards were launched for $$total features/controller/api tests - refusing to report a pass"; \
+		exit 1; \
+	fi; \
 	fail=0; \
-	for i in $$(seq 0 $$((shards - 1))); do \
-		if [ -f "$$tmpdir/shard-$$i.exit" ]; then \
-			cat "$$tmpdir/shard-$$i.log"; \
-			code=$$(cat "$$tmpdir/shard-$$i.exit"); \
-			if [ "$$code" != "0" ]; then fail=1; fi; \
+	for i in $$launched; do \
+		if [ -f "$$tmpdir/shard-$$i.log" ]; then cat "$$tmpdir/shard-$$i.log"; fi; \
+		if code=$$(cat "$$tmpdir/shard-$$i.exit" 2>/dev/null) && [ -n "$$code" ]; then \
+			if [ "$$code" != "0" ]; then \
+				echo "❌ shard $$i: go test exited $$code"; \
+				fail=1; \
+			fi; \
+		else \
+			echo "❌ shard $$i: no readable exit status - the shard was launched but never recorded a result (killed by the OOM killer or a signal, or its output could not be written). Failing closed."; \
+			fail=1; \
 		fi; \
 	done; \
 	exit $$fail

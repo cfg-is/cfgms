@@ -3716,6 +3716,230 @@ test_claude_pipeline_suites() {
     rm -rf "$tmpdir"
 }
 
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# the partition of features/controller/api tests across shards must be
+# complete (every test lands in exactly one shard, none dropped or
+# duplicated) and even (no shard starves while another does most of the
+# work). Uses CFGMS_API_TEST_SHARD_PLAN_ONLY=1 so this runs in milliseconds
+# instead of paying for a full -race run just to check the partition math.
+test_api_shard_partition_covers_all_tests() {
+    log_test "Testing test-framework-api-sharded: partition is complete and even..."
+
+    local list_out list_rc total
+    list_out=$(go test -list '.*' ./features/controller/api/... 2>&1)
+    list_rc=$?
+    if [[ $list_rc -ne 0 ]]; then
+        log_fail "go test -list ./features/controller/api/...: exited ${list_rc}"
+        echo "$list_out" | tail -20
+        return
+    fi
+    total=$(echo "$list_out" | grep -c '^Test')
+    if [[ "$total" -eq 0 ]]; then
+        log_fail "go test -list found no tests in features/controller/api"
+        return
+    fi
+
+    local shards=4
+    local plan_out plan_rc
+    plan_out=$(CFGMS_API_TEST_SHARDS=$shards CFGMS_API_TEST_SHARD_PLAN_ONLY=1 make test-framework-api-sharded 2>&1)
+    plan_rc=$?
+    if [[ $plan_rc -ne 0 ]]; then
+        log_fail "make test-framework-api-sharded (plan-only): exited ${plan_rc}"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    local counts sum min max
+    counts=$(echo "$plan_out" | grep -oE '^shard [0-9]+: [0-9]+ tests' | grep -oE '[0-9]+ tests' | grep -oE '^[0-9]+')
+    if [[ -z "$counts" ]]; then
+        log_fail "could not parse shard counts from plan-only output"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    sum=0
+    min=""
+    max=""
+    while read -r n; do
+        sum=$((sum + n))
+        if [[ -z "$min" || "$n" -lt "$min" ]]; then min=$n; fi
+        if [[ -z "$max" || "$n" -gt "$max" ]]; then max=$n; fi
+    done <<< "$counts"
+
+    if [[ "$sum" -ne "$total" ]]; then
+        log_fail "shard counts sum to ${sum}, go test -list reports ${total} tests — partition drops or duplicates tests"
+        return
+    fi
+
+    if [[ $((max - min)) -gt 1 ]]; then
+        log_fail "shard sizes range from ${min} to ${max} tests (across ${shards} shards) — partition is not even"
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: ${total} tests partitioned evenly across ${shards} shards (sizes ${min}-${max})"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# shard aggregation must fail closed. A shard subshell that dies before it can
+# record its exit status (OOM kill, signal, unwritable temp dir) used to be
+# skipped by the aggregation loop, so `make test` reported success while a
+# whole shard of tests never ran. Driven with a stub `go` on PATH so it costs
+# milliseconds instead of a real -race run: the stub kills its own parent
+# subshell for one shard, reproducing the OOM-kill case exactly.
+test_api_shard_aggregation_fails_closed() {
+    log_test "Testing test-framework-api-sharded: a shard with no exit status fails closed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list; for the shard whose -run
+    # pattern includes TestB it SIGKILLs the subshell that launched it, so no
+    # shard-N.exit file is ever written.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+case "$*" in
+    *TestB*) kill -9 "$PPID"; exit 0 ;;
+esac
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # rc captured via || so a non-zero make does not trip the suite's set -e.
+    local out rc=0
+    out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_fail "a shard that died without recording an exit status still produced a passing target (exit 0) — false green in make test"
+        echo "$out" | tail -20
+        return
+    fi
+
+    if ! echo "$out" | grep -q 'no readable exit status'; then
+        log_fail "target failed but printed no diagnostic naming the shard with the missing exit status"
+        echo "$out" | tail -20
+        return
+    fi
+
+    # A temp dir that cannot be created must also fail closed rather than
+    # running zero shards and reporting success.
+    local not_a_dir="${tmp_dir}/tmpdir-is-a-file"
+    : > "$not_a_dir"
+
+    local mk_out mk_rc=0
+    mk_out=$(PATH="${bin_dir}:$PATH" TMPDIR="$not_a_dir" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || mk_rc=$?
+
+    if [[ $mk_rc -eq 0 ]]; then
+        log_fail "target reported success when mktemp -d could not create the shard output dir"
+        echo "$mk_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: missing shard exit status and unusable temp dir both fail closed"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# CFGMS_API_TEST_SHARDS must be validated as a decimal integer before it
+# reaches any arithmetic context. Bash re-evaluates the contents of a variable
+# used inside $(( )) as an arithmetic expression, so an unvalidated value is
+# both command execution (an array-subscript payload runs) and a silent
+# fail-open (a non-numeric value makes `seq 0 $((shards - 1))` emit nothing,
+# so zero shards launch and the target exits 0 with the whole suite unrun).
+# Driven with a stub `go` on PATH so it costs milliseconds.
+test_api_shard_count_rejects_non_integer() {
+    log_test "Testing test-framework-api-sharded: a non-integer shard count is rejected, not executed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list, reports success for any run.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # 1. Arithmetic-injection payload must not execute its command substitution.
+    local marker="${tmp_dir}/injection-executed"
+    local inj_out inj_rc=0
+    inj_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS="a[\$(touch ${marker})]" \
+        make test-framework-api-sharded 2>&1) || inj_rc=$?
+
+    if [[ -e "$marker" ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS reached bash arithmetic unvalidated — the injected command substitution executed"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    if [[ $inj_rc -eq 0 ]]; then
+        log_fail "an injection payload in CFGMS_API_TEST_SHARDS produced a passing target (exit 0) — false green in make test"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    # 2. A plain non-integer must fail closed rather than launching zero shards.
+    local bad_out bad_rc=0
+    bad_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=abc \
+        make test-framework-api-sharded 2>&1) || bad_rc=$?
+
+    if [[ $bad_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=abc produced a passing target (exit 0) — zero shards ran and make test still reported success"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    if ! echo "$bad_out" | grep -q 'shard count must be a positive integer'; then
+        log_fail "target failed but printed no diagnostic explaining the invalid shard count"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    # 3. Zero is not a positive integer and must not be accepted either.
+    local zero_out zero_rc=0
+    zero_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=0 \
+        make test-framework-api-sharded 2>&1) || zero_rc=$?
+
+    if [[ $zero_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=0 produced a passing target (exit 0) — zero shards ran"
+        echo "$zero_out" | tail -20
+        return
+    fi
+
+    # 4. A valid count still runs: validation must not break the normal path.
+    local ok_out ok_rc=0
+    ok_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 \
+        make test-framework-api-sharded 2>&1) || ok_rc=$?
+
+    if [[ $ok_rc -ne 0 ]]; then
+        log_fail "a valid CFGMS_API_TEST_SHARDS=2 was rejected (exit ${ok_rc}) — validation is too strict"
+        echo "$ok_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: injection payload, non-integer and zero shard counts all fail closed; valid counts still run"
+}
+
 test_resource_sampler_no_placeholder() {
     log_test "Testing resource-sampler.sh: RESOURCE_PROFILE line contains no literal \${ placeholder..."
 
@@ -4111,6 +4335,12 @@ echo ""
 test_resource_sampler_loop_guard
 echo ""
 test_resource_sampler_no_placeholder
+echo ""
+test_api_shard_partition_covers_all_tests
+echo ""
+test_api_shard_aggregation_fails_closed
+echo ""
+test_api_shard_count_rejects_non_integer
 echo ""
 test_claude_pipeline_suites
 echo ""
