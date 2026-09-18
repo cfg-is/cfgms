@@ -1066,8 +1066,9 @@ by that same story. **`--harness`/`--model` is now the only credential-delivery 
 `launch-investigator` has for lane mode.**
 
 `launch-investigator --harness <id> --model <id>` generalizes the plan-mode-only credential mount
-above: passing `--harness claude` mounts `~/.claude/.credentials.json` **read-only** into the
-container and sets three environment variables the container-side harness runner reads:
+above: passing `--harness claude` mounts the Claude credential **read-only** into the container
+(through the mirror described in [The credential mirror](#the-credential-mirror) below, not the
+host's live file) and sets three environment variables the container-side harness runner reads:
 
 | Variable | Set to |
 |---|---|
@@ -1254,6 +1255,94 @@ gets refused at container start, never `NXDOMAIN` mid-run. That is deliberate �
 enumerated per harness rather than opened wholesale — and is a step in each future harness story
 (`codex.conf` landed by Issue #3935; `opencode.conf` by Issue #3936; `ollama.conf` by this story)
 not something a lane can work around at runtime.
+
+## The credential mirror
+
+**What was wrong.** Containers bind-mounted the host's live `~/.claude/.credentials.json` as a
+**file**. The host refreshes its OAuth token by writing a replacement and renaming it into place,
+and a file bind mount pins the **original inode** — so a running container never saw the
+replacement and kept presenting a credential that had been revoked. Any container outliving one
+token lifetime (measured: 8 hours) meets this.
+
+Measured on sweep `2026-09-16T1843Z-a17e6fcc`: container up 17:45:43, host rewrote the credential
+18:13:39, the container's next request rejected 18:14:15 with `OAuth access token has been
+revoked`. Thirty-six seconds. The adjudicator lost 7 of 57 completed batches to it.
+
+Mount direction was tested both ways, and the asymmetry is the whole story:
+
+| Mount kind | host replaces by rename → container sees it? |
+|---|---|
+| file | **no** — container stays pinned to the old inode |
+| directory | yes |
+
+Two claims in `agent-dispatch.sh`'s own comments were wrong as a result, and both are corrected
+there now: that agent containers "track host token rotations live and refresh the token in place,
+exactly like an interactive session", and that this model *replaced* an earlier one whose frozen
+copies were silently invalidated by rotation. The live file mount had the same defect the earlier
+fix (#1594) was believed to have removed — a container still held an effectively frozen
+credential; only the mechanism freezing it had changed.
+
+**What happens now.**
+
+```
+host ~/.claude/.credentials.json  --(one-way, host is sole writer)-->
+  mirror dir 0700 / .credentials.json 0600  --(:ro bind)-->  container
+```
+
+Three properties, each load-bearing:
+
+1. **A dedicated directory**, holding the credential and nothing else. The host's own `~/.claude`
+   also holds session transcripts, memory files, shell history and a personal profile; mounting
+   the whole directory to solve an inode problem would trade a stale-token bug for a
+   data-exposure one.
+2. **Read-only, so the flow is one-way.** The host stays the sole refresher. A container must
+   never be able to revoke the host's token — that turns a one-agent fault into a pipeline-wide
+   outage. Four of the six mount sites were previously read-write.
+3. **Updated in place, never by rename.** The inode is what a file mount pins, so keeping it
+   stable is the fix. A rename here would faithfully reproduce the original bug inside the mirror,
+   and a test asserting only that the content updated would not notice.
+
+**The cost of (3), stated plainly.** An in-place rewrite is not atomic, so a reader can in
+principle observe a partially written file. The window is a single write of ~1 KB by the sole
+writer, and the failure mode of losing that race is a JSON parse error — the same failure the
+container already gets from a revoked token, not a worse one. Mounting the directory instead of
+the file is atomic but requires every container entrypoint to relocate where it looks for the
+credential: a larger blast radius on the boot path of every agent, for a smaller failure.
+
+**Liveness.** A watcher owned by the launching orchestrator re-syncs every
+`CFGMS_CREDS_MIRROR_POLL_SECONDS` (default 30, ample against an 8-hour token) and writes a
+heartbeat. Change is detected by **inode**, then mtime and size — a same-second replacement can
+share an mtime, so mtime alone can miss a rotation entirely. Concurrent orchestrators may each run
+a watcher; every writer copies the same source to the same path, so a duplicate is a redundant
+write rather than a conflict. The watcher's `trap` is **chained** onto any existing `EXIT` trap,
+because a bare `trap ... EXIT` replaces rather than adds.
+
+**A dead watcher is not allowed to be silent**, since it is otherwise indistinguishable from "no
+refresh happened" — the original bug restored quietly. The launch gate distinguishes two states:
+no heartbeat at all means no watcher has ever run here, which is an ordinary first launch and
+starts one; a heartbeat that has gone **stale** means a watcher ran and stopped, and that refuses
+the launch. Only the watcher writes the heartbeat — a plain content refresh deliberately does not,
+because the gate also refreshes, and a gate that beats the heartbeat immediately before testing it
+can never fail.
+
+**Mounting an absent source is guarded.** Docker creates a bind mount's missing source as a
+**directory**, which would mount a directory over the container's credential path and break
+authentication for a reason that looks nothing like its cause. `ensure_creds_mirror_for_mount`
+runs before each of the six launches and fails loudly instead. Two of those six sites are in arms
+that never call the credential gate, so this is a separate guarantee rather than belt-and-braces.
+
+**Not a prompt-injection fix.** The host parses this file as strict JSON against a fixed schema
+and treats no field as instructions, so there was no injection path through it before this change
+either. What read-only closes is corruption and substitution by an actively malicious container.
+
+**Unresolved, and it bounds what this achieves.** Whether a *running* Claude Code re-reads the
+credential file at all, or only reads it at process start, is not determinable from the minified
+CLI bundle, and the decisive test needs a real token rotation observed against a live container —
+which must not be forced, because forcing one revokes the token the host session is itself using.
+If the CLI only reads at start, the mirror reduces the **frequency** of an in-flight auth failure
+rather than eliminating it: a freshly launched container never starts stale, but one already
+mid-run at the moment of rotation can still hit it. Issue #4144's adjudicator checkpointing
+protects already-completed work either way, which is why the two were built as separate stories.
 
 ## Prompt transport: stdin, never argv (Issue #4002)
 
