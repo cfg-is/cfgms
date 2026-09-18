@@ -506,15 +506,17 @@ was considered and rejected, so a later reader can see it was weighed, not misse
   anchored to worked CFGMS examples. CVSS can be added later as an optional second field without
   changing the anchors.
 - **D2 — CWE vocabulary: a closed shortlist plus an explicit `other` escape, not the full
-  corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + `vuln_class`; with an open
+  corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + normalised `cwe`; with an open
   vocabulary, two lanes describing one defect under two identifiers silently fail to merge. The
   core lists 25 CWE identifiers CFGMS actually cares about (certificate validation,
   authentication and authorization, signature verification, secret handling, logging, injection,
   path and link handling, deserialization, races, resource consumption) and instructs a lane to
-  set `vuln_class` to exactly one of them or to `other: <short label>`. The escape is stated
+  set the identifier to exactly one of them or to `other: <short label>`. The escape is stated
   explicitly, not implied — it is what stops the shortlist suppressing a real finding it did not
-  anticipate. This story chooses the vocabulary and carries it in the existing `vuln_class`
-  field; a dedicated CWE field is a separate schema story.
+  anticipate. This story chose the vocabulary and first carried it in the existing `vuln_class`
+  field. **The dedicated `cwe` field landed in Issue #3983 and now holds it**, and since Issue
+  #4134 that normalised `cwe` is what findings de-duplicate on; `vuln_class` kept its original
+  job as the short human-readable class name.
 - **D3 — The assumed attacker per level.** Named tiers — T0, a network party with no credential;
   T1, a compromised steward (root on one enrolled endpoint); T2, a compromised tenant admin for a
   short window; T3, a compromised controller or root admin; P, an untrusted module publisher —
@@ -598,7 +600,24 @@ names which of the step's `hypotheses` this finding resulted from — a finding 
 `candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
 finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
-**The de-duplication key is still `file` + `symbol` + `vuln_class` — never the location.** Line
+**KNOWN GAP: two findings from ONE lane at the same key still merge (Issue #4134).** Measured on
+sweep `2026-09-16T1843Z-a17e6fcc`: 107 same-lane keys held two or more findings, swallowing 116 of
+the 2,079 occurrences that reach grouping — **5.6%**. A lane reporting two findings is that lane
+asserting they are two things, and merging them overrules the only judgement in the system that
+actually read the code: the second survives as an occurrence bullet while the consolidated record —
+title, line, the count itself — describes only the first. Real example: codex on
+`pkg/secrets/providers/sops/lock.go::acquireCASLock`, both CWE-362, race windows twenty lines apart,
+rendered as one finding.
+
+This is **deliberately unfixed.** The obvious repair — a per-lane ordinal in the key — was built and
+reverted, because an ordinal is not recoverable from an already-consolidated finding, so
+`consolidate._finding_key()` collided and the adjudicator's and verifier's verdicts cross-applied
+between distinct findings. A false `guarded` reads as CLEAN, which is worse than losing a finding.
+The real fix is an explicit `finding_id` carried end to end through the lane envelope, the
+adjudicator and the verifier — a schema change across three stages, not yet scheduled. Until then,
+read a single-lane finding's occurrence list, not only its title.
+
+**The de-duplication key is still `file` + `symbol` + normalised `cwe` — never the location.** Line
 ranges rot as `develop` advances while symbol names survive, so keying on `line`/`end_line` would
 split one defect two lanes report at two slightly different line numbers into two findings,
 destroying the cross-lane agreement signal the harness is built on. Before Issue #3983, that
@@ -1860,8 +1879,9 @@ catalogue fails closed.
 
 **The regression corpus (Issue #4059).** `docs/security-review/regression-corpus.md` pins defects
 this repository has had to commits where they are still present, so "model A beats model B" and "this
-change made it worse" are answerable with a number. `corpus.py` scores on file plus `vuln_class` --
-never line numbers, which rot. Right file, wrong class is `near`; an entry with no recorded files is
+change made it worse" are answerable with a number. `corpus.py` scores on file plus the
+consolidated `vuln_class`, which **since Issue #4134 is the normalised `cwe`**, not the free-text
+label a lane wrote -- never line numbers, which rot. Right file, wrong class is `near`; an entry with no recorded files is
 `unscoreable` and leaves the denominator. An entry must be a defect **verified in its fix commit's
 body**: a subject line is not evidence, and an entry that was never a defect marks a model down for
 missing something that never existed. Read the corpus score beside the closure rate, never either
@@ -2571,7 +2591,7 @@ the actual diagnostic text (an unrecognised model id, an auth error) beside it �
 of recording the tail in the first place. A step with no tail on disk (an envelope predating this
 story, or a state that genuinely had nothing to show) contributes no entry.
 
-**De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
+**De-duplication key is `file` + `symbol` + normalised `cwe`**, exactly as the Finding schema above —
 never the `line`/`end_line` location Issue #3983 added. Every occurrence across every lane's
 `step-*.findings.json` sharing this key collapses into one consolidated entry; the entry's `lanes`
 field lists exactly the lanes that independently reported it, and `occurrences` keeps each lane's
@@ -2580,15 +2600,27 @@ discarding the disagreement. The consolidated finding's own top-level `cwe`/`lin
 (`consolidate.py::_first_occurrence_field`) are taken from the first occurrence in `(lane,
 step_id)` order — a deterministic pick, never a merge — since these are a reader's hint, not part
 of what makes two findings the same finding; `consolidated.md` renders the picked location
-immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` beside
-`vuln_class`.
+immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` beside a prose
+class label.
+
+That label is **not** the consolidated finding's `vuln_class`. Since Issue #4134 that field holds
+the normalised class that keyed the group, so printing it beside `cwe` renders `CWE-863
+(CWE-863)`. `consolidate.py::_prose_label()` instead picks the first occurrence whose own
+`vuln_class` is readable prose, stripping an identifier prefix (`CWE-863: Incorrect
+authorization` → `Incorrect authorization`) and skipping an occurrence that carries nothing but
+an identifier. It tests the label's SHAPE, not whether it is in the vocabulary — an out-of-list
+`CWE-99999` is still an identifier and still not a heading. When no occurrence carries prose it
+falls back to the key, because a heading must not be empty. The same helper renders the
+cross-step group member list, which is why `_cross_step_groups()` projects each member's
+occurrence labels — labels only, never whole occurrences, since those members travel to the
+adjudicator and Issue #4080 keeps finder evidence out of that payload.
 
 **Findings are sorted by agreement, then severity, then confidence (Issue #3960, F6).**
 `_finalize_findings()` orders `report["findings"]` -- and therefore `render_markdown()`'s
 rendered order -- primarily by `agreement.reported` descending, then by the group's
 highest-ranked occurrence `severity` descending (`critical` > `high` > `medium` > `low`), then
 by its highest-ranked occurrence `confidence` descending (`high` > `medium` > `low`), with the
-`file`/`symbol`/`vuln_class` de-duplication key retained only as the final tiebreaker between
+`file`/`symbol`/normalised `cwe` de-duplication key retained only as the final tiebreaker between
 two findings tied on all three ranked fields. Severity/confidence are taken via `max()` over a
 group's `occurrences`, not the first occurrence in insertion order, so a group where only the
 second-listed lane called it `critical` still sorts as critical. This matches
