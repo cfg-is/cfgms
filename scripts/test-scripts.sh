@@ -3860,8 +3860,19 @@ test_api_shard_partition_covers_all_tests() {
 test_go_group_split_partition_covers_all_packages() {
     log_test "Testing go-group split: controller-core/heavy-providers/rest partition all packages, no drops or duplicates..."
 
+    # Every captured stream is filtered to lines that actually look like this
+    # module's import paths. Not cosmetic: test-go-group-* is invoked here via
+    # `make` from inside a shell that (in CI, via `make test` -> make test-scripts
+    # -> this script) already inherited MAKEFLAGS/MAKELEVEL from an enclosing
+    # make process, which makes GNU Make auto-print "Entering directory" /
+    # "Leaving directory" around the nested invocation — two extra non-empty
+    # lines per call that a bare `grep -c .` counts as packages. Reproduced only
+    # in that nested context, never when running the make target directly from
+    # an interactive shell, which is why this passed locally and failed in CI.
+    local pkg_filter='^github\.com/cfgis/cfgms/'
+
     local full full_rc
-    full=$(go list ./... 2>&1 | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$')
+    full=$(go list ./... 2>&1 | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$' | grep -E "$pkg_filter")
     full_rc=$?
     if [[ $full_rc -ne 0 ]]; then
         log_fail "go list ./...: exited ${full_rc}"
@@ -3870,11 +3881,11 @@ test_go_group_split_partition_covers_all_packages() {
     fi
 
     local core heavy rest core_rc heavy_rc rest_rc
-    core=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-controller-core 2>&1)
+    core=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-controller-core 2>&1 | grep -E "$pkg_filter")
     core_rc=$?
-    heavy=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-heavy-providers 2>&1)
+    heavy=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-heavy-providers 2>&1 | grep -E "$pkg_filter")
     heavy_rc=$?
-    rest=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-rest 2>&1)
+    rest=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-rest 2>&1 | grep -E "$pkg_filter")
     rest_rc=$?
     if [[ $core_rc -ne 0 || $heavy_rc -ne 0 || $rest_rc -ne 0 ]]; then
         log_fail "CFGMS_TEST_GROUP_LIST_ONLY=1 exited non-zero (core=${core_rc}, heavy=${heavy_rc}, rest=${rest_rc})"
