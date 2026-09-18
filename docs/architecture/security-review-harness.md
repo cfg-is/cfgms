@@ -60,6 +60,15 @@ All sweep state lives outside the repository, under a base directory resolved by
     harness_identity.json              SHA-256 over investigator-entrypoint.sh and the
                                         --lane-entrypoint script from the LAST launch-investigator
                                         call (Issue #3952) -- recorded, not frozen
+    container-logs/
+      <mode>.log                       each investigator container's stdout+stderr, streamed to
+                                        disk for the container's lifetime (Issue #4132). <mode> is
+                                        a lane dir name for a finder lane, else plan / verifier /
+                                        adjudicator. Written under whichever directory that launch
+                                        was given as --sweep-dir, so only finder lanes and the
+                                        LEGACY SINGLE planner land HERE (plan.log); the verifier,
+                                        the adjudicator and each MULTI-planner write under their
+                                        own sub-sweep dir below
     plan/
       step-001.json                    step prompt + scope (generated from metadata only)
       step-002.json
@@ -956,6 +965,7 @@ credential-delivery mechanics are documented at the files themselves rather than
 | Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist-base.conf` + `.devcontainer/dnsmasq-allowlist.d/` |
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
 | Plan-mode-only mount of that same file at `/home/agent/.claude/agents/investigator.md:ro`, so `claude --agent investigator` resolves it (Issue #4003) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm, plan branch) |
+| Streaming each container's log to `<--sweep-dir>/container-logs/<mode>.log` for its lifetime, so the event stream outlives the container (Issue #4132) — under whichever directory that launch was given, which is a sub-sweep dir for the verifier, the adjudicator and each multi-planner | `.claude/scripts/agent-dispatch.sh` (`start_investigator_log_capture`) |
 | Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
@@ -3402,7 +3412,8 @@ meant to catch), then asserts `resume` exits non-zero, names the tampered path, 
 container at all — no new step file appears under any `lanes/<lane>/`.
 
 **Reap-before-relaunch (Issue #3930).** `launch-investigator`'s `docker run -d` carries no `--rm`,
-so a container's name stays taken after it exits — nothing else removes it. Before Issue #3930,
+so a container's name stays taken after it exits until something removes it explicitly — the three
+paths that do are enumerated below. Before Issue #3930,
 `agent-dispatch.sh` refused to launch whenever ANY container by that name existed in ANY state, so
 once a sweep's investigator container had exited, `resume` could never dispatch that lane again:
 every retry hit the same name collision and silently no-op'd forever. The container-exists check
@@ -3411,6 +3422,49 @@ is now state-aware (`_container_safe_to_reap` in `agent-dispatch.sh`, reused by
 exactly `exited` is removed and the launch proceeds; a container that is `running`, `restarting`,
 or `created` — or in any state this script cannot positively identify as `exited` — is refused
 exactly as before, never reaped, never raced.
+
+A container's log lives exactly as long as the container, so whichever path removes one destroys
+its log with it. Three paths remove an investigator container, and none of them waits for anyone
+to have read it:
+
+- **Reap-before-relaunch**, described above — the next launch for that sweep and mode, which is to
+  say while the sweep is still running.
+- **The stale-investigator reaper** (Issue #4055, `agent-dispatch.sh`'s `cleanup-stale` arm) —
+  `docker ps -a --filter name=cfg-agent-investigator- --filter status=exited`, then `docker rm`
+  after a grace window (`CFGMS_INVESTIGATOR_REAP_MINUTES`, default 30). This is the routine
+  garbage collector and the path that removes containers belonging to FINISHED sweeps, so it is
+  the one that most often takes a log nobody has read yet. Note its own comment asserts an exited
+  investigator "holds nothing of value" — true only because of the capture described here.
+- **`cleanup-container <name>`** — on request, for an arbitrary container name.
+
+`cleanup-issue` is NOT one of them: it only ever constructs `cfg-agent-<num>` or
+`cfg-agent-item-<id>`, neither of which can match `cfg-agent-investigator-*`.
+
+Step outcomes survive independently in
+`lanes/<lane>/step-*.findings.json`; what is lost is the event stream — `step_written`,
+`step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and the timing between those events,
+which is exactly what is needed to work out why a lane was slow, how often a repair round fired,
+or whether a step's scanners ran.
+
+`start_investigator_log_capture` (Issue #4132) therefore streams `docker logs -f --timestamps`
+into `<--sweep-dir>/container-logs/<mode>.log` for the container's lifetime — under whichever
+directory that launch was given, not the sweep root. Five dispatch sites, and `plan` mode is split
+across both shapes:
+
+| Dispatch site | Mode | `--sweep-dir` | Log |
+|---|---|---|---|
+| `security-review.sh:724` | finder lane | sweep root | `<sweep>/container-logs/<lane-dir-name>.log` |
+| `planner.py:874` | legacy single planner | sweep root | `<sweep>/container-logs/plan.log` |
+| `planner.py:921` | multi-planner | `<sweep>/planners/<lane>` | `<sweep>/planners/<lane>/container-logs/plan.log` |
+| `verify.py:180` | verifier | `<sweep>/verification` | `<sweep>/verification/container-logs/verifier.log` |
+| `adjudicate.py:187` | adjudicator | `<sweep>/adjudication` | `<sweep>/adjudication/container-logs/adjudicator.log` |
+
+The sub-sweep layout is also why a fixed `<mode>.log` filename cannot collide: every
+multi-planner lane writes `plan.log`, kept apart solely by its own sub-directory. The follow ends by itself when the container exits, so
+there is nothing to clean up. It starts in the launch's success branch before the launch is
+announced, so a short run cannot outrun its own capture, and every failure path returns 0 with a
+warning: an unpersisted log is a diagnostic loss, never a reason to fail an otherwise healthy
+launch.
 
 **Each lane's dispatch is independent (AC6).** Every roster lane's `launch-investigator` call is
 made in a loop (`dispatch_roster_lanes`); a lane that fails to dispatch for a documented,
