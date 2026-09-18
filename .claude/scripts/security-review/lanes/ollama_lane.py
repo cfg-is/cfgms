@@ -533,6 +533,7 @@ def call_ollama_harness(
     http_status = None
     retry_after = None
     retry_after_slept = None
+    rate_limited_recovered = False
     metrics = {}
 
     payload = {
@@ -599,7 +600,16 @@ def call_ollama_harness(
                 slept = min(wait, RETRY_AFTER_MAX_SLEEP_SECONDS)
                 time.sleep(slept)
                 retry_after_slept = slept
-                http_status, retry_after, body, reason = _post()
+                # A handled 429 must still be VISIBLE. `retry_after` keeps the
+                # header that was obeyed rather than being overwritten by the
+                # retry's (absent on a 200), and the first status is recorded
+                # beside the final one. Otherwise a lane being throttled on
+                # every single call recovers every time and looks untroubled --
+                # "invisible because it was handled" is how a slow lane stops
+                # being diagnosable, and slow-with-no-reason is exactly the
+                # symptom that took a day to explain before the API move.
+                rate_limited_recovered = True
+                http_status, _retry_header_after, body, reason = _post()
 
         if reason is None:
             stdout, stderr, metrics = _parse_generate_response(body)
@@ -669,6 +679,12 @@ def call_ollama_harness(
                 "http_status": http_status,
                 "retry_after": retry_after,
                 "retry_after_slept_seconds": retry_after_slept,
+                # True when a 429 was waited out in place and the retry
+                # succeeded. `rate_limited` is False in that case -- correctly,
+                # since the shared backoff must not charge the sweep a second
+                # wait for a limit already paid for -- so this is the only
+                # record that it happened at all.
+                "rate_limited_recovered": rate_limited_recovered,
                 **metrics,
             },
             indent=2,

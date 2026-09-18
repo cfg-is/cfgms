@@ -1144,6 +1144,24 @@ def test_retry_after_is_honoured_on_429_not_merely_recorded():
                 "retry-after: the wait actually taken is recorded, not just the header",
                 repr(parsed),
             )
+            # Handled must not mean unrecorded. `rate_limited` is False here on
+            # purpose -- the shared backoff must not charge the sweep a second
+            # wait for a limit already paid for in place -- which makes these
+            # two fields the ONLY trace that it happened. Without them a lane
+            # throttled on every single call recovers every time and looks
+            # untroubled, and "slow for no visible reason" is precisely the
+            # symptom that took a day to explain before the API move.
+            check(
+                parsed.get("rate_limited_recovered") is True,
+                "retry-after: a handled 429 is still visible in the meta",
+                repr(parsed),
+            )
+            check(
+                parsed.get("retry_after") == "7",
+                "retry-after: the header that was OBEYED survives the retry, "
+                "rather than being overwritten by the retry's absent one",
+                repr(parsed.get("retry_after")),
+            )
 
 
 def test_retry_after_is_capped_and_a_second_429_defers_to_the_backoff():
