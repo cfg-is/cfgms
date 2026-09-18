@@ -47,8 +47,12 @@ Cost/usage reporting (`token_report.py`) attributes a session to a segment keyed
 Monitor tool:
   command: ./.claude/scripts/pipeline-watch.sh watch
   description: pipeline state changes (merges, PR checks, containers, board)
-  persistent: true
+  timeout_ms: 1800000
 ```
+
+`Monitor` has no "persistent" option — it caps a watch at 30 minutes and kills it at the deadline. So set `timeout_ms` to that maximum and **re-arm on each expiry**: a long-lived watch is a chain of restarts, not one process.
+
+A re-arm is a **resume**, not a fresh arm. The watcher re-baselines its probes against current reality (so the gap while it was down is not replayed as a burst of stale events) but keeps its `last_full` and `drained_streak`, and emits no `full_cycle reason=startup`. Only a genuine first arm — no persisted state, or after `reset` — asks for the startup cycle. Do not run a cycle for a startup event you did not get.
 
 The watcher refuses to start if another instance is already running on this host (PID file in the PO cache dir), so double-arming is safe.
 

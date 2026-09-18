@@ -230,14 +230,52 @@ cmd_watch() {
   printf '%s\n' "$$" > "${pidfile}"
   trap 'rm -f "${pidfile}"' EXIT
 
-  # Baseline silently, then ask for one cycle so arming the watcher does not
-  # leave already-queued work sitting until the first state change.
+  # Re-baseline the edge-triggered probes against current reality on EVERY
+  # start, resume included. Skipping this would make the first post-restart
+  # tick replay every change that happened while the watcher was down — a
+  # burst of stale events, which is worse than the problem being solved.
   fast_tick >/dev/null 2>&1 || true
   slow_tick >/dev/null 2>&1 || true
-  sset drained_streak 0
   now="$(date +%s)"
-  sset last_full "${now}"
-  emit "full_cycle reason=startup"
+
+  # A restart is NOT a cold start, and it is not rare: the harness Monitor that
+  # hosts this watcher caps a watch at 30 minutes, so a long-lived
+  # `/pipeline watch` IS a chain of restarts. Resetting the persisted state on
+  # each one (issue #4130) broke three things at once:
+  #
+  #   - every restart emitted `full_cycle reason=startup`, and each such event
+  #     justifies a full §4 cycle -- measured at $1.24-$2.37 a cycle, so ~$2
+  #     per half hour against a design rate of one per two hours;
+  #   - `last_full` was reset to now on each start, so `now - last_full` could
+  #     never reach FULL_INTERVAL (7200s) across 1800s restarts and the
+  #     `reason=interval` cycle below was unreachable;
+  #   - `drained_streak` was zeroed on each start, so the two consecutive
+  #     drained cycles that trigger the clean shutdown could never accumulate,
+  #     and the watcher ran forever on exactly the idle pipeline it exists to
+  #     detect and exit on.
+  #
+  # So the cold-start work is gated on there being no prior state at all. A
+  # recorded last_full means some earlier start already baselined and already
+  # asked for its cycle; asking again is the bug.
+  #
+  # Deliberately NOT gated on the state being recent. Carrying a stale
+  # last_full forward is what makes the interval branch below do the right
+  # thing: a watcher that was down for three hours resumes, the loop's own
+  # `now - last_full >= FULL_INTERVAL` test is already true, and it emits
+  # `reason=interval` on the first tick. Treating stale state as a cold start
+  # instead would fire the same cycle mislabelled `reason=startup` and reset
+  # the drained streak with it, which is the bug wearing a different hat.
+  # `reset` is the way to force a genuine cold start.
+  local prior_full
+  prior_full="$(sget last_full)"
+  if [[ ! "${prior_full}" =~ ^[0-9]+$ ]]; then
+    # Genuine cold start: no prior state. Ask for one cycle so arming the
+    # watcher does not leave already-queued work sitting until the first
+    # state change.
+    sset drained_streak 0
+    sset last_full "${now}"
+    emit "full_cycle reason=startup"
+  fi
 
   local last_slow="${now}" streak
   while true; do
