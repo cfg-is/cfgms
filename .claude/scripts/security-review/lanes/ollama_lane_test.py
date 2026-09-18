@@ -1231,6 +1231,230 @@ def test_a_second_429_is_not_recorded_as_a_recovery():
             "second 429: the wait taken is recorded even though it did not help",
             repr(parsed.get("retry_after_slept_seconds")),
         )
+        check(
+            parsed.get("retry_after_on_retry") == "9",
+            "second 429: the SECOND response's header is kept too -- it is the live instruction",
+            repr(parsed.get("retry_after_on_retry")),
+        )
+
+
+def _meta_after_one_retry(out_dir, second_response):
+    """Drive a 429 (Retry-After 7) followed by `second_response`, and return the
+    step meta. `second_response(request)` either raises or returns a file-like
+    body, exactly as `urlopen` would."""
+    raw_path = os.path.join(out_dir, "raw.json")
+    calls: list = []
+
+    def _urlopen(request, *a, **k):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise ollama_lane.urllib.error.HTTPError(
+                url=request.full_url, code=429, msg="Too Many Requests",
+                hdrs=_FakeHeaders({"Retry-After": "7"}), fp=io.BytesIO(b"slow down"),
+            )
+        return second_response(request)
+
+    real_urlopen = ollama_lane.urllib.request.urlopen
+    real_sleep = ollama_lane.time.sleep
+    ollama_lane.urllib.request.urlopen = _urlopen
+    ollama_lane.time.sleep = lambda s: None
+    try:
+        exit_code, rate_limited, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+    finally:
+        ollama_lane.urllib.request.urlopen = real_urlopen
+        ollama_lane.time.sleep = real_sleep
+
+    diag = harness_runner.step_diagnostics_dir(out_dir)
+    names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+    meta = [n for n in names if n.endswith(".meta.json")]
+    if not meta:
+        return exit_code, rate_limited, None
+    with open(os.path.join(diag, meta[0])) as f:
+        return exit_code, rate_limited, json.load(f)
+
+
+def test_a_retry_that_returns_500_is_not_a_recovery():
+    """[REQUIRED TEST] The retry did not 429 again -- it failed differently.
+
+    `rate_limited_recovered = http_status != 429` passed every existing test
+    and still reported this as a recovery, because "not a 429" is a weaker
+    claim than "succeeded". The record then read
+    `rate_limited_recovered: true` beside `exit_code: 1`, which is the same
+    incoherent pair round 2 was about, surviving the round-2 fix.
+
+    The flag is a claim about the OUTCOME, so it is computed where the outcome
+    is known.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        def _boom(request):
+            raise ollama_lane.urllib.error.HTTPError(
+                url=request.full_url, code=500, msg="Internal Server Error",
+                hdrs=_FakeHeaders({}), fp=io.BytesIO(b"upstream exploded"),
+            )
+        exit_code, _rl, parsed = _meta_after_one_retry(out_dir, _boom)
+        check(exit_code != 0, "retry 500: reports a non-zero code", str(exit_code))
+        if parsed is None:
+            check(False, "retry 500: a meta file is written")
+            return
+        check(
+            parsed.get("rate_limited_recovered") is False,
+            "retry 500: a retry that failed differently is NOT a recovery",
+            repr(parsed),
+        )
+        check(
+            parsed.get("http_status") == 500,
+            "retry 500: the final status is recorded",
+            repr(parsed.get("http_status")),
+        )
+
+
+def test_a_200_carrying_rate_limit_prose_is_not_a_recovery():
+    """[REQUIRED TEST] The retry returned 200, and the body says the limit is
+    still in force.
+
+    This lane defines a rate limit as `http_status == 429 OR
+    looks_rate_limited(body)` -- so treating this 200 as a recovery
+    contradicts the definition one line above it, and renders
+    `rate_limited_recovered: true` directly beside `rate_limited: true`.
+
+    The status code alone cannot decide this, which is exactly why the flag
+    must be computed after `rate_limited`, not from `http_status`.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        def _limited_200(request):
+            body = json.dumps({
+                "response": "rate limit exceeded, please try again later",
+                "done": True,
+            }).encode()
+            return _fake_urlopen(body.decode())()
+        exit_code, rate_limited, parsed = _meta_after_one_retry(out_dir, _limited_200)
+        check(
+            rate_limited is True,
+            "200-with-prose: still reported rate limited, per this lane's own definition",
+            str(rate_limited),
+        )
+        if parsed is None:
+            check(False, "200-with-prose: a meta file is written")
+            return
+        check(
+            parsed.get("rate_limited_recovered") is False,
+            "200-with-prose: NOT a recovery -- the limit is still in force",
+            repr(parsed),
+        )
+
+
+def test_a_retry_that_actually_succeeds_IS_a_recovery():
+    """The positive case, so the two above cannot be satisfied by hardcoding
+    the flag to False. A clean 200 after an obeyed wait is the one shape that
+    IS a recovery."""
+    with tempfile.TemporaryDirectory() as out_dir:
+        def _clean_200(request):
+            body = json.dumps({
+                "response": '{"findings": [], "dispositions": []}',
+                "done": True,
+            }).encode()
+            return _fake_urlopen(body.decode())()
+        exit_code, rate_limited, parsed = _meta_after_one_retry(out_dir, _clean_200)
+        check(exit_code == 0, "clean retry: reports success", str(exit_code))
+        check(rate_limited is False, "clean retry: not rate limited", str(rate_limited))
+        if parsed is None:
+            check(False, "clean retry: a meta file is written")
+            return
+        check(
+            parsed.get("rate_limited_recovered") is True,
+            "clean retry: IS recorded as a recovery -- the only record the limit happened",
+            repr(parsed),
+        )
+
+
+def test_a_transport_failure_still_writes_meta():
+    """[REQUIRED TEST] "Meta is written for EVERY call" was false on the one
+    path with no `http_status` to explain it.
+
+    The transport-failure handler returned before reaching the meta write, so
+    a connection refused, a timeout or a truncated response produced only a
+    `.launch-error.txt` -- and the step a reader most needs a record of had
+    the least. Verified against the old shape: diagnostics written were
+    ['raw.launch-error.txt'] and nothing else.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+
+        def _refused(request, *a, **k):
+            raise ollama_lane.urllib.error.URLError("connection refused")
+
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        ollama_lane.urllib.request.urlopen = _refused
+        try:
+            exit_code, _rl, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+
+        check(exit_code != 0, "transport failure: non-zero code", str(exit_code))
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        check(bool(meta), "transport failure: a meta file IS written", str(names))
+        if not meta:
+            return
+        with open(os.path.join(diag, meta[0])) as f:
+            parsed = json.load(f)
+        check(
+            parsed.get("http_status") is None,
+            "transport failure: http_status is absent, not zero -- no response arrived",
+            repr(parsed.get("http_status")),
+        )
+        check(
+            parsed.get("transport_error") == "URLError",
+            "transport failure: the exception type is recorded",
+            repr(parsed.get("transport_error")),
+        )
+        check(
+            parsed.get("rate_limited_recovered") is False,
+            "transport failure: never claims a recovery",
+            repr(parsed),
+        )
+
+
+def test_an_http_exception_is_caught_and_diagnosed():
+    """[REQUIRED TEST] `http.client.HTTPException` is NOT an `OSError`.
+
+    `IncompleteRead` and `BadStatusLine` escaped the handler while `URLError`
+    and `socket.timeout` were caught. The caller's bare `except Exception`
+    meant no crash -- it meant the diagnostic this lane exists to write was
+    skipped for exactly the truncated-response failures it is most useful for.
+    A new surface too: a subprocess transport could not raise these at all.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+
+        def _truncated(request, *a, **k):
+            raise ollama_lane.http.client.IncompleteRead(b"partial body")
+
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        ollama_lane.urllib.request.urlopen = _truncated
+        try:
+            exit_code, _rl, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+
+        check(exit_code != 0, "IncompleteRead: non-zero code", str(exit_code))
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        check(
+            any(n.endswith(".launch-error.txt") for n in names),
+            "IncompleteRead: the launch-error diagnostic IS written, not skipped",
+            str(names),
+        )
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if meta:
+            with open(os.path.join(diag, meta[0])) as f:
+                parsed = json.load(f)
+            check(
+                parsed.get("transport_error") == "IncompleteRead",
+                "IncompleteRead: recorded by name in the meta",
+                repr(parsed.get("transport_error")),
+            )
 
 
 def test_a_non_finite_retry_after_is_rejected_not_recorded_as_infinity():

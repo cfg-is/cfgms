@@ -1513,8 +1513,30 @@ OLLAMA_PORT_FILE="${SANDBOX}/ollama_stub_port"
 python3 "${SANDBOX}/ollama_stub_server.py" "$OLLAMA_PORT_FILE" \
   >"${SANDBOX}/ollama_stub_server.log" 2>&1 </dev/null &
 OLLAMA_STUB_PID=$!
-# Reap it however this suite ends, including on an early failure exit.
-trap 'kill "$OLLAMA_STUB_PID" 2>/dev/null || true' EXIT
+# Reap it however this suite ends, including on an early failure exit -- and
+# keep reaping the FIXTURES, which a bare `trap ... EXIT` here would silently
+# stop doing.
+#
+# Bash EXIT traps are NOT additive. A second `trap ... EXIT` REPLACES the
+# first, it does not chain:
+#
+#   $ bash -c 'trap "echo A" EXIT; trap "echo B" EXIT'
+#   B
+#
+# The first version of this line installed only the kill, which discarded
+# `trap cleanup_fixtures EXIT` from earlier in this file. Nothing failed
+# visibly: the remaining ~950 lines simply leaked $FAKEBIN, $SANDBOX and
+# $STUB_CLAUDE_BIN_DIR on every exit, including every early failure exit.
+#
+# Those dirs cannot be reaped by anything else either. `create_snapshot()`
+# strips write bits from every extracted file AND directory on purpose, and
+# `rm -rf` cannot unlink an entry without write permission on its parent, so
+# an ordinary TMPDIR sweeper leaves them behind too. `cleanup_fixtures` exists
+# precisely because it `chmod -R u+w` first.
+#
+# So this trap must do BOTH, and any future trap in this file must re-arm
+# whatever it displaces.
+trap 'kill "$OLLAMA_STUB_PID" 2>/dev/null || true; cleanup_fixtures' EXIT
 # The port is chosen by the kernel and written once the socket is bound, so
 # wait for the file rather than racing the server's startup.
 for _ in $(seq 1 100); do

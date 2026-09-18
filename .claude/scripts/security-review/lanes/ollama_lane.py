@@ -93,6 +93,7 @@ stub `ollama` binary placed on `PATH`.
 from __future__ import annotations
 
 import errno
+import http.client
 import json
 import os
 import re
@@ -224,9 +225,18 @@ def _ollama_generate_url() -> str:
 # long-wait budget is the honest move, and it reads correctly at any value of
 # this constant.
 #
-# STATUS OF THE NUMBER: chosen, not derived. The only hard constraint is
-# staying well under `CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS`
-# (default 900) so an in-place wait cannot starve the outer budget. No real
+# STATUS OF THE NUMBER: chosen, not derived. It keeps any SINGLE in-place wait
+# well under `CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS` (default 900).
+#
+# It does NOT bound the total. The outer backoff retries, and each attempt may
+# serve its own in-place wait, so the two budgets ADD rather than nest.
+# Measured against the real `call_with_rate_limit_backoff` with every response
+# 429/Retry-After 120: outer sleeps [30, 60, 120, 240] = 450s, in-place
+# [120 x 5] = 600s, total 1050s against a stated 900. An earlier version of
+# this comment said the constraint meant an in-place wait "cannot starve the
+# outer budget", which is true per wait and false in aggregate -- and worse
+# than saying nothing, because it reads as a guarantee. Treat 900 as a
+# per-attempt bound; there is no aggregate one today. No real
 # `Retry-After` has ever been observed through this path -- the one sweep that
 # exercised rate limiting ran on the CLI transport, which cannot read headers
 # -- so there is no measurement behind 120 and a future reader should not
@@ -566,6 +576,14 @@ def call_ollama_harness(
     retry_after_slept = None
     retry_after_deferred = None
     rate_limited_recovered = False
+    # Set when an in-place wait was served and a second request was actually
+    # made. `rate_limited_recovered` is a function of this AND the final
+    # outcome, so it cannot be decided at the point of the retry.
+    retried_after_sleep = False
+    # The `Retry-After` the SECOND response carried, when the retry was itself
+    # rate limited. Distinct from `retry_after`, which keeps the header that
+    # was obeyed.
+    retry_after_retry = None
     metrics = {}
 
     payload = {
@@ -664,10 +682,24 @@ def call_ollama_harness(
                 # recoverable through an undocumented conjunction.
                 #
                 # `retry_after` deliberately keeps the FIRST header -- the one
-                # that was obeyed -- so a second 429's own header is discarded
-                # rather than shown beside a status it does not belong to.
-                http_status, _retry_header_after, body, reason = _post()
-                rate_limited_recovered = http_status != 429
+                # that was obeyed. The SECOND response's header is recorded
+                # separately rather than discarded: when the retry is itself a
+                # 429, the server has just named a new wait, and that number is
+                # the one a caller could actually act on. Throwing it away left
+                # the shared backoff sleeping its own 30s guess while a live
+                # instruction sat unread.
+                http_status, retry_after_after, body, reason = _post()
+                retry_after_retry = retry_after_after
+                # NOT computed here. `rate_limited_recovered` is a claim about
+                # the OUTCOME -- see where it is set below, once `rate_limited`
+                # and `exit_code` are known.
+                #
+                # `http_status != 429` was written to the round-2 test rather
+                # than to the field's meaning, and it over-reports in two cells
+                # nothing drove: a retry returning 500 is not a recovery, and a
+                # 200 whose body carries limit prose is by this lane's own
+                # definition (see `rate_limited` below) still a rate limit.
+                retried_after_sleep = True
 
         if reason is None:
             stdout, stderr, metrics = _parse_generate_response(body)
@@ -680,7 +712,14 @@ def call_ollama_harness(
         # had under the subprocess: 0 only for an unambiguously good response.
         exit_code = 0 if http_status == 200 else 1
         combined = "{}\n{}".format(stdout, stderr)
-    except (OSError, subprocess.SubprocessError) as exc:
+    # `http.client.HTTPException` is NOT an OSError subclass, so `IncompleteRead`
+    # and `BadStatusLine` escaped this handler while `URLError`, `socket.timeout`
+    # and `RemoteDisconnected` were caught. The caller's bare `except Exception`
+    # meant no crash -- it meant the `.launch-error.txt` diagnostic this lane
+    # exists to write was silently skipped for exactly the truncated-response
+    # failures it is most useful for. A new surface: a subprocess transport
+    # could not raise these at all.
+    except (OSError, subprocess.SubprocessError, http.client.HTTPException) as exc:
         error_text = str(exc)
         # A timeout carries the partial output the model had produced when the
         # clock ran out, and that is the single most useful artifact for sizing
@@ -695,16 +734,66 @@ def call_ollama_harness(
             harness_runner.write_step_diagnostic(
                 lane_dir, f"{diag_base}.stdout.txt", partial
             )
+        # Meta on this path too. The claim below the happy path -- "written for
+        # EVERY call" -- was false here: a transport failure returned before
+        # reaching it, so the one outcome with NO http_status to explain it
+        # also had no meta. That is the step a reader most needs a record of.
+        #
+        # Deliberately thinner than the full record: there is no status, no
+        # body and no token count, because no response arrived. What it can
+        # carry is the shape of the attempt and any wait already served, so a
+        # step that slept 120s and then lost the connection does not read as a
+        # step that failed instantly.
+        harness_runner.write_step_diagnostic(
+            lane_dir,
+            f"{diag_base}.meta.json",
+            json.dumps(
+                {
+                    "model": model,
+                    "exit_code": 1,
+                    "extracted_json_object": False,
+                    "rate_limited": harness_runner.looks_rate_limited(error_text),
+                    "prompt_chars": len(prompt),
+                    "timeout_seconds": timeout,
+                    # No response ever arrived, so these are absent rather than
+                    # zero -- a zero would read as "the server said nothing",
+                    # which is a different fact from "we never heard back".
+                    "http_status": None,
+                    "transport_error": type(exc).__name__,
+                    "retry_after": retry_after,
+                    "retry_after_slept_seconds": retry_after_slept,
+                    "retry_after_deferred_seconds": retry_after_deferred,
+                    "retry_after_on_retry": retry_after_retry,
+                    "rate_limited_recovered": False,
+                },
+                indent=2,
+            ),
+        )
         return 1, harness_runner.looks_rate_limited(error_text), harness_runner.sanitize_harness_output_tail(error_text)
 
     # A 429 is now a fact, not an inference. The text match stays as a fallback
     # because the daemon can report an upstream limit inside a 200 body, which
     # no status code would reveal -- the two are complementary, not redundant.
     rate_limited = http_status == 429 or harness_runner.looks_rate_limited(combined)
+    # The criterion, stated where every term in it is known: a wait was served
+    # in place, AND the call that followed actually produced a usable answer.
+    #
+    # Deliberately NOT `http_status != 429`. That passed the round-2 test and
+    # still over-reported, because "the retry was not another 429" is a weaker
+    # claim than "the retry succeeded" in two ways the test never drove:
+    #   - the retry returned 500: not a 429, not a recovery either.
+    #   - the retry returned 200 with rate-limit prose in the body: this lane
+    #     treats that as a rate limit one line above, so calling it a recovery
+    #     contradicts the definition immediately preceding it.
+    # Both then rendered `rate_limited_recovered: true` beside
+    # `rate_limited: true` or `exit_code: 1` -- the exact incoherent pair
+    # round 2 was about, surviving the round-2 fix.
+    rate_limited_recovered = retried_after_sleep and exit_code == 0 and not rate_limited
     output_tail = harness_runner.sanitize_harness_output_tail(combined)
 
     extracted = _extract_json_object(stdout)
-    # Meta is written for EVERY call, not only failures.
+    # Meta is written for EVERY call, not only failures -- including the
+    # transport-failure path above, which returns before reaching this.
     #
     # It used to be gated with the two dumps below, which meant the common case
     # -- a successful step -- recorded nothing at all. Since it now carries
@@ -743,11 +832,23 @@ def call_ollama_harness(
                 # evidence that would let RETRY_AFTER_MAX_SLEEP_SECONDS be set
                 # from measurement instead of judgement.
                 "retry_after_deferred_seconds": retry_after_deferred,
-                # True when a 429 was waited out in place and the retry
-                # succeeded. `rate_limited` is False in that case -- correctly,
-                # since the shared backoff must not charge the sweep a second
-                # wait for a limit already paid for -- so this is the only
-                # record that it happened at all.
+                # The header the SECOND response carried, when the retry was
+                # itself rate limited (`None` otherwise). `retry_after` above
+                # keeps the one that was OBEYED, so without this the server's
+                # live instruction was discarded and the shared backoff slept
+                # its own guess instead of the number just named.
+                "retry_after_on_retry": retry_after_retry,
+                # True when a 429 was waited out in place AND the retry
+                # produced a usable answer: `exit_code == 0` and not itself
+                # rate limited. When it is True, `rate_limited` is False by
+                # construction rather than by coincidence -- correctly, since
+                # the shared backoff must not charge the sweep a second wait
+                # for a limit already paid for -- so this is the only record
+                # that the limit happened at all.
+                #
+                # A retry that 429s again, errors, or comes back 200 carrying
+                # limit prose leaves this False and `rate_limited` True. Those
+                # are not recoveries and counting them as such over-reports.
                 "rate_limited_recovered": rate_limited_recovered,
                 **metrics,
             },
