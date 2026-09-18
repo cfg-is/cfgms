@@ -154,6 +154,121 @@ def status_envelope(commit_sha: str, lane: str, step_id: str, state: str) -> dic
     }
 
 
+def test_a_mixed_sweep_names_which_steps_ran_which_instrument():
+    """REQUIRED TEST (Issue #4136, AC5): a sweep that ran two harness versions
+    or two prompt versions says so in the report, naming both.
+
+    This is the test that makes dropping the resume-time gate safe. Allowing a
+    sweep to change instrument mid-run is a real gain; allowing it SILENTLY is
+    a hazard, because a reader comparing lanes would have no way to see that
+    one of them changed partway. The gate and this section are two halves of
+    one decision, so they are tested together or neither is honest.
+
+    Both fields are exercised in one fixture on purpose. `harness_identity`
+    used to quarantine and `prompt_version` used to be ignored entirely -- the
+    harness was too strict about one and too loose about the other. If only
+    one is asserted, the inconsistency can come back in whichever direction is
+    untested.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        for step in ("step-001", "step-002", "step-003"):
+            write_plan_step(sweep, step, sha, scope="pkg/example")
+
+        # step-001 and step-002 ran the ORIGINAL instrument.
+        for step in ("step-001", "step-002"):
+            write(
+                os.path.join(sweep, "lanes", "laneA", f"{step}.findings.json"),
+                complete_envelope(sha, "laneA", step, []),
+            )
+        # step-003 ran after a harness fix AND a prompt change landed.
+        drifted = complete_envelope(sha, "laneA", "step-003", [])
+        drifted["harness_identity"] = "d" * 64
+        drifted["prompt_version"] = "e" * 64
+        write(os.path.join(sweep, "lanes", "laneA", "step-003.findings.json"), drifted)
+
+        report = consolidate.consolidate(sweep, repo)
+        row = report["provenance"][0]
+        check(row["mixed"] is True, "provenance: a sweep with two instruments is marked mixed", str(row))
+        check(
+            row["harness_identity"] == {"c" * 64: ["step-001", "step-002"], "d" * 64: ["step-003"]},
+            "provenance: each harness identity names exactly the steps it produced",
+            str(row["harness_identity"]),
+        )
+        check(
+            row["prompt_version"] == {"b" * 64: ["step-001", "step-002"], "e" * 64: ["step-003"]},
+            "provenance: prompt_version is tracked too -- drift in it used to be invisible",
+            str(row["prompt_version"]),
+        )
+
+        md = consolidate.render_markdown(report)
+        section = md.split("## Provenance")[1].split("##")[0]
+        check(
+            "`laneA` changed instrument partway" in section,
+            "provenance: the report NAMES the lane that drifted, not just that some lane did",
+            section,
+        )
+        check(
+            "Drift is measured **within** a lane" in section,
+            "provenance: and says drift is within-lane, so two lanes differing is not read as drift",
+            section,
+        )
+        for field, value, count in (
+            ("harness_identity", "c" * 64, 2),
+            ("harness_identity", "d" * 64, 1),
+            ("prompt_version", "e" * 64, 1),
+        ):
+            check(
+                f"| laneA | `{field}` | `{value}` | {count} |" in section,
+                f"provenance: the table row for {field}={value[:6]}... names its step count",
+                section,
+            )
+
+
+def test_a_single_instrument_sweep_says_so_rather_than_staying_quiet():
+    """The section renders on EVERY sweep, not only a drifted one.
+
+    A section that appears only when there is bad news teaches a reader to
+    skim for its absence, and absence is indistinguishable from "this harness
+    version does not record provenance at all". "One version throughout" is
+    the answer to the same question and is worth stating.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write(
+            os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"),
+            complete_envelope(sha, "laneA", "step-001", []),
+        )
+        report = consolidate.consolidate(sweep, repo)
+        check(report["provenance"][0]["mixed"] is False,
+              "provenance: one instrument throughout is not marked mixed",
+              str(report["provenance"][0]))
+        md = consolidate.render_markdown(report)
+        check("## Provenance" in md,
+              "provenance: the section is present on an undrifted sweep too", md)
+        check("ONE harness version and ONE prompt version from start to finish" in md,
+              "provenance: and states each lane was consistent end to end", md)
+
+
+def test_a_step_with_no_recorded_provenance_is_a_row_not_a_silence():
+    """An envelope missing the field records `unrecorded` rather than being
+    skipped. "We do not know which version produced these steps" is itself a
+    fact about the sweep, and dropping the step would make an unknown look
+    like an absence of steps."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        env = complete_envelope(sha, "laneA", "step-001", [])
+        del env["harness_identity"]
+        write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), env)
+        report = consolidate.consolidate(sweep, repo)
+        row = report["provenance"][0]
+        check(row["harness_identity"] == {"unrecorded": ["step-001"]},
+              "provenance: a missing identity is recorded as unrecorded, never dropped",
+              str(row))
+
+
 def test_dedup_across_lanes_on_file_symbol_vuln_class():
     with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
         sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "package example\n"})

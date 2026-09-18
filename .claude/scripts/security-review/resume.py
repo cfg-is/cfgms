@@ -129,19 +129,40 @@ def _binding_mismatches(
     return mismatches
 
 
-def harness_versions_by_step(lane_dir: str, step_ids: list[str]) -> dict:
-    """Which harness identity produced each completed step in this lane.
+#: The provenance values recorded on every `complete` envelope that describe
+#: the INSTRUMENT rather than the question (Issue #4136). `plan_hash` is
+#: deliberately absent: it describes the question, so it still gates.
+PROVENANCE_FIELDS = ("harness_identity", "prompt_version")
 
-    `{harness_identity: [step_id, ...]}`, each list sorted, steps with no
-    recorded identity collected under `"unrecorded"`.
+#: What a step records when the field is missing from its envelope. A real
+#: value, not `None`, so it survives JSON and renders as a row rather than
+#: vanishing -- "we do not know which version produced these" is itself a
+#: finding about the sweep.
+PROVENANCE_UNRECORDED = "unrecorded"
 
-    This is the whole benefit case for not gating on harness drift. Without it
-    a mixed sweep is just a sweep you cannot reason about; with it, "the first
-    200 steps ran the old lane code" is answerable from the artifacts, which is
-    what makes comparing two harness versions over a real sample size possible
-    at all. A record nobody can query is not a record.
+
+def provenance_by_step(lane_dir: str, step_ids: list[str]) -> dict:
+    """Which instrument produced each completed step in this lane.
+
+    `{field: {value: [step_id, ...]}}` over `PROVENANCE_FIELDS`, every list
+    sorted, every field present even when this lane has no completed steps, so
+    a caller never has to distinguish "absent" from "empty".
+
+    This is the whole benefit case for not gating on drift. Without it a mixed
+    sweep is just a sweep you cannot reason about; with it, "the first 200
+    steps ran the old lane code" is answerable from the artifacts, which is
+    what makes comparing two versions over a real sample size possible at all.
+    A record nobody can query is not a record.
+
+    `prompt_version` is here for the OPPOSITE reason to `harness_identity`.
+    Drift in it was never gated and never reported either, so two prompt
+    vocabularies could coexist in one report with no signal at all -- the
+    harness was simultaneously too strict about the harness and too loose
+    about the prompt. Neither should quarantine; both must be visible. Treating
+    them the same way in one function is what makes that consistent rather
+    than two separate accidents.
     """
-    by_identity: dict[str, list[str]] = {}
+    found: dict = {field: {} for field in PROVENANCE_FIELDS}
     for step_id in step_ids:
         findings_path = os.path.join(lane_dir, f"{step_id}.findings.json")
         if not os.path.isfile(findings_path):
@@ -149,9 +170,24 @@ def harness_versions_by_step(lane_dir: str, step_ids: list[str]) -> dict:
         envelope = _load_json(findings_path)
         if not isinstance(envelope, dict) or envelope.get("state") != "complete":
             continue
-        identity = envelope.get("harness_identity") or "unrecorded"
-        by_identity.setdefault(str(identity), []).append(step_id)
-    return {k: sorted(v) for k, v in sorted(by_identity.items())}
+        for field in PROVENANCE_FIELDS:
+            value = envelope.get(field) or PROVENANCE_UNRECORDED
+            found[field].setdefault(str(value), []).append(step_id)
+    return {
+        field: {value: sorted(steps) for value, steps in sorted(found[field].items())}
+        for field in PROVENANCE_FIELDS
+    }
+
+
+def harness_versions_by_step(lane_dir: str, step_ids: list[str]) -> dict:
+    """`{harness_identity: [step_id, ...]}` -- the `harness_identity` half of
+    `provenance_by_step()`, kept as its own name because that is the question
+    an operator actually asks ("which steps ran the old lane code?").
+
+    Delegates rather than re-walking the lane, so the two answers cannot
+    disagree about the same artifacts.
+    """
+    return provenance_by_step(lane_dir, step_ids)["harness_identity"]
 
 
 def _quarantine(findings_path: str, step_id: str, mismatches: list[str]) -> None:

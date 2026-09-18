@@ -705,8 +705,31 @@ harness and keeping the sweep.
 A mixed sweep is also worth something a pinned one is not: two harness versions over a real
 sample size, comparable after the fact — but only if each step still records which version
 produced it. `harness_identity` stays on every envelope for exactly that, and
-`resume.harness_versions_by_step()` answers "which steps ran under which harness". Dropping the
-gate without keeping that query would trade a false gate for a blind spot.
+`resume.provenance_by_step()` answers "which instrument produced which steps"
+(`resume.harness_versions_by_step()` is the `harness_identity` half of it under the name an
+operator actually asks for). Dropping the gate without keeping that query would trade a false
+gate for a blind spot.
+
+**`prompt_version` is tracked by the same function, for the opposite reason.** Drift in it was
+never gated *and never reported either*, so two prompt vocabularies could coexist in one report
+with no signal at all — the harness was simultaneously too strict about the harness and too loose
+about the prompt. Neither should quarantine; both must be visible. Handling them in one function
+is what makes that consistent rather than two separate accidents. `plan_hash` is deliberately not
+in `resume.PROVENANCE_FIELDS`: it describes the *question*, not the instrument, so it still gates.
+
+**The report says so, on every sweep.** `consolidate.build_provenance()` reads the same function
+and `consolidated.md` carries a `## Provenance` section immediately after `## Coverage`: one row
+per lane per tracked field, each distinct value with the number of steps it produced. When any
+lane holds more than one value the section opens by saying the sweep ran more than one version of
+the instrument. When none does, it says so too — a section that appears only on bad news teaches
+a reader to skim for its absence, and an absence is indistinguishable from a harness that never
+recorded provenance at all. A step whose envelope carries no value is recorded as `unrecorded`
+rather than dropped, since "we do not know what produced these" is itself a fact about the sweep.
+
+Allowing a sweep to change instrument mid-run and reporting that it did are two halves of one
+decision. The gain is real, and it would be a silent hazard without the section: a reader
+comparing two lanes has to be able to see that one of them changed partway. A finding is a
+finding whichever version found it — but a *rate* is not a rate across two.
 
 A changed **plan** still re-runs the step, and must: different files and different hypotheses mean
 the recorded answer answers a different question. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
