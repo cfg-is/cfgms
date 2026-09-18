@@ -1297,39 +1297,86 @@ Three properties, each load-bearing:
    data-exposure one.
 2. **Read-only, so the flow is one-way.** The host stays the sole refresher. A container must
    never be able to revoke the host's token — that turns a one-agent fault into a pipeline-wide
-   outage. Four of the six mount sites were previously read-write.
+   outage. **Five of the seven mount sites were previously read-write** — six in
+   `agent-dispatch.sh`, four of them writable, plus a seventh in `po-act.sh`'s inlined dev-agent
+   launch, also writable. The seventh was missed on the first pass precisely because the test
+   asserting "no launcher mounts the live credential" only searched `agent-dispatch.sh`; it now
+   searches every launcher and names the set it searched.
 3. **Updated in place, never by rename.** The inode is what a file mount pins, so keeping it
    stable is the fix. A rename here would faithfully reproduce the original bug inside the mirror,
    and a test asserting only that the content updated would not notice.
 
 **The cost of (3), stated plainly.** An in-place rewrite is not atomic, so a reader can in
-principle observe a partially written file. The window is a single write of ~1 KB by the sole
-writer, and the failure mode of losing that race is a JSON parse error — the same failure the
-container already gets from a revoked token, not a worse one. Mounting the directory instead of
+principle observe a partly-updated file. It is written with `dd conv=notrunc` rather than `cat >`:
+a redirection opens with `O_TRUNC`, which means a racing reader sees an **empty** file, not merely
+a mixed one. Overwriting in place from byte zero leaves the reader with the old content, the new
+content, or a mix — never nothing — and the file is truncated afterwards only when the new
+credential is shorter than the old. The failure mode of losing that race is a JSON parse error,
+the same failure a revoked token already causes, not a worse one. Mounting the directory instead of
 the file is atomic but requires every container entrypoint to relocate where it looks for the
 credential: a larger blast radius on the boot path of every agent, for a smaller failure.
 
-**Liveness.** A watcher owned by the launching orchestrator re-syncs every
-`CFGMS_CREDS_MIRROR_POLL_SECONDS` (default 30, ample against an 8-hour token) and writes a
-heartbeat. Change is detected by **inode**, then mtime and size — a same-second replacement can
-share an mtime, so mtime alone can miss a rotation entirely. Concurrent orchestrators may each run
-a watcher; every writer copies the same source to the same path, so a duplicate is a redundant
-write rather than a conflict. The watcher's `trap` is **chained** onto any existing `EXIT` trap,
-because a bare `trap ... EXIT` replaces rather than adds.
+**Liveness.** A **detached** watcher re-syncs every `CFGMS_CREDS_MIRROR_POLL_SECONDS` (default 30,
+ample against an 8-hour token) and writes a heartbeat. Change is detected by **inode**, then mtime
+and size — a same-second replacement can share an mtime, so mtime alone can miss a rotation
+entirely.
 
-**A dead watcher is not allowed to be silent**, since it is otherwise indistinguishable from "no
-refresh happened" — the original bug restored quietly. The launch gate distinguishes two states:
-no heartbeat at all means no watcher has ever run here, which is an ordinary first launch and
-starts one; a heartbeat that has gone **stale** means a watcher ran and stopped, and that refuses
-the launch. Only the watcher writes the heartbeat — a plain content refresh deliberately does not,
-because the gate also refreshes, and a gate that beats the heartbeat immediately before testing it
-can never fail.
+**It must outlive the dispatch that started it, and getting that wrong was worse than the bug this
+story fixes.** An earlier version forked a plain `&` job and killed it from an `EXIT` trap. Every
+caller — `launch`, `launch-generic`, `review-pr`, `launch-investigator` plan mode — is a one-shot
+`agent-dispatch.sh` invocation that reaches EOF seconds after `docker run -d`, so the trap fired
+before the watcher's first sleep finished. The heartbeat was written once and never advanced, and
+since a watcher was only started when the heartbeat read "never", the next dispatch past
+`CREDS_MIRROR_MAX_AGE_SECONDS` was refused — and so was every dispatch after it, until someone
+deleted the heartbeat by hand. A total pipeline outage, traded for an 8-hourly rotation race.
+
+So the watcher is detached with `setsid nohup … & disown`, the pattern
+`start_investigator_log_capture` already uses for the same reason, and its pid is kept in
+`.watcher.pid` so a **later, separate** invocation can test it with `kill -0`. There is no `EXIT`
+trap: `stop_creds_mirror_watcher` exists for an operator and for tests, and
+`agent-dispatch.sh creds-mirror-status` reports whether one is alive.
+
+The watcher re-invokes this script through a **`BASH_SOURCE`-derived absolute path, never `$0`**.
+`agent-dispatch.sh` is sourced by `po-act.sh` and by its test suites, so `$0` is the *sourcing*
+file — a detached `bash "$0" creds-mirror-watch` would have run po-act.sh with an argument it does
+not understand and exited immediately.
+
+Concurrent orchestrators are fine: the pidfile check means a second finds the first alive and
+returns, and even if two ran, both copy the same source to the same path, so a duplicate is a
+redundant write rather than a conflict.
+
+**A dead watcher is not allowed to be silent** — but it is not allowed to brick dispatch either,
+and those are different requirements. `ensure_creds_mirror_for_mount` restarts a watcher that is
+absent or dead, says so when the heartbeat had gone stale, and proceeds. Refusing instead, as an
+earlier version did, converts a recoverable local fault into a pipeline-wide outage: the exact
+failure mode the read-only mount above exists to prevent, arrived at from the other direction.
+
+Staleness is only a hard failure once a watcher is confirmed **running** and the heartbeat is
+*still* old — running and not working. Only the watcher writes the heartbeat; a plain content
+refresh deliberately does not, because something that beats the heartbeat immediately before
+testing it can never fail, and a check that cannot fail reads as a safety net while guaranteeing
+nothing.
+
+**All of this lives at the MOUNT, not at the credential gate**, and the distinction is not
+cosmetic. `gate_credentials_for_launch` is called early by several arms that then refuse before
+launching anything — a review refused for `no_story_link` never starts a container and has no
+business needing a credential. Putting the mirror check there pre-empted those paths, turning a
+`REVIEW_REFUSED:...` into a `DISPATCH_DEFERRED:creds_mirror_unavailable` and breaking seven
+existing script suites. `ensure_creds_mirror_for_mount` runs immediately before each `docker run`
+that mounts the mirror, which by construction cannot pre-empt a path that never reaches it.
+`creds_gate.test.sh` asserts that the gate does **not** touch the mirror, so the mistake cannot
+return quietly.
+
+Hermetic suites satisfy the guard through the existing `CFGMS_TEST_CREDS_STATUS` seam rather than
+a second one: a suite injecting a synthetic credential status is by definition not performing a
+real launch, since its `docker` is a stub that records argv.
 
 **Mounting an absent source is guarded.** Docker creates a bind mount's missing source as a
 **directory**, which would mount a directory over the container's credential path and break
-authentication for a reason that looks nothing like its cause. `ensure_creds_mirror_for_mount`
-runs before each of the six launches and fails loudly instead. Two of those six sites are in arms
-that never call the credential gate, so this is a separate guarantee rather than belt-and-braces.
+authentication for a reason that looks nothing like its cause. The same guard covers this, running
+before each of the six `agent-dispatch.sh` launches and the one in `po-act.sh`, and failing loudly
+instead. Two of those sites are in arms that never call the credential gate, so this is a separate
+guarantee rather than belt-and-braces.
 
 **Not a prompt-injection fix.** The host parses this file as strict JSON against a fixed schema
 and treats no field as instructions, so there was no injection path through it before this change

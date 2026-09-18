@@ -17,6 +17,12 @@ WORKTREE_BASE="${CFGMS_TEST_WORKTREE_BASE:-$(cd "$REPO_ROOT/.." && pwd)/worktree
 # repo with no .devcontainer/ tree, and this file must still source cleanly
 # when they do (verified by scripts/test-scripts.sh's create-clone fixtures).
 _agent_dispatch_self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# This file's own absolute path, for re-invoking itself as a detached worker.
+# `$0` is WRONG for that: this script is sourced by po-act.sh and by its test
+# suites, and `$0` is then the SOURCING file, so `bash "$0" <subcommand>` runs
+# po-act.sh (or a test) with an argument it does not understand. Caught by the
+# watcher-survival test, which saw the watcher exit instantly.
+_AGENT_DISPATCH_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 if [[ -f "${_agent_dispatch_self_root}/.devcontainer/agent-context.sh" ]]; then
   # shellcheck source=../../.devcontainer/agent-context.sh
   source "${_agent_dispatch_self_root}/.devcontainer/agent-context.sh"
@@ -1132,31 +1138,18 @@ gate_credentials_for_launch() {
       exit 10
       ;;
   esac
-  refresh_creds_mirror || {
-    echo "DISPATCH_DEFERRED:creds_mirror_unavailable"
-    exit 10
-  }
-  # Two different states, deliberately treated differently:
+  # The credential MIRROR is deliberately NOT checked here.
   #
-  #   NO heartbeat at all -> no watcher has ever run here. Start one. This is
-  #     the ordinary first launch and must not be an error.
-  #   A heartbeat that has gone STALE -> a watcher ran and stopped. Refuse.
-  #     That is the case AC5 is about: the mirror will drift out of date
-  #     during the container's life and nothing will say so.
+  # Several arms call this gate early and then refuse before launching
+  # anything -- a review refused for `no_story_link` never starts a
+  # container. Checking the mirror here pre-empted those paths, turning a
+  # `REVIEW_REFUSED:...` into a `DISPATCH_DEFERRED:creds_mirror_unavailable`
+  # and breaking seven existing script tests. A path that never launches a
+  # container has no business needing a credential.
   #
-  # Collapsing these would either break every first launch or silently accept
-  # a dead watcher, and the second failure is invisible until a container
-  # 401s hours later.
-  if [[ "$(creds_mirror_age_seconds)" == "never" ]]; then
-    start_creds_mirror_watcher || {
-      echo "DISPATCH_DEFERRED:creds_mirror_watcher_unstartable"
-      exit 10
-    }
-  fi
-  creds_mirror_is_fresh || {
-    echo "DISPATCH_DEFERRED:creds_mirror_stale:$(creds_mirror_age_seconds)s"
-    exit 10
-  }
+  # `ensure_creds_mirror_for_mount` does that work instead, immediately
+  # before each `docker run` that mounts the mirror -- the actual point of
+  # use, which by construction cannot pre-empt a path that never reaches it.
 }
 
 # ---------------------------------------------------------------------------
@@ -1246,22 +1239,45 @@ refresh_creds_mirror() {
   local src; src="$(host_creds_file)"
   [[ -f "$src" ]] || return 1
 
-  mkdir -p "$CREDS_MIRROR_DIR" || return 1
-  chmod 0700 "$CREDS_MIRROR_DIR" || return 1
-
-  # Create the target first so the in-place write below has an inode to keep.
-  if [[ ! -f "$CREDS_MIRROR_FILE" ]]; then
-    : > "$CREDS_MIRROR_FILE" || return 1
+  # `mkdir -m` and a tightened umask, NOT create-then-chmod. The latter
+  # creates under the ambient umask and narrows it afterwards, leaving a
+  # window in which a credential file is readable by more than its owner.
+  # Short windows on a credential are still windows.
+  if [[ ! -d "$CREDS_MIRROR_DIR" ]]; then
+    mkdir -m 0700 -p "$CREDS_MIRROR_DIR" || return 1
   fi
-  chmod 0600 "$CREDS_MIRROR_FILE" || return 1
+  chmod 0700 "$CREDS_MIRROR_DIR" 2>/dev/null || true
+
+  if [[ ! -f "$CREDS_MIRROR_FILE" ]]; then
+    # Subshell so the umask change cannot leak into the caller.
+    ( umask 077; : > "$CREDS_MIRROR_FILE" ) || return 1
+  fi
+  chmod 0600 "$CREDS_MIRROR_FILE" 2>/dev/null || true
 
   if ! cmp -s "$src" "$CREDS_MIRROR_FILE"; then
-    # `cat >` truncates and rewrites the SAME inode. Not `cp` (which may
-    # unlink and recreate on some implementations) and never a rename, both
-    # of which would change the inode and reintroduce the pinning bug in the
-    # mirror itself.
-    if ! cat "$src" > "$CREDS_MIRROR_FILE"; then
+    # NOT `cat >`. That opens with O_TRUNC, so a reader racing the write sees
+    # an EMPTY file -- not a partial one, which is what an earlier version of
+    # this comment claimed. `dd conv=notrunc` overwrites in place from byte
+    # zero without truncating first, so a racing reader sees either the old
+    # content, the new content, or a mix of the two -- never nothing.
+    #
+    # Still not atomic, and still deliberately so: the inode is what a file
+    # bind mount pins, so keeping it stable rules atomicity out. What this
+    # buys is that the worst case is a malformed parse rather than a
+    # zero-byte read, and the window is a single ~1 KB write by the sole
+    # writer. Mounting the directory instead would be atomic and would
+    # require relocating where every container entrypoint looks for the
+    # credential -- a far larger blast radius for a smaller failure.
+    if ! dd of="$CREDS_MIRROR_FILE" conv=notrunc status=none 2>/dev/null < "$src"; then
       return 1
+    fi
+    # Only if the new content is SHORTER: otherwise the tail of the previous
+    # credential would survive past the end of the new one.
+    local new_size old_size
+    new_size=$(stat -c '%s' "$src" 2>/dev/null) || new_size=""
+    old_size=$(stat -c '%s' "$CREDS_MIRROR_FILE" 2>/dev/null) || old_size=""
+    if [[ -n "$new_size" && -n "$old_size" && "$old_size" -gt "$new_size" ]]; then
+      truncate -s "$new_size" "$CREDS_MIRROR_FILE" 2>/dev/null || true
     fi
   fi
   return 0
@@ -1327,53 +1343,115 @@ assert_creds_mirror_uid() {
 # Fails the launch loudly instead. A dispatch that cannot authenticate is
 # worth stopping before the container starts, not after it burns a session.
 ensure_creds_mirror_for_mount() {
+  # Hermetic seam, reusing the one this file already documents rather than
+  # adding a second. A suite that injects a synthetic credential status is by
+  # definition not performing a real launch -- its `docker` is a stub that
+  # records argv -- so there is no mirror to maintain and no container to
+  # authenticate.
+  [[ -n "${CFGMS_TEST_CREDS_STATUS:-}" ]] && return 0
+
   if ! refresh_creds_mirror; then
     echo "ERROR: credential mirror unavailable at ${CREDS_MIRROR_FILE}; refusing to launch" >&2
     echo "       (mounting an absent source would create a DIRECTORY there and break auth)" >&2
     exit 10
   fi
+
+  # Liveness, checked at the launch rather than at the gate. Two states,
+  # deliberately distinguished:
+  #
+  #   NO heartbeat at all -> no watcher has ever run here. Start one; this is
+  #     an ordinary first launch and must not be an error.
+  #   A STALE heartbeat -> a watcher ran and stopped. Refuse. Otherwise the
+  #     mirror drifts out of date during the container's life and nothing
+  #     says so, which is the original bug restored quietly.
+  # A dead or absent watcher is RESTARTED, never a reason to refuse.
+  #
+  # The earlier version refused on a stale heartbeat, which -- combined with
+  # a watcher that could not survive its dispatch -- bricked every subsequent
+  # dispatch until a human deleted the heartbeat. "A dead watcher must not be
+  # silent" is satisfied by saying so and fixing it; refusing the launch
+  # converts a recoverable local fault into a pipeline-wide outage, which is
+  # the exact failure mode the read-only mount elsewhere in this file exists
+  # to prevent.
+  if ! creds_mirror_watcher_alive; then
+    local was; was="$(creds_mirror_age_seconds)"
+    if [[ "$was" != "never" ]]; then
+      echo "NOTE: credential mirror watcher was not running (heartbeat ${was}s old); restarting it" >&2
+    fi
+    start_creds_mirror_watcher || {
+      echo "ERROR: could not start the credential mirror watcher; refusing to launch" >&2
+      exit 10
+    }
+  fi
+  # Only now is staleness a real failure: a watcher is running and the
+  # heartbeat is still old, which means it is running and not working.
+  if ! creds_mirror_is_fresh; then
+    echo "ERROR: credential mirror is stale ($(creds_mirror_age_seconds)s) despite a live watcher" >&2
+    echo "       refusing to launch rather than hand a container a credential that will go bad" >&2
+    exit 10
+  fi
 }
 
-CREDS_MIRROR_WATCHER_PID=""
+CREDS_MIRROR_WATCHER_PIDFILE="${CREDS_MIRROR_DIR}/.watcher.pid"
 
-# Keep the mirror current for as long as the launching orchestrator lives.
+# Is a watcher actually running RIGHT NOW?
 #
-# Concurrent orchestrators may each run one and that is fine: every writer
-# copies the same host file to the same path, so a duplicate write is a
-# redundant write, not a conflict.
+# The pid lives in a file, not a shell variable, because the process that
+# starts the watcher is not the process that needs to know about it later.
+# Every dispatch is a separate one-shot `agent-dispatch.sh` invocation.
+creds_mirror_watcher_alive() {
+  local pid
+  [[ -f "$CREDS_MIRROR_WATCHER_PIDFILE" ]] || return 1
+  pid="$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+# Keep the mirror current for as long as the HOST session lasts -- not the
+# dispatch that happened to start it.
+#
+# THIS WAS THE CRITICAL BUG. The watcher used to be a plain `&` background
+# job with an EXIT trap that killed it. Every caller (`launch`,
+# `launch-generic`, `review-pr`, `launch-investigator` plan mode) is a
+# one-shot invocation that reaches EOF seconds after `docker run -d`, so the
+# trap fired before the watcher's first sleep finished. The heartbeat was
+# written once and never advanced; the watcher was only restarted when the
+# heartbeat read "never"; so the next dispatch more than
+# CREDS_MIRROR_MAX_AGE_SECONDS later was refused, and so was every dispatch
+# after it, until someone deleted the heartbeat by hand. That is a total
+# pipeline outage -- strictly worse than the 8-hour rotation race this story
+# exists to fix.
+#
+# Detached with `setsid nohup … & disown`, the same pattern
+# `start_investigator_log_capture` already uses for exactly this reason: the
+# work must outlive the dispatch shell rather than die with it.
+#
+# Concurrent orchestrators are fine. The pidfile check means a second one
+# finds the first alive and returns; and even if two did run, both copy the
+# same host file to the same path, so a duplicate write is a redundant write.
 start_creds_mirror_watcher() {
-  [[ -n "$CREDS_MIRROR_WATCHER_PID" ]] && return 0
+  creds_mirror_watcher_alive && return 0
   refresh_creds_mirror || return 1
-  # Heartbeat once up front so a launch immediately after starting the
-  # watcher is not refused for a staleness that has not had time to happen.
+  # Beat once up front, so a launch immediately after starting the watcher is
+  # not refused for a staleness that has had no time to occur.
   creds_mirror_heartbeat
-  (
-    while true; do
-      refresh_creds_mirror || true
-      creds_mirror_heartbeat
-      sleep "$CREDS_MIRROR_POLL_SECONDS"
-    done
-  ) &
-  CREDS_MIRROR_WATCHER_PID=$!
-  # Chained deliberately: a bare `trap ... EXIT` REPLACES any existing EXIT
-  # trap rather than adding to it, so writing one here without preserving
-  # what was already installed would silently disable the caller's own
-  # cleanup.
-  local existing
-  existing="$(trap -p EXIT | sed -n "s/^trap -- '\(.*\)' EXIT$/\1/p")"
-  if [[ -n "$existing" ]]; then
-    trap "stop_creds_mirror_watcher; ${existing}" EXIT
-  else
-    trap 'stop_creds_mirror_watcher' EXIT
-  fi
+  setsid nohup bash "$_AGENT_DISPATCH_SELF" creds-mirror-watch >/dev/null 2>&1 < /dev/null &
+  local pid=$!
+  disown 2>/dev/null || true
+  ( umask 077; printf '%s\n' "$pid" > "$CREDS_MIRROR_WATCHER_PIDFILE" ) 2>/dev/null || true
   return 0
 }
 
+# Deliberately NOT called from an EXIT trap -- see above. Exists for an
+# operator, and for tests, to stop a watcher on purpose.
 stop_creds_mirror_watcher() {
-  [[ -n "$CREDS_MIRROR_WATCHER_PID" ]] || return 0
-  kill "$CREDS_MIRROR_WATCHER_PID" 2>/dev/null || true
-  wait "$CREDS_MIRROR_WATCHER_PID" 2>/dev/null || true
-  CREDS_MIRROR_WATCHER_PID=""
+  local pid
+  [[ -f "$CREDS_MIRROR_WATCHER_PIDFILE" ]] || return 0
+  pid="$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)" || return 0
+  if [[ "$pid" =~ ^[0-9]+$ ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null || true
 }
 
 # Stream an investigator container's log to disk for the container's lifetime.
@@ -2407,6 +2485,35 @@ case "$cmd" in
     echo "WAIT_DONE"
     ;;
 
+  creds-mirror-watch)
+    # The detached credential-mirror watcher. Not for humans to run directly;
+    # `start_creds_mirror_watcher` launches it with setsid+nohup so it
+    # outlives the one-shot dispatch that started it.
+    #
+    # Runs until killed. `stop_creds_mirror_watcher` is the intended way,
+    # and `creds_mirror_watcher_alive` is how a later dispatch discovers
+    # whether one is already running.
+    trap 'exit 0' TERM INT
+    while true; do
+      refresh_creds_mirror || true
+      creds_mirror_heartbeat
+      sleep "$CREDS_MIRROR_POLL_SECONDS"
+    done
+    ;;
+
+  creds-mirror-stop)
+    stop_creds_mirror_watcher
+    echo "CREDS_MIRROR_WATCHER_STOPPED"
+    ;;
+
+  creds-mirror-status)
+    if creds_mirror_watcher_alive; then
+      echo "CREDS_MIRROR_WATCHER_ALIVE:$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null):age=$(creds_mirror_age_seconds)s"
+    else
+      echo "CREDS_MIRROR_WATCHER_DEAD:age=$(creds_mirror_age_seconds)s"
+    fi
+    ;;
+
   check-creds)
     # Report OAuth token validity by reading the host credentials file directly
     # — agent containers bind-mount this exact file, so it is what they use.
@@ -3354,8 +3461,8 @@ PROMPT_EOF
         gate_credentials_for_launch
       fi
       if [[ -z "$inv_harness" ]]; then
-        ensure_creds_mirror_for_mount
-        claude_creds_mount=(-v "${CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}:ro")
+          ensure_creds_mirror_for_mount
+          claude_creds_mount=(-v "${CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}:ro")
       fi
 
       # Issue #4003: since #3979 moved /workspace from a repo checkout to the

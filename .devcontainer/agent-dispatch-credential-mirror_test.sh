@@ -94,9 +94,26 @@ setup_fixture() {
     CREDS_MIRROR_DIR="${WORK}/mirror"
     CREDS_MIRROR_FILE="${CREDS_MIRROR_DIR}/.credentials.json"
     CREDS_MIRROR_HEARTBEAT="${CREDS_MIRROR_DIR}/.watcher-heartbeat"
+    CREDS_MIRROR_WATCHER_PIDFILE="${CREDS_MIRROR_DIR}/.watcher.pid"
+    # Short poll so the survival case costs seconds, not half a minute.
+    CREDS_MIRROR_POLL_SECONDS=2
+    export CFGMS_CREDS_MIRROR_POLL_SECONDS=2
 }
 teardown_fixture() {
-    if [[ -n "${CREDS_MIRROR_WATCHER_PID:-}" ]]; then stop_creds_mirror_watcher || true; fi
+    # The watcher is DETACHED by design now, so a subshell exiting does not
+    # reap it. Every pidfile under the fixture must be reaped, not just the
+    # main mirror's: several cases point CFGMS_CREDS_MIRROR_DIR at their own
+    # directory (mirror-first, mirror-seam), and each starts its own watcher.
+    # Stopping only the one this shell happens to know about left two
+    # `sleep`-looping processes behind -- caught by the leak assertion at the
+    # end of the suite, which is why that assertion exists.
+    if [[ -n "$WORK" && -d "$WORK" ]]; then
+        while IFS= read -r pidfile; do
+            [[ -n "$pidfile" ]] || continue
+            pid="$(cat "$pidfile" 2>/dev/null || true)"
+            [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
+        done < <(find "$WORK" -name '.watcher.pid' -type f 2>/dev/null)
+    fi
     [[ -n "$WORK" ]] && rm -rf "$WORK"
     WORK=""
 }
@@ -126,21 +143,57 @@ setup_fixture
 refresh_creds_mirror
 
 # Read from the SOURCE rather than from a variable this test set itself: the
-# claim is about what the script mounts, not about what a fixture can be
+# claim is about what the scripts mount, not about what a fixture can be
 # persuaded to say.
-mounts=$(grep -E '^\s*-v .*credentials\.json' "$DISPATCH" || true)
-assert_not_contains "$mounts" '${HOME}/.claude/.credentials.json' \
-    "no container mounts the host's LIVE credential file any more"
+#
+# EVERY launcher is searched, and the set is named in the assertion.
+# An earlier version of this file grepped agent-dispatch.sh alone while
+# asserting "no container mounts the host's LIVE credential file any more" --
+# and passed, with a seventh mount site sitting untouched in po-act.sh. A
+# test that confirms a global claim against the one file you happened to look
+# at is not a test of that claim.
+LAUNCHERS=("$DISPATCH" "$(dirname "$DISPATCH")/po-act.sh")
+for launcher in "${LAUNCHERS[@]}"; do
+    [[ -f "$launcher" ]] || _fail "launcher not found: $launcher"
+done
 
-mirror_mounts=$(grep -c 'CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}:ro' "$DISPATCH" || true)
-assert_eq "$mirror_mounts" "6" "all six credential mount sites use the mirror, read-only"
+live_total=0
+for launcher in "${LAUNCHERS[@]}"; do
+    n=$(grep -cF '${HOME}/.claude/.credentials.json:/home/agent/.claude/.credentials.json' "$launcher" || true)
+    live_total=$(( live_total + n ))
+done
+assert_eq "$live_total" "0" \
+    "no launcher mounts the host's LIVE credential (searched: agent-dispatch.sh, po-act.sh)"
 
-rw=$(grep -E 'CREDS_MIRROR_FILE\}:\$\{CREDS_MIRROR_MOUNT\}"' "$DISPATCH" || true)
-assert_eq "$rw" "" "no mirror mount is read-write"
+mirror_mounts=$(grep -cF 'CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}:ro' "$DISPATCH" || true)
+assert_eq "$mirror_mounts" "6" "all six agent-dispatch.sh mount sites use the mirror, read-only"
 
-guards=$(grep -c '^\s*ensure_creds_mirror_for_mount$' "$DISPATCH" || true)
+po_mirror=$(grep -cF 'CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}:ro' "${LAUNCHERS[1]}" || true)
+assert_eq "$po_mirror" "1" "po-act.sh's inlined dev-agent launch uses the mirror too"
+
+rw_total=0
+for launcher in "${LAUNCHERS[@]}"; do
+    n=$(grep -cF '${CREDS_MIRROR_FILE}:${CREDS_MIRROR_MOUNT}"' "$launcher" || true)
+    rw_total=$(( rw_total + n ))
+done
+assert_eq "$rw_total" "0" "no mirror mount in any launcher is read-write"
+
+guards=$(grep -cE '^\s*ensure_creds_mirror_for_mount$' "$DISPATCH" || true)
 assert_eq "$guards" "6" \
-    "every mount site is guarded, so an absent mirror cannot be mounted as a DIRECTORY"
+    "every agent-dispatch.sh mount site is guarded, so an absent mirror cannot be mounted as a DIRECTORY"
+po_guards=$(grep -cE '^\s*ensure_creds_mirror_for_mount$' "${LAUNCHERS[1]}" || true)
+assert_eq "$po_guards" "1" "po-act.sh's mount site is guarded too"
+
+# The mirror check must NOT live in the launch gate. Several arms call that
+# gate early and then refuse before launching anything -- a review refused for
+# `no_story_link` never starts a container and has no business needing a
+# credential. Putting it there broke seven existing suites, and nothing in
+# this file would have noticed.
+gate_body=$(sed -n '/^gate_credentials_for_launch() {/,/^}/p' "$DISPATCH")
+assert_not_contains "$gate_body" "refresh_creds_mirror" \
+    "the launch gate does not touch the mirror: it must not pre-empt paths that never launch"
+assert_not_contains "$gate_body" "creds_mirror_is_fresh" \
+    "the launch gate does not check mirror freshness either"
 
 dir_mode=$(stat -c '%a' "$CREDS_MIRROR_DIR")
 file_mode=$(stat -c '%a' "$CREDS_MIRROR_FILE")
@@ -231,22 +284,40 @@ touch -d "@$(( $(date +%s) - CREDS_MIRROR_MAX_AGE_SECONDS - 60 ))" "$CREDS_MIRRO
 if creds_mirror_is_fresh; then _fail "a stale heartbeat should NOT read as fresh"
 else _pass "a heartbeat older than the threshold reads as stale"; fi
 
-# And the gate refuses the launch. CFGMS_TEST_CREDS_STATUS injects a healthy
-# token, so the refusal can only come from mirror staleness -- otherwise this
-# would pass for the wrong reason.
+# The refusal comes from the MOUNT GUARD, not the launch gate.
+#
+# The check used to live in `gate_credentials_for_launch`, and that was a real
+# defect: several arms call the gate early and then refuse before launching
+# anything, so a review refused for `no_story_link` was pre-empted by a
+# credential check it never needed. Seven existing script suites failed on it.
+# The guard runs immediately before each `docker run`, which cannot pre-empt a
+# path that never reaches it.
+#
+# CFGMS_TEST_CREDS_STATUS is deliberately NOT set here: it is the hermetic
+# early-return seam, so setting it would exercise the return and assert
+# nothing about staleness. Its own behaviour is asserted separately below.
 out=$(bash -c "
     export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
     export CFGMS_CREDS_MIRROR_DIR='$CREDS_MIRROR_DIR'
-    export CFGMS_TEST_CREDS_STATUS='CREDS_OK:300'
     source '$DISPATCH'
     touch -d \"@\$(( \$(date +%s) - 10000 ))\" '$CREDS_MIRROR_HEARTBEAT'
-    gate_credentials_for_launch
-    echo GATE_ALLOWED
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
 " 2>&1)
-assert_contains "$out" "creds_mirror_stale" \
-    "the launch gate refuses a stale mirror, naming staleness as the cause"
-assert_not_contains "$out" "GATE_ALLOWED" \
-    "the gate does not fall through to allow the launch"
+# CHANGED by the 6-phase review (Finding 1). A stale heartbeat used to REFUSE
+# the launch. Combined with a watcher that could not survive its dispatch,
+# that bricked every subsequent dispatch until a human deleted the heartbeat
+# -- a pipeline-wide outage, strictly worse than the rotation race this story
+# fixes. A dead watcher is now RESTARTED and the launch proceeds.
+#
+# "A dead watcher must not be silent" is still honoured: it says so. Silence
+# is the thing to avoid, not survivability.
+assert_contains "$out" "restarting it" \
+    "a stale heartbeat restarts the watcher rather than refusing the launch"
+assert_contains "$out" "LAUNCH_PROCEEDED" \
+    "and the dispatch proceeds -- a local fault must not become a pipeline outage"
+assert_contains "$out" "heartbeat" \
+    "the restart names the staleness it observed, so it is not a silent recovery"
 
 # A first launch, with no watcher ever started, must NOT be refused -- it
 # starts one instead. Collapsing this with the stale case would break every
@@ -254,13 +325,29 @@ assert_not_contains "$out" "GATE_ALLOWED" \
 out_first=$(bash -c "
     export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
     export CFGMS_CREDS_MIRROR_DIR='${WORK}/mirror-first'
+    source '$DISPATCH'
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
+" 2>&1)
+assert_contains "$out_first" "LAUNCH_PROCEEDED" \
+    "a first launch with no watcher yet starts one rather than being refused"
+
+# The hermetic seam itself. A suite injecting a synthetic credential status is
+# not performing a real launch -- its docker is a stub recording argv -- so
+# the guard returns early and needs no mirror at all. Asserted rather than
+# assumed, because every existing script suite now depends on it.
+out_seam=$(bash -c "
+    export CFGMS_HOST_CREDS_FILE='${WORK}/host/does-not-exist.json'
+    export CFGMS_CREDS_MIRROR_DIR='${WORK}/mirror-seam'
     export CFGMS_TEST_CREDS_STATUS='CREDS_OK:300'
     source '$DISPATCH'
-    gate_credentials_for_launch
-    echo GATE_ALLOWED
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
 " 2>&1)
-assert_contains "$out_first" "GATE_ALLOWED" \
-    "a first launch with no watcher yet starts one rather than being refused"
+assert_contains "$out_seam" "LAUNCH_PROCEEDED" \
+    "CFGMS_TEST_CREDS_STATUS makes the guard a no-op, so hermetic suites need no real credential"
+assert_not_contains "$out_seam" "credential mirror unavailable" \
+    "and the seam does not merely swallow the error -- no mirror work is attempted at all"
 
 # A missing mirror must fail loudly: Docker creates an absent bind source as
 # a DIRECTORY, which would mount a directory over the container's credential
@@ -276,6 +363,102 @@ assert_contains "$out2" "credential mirror unavailable" \
     "an absent host credential blocks the launch with a named reason"
 assert_not_contains "$out2" "LAUNCH_PROCEEDED" \
     "the launch does not proceed to mount a source that does not exist"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "test_watcher_survives_the_dispatch_that_started_it"
+# ---------------------------------------------------------------------------
+# [REQUIRED TEST -- 6-phase review Finding 1, CRITICAL]
+#
+# Every caller is a ONE-SHOT `agent-dispatch.sh` invocation that exits seconds
+# after `docker run -d`. The watcher used to be a plain `&` job with an EXIT
+# trap that killed it, so it died before its first sleep finished: the
+# heartbeat was written once and never advanced, and since a watcher was only
+# restarted when the heartbeat read "never", every dispatch more than 90s
+# later was refused. A total pipeline outage, strictly worse than the rotation
+# race this story fixes.
+#
+# **The old suite could not have caught it.** Every case ran inside a
+# `bash -c` that exited immediately, so it matched the bug's shape instead of
+# testing against it: a watcher that dies with its parent is indistinguishable
+# from one that works, if the parent always exits first and nothing looks
+# afterwards.
+setup_fixture
+
+# Start the watcher from a process that then EXITS -- exactly a dispatch.
+starter_out=$(bash -c "
+    export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
+    export CFGMS_CREDS_MIRROR_DIR='$CREDS_MIRROR_DIR'
+    export CFGMS_CREDS_MIRROR_POLL_SECONDS=2
+    source '$DISPATCH'
+    start_creds_mirror_watcher
+    echo STARTED
+" 2>&1)
+assert_contains "$starter_out" "STARTED" "survival: the starting process ran and exited"
+
+assert_eq "$(test -f "$CREDS_MIRROR_WATCHER_PIDFILE" && echo yes || echo no)" "yes" \
+    "survival: a pidfile is left behind, so a LATER invocation can find the watcher"
+
+watcher_pid=$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)
+if kill -0 "$watcher_pid" 2>/dev/null; then
+    _pass "survival: the watcher is STILL ALIVE after the process that started it exited"
+else
+    _fail "survival: the watcher died with its parent -- this is the CRITICAL bug"
+fi
+
+beat_before=$(stat -c '%Y' "$CREDS_MIRROR_HEARTBEAT" 2>/dev/null || echo 0)
+sleep 5
+beat_after=$(stat -c '%Y' "$CREDS_MIRROR_HEARTBEAT" 2>/dev/null || echo 0)
+assert_ne "$beat_before" "$beat_after" \
+    "survival: the heartbeat ADVANCED after one poll interval -- the watcher is working, not merely running"
+
+if creds_mirror_watcher_alive; then
+    _pass "survival: creds_mirror_watcher_alive agrees, from a different process than the starter"
+else
+    _fail "survival: creds_mirror_watcher_alive says dead while the pid is alive"
+fi
+
+# A stale heartbeat with a DEAD watcher must RESTART it, never refuse. The old
+# behaviour refused, which is what turned a local fault into a pipeline-wide
+# outage.
+stop_creds_mirror_watcher
+touch -d "@$(( $(date +%s) - 10000 ))" "$CREDS_MIRROR_HEARTBEAT"
+heal_out=$(bash -c "
+    export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
+    export CFGMS_CREDS_MIRROR_DIR='$CREDS_MIRROR_DIR'
+    export CFGMS_CREDS_MIRROR_POLL_SECONDS=2
+    source '$DISPATCH'
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
+" 2>&1)
+assert_contains "$heal_out" "LAUNCH_PROCEEDED" \
+    "self-heal: a dead watcher with a stale heartbeat restarts it rather than bricking the dispatch"
+assert_contains "$heal_out" "restarting it" \
+    "self-heal: and says so -- a dead watcher must not be silent, which is different from must not be survivable"
+teardown_fixture
+
+# No watcher may outlive the SUITE, even though one must outlive a dispatch.
+#
+# Waits rather than samples once: `kill` is asynchronous, so a process that is
+# on its way out is still in the table for a moment, and an instant count
+# reports a leak that is not one. Five seconds is far longer than a SIGTERM
+# needs and still bounded.
+leaked=1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    # `ps` with the bracket trick, NOT `pgrep -f`. pgrep matches any ancestor
+    # shell whose command line happens to contain the pattern, so it counted
+    # the very process doing the measuring and reported a leak that was not
+    # one. The bracketed class cannot match the grep itself, and the full
+    # invocation cannot match a shell that merely mentions the subcommand.
+    leaked=$(ps -eo args 2>/dev/null | grep -c "[a]gent-dispatch.sh creds-mirror-watch" || true)
+    [[ "$leaked" -eq 0 ]] && break
+    sleep 0.5
+done
+assert_eq "$leaked" "0" "cleanup: the suite leaks no watcher processes"
+if [[ "$leaked" -ne 0 ]]; then
+    echo "      still running:" >&2
+    ps -eo pid,args | grep "[a]gent-dispatch.sh creds-mirror-watch" >&2 || true
+fi
 
 teardown_fixture
 
