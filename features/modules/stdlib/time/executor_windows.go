@@ -6,11 +6,30 @@
 package timemodule
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/cfgis/cfgms/features/modules"
 )
+
+// errAccessDeniedHRESULT is the exit code w32tm.exe reports when the calling
+// process lacks the privilege to query the Windows Time Service configuration
+// (HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED), i.e. 0x80070005). Checked as a
+// numeric exit code rather than matching the printed message text, which is
+// locale-dependent.
+const errAccessDeniedHRESULT = 0x80070005
+
+// isAccessDeniedExitError reports whether err is an *exec.ExitError carrying
+// errAccessDeniedHRESULT. Split out from getNTPConfig so the classification
+// itself is unit-testable against a synthetic exit code, independent of
+// whether this session actually has an elevated token.
+func isAccessDeniedExitError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == errAccessDeniedHRESULT
+}
 
 // windowsExecutor manages host time configuration on Windows via tzutil.exe
 // and w32tm.exe.
@@ -90,9 +109,23 @@ func (e *windowsExecutor) getTimezone() (string, error) {
 }
 
 // getNTPConfig returns the NTP peer list and sync-enabled state via w32tm.
+//
+// "w32tm /query /configuration" requires an elevated (Administrator) token; a
+// standard, non-elevated user gets HRESULT 0x80070005 (access denied). This is
+// not a production concern: the steward's Windows service is installed with
+// no explicit ServiceStartName (cmd/steward/service/manager_windows.go), which
+// the Windows Service Control Manager defaults to LocalSystem -- a strictly
+// higher-privileged account than Administrator, so the steward's own calls
+// always succeed. The failure mode this guards is a developer or CI session
+// running go test as a standard user, where ErrInsufficientPrivilege lets the
+// caller distinguish "this environment can't answer" from a real fault instead
+// of receiving an opaque access-denied error.
 func (e *windowsExecutor) getNTPConfig() (servers []string, enabled bool, err error) {
 	out, runErr := exec.Command("w32tm", "/query", "/configuration").CombinedOutput()
 	if runErr != nil {
+		if isAccessDeniedExitError(runErr) {
+			return nil, false, fmt.Errorf("w32tm /query /configuration requires an elevated (Administrator) token: %w", modules.ErrInsufficientPrivilege)
+		}
 		return nil, false, fmt.Errorf("w32tm /query /configuration: %w (output: %s)", runErr, strings.TrimSpace(string(out)))
 	}
 
