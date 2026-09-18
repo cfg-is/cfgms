@@ -279,7 +279,10 @@ any `/workspace` fallback. The review methodology is policy too, so `docs/securi
 `/opt/cfgms-harness/docs/security-review` and `methodology_path()` resolves there first (an
 explicit `CFGMS_SECURITY_REVIEW_METHODOLOGY` path wins; the checkout root is the fallback for
 tests). Every non-test `.py` in the harness tree plus `methodology.md` is hashed into
-`harness_identity.json`, so a resume after a harness or policy change re-runs its steps. Lane
+`harness_identity.json`, so a resume after a harness or policy change can SAY which harness
+produced which steps. Since Issue #4136 it does not re-run them -- see
+[Provenance fields](#provenance-fields-and-the-one-that-quarantines-on-resume-issues-3962-4136) below for why the harness is
+recorded but not gated on. Lane
 startup is verified with exactly the production mounts and environment (no repo-root override). Verified in the
 rebuilt image: with a `scan_profiles.py` planted in the snapshot that raises on import, the lane
 imported both modules from `/opt/cfgms-harness/security-review`.
@@ -677,10 +680,13 @@ binding stays visible on the envelope exactly like `refusal_attempts` does.
   `refused`/`failed`/`parked` step never got far enough to have read anything meaningful or to
   have addressed any hypothesis.
 
-#### Binding fields and quarantine on resume (Issue #3962)
+#### Provenance fields, and the one that quarantines on resume (Issues #3962, #4136)
 
-`plan_hash`, `prompt_version`, and `harness_identity` bind an envelope to the exact plan step,
-system prompt, and harness code it was produced against:
+`plan_hash`, `prompt_version`, and `harness_identity` record the exact plan step, system prompt,
+and harness code an envelope was produced against. **Only `plan_hash` is checked on resume.** The
+other two are recorded and read back through `resume.provenance_by_step()`; neither gates. The
+split is deliberate: `plan_hash` describes the *question* a step answered, while the other two
+describe the *instrument* that answered it.
 
 - **`plan_hash`** — a SHA-256 hex digest of `plan_dir/<step_id>.json`'s own raw bytes on disk
   (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization
@@ -689,26 +695,84 @@ system prompt, and harness code it was produced against:
   the methodology core, the anchor-section wording, every anchor's id/severity/tags/text, and
   `OUTPUT_SCHEMA_DESCRIPTION`
   (`harness_runner.compute_prompt_version()`; widened from `SYSTEM_PROMPT` alone by Issue #3981 so
-  a rubric or worked-example edit is visible on the envelope). Recorded for provenance; `resume.py` does not
-  check it against a current value the way it does the other two fields.
+  a rubric or worked-example edit is visible on the envelope). Recorded for provenance and **not** checked
+  against a current value — the same treatment `harness_identity` now gets (Issue #4136).
+  `plan_hash` is the only field `resume.py` still binds on.
 - **`harness_identity`** — read verbatim from the `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`
   env var (falling back to `"unknown"` when absent, e.g. a standalone invocation outside the
   investigator container) — the trusted-harness identity [`launch-investigator`
   computes and injects](#investigator-launch-primitive) (Issue #3952).
 
-`resume.py::missing_steps()` takes two additional optional parameters, `plan_dir` and
-`current_harness_identity`, both defaulting to `None` (skipping this check entirely — the
-pre-#3962 behavior, preserved for any caller that has not been updated). Every real caller —
-`claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — always passes both. When
-given, an otherwise schema-valid `complete` envelope is additionally checked: its `plan_hash`
-must equal a fresh hash of the current `plan_dir/<step_id>.json`, and its `harness_identity` must
-equal `current_harness_identity`. Either mismatch alone is sufficient — the two are independent
-bindings, since the plan can change between sweep runs without the harness code changing, and
-vice versa. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
+`resume.py::missing_steps()` takes one additional optional parameter, `plan_dir`, defaulting to
+`None` (skipping the check entirely — the pre-#3962 behavior). Every real caller —
+`claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — passes it. When given, an
+otherwise schema-valid `complete` envelope is additionally checked: its `plan_hash` must equal a
+fresh hash of the current `plan_dir/<step_id>.json`.
+
+The `current_harness_identity` parameter that sat beside it is **removed**, not retained as an
+accepted no-op (Issue #4136). Keeping a parameter every caller still passes and nothing reads
+would be the same present-but-unwired trap this change exists to close: it reads as a live binding
+to anyone skimming the signature. `provenance_by_step()` answers the reporting question from the
+value recorded on each envelope, so it never needed a "current" value to compare against.
+
+**`harness_identity` is recorded but never gated on (Issue #4136).** It was a binding, and that
+was a category error. The two values are not the same kind of thing:
+
+- The target tree is the **specimen**. It is pinned and byte-verified because changing it means
+  later measurements are not of the same object.
+- The harness is the **instrument**. Improving an instrument mid-run does not invalidate readings
+  already taken; it means later readings came from a better one. A validated finding is a finding
+  whichever version found it.
+
+In practice the only reason to stop a sweep and change harness code is to fix a bug, so a
+mid-sweep change is nearly always an improvement — and quarantining on it meant landing any
+harness fix discarded every completed step of every open sweep. Measured on sweep
+`2026-09-16T1843Z-a17e6fcc`: **611 steps**. The operator had to choose between improving the
+harness and keeping the sweep.
+
+A mixed sweep is also worth something a pinned one is not: two harness versions over a real
+sample size, comparable after the fact — but only if each step still records which version
+produced it. `harness_identity` stays on every envelope for exactly that, and
+`resume.provenance_by_step()` answers "which instrument produced which steps"
+(`resume.harness_versions_by_step()` is the `harness_identity` half of it under the name an
+operator actually asks for). Dropping the gate without keeping that query would trade a false
+gate for a blind spot.
+
+**`prompt_version` is tracked by the same function, for the opposite reason.** Drift in it was
+never gated *and never reported either*, so two prompt vocabularies could coexist in one report
+with no signal at all — the harness was simultaneously too strict about the harness and too loose
+about the prompt. Neither should quarantine; both must be visible. Handling them in one function
+is what makes that consistent rather than two separate accidents. `plan_hash` is deliberately not
+in `resume.PROVENANCE_FIELDS`: it describes the *question*, not the instrument, so it still gates.
+
+**The report says so, on every sweep.** `consolidate.build_provenance()` reads the same function
+and `consolidated.md` carries a `## Provenance` section immediately after `## Coverage`: one row
+per lane per tracked field, each distinct value with the number of steps it produced. When any
+lane holds more than one value the section opens by saying the sweep ran more than one version of
+the instrument. When none does, it says so too — a section that appears only on bad news teaches
+a reader to skim for its absence, and an absence is indistinguishable from a harness that never
+recorded provenance at all. A step whose envelope carries no value is recorded as `unrecorded`
+rather than dropped, since "we do not know what produced these" is itself a fact about the sweep.
+
+Allowing a sweep to change instrument mid-run and reporting that it did are two halves of one
+decision. The gain is real, and it would be a silent hazard without the section: a reader
+comparing two lanes has to be able to see that one of them changed partway. A finding is a
+finding whichever version found it — but a *rate* is not a rate across two.
+
+**Drift is a within-lane property, and the section says so positively.** Two lanes on different
+harnesses always carry different `harness_identity` values, because the identity covers the
+harness that ran; that is normal, not drift. This is stated outright rather than left as an
+absence of a warning, because of what a false positive costs *here* specifically. This section is
+read by someone deciding whether to trust a sweep. A false alarm does not cost them a minute — it
+teaches them the section cries wolf, and a real drift then lands in a section nobody reads. A
+report that misreads two legitimate values as a problem is worse than no report at all.
+
+A changed **plan** still re-runs the step, and must: different files and different hypotheses mean
+the recorded answer answers a different question. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
 (see [Writes are atomic](#writes-are-atomic)) and the step is returned as outstanding, exactly
-like a schema-invalid envelope — never silently treated as `complete` for a task whose plan or
-harness code has since changed shape. The log event recording the quarantine names which
-binding(s) mismatched.
+like a schema-invalid envelope — never silently treated as `complete` for a task whose **plan**
+has since changed shape. Changed harness code no longer quarantines anything; see the section
+above for why. The log event recording the quarantine names which binding mismatched.
 
 ### Disposition
 
@@ -972,9 +1036,11 @@ still changes the recorded value. The result is written to `<sweep-dir>/harness_
 call — this value is recorded per dispatch, never frozen at sweep creation the way `commit_sha`
 is) and injected into the container as `CFGMS_SECURITY_REVIEW_HARNESS_IDENTITY`, on every call,
 plan mode and lane mode alike. This is recording only: nothing compares the value against a prior
-dispatch, and no earlier snapshot of the harness code itself is taken or verified — binding this
-value into a per-step result envelope and quarantining a mismatch on resume is STORY-12 (D6),
-which consumes the value this command produces.
+dispatch, and no earlier snapshot of the harness code itself is taken or verified. STORY-12 (D6)
+landed the envelope side — every step envelope carries this value — but **Issue #4136 removed the
+quarantine-on-mismatch half on purpose.** The harness is the instrument, not the specimen, so its
+drift is reported (`resume.provenance_by_step()`, and the report's `## Provenance` section) and
+never gated on.
 
 **`--harness`/`--model` (Issue #3932, epic #3927's contract C2) — the only credential path
 (Issue #3933).** The architectural correction in epic #3927 — model access by subscription
@@ -2574,7 +2640,7 @@ failed one — without this, a sweep where every step was parked or refused, wit
 would render as a clean full sweep), any `dispatch_report.json` entry recorded an outcome other
 than `dispatched`, or `plan/rejected_proposals.json` recorded anything at all. When
 `False`, the report's opening sentence says the sweep is incomplete, a dedicated `## Incomplete`
-section — placed directly after `## Coverage`, before `## Dispatch` — lists every one of those
+section — placed after `## Coverage` and `## Provenance`, before `## Scanner coverage` — lists every one of those
 gaps by lane name (or points at `## Dispatch` for a dispatch/rejection gap, so the identity detail
 is not printed twice), and the `## Findings` section's empty case reads "No candidates reported in
 the tasks that completed." instead of the unconditional "_No findings after de-duplication and
