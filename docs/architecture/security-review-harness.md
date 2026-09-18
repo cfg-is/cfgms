@@ -77,6 +77,11 @@ All sweep state lives outside the repository, under a base directory resolved by
       claude-sonnet-5/
         step-001.findings.json         terminal: step complete and validated
         step-002.status.json           non-terminal: parked | refused | failed
+        diagnostics/
+          step-001.meta.json           per-step timing and counters, written for EVERY step
+                                        by the shared lane runner (Issue #4135) -- see
+                                        [Per-step time attribution](#per-step-time-attribution-issue-4135)
+          step-002.prompt.txt          failure evidence only: prompt, raw answer, stdout/stderr
         ...
       claude-opus-5/
         step-001.findings.json
@@ -89,6 +94,9 @@ All sweep state lives outside the repository, under a base directory resolved by
       lanes/
         adjudicator/
           adjudication.json            one lane-shaped envelope: the adjudicator's verdicts
+          .adjudication-checkpoint.json  per-batch progress (Issue #4144). Internal harness
+                                        state, never a report artifact; survives prepare(),
+                                        removed on a complete run
     report/
       consolidated.json                machine-readable, de-duplicated; adjudication merged beside
                                         the raw lane values, never instead of them
@@ -3096,6 +3104,92 @@ the per-lane coverage table — `PASS`, or `FAIL (<N> file(s) unassigned/short)`
 a G-2 path was never planned into any step at all; a G-3 path was reviewed, but only from one
 angle, or from two angles that turned out to ask the same question.
 
+## Per-step time attribution (Issue #4135)
+
+**The problem this fixes.** On one real sweep the ollama lane averaged **7.29 min/step** against
+codex's **1.26 min/step**, on the identical plan with the identical scanner pass, while a hand
+probe of the same prompt shape returned in 169 s. The gap could not be explained from the recorded
+data, because the artifacts carried `prompt_chars` and a final `rate_limited` flag and nothing
+about elapsed time at all.
+
+The cause was found by hand: `agent-dispatch.sh` passes
+`CFGMS_SECURITY_REVIEW_RATE_LIMIT_MAX_WAIT_SECONDS=900`, so
+`harness_runner.call_with_rate_limit_backoff` sleeps and retries a rate-limited step (30 s
+doubling) for up to 900 s before parking. Observed step durations — 13.8 / 14.3 / 15.9 / 14.5 /
+13.7 min — all sit just under that budget.
+
+**A reporting defect follows from it.** `rate_limited` recorded only the FINAL attempt. A step
+that slept through four retries and succeeded on the fifth was written `complete` with
+`rate_limited: false`, and ~14 minutes of waiting left no trace. An operator reading those
+artifacts concluded the lane was not rate limited, and every recorded value agreed.
+
+### What is recorded
+
+`harness_runner.run_lane` writes `diagnostics/<step_id>.meta.json` for **every** step, on every
+exit path — complete, parked, refused, failed, and the path where the step body itself raised.
+Written by the shared runner, so all four lanes produce the same shape and are comparable.
+
+This is a deliberate exception to the diagnostics rule that a `complete` step leaves nothing
+behind. That rule exists for SIZE — a full-repository sweep must not keep a copy of every prompt —
+and it is unchanged for prompts, raw answers and stdout/stderr dumps, which stay failure-only. A
+~1 KB meta is not what the size argument is about, and gating it on failure made a lane's
+throughput measurable only from its failures, which is the one population it is not a property of.
+
+- **`stages`** — wall-clock seconds and an entry count per stage: `read_step_files`,
+  `collect_scan_evidence`, `build_prompt` (which contains `render_scan_evidence`), `model_call`,
+  `rate_limit_backoff_sleep`, `extract_and_enrich`, `repair_rounds`, `build_dispositions`,
+  `validate_and_write_envelope`. `time.monotonic()`, never `time.time()`: a wall clock that steps
+  backwards would put a negative duration in the one artifact whose purpose is to be believed
+  about durations.
+- **A stage that never ran is ABSENT, not zero.** Zero means it ran and was instant; absence means
+  the step never got there. A file that cannot tell those apart is the problem, not the fix.
+- **`repair_rounds` is `composite: true`** — it contains a model call and an extraction that are
+  also recorded on their own, so it is excluded from any sum. Flagged in the data rather than only
+  here, so a consumer can skip it without knowing this document exists.
+- **`wall_seconds` / `attributed_seconds` / `unattributed_seconds`** — the step's real elapsed
+  time, the part the stages account for, and the difference. The difference is reported on purpose:
+  a large value means real time is going somewhere nothing instruments, which is exactly the
+  condition this story ends rather than hides.
+- **`model_seconds` vs `rate_limit_backoff_sleep_seconds`** — the split that was invisible.
+  `call_with_rate_limit_backoff` fills an optional `stats` accumulator (`new_backoff_stats()`),
+  passed in rather than returned so the `(exit_code, rate_limited, output_tail)` tuple every lane
+  and every test stub expects is unchanged. One accumulator per STEP, shared by the first call and
+  every repair round.
+- **`rate_limited` means EVER**, and `rate_limited_final_attempt` is kept beside it. The state
+  machine still reads the final attempt — `terminal_state.classify()` is deliberately not changed
+  by this story — so both have to be recoverable, or the meta would contradict the envelope with
+  no way to tell why. `rate_limit_backoff_gave_up_over_budget` distinguishes "parked because the
+  900 s ran out" from "never limited".
+- **Token counts are named, never guessed.** `tokens` is `null` for the CLI harnesses with an
+  explicit `tokens_unavailable` reason naming both cases: claude/codex/opencode expose no usage
+  figures at all, while ollama does and writes them to its own per-call
+  `<step_id>.taskN.meta.json` beside this file. A zero would be indistinguishable from a real
+  zero, and an estimate in an artifact used to compare harnesses is worse than a gap.
+- **A/B-ing a prompt change** — `prompt_chars`, `answer_chars`, `repair_attempts`,
+  `repair_causes` (the defects that triggered each round, not just a count — a missing field and
+  unparseable JSON are different signals), `hypotheses_answered` against
+  `hypotheses_synthesized_not_attempted`, and `prompt_version`.
+- **Scanner cache** — `scan_checks` / `scan_cache_hits` / `scan_cache_misses`, so a fast step is
+  not mistaken for a fast tool.
+
+### The sweep roll-up
+
+`consolidate.build_timing_rollup()` aggregates every lane's per-step metas into one row per lane,
+rendered as `## Timing` in `report/consolidated.md`. It lands in the sweep tree rather than a log
+because container logs die with their container (the same reason Issue #4132 captures them into
+the sweep tree), and the question it answers — "why did that lane take six times longer on the
+same plan" — is asked days later, from the report.
+
+The roll-up reads only `<step_id>.meta.json` and skips any name carrying a `.taskN.` segment, so
+the ollama lane's per-CALL metas are not counted as extra steps; doing so would double its step
+count and make its mean look better than every other lane's. A lane whose envelopes predate this
+story contributes a row with `steps_measured: 0` rather than being omitted, so a missing lane is
+visibly missing — and when NO lane recorded anything the section is not rendered at all, since an
+always-present table of zeros trains a reader to skip it.
+
+`... of those, recovered` counts steps that hit a limit, waited, and then succeeded. Those are the
+ones that used to be invisible.
+
 ## Finding verification (Issue #4071)
 
 `CFGMS_SECURITY_REVIEW_VERIFIER` names one `harness:model` pair, parsed by the same
@@ -3213,13 +3307,58 @@ re-checked against real data rather than re-argued.
 - **It is a lane-shaped citizen.** `lanes/adjudicator.py` writes one envelope with the same
   four terminal states, classified the same way: a rate-limit signal is `parked`, a non-zero
   harness exit is `failed`, no output file is `refused`, unparseable or schema-invalid output is
-  `failed`. A non-`complete` envelope carries no adjudications at all (all-or-nothing across
-  batches — partial adjudication would leave a reader unable to tell which severities were
-  judged). `consolidate.load_adjudication()` treats an envelope that is missing after a recorded
+  `failed`. **A non-`complete` envelope carries the batches that did finish** (Issue #4144); the
+  verdict lists are present and may be empty, never absent, so "no verdicts survived" and "this
+  envelope predates the fix" are distinguishable. They are validated by the same schema rules that
+  apply on a `complete` envelope — a verdict on the failure path is the one nobody re-reads, so it
+  is exactly where an unvalidated value would do its damage.
+
+  This replaced an all-or-nothing rule whose stated reason was that partial adjudication would
+  leave a reader unable to tell which severities were judged. That reason does not survive
+  contact with the mechanism: the partial verdicts are **not** applied to any finding, so no
+  severity renders as adjudicated on a non-`complete` envelope, and nothing becomes ambiguous.
+  What the old rule actually cost was measurable — on sweep `2026-09-16T1843Z-a17e6fcc` the stage
+  completed 7 of 57 batches over 28 minutes and all 7 were discarded. It was also not only a crash
+  path: `finish()` attached verdicts only when the state was `complete`, so every clean early exit
+  threw the finished work away with no container restart involved.
+
+  `consolidate.load_adjudication()` still treats an envelope that is missing after a recorded
   dispatch, schema-invalid, non-`complete`, from another sweep, or `stale` exactly like a failed
   lane: raw severities render, the status and reason land in `## Incomplete`, and the opening
   sentence says the sweep is incomplete. "No parseable output means it did not run" holds here as
-  it does for every lane.
+  it does for every lane. What the preserved verdicts add is a count in the report — how much
+  survived — and a checkpoint a resume can skip past, not an adjudication the report pretends to
+  have.
+- **Progress is checkpointed per batch, and resumed.** After each batch completes,
+  `lanes/adjudicator.py` writes `.adjudication-checkpoint.json` beside its envelope through
+  `atomic_write.write_json_atomic`. It is internal harness state, never a report artifact: a
+  dotfile, and in the adjudication sub-sweep tree, which `consolidate._discover_lanes()` never
+  walks. `adjudicate.prepare()` removes only the stale `adjudication.json`, so the checkpoint
+  survives to the next `resume` deliberately. A `complete` run removes it, since a spent
+  checkpoint could only ever be applied to some later, different run.
+
+  A checkpoint records batch **indices**, so it is bound to the plan that produced them by two
+  independent keys, and a mismatch on either discards the whole file rather than applying part of
+  it. `input_hash` catches an input whose content changed; `plan_fingerprint` — a hash over which
+  findings and groups sit in which batch, in order — catches a plan that changed for any other
+  reason, including `harness`, `batch_size`, `max_prompt_bytes` and edits to `plan_batches()`
+  itself. Neither subsumes the other: change only a report's evidence text and every finding key
+  is identical, so the fingerprint matches and only the input hash notices. A checkpoint whose
+  stored verdicts fail validation is also discarded entirely — redoing a batch costs model time,
+  while trusting a corrupt one puts an unchecked verdict in the report.
+- **A revoked credential is named as such.** `call_<harness>_harness` returns a sanitized output
+  tail as its third element; `run_adjudication()` was unpacking only the first two, so the
+  harness's own error text never reached the envelope, and it could not be recovered from the
+  exit code either because `lanes/adjudicator.py`'s `main()` returns 0 unconditionally. The tail
+  now lands in `stop_reason_raw`, trimmed from the **front** — `sanitize_harness_output_tail()`
+  keeps the last 4,000 characters because that is where the explanation is, and `stop_reason_raw`
+  caps at 500, so head-truncation would discard exactly the text the tail exists to carry.
+  `consolidate.looks_auth_revoked()` classifies that text as the `auth_revoked` status, which
+  `_adjudication_incomplete_lines()` renders as a distinctly labelled known-recoverable cause
+  naming the remedy. It is deliberately **not** in `ADJUDICATION_OK_STATUSES`: the stage produced
+  no verdicts, so the severities are still raw and the sweep is still incomplete. The status
+  distinguishes "restore the credential and resume" from "investigate this", and claims nothing
+  more.
 - **Determinism is lost, so record provenance.** Every envelope carries `harness`, `model_id`,
   `prompt_version` (a digest over the adjudicator's system prompt, the methodology core, every
   anchor, and the output shape), `harness_identity`, and `input_hash` — the SHA-256 of the exact

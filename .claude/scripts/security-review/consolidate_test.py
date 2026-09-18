@@ -2420,6 +2420,8 @@ def _write_adjudication_envelope(
     group_assessments: list[dict] | None = None,
     state: str = "complete",
     input_hash: str | None = None,
+    stop_reason: str | None = None,
+    partial: bool = False,
 ) -> str:
     envelope = {
         "sweep_id": os.path.basename(sweep),
@@ -2436,7 +2438,13 @@ def _write_adjudication_envelope(
         envelope["adjudications"] = adjudications
         envelope["group_assessments"] = group_assessments or []
     else:
-        envelope["stop_reason_raw"] = f"stub {state}"
+        envelope["stop_reason_raw"] = stop_reason if stop_reason is not None else f"stub {state}"
+        # Issue #4144: a non-complete envelope may carry the batches that did
+        # finish. `partial=True` writes that shape so the consolidator can be
+        # tested against it.
+        if partial:
+            envelope["adjudications"] = adjudications
+            envelope["group_assessments"] = group_assessments or []
     path = consolidate.adjudication_output_path(sweep)
     write(path, envelope)
     return path
@@ -2926,6 +2934,276 @@ def test_failed_adjudication_stage_renders_raw_findings_and_incomplete():
         check(report["adjudication"]["status"] == "failed", "consolidate: a `failed` envelope reports status failed", str(report["adjudication"]))
         check("stub failed" in md, "consolidate.md: the envelope's stop_reason_raw is surfaced", md)
         check("Severity (adjudicated)" not in md, "consolidate.md: nothing is rendered as adjudicated after a failed stage")
+
+
+def test_auth_revoked_renders_as_recoverable():
+    """REQUIRED TEST (Issue #4144 AC9): a credential failure renders as a
+    distinctly labelled known-recoverable cause, separate from a real
+    failure, and is excluded from the finding-coverage tallies.
+
+    It is still a gap -- severities stay raw and the sweep still reads as
+    incomplete, because no adjudication happened. What changes is that an
+    operator can tell "restore the credential and resume" from "investigate
+    this" without opening container stderr.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = _two_lane_disagreement_sweep(repo, sweep)
+        _record_adjudicator_dispatch(sweep)
+        _write_adjudication_envelope(
+            sweep,
+            repo,
+            sha,
+            [],
+            state="failed",
+            stop_reason="harness_exit_1: OAuth token has been revoked; run `claude setup-token`",
+        )
+        report = consolidate.consolidate(sweep, repo)
+        md = consolidate.render_markdown(report)
+
+        check(
+            report["adjudication"]["status"] == consolidate.ADJUDICATION_AUTH_REVOKED,
+            "auth_revoked: a revoked-token stop reason classifies as auth_revoked, not a bare `failed`",
+            str(report["adjudication"]["status"]),
+        )
+        check(
+            "Adjudication stage stopped on a credential failure" in md,
+            "auth_revoked: rendered with its own distinct label",
+            md,
+        )
+        check(
+            "known-recoverable cause, not a defect in the code under review" in md,
+            "auth_revoked: the line says the cause is not a defect in the reviewed code",
+            md,
+        )
+        check(
+            "security-review.sh resume" in md,
+            "auth_revoked: the line names the actual remedy",
+            md,
+        )
+        check(
+            "Adjudication stage did not complete" not in md,
+            "auth_revoked: the generic real-failure bullet is NOT also emitted",
+            md,
+        )
+        check(
+            "Adjudicator omitted" not in md,
+            "auth_revoked: not counted as a finding-coverage gap -- no omitted-findings bullet",
+            md,
+        )
+        check(
+            "Severity (raw)" in md and "Severity (adjudicated)" not in md,
+            "auth_revoked: severities stay raw -- the stage produced no verdicts",
+            md,
+        )
+
+        # The negative direction: a failure that is NOT a credential problem
+        # must keep the generic label. Without this, a rule that classified
+        # everything as auth_revoked would pass every assertion above.
+        _write_adjudication_envelope(
+            sweep, repo, sha, [], state="failed", stop_reason="harness_exit_1: segmentation fault"
+        )
+        other = consolidate.render_markdown(consolidate.consolidate(sweep, repo))
+        check(
+            "Adjudication stage did not complete" in other
+            and "stopped on a credential failure" not in other,
+            "auth_revoked: an unrelated failure still renders as a real failure",
+            other,
+        )
+
+
+def test_the_adjudicator_checkpoint_is_not_discovered_as_a_lane_output():
+    """Issue #4144 implementation note: the checkpoint is internal harness
+    state, so consolidation must not see it.
+
+    Asserted rather than reasoned about. It holds for two independent
+    reasons -- it is a dotfile, and it lives in the adjudication sub-sweep
+    tree, which `_discover_lanes()` never walks -- and a test pins both,
+    since either could be undone by a later change that looks harmless.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = _two_lane_disagreement_sweep(repo, sweep)
+        _record_adjudicator_dispatch(sweep)
+        _write_adjudication_envelope(sweep, repo, sha, [_thing_adjudication()])
+        before = consolidate.consolidate(sweep, repo)
+
+        checkpoint = os.path.join(
+            os.path.dirname(consolidate.adjudication_output_path(sweep)),
+            ".adjudication-checkpoint.json",
+        )
+        write(
+            checkpoint,
+            {
+                "input_hash": "x",
+                "plan_fingerprint": "y",
+                "completed_batches": [0],
+                "adjudications": [_thing_adjudication(severity="low")],
+                "group_assessments": [],
+            },
+        )
+        after = consolidate.consolidate(sweep, repo)
+
+        check(
+            before["coverage"] == after["coverage"],
+            "checkpoint: writing one adds no lane to the coverage table",
+            f"{before['coverage']} -> {after['coverage']}",
+        )
+        check(
+            before["findings"] == after["findings"],
+            "checkpoint: the findings are byte-identical with a checkpoint present",
+        )
+        check(
+            after["adjudication"]["status"] == "complete",
+            "checkpoint: a leftover checkpoint does not disturb a complete adjudication",
+            str(after["adjudication"]["status"]),
+        )
+
+
+def test_partial_adjudications_are_reported_on_an_early_exit():
+    """Issue #4144: the batches that finished are preserved on a non-complete
+    envelope, and the report says how many, so an operator can weigh a resume
+    against a re-run."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = _two_lane_disagreement_sweep(repo, sweep)
+        _record_adjudicator_dispatch(sweep)
+        _write_adjudication_envelope(
+            sweep,
+            repo,
+            sha,
+            [_thing_adjudication()],
+            state="failed",
+            stop_reason="harness_exit_1: segmentation fault",
+            partial=True,
+        )
+        report = consolidate.consolidate(sweep, repo)
+        md = consolidate.render_markdown(report)
+        check(
+            report["adjudication"]["partial_adjudications"] == 1,
+            "partial: the surviving verdict count is recorded",
+            str(report["adjudication"].get("partial_adjudications")),
+        )
+        check(
+            "The batches that did finish are preserved" in md and "1 finding verdict(s)" in md,
+            "partial: the report says how much survived",
+            md,
+        )
+        check(
+            "Severity (adjudicated)" not in md,
+            "partial: a preserved verdict is NOT applied to the findings -- the stage is still incomplete",
+            md,
+        )
+
+        # Nothing survived: no partial clause at all, rather than "0 verdicts".
+        _write_adjudication_envelope(
+            sweep, repo, sha, [], state="failed", stop_reason="harness_exit_1: segmentation fault"
+        )
+        none_md = consolidate.render_markdown(consolidate.consolidate(sweep, repo))
+        check(
+            "The batches that did finish are preserved" not in none_md,
+            "partial: an exit that finished no batch gains no partial clause",
+            none_md,
+        )
+
+
+def _write_step_meta(sweep: str, lane: str, step_id: str, **fields) -> None:
+    meta = {
+        "meta_version": 1,
+        "step_id": step_id,
+        "lane": lane,
+        "state": "complete",
+        "wall_seconds": 10.0,
+        "attributed_seconds": 9.0,
+        "unattributed_seconds": 1.0,
+        "model_seconds": 5.0,
+        "rate_limit_backoff_sleep_seconds": 0.0,
+        "harness_calls": 1,
+        "rate_limited": False,
+        "rate_limited_final_attempt": False,
+        "rate_limit_backoff_gave_up_over_budget": False,
+        "repair_attempts": 0,
+        "hypotheses_answered": 1,
+        "hypotheses_synthesized_not_attempted": 0,
+    }
+    meta.update(fields)
+    write(os.path.join(sweep, "lanes", lane, "diagnostics", f"{step_id}.meta.json"), meta)
+
+
+def test_timing_rollup_lands_in_the_sweep_tree():
+    """REQUIRED TEST (Issue #4135 AC7): a sweep-level roll-up of the per-step
+    timings, in the report rather than a container log.
+
+    Container logs die with the container, and the question this answers --
+    "why did that lane take six times longer on the same plan" -- is asked
+    days later from the report.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        _two_lane_disagreement_sweep(repo, sweep)
+        # laneA: fast and clean. laneB: the shape this story was written about
+        # -- a step that hit a limit, slept, and then SUCCEEDED.
+        _write_step_meta(sweep, "laneA", "step-001", wall_seconds=60.0, model_seconds=55.0)
+        _write_step_meta(
+            sweep, "laneB", "step-001",
+            wall_seconds=900.0, model_seconds=60.0,
+            rate_limit_backoff_sleep_seconds=830.0,
+            harness_calls=5, rate_limited=True, rate_limited_final_attempt=False,
+            repair_attempts=2,
+        )
+        report = consolidate.consolidate(sweep, repo)
+        rows = {r["lane"]: r for r in report["timing"]}
+
+        check(set(rows) == {"laneA", "laneB"}, "timing: one row per lane", str(sorted(rows)))
+        check(rows["laneB"]["backoff_sleep_seconds"] == 830.0,
+              "timing: the backoff sleep is reported as its own number, not folded into the total",
+              str(rows["laneB"]))
+        check(rows["laneB"]["rate_limited_steps"] == 1,
+              "timing: the rate-limited step is counted", str(rows["laneB"]["rate_limited_steps"]))
+        check(rows["laneB"]["rate_limited_only_on_an_earlier_attempt"] == 1,
+              "timing: a step that was limited and then RECOVERED is counted distinctly -- the case that used to be invisible",
+              str(rows["laneB"]))
+        check(rows["laneA"]["rate_limited_steps"] == 0,
+              "timing: the clean lane claims no rate limiting", str(rows["laneA"]))
+        check(rows["laneB"]["mean_wall_seconds_per_step"] == 900.0,
+              "timing: mean seconds per step, the figure that made the two lanes comparable",
+              str(rows["laneB"]["mean_wall_seconds_per_step"]))
+        check(rows["laneB"]["repair_attempts"] == 2, "timing: repair attempts roll up", str(rows["laneB"]))
+
+        md = consolidate.render_markdown(report)
+        check("## Timing" in md, "timing.md: the section renders", md[:400])
+        check("Backoff sleep" in md and "830.0" in md,
+              "timing.md: the sleeping is visible in the report a human actually reads", md)
+        check("of those, recovered" in md,
+              "timing.md: the recovered-after-limit column is explained, not just numbered", md)
+
+
+def test_no_timing_section_when_no_lane_recorded_one():
+    """A sweep whose lanes predate this story gains no empty section. An
+    always-rendered table of zeros would train a reader to skip it."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        _two_lane_disagreement_sweep(repo, sweep)
+        report = consolidate.consolidate(sweep, repo)
+        check(all(r["steps_measured"] == 0 for r in report["timing"]),
+              "timing: a lane with no metas reports zero steps measured rather than being omitted",
+              str(report["timing"]))
+        check("## Timing" not in consolidate.render_markdown(report),
+              "timing.md: no section at all when nothing was measured")
+
+
+def test_the_ollama_per_call_meta_is_not_counted_as_a_step():
+    """The ollama lane writes its own `<step>.taskN.meta.json` per CALL. Rolling
+    those up beside the per-STEP files would double-count its steps and make
+    its mean look better than every other lane's."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        _two_lane_disagreement_sweep(repo, sweep)
+        _write_step_meta(sweep, "laneA", "step-001", wall_seconds=100.0)
+        write(
+            os.path.join(sweep, "lanes", "laneA", "diagnostics", "step-001.task0.meta.json"),
+            {"meta_version": 1, "step_id": "step-001", "wall_seconds": 100.0, "model_seconds": 1.0},
+        )
+        rows = {r["lane"]: r for r in consolidate.consolidate(sweep, repo)["timing"]}
+        check(rows["laneA"]["steps_measured"] == 1,
+              "timing: a per-call meta beside the per-step one is not counted as a second step",
+              str(rows["laneA"]))
+        check(rows["laneA"]["wall_seconds"] == 100.0,
+              "timing: and its seconds are not added in either", str(rows["laneA"]["wall_seconds"]))
 
 
 def test_adjudication_dispatch_outcome_other_than_dispatched_is_a_gap():

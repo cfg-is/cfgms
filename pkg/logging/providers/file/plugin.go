@@ -28,7 +28,8 @@ type FileProvider struct {
 	stats        interfaces.ProviderStats
 	initialized  bool
 	stopRotation chan struct{}
-	bgWg         sync.WaitGroup // tracks backgroundMaintenance goroutine
+	bgWg         sync.WaitGroup // tracks backgroundMaintenance goroutine and compressOldFiles goroutines
+	compressMu   sync.Mutex     // serializes compressOldFiles passes; see rotation.go
 }
 
 // FileConfig holds configuration for the file-based logging provider
@@ -148,13 +149,21 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
+	// Mark the provider open *before* the first rotation: rotateLogFile refuses
+	// to open a file handle unless p.initialized is true (see rotation.go), which
+	// is what stops a write racing Close() from resurrecting the log file. The
+	// initial rotation here is the one legitimate open on a not-yet-serving
+	// provider, so the flag is set first and rolled back if the open fails.
+	p.stopRotation = make(chan struct{})
+	p.initialized = true
+
 	// Open initial log file (rotateLogFile expects mutex to be held)
 	if err := p.rotateLogFile(); err != nil {
+		p.initialized = false
+		p.stopRotation = nil
 		p.mutex.Unlock()
 		return fmt.Errorf("failed to create initial log file: %w", err)
 	}
-	p.stopRotation = make(chan struct{})
-	p.initialized = true
 	flushInterval := p.config.FlushInterval
 	p.mutex.Unlock()
 
@@ -175,7 +184,10 @@ func (p *FileProvider) Initialize(config map[string]interface{}) error {
 
 // Close shuts down the provider and closes files.
 // Safe to call multiple times and safe to call after a subsequent Initialize
-// (the singleton registry pattern reuses the same *FileProvider across tests).
+// (each *FileProvider instance is independently reusable across an
+// Initialize/Close/Initialize cycle -- the registered factory in init() gives
+// each LoggingManager its own instance, so there is no cross-instance sharing
+// to worry about here, only the same instance's own lifecycle).
 func (p *FileProvider) Close() error {
 	// Atomically transition initialized → false and capture the stop channel.
 	// Using p.mutex (not a sync.Once) so that Initialize() can reset the state
@@ -195,9 +207,14 @@ func (p *FileProvider) Close() error {
 		close(stopChan)
 	}
 
-	// Wait for backgroundMaintenance to fully exit before closing the file.
-	// This guarantees no goroutine holds the file handle when we close it,
-	// which prevents Windows "file in use" errors during test TempDir cleanup.
+	// Wait for backgroundMaintenance AND any in-flight compressOldFiles
+	// goroutine (spawned by rotateLogFile, tracked in bgWg since both use it)
+	// to fully exit before closing the file, so no goroutine holds a file
+	// handle when we close it.
+	//
+	// p.initialized is already false at this point, so no new write can start a
+	// rotation (rotateLogFile refuses to open a file on a closed provider) and
+	// therefore no new goroutine can be added to bgWg while we wait here.
 	p.bgWg.Wait()
 
 	// Flush and close resources under the write lock.
@@ -217,16 +234,16 @@ func (p *FileProvider) Close() error {
 	return nil
 }
 
-// WriteEntry writes a single log entry to the file
+// WriteEntry writes a single log entry to the file.
+//
+// The "is the provider still open?" check is made under p.mutex, together with
+// the write itself. Checking it before taking the lock was the cause of Issue
+// #4145: a writer could observe initialized==true, block on p.mutex while
+// Close() ran to completion, then proceed against a closed provider, where
+// needsRotation() sees a nil currentFile and rotateLogFile() opens a brand-new
+// log file that nothing ever closes again.
 func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry) error {
-	if !p.initialized {
-		return fmt.Errorf("provider not initialized")
-	}
-
 	start := time.Now()
-	defer func() {
-		p.updateStats(1, time.Since(start))
-	}()
 
 	// Serialize entry to JSON
 	jsonBytes, err := json.Marshal(entry)
@@ -236,6 +253,14 @@ func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry
 
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
+
+	if !p.initialized {
+		return fmt.Errorf("provider not initialized")
+	}
+
+	defer func() {
+		p.updateStatsLocked(1, time.Since(start))
+	}()
 
 	// Check if rotation is needed before writing
 	if p.needsRotation() {
@@ -256,8 +281,17 @@ func (p *FileProvider) WriteEntry(ctx context.Context, entry interfaces.LogEntry
 	return nil
 }
 
-// WriteBatch writes multiple log entries efficiently
+// WriteBatch writes multiple log entries efficiently.
+//
+// As in WriteEntry, the initialized check is made under p.mutex so that a batch
+// racing Close() cannot reach rotateLogFile() and re-open the log file (Issue
+// #4145).
 func (p *FileProvider) WriteBatch(ctx context.Context, entries []interfaces.LogEntry) error {
+	start := time.Now()
+
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if !p.initialized {
 		return fmt.Errorf("provider not initialized")
 	}
@@ -266,13 +300,9 @@ func (p *FileProvider) WriteBatch(ctx context.Context, entries []interfaces.LogE
 		return nil
 	}
 
-	start := time.Now()
 	defer func() {
-		p.updateStats(len(entries), time.Since(start))
+		p.updateStatsLocked(len(entries), time.Since(start))
 	}()
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
 
 	// Check if rotation is needed before batch write
 	if p.needsRotation() {
@@ -453,14 +483,17 @@ func (p *FileProvider) GetStats(ctx context.Context) (interfaces.ProviderStats, 
 	return stats, nil
 }
 
-// Flush forces buffered writes to disk
+// Flush forces buffered writes to disk.
+//
+// The initialized check is under p.mutex for the same reason as in WriteEntry:
+// read outside the lock it races Close()'s write of the same field.
 func (p *FileProvider) Flush(ctx context.Context) error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
 	if !p.initialized {
 		return fmt.Errorf("provider not initialized")
 	}
-
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
 
 	if p.writer != nil {
 		if err := p.writer.Flush(); err != nil {

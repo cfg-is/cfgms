@@ -418,6 +418,8 @@ test_executable_permissions() {
         "scripts/check-binary-artifacts_test.sh"
         "scripts/check-docs-boundary.sh"
         "scripts/check-docs-boundary_test.sh"
+        "scripts/install-git-hooks.sh"
+        "scripts/install-git-hooks_test.sh"
         "scripts/verify-nancy-ignore-scope.sh"
         "scripts/verify-nancy-ignore-scope_test.sh"
         "scripts/lab-datasvc-bootstrap.sh"
@@ -931,6 +933,35 @@ test_check_docs_boundary() {
         log_pass "check-docs-boundary.sh: Real docs/ tree is clean"
     else
         log_fail "check-docs-boundary.sh: Real docs/ tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Fixture suite for scripts/install-git-hooks.sh (Issue #4150). A pre-push hook run
+# from a linked worktree inherits GIT_DIR; running make test with it set let one
+# `git init` in a scratch directory flip the MAIN repository to core.bare=true.
+# Delegates to scripts/install-git-hooks_test.sh, which installs the real hooks
+# into a throwaway repository and pushes from a linked worktree and the main
+# checkout with `make` stubbed.
+test_install_git_hooks() {
+    log_test "Testing install-git-hooks.sh..."
+
+    local test_script="scripts/install-git-hooks_test.sh"
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "install-git-hooks_test.sh: Not found or not executable"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "install-git-hooks_test.sh: worktree pushes leave the main repo intact"
+    else
+        log_fail "install-git-hooks_test.sh: Fixture tests failed (exit $rc)"
         sed 's/^/    /' "$out_file" >&2
     fi
     rm -f "$out_file"
@@ -4000,6 +4031,8 @@ echo ""
 test_check_binary_artifacts
 echo ""
 test_check_docs_boundary
+echo ""
+test_install_git_hooks
 echo ""
 test_verify_nancy_ignore_scope
 echo ""
