@@ -279,7 +279,10 @@ any `/workspace` fallback. The review methodology is policy too, so `docs/securi
 `/opt/cfgms-harness/docs/security-review` and `methodology_path()` resolves there first (an
 explicit `CFGMS_SECURITY_REVIEW_METHODOLOGY` path wins; the checkout root is the fallback for
 tests). Every non-test `.py` in the harness tree plus `methodology.md` is hashed into
-`harness_identity.json`, so a resume after a harness or policy change re-runs its steps. Lane
+`harness_identity.json`, so a resume after a harness or policy change can SAY which harness
+produced which steps. Since Issue #4136 it does not re-run them -- see
+[Binding an envelope](#binding-an-envelope-to-its-plan-and-harness) below for why the harness is
+recorded but not gated on. Lane
 startup is verified with exactly the production mounts and environment (no repo-root override). Verified in the
 rebuilt image: with a `scan_profiles.py` planted in the snapshot that raises on import, the lane
 imported both modules from `/opt/cfgms-harness/security-review`.
@@ -681,11 +684,32 @@ system prompt, and harness code it was produced against:
 `current_harness_identity`, both defaulting to `None` (skipping this check entirely — the
 pre-#3962 behavior, preserved for any caller that has not been updated). Every real caller —
 `claude_lane.py`/`codex_lane.py`/`opencode_lane.py`'s `run_lane()` — always passes both. When
-given, an otherwise schema-valid `complete` envelope is additionally checked: its `plan_hash`
-must equal a fresh hash of the current `plan_dir/<step_id>.json`, and its `harness_identity` must
-equal `current_harness_identity`. Either mismatch alone is sufficient — the two are independent
-bindings, since the plan can change between sweep runs without the harness code changing, and
-vice versa. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
+given, an otherwise schema-valid `complete` envelope is additionally checked against ONE of them:
+its `plan_hash` must equal a fresh hash of the current `plan_dir/<step_id>.json`.
+
+**`harness_identity` is recorded but never gated on (Issue #4136).** It was a binding, and that
+was a category error. The two values are not the same kind of thing:
+
+- The target tree is the **specimen**. It is pinned and byte-verified because changing it means
+  later measurements are not of the same object.
+- The harness is the **instrument**. Improving an instrument mid-run does not invalidate readings
+  already taken; it means later readings came from a better one. A validated finding is a finding
+  whichever version found it.
+
+In practice the only reason to stop a sweep and change harness code is to fix a bug, so a
+mid-sweep change is nearly always an improvement — and quarantining on it meant landing any
+harness fix discarded every completed step of every open sweep. Measured on sweep
+`2026-09-16T1843Z-a17e6fcc`: **611 steps**. The operator had to choose between improving the
+harness and keeping the sweep.
+
+A mixed sweep is also worth something a pinned one is not: two harness versions over a real
+sample size, comparable after the fact — but only if each step still records which version
+produced it. `harness_identity` stays on every envelope for exactly that, and
+`resume.harness_versions_by_step()` answers "which steps ran under which harness". Dropping the
+gate without keeping that query would trade a false gate for a blind spot.
+
+A changed **plan** still re-runs the step, and must: different files and different hypotheses mean
+the recorded answer answers a different question. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
 (see [Writes are atomic](#writes-are-atomic)) and the step is returned as outstanding, exactly
 like a schema-invalid envelope — never silently treated as `complete` for a task whose plan or
 harness code has since changed shape. The log event recording the quarantine names which

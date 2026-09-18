@@ -220,33 +220,48 @@ def test_changed_binding_quarantines_and_reruns_the_step() -> None:
         check(calls["n"] == 1, "binding resume: unchanged bindings do not re-invoke the harness", str(calls))
         check(quarantined_files() == [], "binding resume: nothing quarantined while bindings match", repr(quarantined_files()))
 
+        # Issue #4136 inverted this. A changed harness identity must NOT re-run
+        # a completed step: the target tree is the specimen and is pinned, but
+        # the harness is the instrument, and improving an instrument mid-run
+        # does not invalidate readings already taken. Quarantining on it meant
+        # landing any harness fix discarded every completed step of every open
+        # sweep -- 611 on the sweep that prompted the change.
         third = run("identity-B")
-        check(calls["n"] == 2, "binding resume: a changed harness_identity re-invokes the harness", str(calls))
+        check(calls["n"] == 1, "binding resume: a changed harness_identity does NOT re-invoke the harness", str(calls))
+        check(third == [], "binding resume: the completed step is skipped despite the harness change", repr(third))
         check(
-            third and third[0]["harness_identity"] == "identity-B",
-            "binding resume: the re-run envelope records the current harness identity",
-            repr(third),
-        )
-        check(
-            len(quarantined_files()) == 1,
-            "binding resume: the stale envelope is quarantined, not deleted or left in place",
+            quarantined_files() == [],
+            "binding resume: nothing is quarantined for a harness change",
             repr(sorted(os.listdir(out_dir))),
         )
+        # And the record survives, which is the whole benefit case: a mixed
+        # sweep is only worth having if you can still say afterwards which
+        # steps ran under which harness.
+        with open(os.path.join(out_dir, "step-001.findings.json")) as f:
+            kept = json.load(f)
+        check(
+            kept["harness_identity"] == "identity-A",
+            "binding resume: the step keeps the identity that actually produced it",
+            repr(kept.get("harness_identity")),
+        )
 
+        # A changed PLAN still re-runs it. Narrowing the gate must not remove
+        # it -- a different plan means different files and hypotheses, so the
+        # recorded answer answers a different question.
         write_plan_step(plan_dir, "step-001", description="a changed scope description")
         with open(os.path.join(plan_dir, "step-001.json"), "rb") as f:
             changed_plan_hash = hashlib.sha256(f.read()).hexdigest()
 
         fourth = run("identity-B")
-        check(calls["n"] == 3, "binding resume: a changed plan step re-invokes the harness", str(calls))
+        check(calls["n"] == 2, "binding resume: a changed plan step re-invokes the harness", str(calls))
         check(
             fourth and fourth[0]["plan_hash"] == changed_plan_hash,
             "binding resume: the re-run envelope records the changed plan's hash",
             repr(fourth),
         )
         check(
-            len(quarantined_files()) == 2,
-            "binding resume: the plan-mismatched envelope is quarantined too",
+            len(quarantined_files()) == 1,
+            "binding resume: the plan-mismatched envelope is quarantined",
             repr(sorted(os.listdir(out_dir))),
         )
 

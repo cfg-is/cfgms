@@ -258,10 +258,17 @@ def test_plan_hash_mismatch_quarantines_and_returns_outstanding():
 
 
 def test_harness_identity_mismatch_quarantines_independently_of_plan_hash():
-    # REQUIRED TEST: plan_dir/the plan file are unchanged (plan_hash matches),
-    # but current_harness_identity differs from the envelope's recorded
-    # value -- proving the two bindings are checked independently, not only
-    # the plan half actually being wired.
+    # REQUIRED TEST (Issue #4136): the plan is unchanged but the harness code
+    # has moved on. The step MUST be kept.
+    #
+    # This asserted the opposite until #4136, and the inversion is the story:
+    # the target tree is the specimen and is pinned because changing it means
+    # later measurements are not of the same object; the harness is the
+    # instrument, and improving an instrument mid-run does not invalidate
+    # readings already taken. Quarantining on it meant landing any harness fix
+    # discarded every completed step of every open sweep -- 611 of them on the
+    # sweep that prompted this -- so the operator had to choose between
+    # improving the harness and keeping the sweep.
     with tempfile.TemporaryDirectory() as lane_dir, tempfile.TemporaryDirectory() as plan_dir:
         write_plan_step(plan_dir, "step-001", hypotheses=["h1"])
         matching_hash = _plan_hash_of(plan_dir, "step-001")
@@ -275,14 +282,69 @@ def test_harness_identity_mismatch_quarantines_independently_of_plan_hash():
             lane_dir, ["step-001"], plan_dir=plan_dir, current_harness_identity="def456"
         )
         check(
+            missing == [],
+            "missing_steps: a harness_identity change alone does NOT re-run the step",
+            str(missing),
+        )
+        check(
+            os.path.isfile(findings_path),
+            "missing_steps: the completed findings.json survives a harness change",
+            str(os.listdir(lane_dir)),
+        )
+        # The record has to survive too, or the decision buys nothing: a mixed
+        # sweep is only worth having if you can still say which steps ran under
+        # which harness afterwards.
+        with open(findings_path) as f:
+            kept = json.load(f)
+        check(
+            kept.get("harness_identity") == "abc123",
+            "missing_steps: the step keeps the identity that actually produced it",
+            repr(kept.get("harness_identity")),
+        )
+
+    # REQUIRED TEST (Issue #4136): a changed PLAN still re-runs the step.
+    # Narrowing the gate must not remove it -- a different plan means different
+    # files and different hypotheses, so the recorded answer answers a
+    # different question.
+    with tempfile.TemporaryDirectory() as lane_dir, tempfile.TemporaryDirectory() as plan_dir:
+        write_plan_step(plan_dir, "step-001", hypotheses=["h1"])
+        findings_path = os.path.join(lane_dir, "step-001.findings.json")
+        write(
+            findings_path,
+            complete_envelope("step-001", plan_hash="stale" + "0" * 59, harness_identity="abc123"),
+        )
+        missing = resume.missing_steps(
+            lane_dir, ["step-001"], plan_dir=plan_dir, current_harness_identity="abc123"
+        )
+        check(
             missing == ["step-001"],
-            "missing_steps: a harness_identity mismatch alone is returned as outstanding",
+            "missing_steps: a plan_hash mismatch still re-runs the step",
             str(missing),
         )
         check(
             not os.path.isfile(findings_path),
-            "missing_steps: the harness_identity-mismatched findings.json is quarantined, not left in place",
+            "missing_steps: a plan-mismatched findings.json is still quarantined",
             str(os.listdir(lane_dir)),
+        )
+
+    # REQUIRED TEST (Issue #4136): the provenance is QUERYABLE, not merely
+    # stored. This is the load-bearing half of the decision -- without it a
+    # mixed sweep is just a sweep nobody can reason about, and the comparison
+    # the change is made to enable is impossible after the fact.
+    with tempfile.TemporaryDirectory() as lane_dir:
+        write(os.path.join(lane_dir, "step-001.findings.json"),
+              complete_envelope("step-001", harness_identity="aaa"))
+        write(os.path.join(lane_dir, "step-002.findings.json"),
+              complete_envelope("step-002", harness_identity="aaa"))
+        write(os.path.join(lane_dir, "step-003.findings.json"),
+              complete_envelope("step-003", harness_identity="bbb"))
+        by_version = resume.harness_versions_by_step(
+            lane_dir, ["step-001", "step-002", "step-003"]
+        )
+        check(
+            by_version == {"aaa": ["step-001", "step-002"], "bbb": ["step-003"]},
+            "provenance: which steps ran under which harness is answerable afterwards",
+            repr(by_version),
         )
 
 

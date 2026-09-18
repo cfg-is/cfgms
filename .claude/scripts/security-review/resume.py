@@ -84,13 +84,41 @@ def _binding_mismatches(
     step_id: str,
     current_harness_identity: "str | None",
 ) -> list[str]:
-    """Return the subset of `["plan_hash", "harness_identity"]` that
-    `envelope` fails to match against the current sweep's values. Each is
-    checked independently -- a step whose plan is unchanged but whose
-    harness code changed since it last ran mismatches on `harness_identity`
-    alone, and vice versa. `[]` means every configured check passed (or
-    neither was configured: `plan_dir` and `current_harness_identity` both
-    `None`, the pre-#3962 default)."""
+    """Return the bindings `envelope` fails that justify re-running the step.
+
+    Only `plan_hash`. A changed plan means the step's SCOPE changed -- different
+    files, different hypotheses -- so the recorded answer is an answer to a
+    different question and must be discarded.
+
+    **`harness_identity` is deliberately NOT a binding (Issue #4136).** It was
+    one, and that was the wrong call. The two values are not the same kind of
+    thing:
+
+    - The target tree is the SPECIMEN. It is pinned and byte-verified because
+      changing it means later measurements are not of the same object.
+    - The harness is the INSTRUMENT. Improving an instrument mid-run does not
+      invalidate readings already taken; it means later readings came from a
+      better instrument. A validated finding is a finding whichever version
+      found it.
+
+    Freezing the instrument to match the specimen looked like symmetry and was
+    a category error. In practice the only reason to stop a sweep and change
+    harness code is to fix a bug, so a mid-sweep change is nearly always an
+    improvement -- and quarantining on it meant landing any harness fix
+    discarded every completed step of every open sweep. Measured on sweep
+    2026-09-16T1843Z-a17e6fcc: 611 steps. The choice was "improve the harness"
+    or "keep the sweep", and that is not a choice worth having.
+
+    A mixed sweep is also worth something the pinned one is not: two harness
+    versions over a real sample size, comparable after the fact -- but ONLY if
+    each step still records which version produced it. `harness_identity` stays
+    on every envelope for exactly that, and `harness_versions_by_step()` below
+    answers "which steps ran under which harness". Dropping the gate without
+    keeping the record would trade a false gate for a blind spot.
+
+    `current_harness_identity` is still accepted so callers need not change,
+    and is used for reporting rather than gating.
+    """
     mismatches: list[str] = []
 
     if plan_dir is not None:
@@ -98,11 +126,32 @@ def _binding_mismatches(
         if current_plan_hash is not None and envelope.get("plan_hash") != current_plan_hash:
             mismatches.append("plan_hash")
 
-    if current_harness_identity is not None:
-        if envelope.get("harness_identity") != current_harness_identity:
-            mismatches.append("harness_identity")
-
     return mismatches
+
+
+def harness_versions_by_step(lane_dir: str, step_ids: list[str]) -> dict:
+    """Which harness identity produced each completed step in this lane.
+
+    `{harness_identity: [step_id, ...]}`, each list sorted, steps with no
+    recorded identity collected under `"unrecorded"`.
+
+    This is the whole benefit case for not gating on harness drift. Without it
+    a mixed sweep is just a sweep you cannot reason about; with it, "the first
+    200 steps ran the old lane code" is answerable from the artifacts, which is
+    what makes comparing two harness versions over a real sample size possible
+    at all. A record nobody can query is not a record.
+    """
+    by_identity: dict[str, list[str]] = {}
+    for step_id in step_ids:
+        findings_path = os.path.join(lane_dir, f"{step_id}.findings.json")
+        if not os.path.isfile(findings_path):
+            continue
+        envelope = _load_json(findings_path)
+        if not isinstance(envelope, dict) or envelope.get("state") != "complete":
+            continue
+        identity = envelope.get("harness_identity") or "unrecorded"
+        by_identity.setdefault(str(identity), []).append(step_id)
+    return {k: sorted(v) for k, v in sorted(by_identity.items())}
 
 
 def _quarantine(findings_path: str, step_id: str, mismatches: list[str]) -> None:
