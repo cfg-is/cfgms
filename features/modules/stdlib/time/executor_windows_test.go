@@ -7,6 +7,7 @@ package timemodule
 
 import (
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,54 @@ func TestWindowsExecutor_GetNTPConfig_TypeParsing(t *testing.T) {
 			t.Errorf("Type parse(%q): got enabled=%v, want enabled=%v", tc.typeLine, enabled, tc.enabled)
 		}
 	}
+}
+
+// TestIsAccessDeniedExitError verifies the exit-code classification getNTPConfig
+// relies on to map w32tm's access-denied failure to modules.ErrInsufficientPrivilege
+// (Issue #4147). Uses a synthetic exit code from cmd.exe rather than depending on
+// this session's actual elevation state, so the classification itself is
+// deterministic regardless of whether the test runner is elevated.
+func TestIsAccessDeniedExitError(t *testing.T) {
+	runWithExitCode := func(t *testing.T, code int) error {
+		t.Helper()
+		return exec.Command("cmd", "/c", "exit", "/b", strconv.Itoa(code)).Run()
+	}
+
+	t.Run("access denied HRESULT is classified as access denied", func(t *testing.T) {
+		err := runWithExitCode(t, errAccessDeniedHRESULT)
+		if err == nil {
+			t.Fatal("exit /b with a non-zero code must return a non-nil error")
+		}
+		if !isAccessDeniedExitError(err) {
+			t.Errorf("isAccessDeniedExitError(%v) = false, want true", err)
+		}
+	})
+
+	t.Run("an unrelated non-zero exit code is not classified as access denied", func(t *testing.T) {
+		err := runWithExitCode(t, 1)
+		if err == nil {
+			t.Fatal("exit /b 1 must return a non-nil error")
+		}
+		if isAccessDeniedExitError(err) {
+			t.Errorf("isAccessDeniedExitError(%v) = true, want false", err)
+		}
+	})
+
+	t.Run("success is not classified as access denied", func(t *testing.T) {
+		if err := runWithExitCode(t, 0); err != nil {
+			t.Fatalf("exit /b 0 must succeed, got %v", err)
+		}
+	})
+
+	t.Run("a non-ExitError is never classified as access denied", func(t *testing.T) {
+		_, err := exec.LookPath("this-binary-does-not-exist-cfgms-4147")
+		if err == nil {
+			t.Fatal("expected LookPath to fail for a nonexistent binary")
+		}
+		if isAccessDeniedExitError(err) {
+			t.Errorf("isAccessDeniedExitError(%v) = true, want false for a non-ExitError", err)
+		}
+	})
 }
 
 // TestWindowsExecutor_GetState verifies the full getState round-trip on Windows
