@@ -231,11 +231,16 @@ cmd_watch() {
   trap 'rm -f "${pidfile}"' EXIT
 
   # Re-baseline the edge-triggered probes against current reality on EVERY
-  # start, resume included. Skipping this would make the first post-restart
-  # tick replay every change that happened while the watcher was down — a
-  # burst of stale events, which is worse than the problem being solved.
-  fast_tick >/dev/null 2>&1 || true
-  slow_tick >/dev/null 2>&1 || true
+  # start, resume included. Replaying the gap event by event would wake the
+  # session with a burst of stale lines, which is worse than the problem being
+  # solved. But the baseline is a DROP, not a deferral: whatever changed while
+  # the watcher was down is consumed here and never reported again. On a cold
+  # start the startup cycle below covers it. On a resume nothing would, so the
+  # output is captured rather than discarded and one `reason=resume_gap` cycle
+  # is emitted when it is non-empty — one event for the whole gap instead of a
+  # burst, and silence when nothing actually moved.
+  local baseline
+  baseline="$( { fast_tick; slow_tick; } 2>/dev/null || true )"
   now="$(date +%s)"
 
   # A restart is NOT a cold start, and it is not rare: the harness Monitor that
@@ -266,15 +271,26 @@ cmd_watch() {
   # instead would fire the same cycle mislabelled `reason=startup` and reset
   # the drained streak with it, which is the bug wearing a different hat.
   # `reset` is the way to force a genuine cold start.
+  # A last_full in the FUTURE is treated as a cold start, not a resume. Syntax
+  # alone is not enough: an NTP step backwards, a suspend/resume or a VM
+  # snapshot restore leaves a timestamp ahead of the clock, and `now -
+  # last_full` then stays negative forever — so the interval branch below never
+  # fires either, and the 2-hourly safety net is silently dead until wall-clock
+  # catches up. The old code self-healed this by re-stamping last_full on every
+  # start; dropping that re-stamp is what exposes it.
   local prior_full
   prior_full="$(sget last_full)"
-  if [[ ! "${prior_full}" =~ ^[0-9]+$ ]]; then
-    # Genuine cold start: no prior state. Ask for one cycle so arming the
-    # watcher does not leave already-queued work sitting until the first
+  if [[ ! "${prior_full}" =~ ^[0-9]+$ ]] || (( prior_full > now )); then
+    # Genuine cold start: no usable prior state. Ask for one cycle so arming
+    # the watcher does not leave already-queued work sitting until the first
     # state change.
     sset drained_streak 0
     sset last_full "${now}"
     emit "full_cycle reason=startup"
+  elif [[ -n "${baseline}" ]]; then
+    # Resume that found the world already moved. One cycle covers the gap.
+    sset last_full "${now}"
+    emit "full_cycle reason=resume_gap"
   fi
 
   local last_slow="${now}" streak
@@ -284,6 +300,16 @@ cmd_watch() {
 
     streak="$(sget drained_streak)"
     if [[ "${streak}" =~ ^[0-9]+$ ]] && (( streak >= DRAINED_LIMIT )); then
+      # Clear the streak as we stop. It has done its job, and leaving it set
+      # makes the drained shutdown a STICKY TERMINAL STATE: the next arm would
+      # resume (so emit no startup cycle), hit this check on its very first
+      # tick, and exit again — while the start-path baseline had already
+      # consumed whatever merge or board change prompted the re-arm. The
+      # watcher would be dead one tick after arming with no signal why, and
+      # only an out-of-band `reset` or `record-cycle work` would revive it.
+      # Making the shutdown reachable (issue #4130) is what turned that from
+      # unreachable into a live trap, so the re-entry path belongs with it.
+      sset drained_streak 0
       emit "stop reason=drained cycles=${streak}"
       return 0
     fi

@@ -217,6 +217,10 @@ out="$(PIPELINE_WATCH_DRAINED_LIMIT=2 \
        PIPELINE_WATCH_PRS_CMD="printf ''" \
        timeout 4 bash "${WATCH}" watch 2>&1)" || rc=$?
 check_not_contains "a re-arm does not re-emit the startup cycle" "${out}" "full_cycle reason=startup"
+# Pin that it STAYED UP and stayed quiet. Without this, the assertion above
+# passes just as well if the watcher refused to start or died on line 1 — the
+# captured output in that case is also free of a startup line.
+check_eq "and the re-arm stayed up for the whole window" "${rc}" "124"
 streak="$(bash "${WATCH}" state | awk -F= '/^drained_streak=/{print $2}' | tr -d ' ')"
 check_eq "a re-arm preserves the drained streak" "${streak}" "1"
 
@@ -240,6 +244,10 @@ check_eq "that shutdown exits 0" "${rc}" "0"
 # resume's first tick is already due.
 bash "${WATCH}" reset >/dev/null
 mkdir -p "${PO_CACHE_DIR}/watch"
+# Seeded through the state file directly: `state` reads it and `reset` clears
+# it, but no subcommand WRITES a chosen timestamp. This couples the test to
+# sset()'s one-file-per-key layout — if that ever changes, this seed and the
+# future-dated one below are what break.
 printf '%s\n' "$(( $(date +%s) - 9000 ))" > "${PO_CACHE_DIR}/watch/last_full"
 rc=0
 out="$(PIPELINE_WATCH_DRAINED_LIMIT=99 \
@@ -251,6 +259,101 @@ out="$(PIPELINE_WATCH_DRAINED_LIMIT=99 \
        timeout 4 bash "${WATCH}" watch 2>&1)" || rc=$?
 check_contains "a stale last_full fires the interval cycle after a re-arm" "${out}" "EVENT full_cycle reason=interval"
 check_not_contains "and does not relabel it as a startup cycle" "${out}" "reason=startup"
+
+# --- the drained stop is not a sticky terminal state (review of PR #4131) ---
+# Making the shutdown reachable created a new trap: nothing cleared the streak
+# when the watcher stopped on it, so the next arm resumed (no startup event),
+# hit the drained check on its first tick and exited again — while the
+# start-path baseline had already eaten whatever change prompted the re-arm.
+bash "${WATCH}" reset >/dev/null
+# Seed last_full so this start is a RESUME. A cold start legitimately zeroes
+# the streak, which would make the stop unreachable and the assertions vacuous.
+mkdir -p "${PO_CACHE_DIR}/watch"
+printf '%s\n' "$(date +%s)" > "${PO_CACHE_DIR}/watch/last_full"
+bash "${WATCH}" record-cycle drained full_cycle >/dev/null
+bash "${WATCH}" record-cycle drained full_cycle >/dev/null
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=2 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=9999 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-s\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 20 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_contains "the drained shutdown fires" "${out}" "EVENT stop reason=drained"
+streak="$(bash "${WATCH}" state | awk -F= '/^drained_streak=/{print $2}' | tr -d ' ')"
+check_eq "stopping on drained clears the streak" "${streak}" "0"
+
+# Re-arming after that stop must stay up, not die on a stale streak.
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=2 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=9999 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-s\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 4 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_not_contains "a re-arm after a drained stop does not stop again" "${out}" "reason=drained"
+check_eq "and it stays up for the whole window" "${rc}" "124"
+
+# --- a resume whose baseline moved emits one catch-up cycle ------------------
+# The start-path baseline is a DROP, not a deferral. On a cold start the
+# startup cycle covers it; on a resume nothing would, so a gap in which real
+# state changed would be silently lost.
+bash "${WATCH}" reset >/dev/null
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=0 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=9999 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-g1\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 20 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_contains "cold start baselines at the first SHA" "${out}" "reason=startup"
+
+# The SHA moved while the watcher was down.
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=99 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=9999 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-g2\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 4 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_contains "a resume whose baseline moved emits a catch-up cycle" "${out}" "EVENT full_cycle reason=resume_gap"
+check_not_contains "and does not replay the gap event by event" "${out}" "EVENT merged"
+
+# A quiet resume stays silent — the catch-up must not fire on every re-arm.
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=99 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=9999 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-g2\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 4 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_not_contains "a quiet resume emits no catch-up cycle" "${out}" "full_cycle"
+
+# --- a future-dated last_full is a cold start, not a dead watcher -----------
+# Syntax alone is not enough: an NTP step back, a suspend/resume or a snapshot
+# restore leaves last_full ahead of the clock, `now - last_full` stays negative
+# forever, and the 2-hourly safety net is silently dead. The pre-#4130 code
+# self-healed this by re-stamping last_full on every start.
+bash "${WATCH}" reset >/dev/null
+mkdir -p "${PO_CACHE_DIR}/watch"
+# Seeded through the state file directly: `state` reads and `reset` clears, but
+# no subcommand WRITES a chosen timestamp. If the state layout ever changes,
+# this and the stale-last_full seed above are what break — see sset().
+printf '%s\n' "$(( $(date +%s) + 86400 ))" > "${PO_CACHE_DIR}/watch/last_full"
+rc=0
+out="$(PIPELINE_WATCH_DRAINED_LIMIT=0 \
+       PIPELINE_WATCH_FAST=1 PIPELINE_WATCH_SLOW=9999 PIPELINE_WATCH_FULL=7200 \
+       PIPELINE_WATCH_SHA_CMD="printf 'sha-f\n'" \
+       PIPELINE_WATCH_CONTAINERS_CMD="printf ''" \
+       PIPELINE_WATCH_BOARD_CMD="echo 0" \
+       PIPELINE_WATCH_PRS_CMD="printf ''" \
+       timeout 20 bash "${WATCH}" watch 2>&1)" || rc=$?
+check_contains "a future-dated last_full takes the cold-start path" "${out}" "EVENT full_cycle reason=startup"
 
 echo "--------------------------------------"
 printf 'ran %d, failed %d\n' "${ran}" "${fail}"
