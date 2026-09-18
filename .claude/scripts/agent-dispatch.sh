@@ -1121,6 +1121,44 @@ gate_credentials_for_launch() {
   esac
 }
 
+# Stream an investigator container's log to disk for the container's lifetime.
+#
+# Investigator containers run with `--rm`, so Docker deletes the container AND
+# its log the instant it exits. Step results survive independently in
+# `lanes/<lane>/step-*.findings.json`; what is lost is the event stream —
+# `step_written`, `step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and
+# with it the sequencing and timing needed to analyse harness behaviour after a
+# run. A sweep's first-finishing lane was the reliable casualty: by the time
+# anyone looked, only the still-running lanes could be read.
+#
+# `docker logs -f` follows until the container exits and then ends by itself,
+# so there is nothing to clean up and no lifetime to track. `--timestamps`
+# is what makes the result useful for timing analysis rather than just a
+# transcript.
+#
+# Detached via setsid+nohup so it never blocks or is killed with the dispatch
+# shell, and every failure path returns 0: an unpersisted log is a diagnostic
+# loss, never a reason to fail a launch that is otherwise fine.
+start_investigator_log_capture() {
+  local sweep_dir="$1" mode_safe="$2" container_id="$3"
+  local log_dir="${sweep_dir}/container-logs"
+
+  if [[ -z "$sweep_dir" || -z "$mode_safe" || -z "$container_id" ]]; then
+    echo "WARNING: log capture skipped (missing sweep dir, mode or container id)" >&2
+    return 0
+  fi
+
+  if ! mkdir -p "$log_dir" 2>/dev/null; then
+    echo "WARNING: could not create ${log_dir}; container log will not be persisted" >&2
+    return 0
+  fi
+
+  setsid nohup docker logs -f --timestamps "$container_id" \
+    > "${log_dir}/${mode_safe}.log" 2>&1 < /dev/null &
+  disown 2>/dev/null || true
+  return 0
+}
+
 usage() {
   cat <<'EOF'
 Usage: agent-dispatch.sh <command> [args...]
@@ -3456,6 +3494,9 @@ PY
       --entrypoint /usr/local/bin/investigator-entrypoint.sh \
       cfg-agent:latest \
       "${inv_mode}" 2>&1); then
+      # Before announcing the launch: the container is running with --rm, so
+      # its log exists only while it does.
+      start_investigator_log_capture "$inv_sweep_dir" "$inv_mode_safe" "$container_id"
       echo "LAUNCHED_INVESTIGATOR:${inv_mode}:${container_id}"
     else
       echo "LAUNCH_FAILED:${container_name}:${container_id}"
