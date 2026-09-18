@@ -437,6 +437,94 @@ assert_contains "$heal_out" "restarting it" \
     "self-heal: and says so -- a dead watcher must not be silent, which is different from must not be survivable"
 teardown_fixture
 
+# A RECYCLED PID must not read as a live watcher.
+#
+# [Review finding, MEDIUM] `kill -0 $pid` proves only that SOME process holds
+# that pid. Pids are recycled. A watcher that died while an unrelated process
+# later took its number would read as alive forever -- never restarted, so the
+# mirror goes stale, and every launch is then refused. Same outage class as
+# the original critical finding, reached by a different route.
+setup_fixture
+mkdir -p "$CREDS_MIRROR_DIR"
+# A real, live process that is definitively NOT our watcher: this shell.
+printf '%s\n' "$$" > "$CREDS_MIRROR_WATCHER_PIDFILE"
+if creds_mirror_watcher_alive; then
+    _fail "pid reuse: a live but unrelated pid is reported as our watcher"
+else
+    _pass "pid reuse: a live pid that is not the watcher is correctly reported dead"
+fi
+
+# And the guard recovers from it rather than refusing, which is the half that
+# actually removes the outage.
+reuse_out=$(bash -c "
+    export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
+    export CFGMS_CREDS_MIRROR_DIR='$CREDS_MIRROR_DIR'
+    export CFGMS_CREDS_MIRROR_POLL_SECONDS=1
+    source '$DISPATCH'
+    printf '%s\n' \$\$ > '$CREDS_MIRROR_WATCHER_PIDFILE'
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
+" 2>&1)
+assert_contains "$reuse_out" "LAUNCH_PROCEEDED" \
+    "pid reuse: the launch proceeds by restarting, rather than refusing forever"
+teardown_fixture
+
+# `stop_creds_mirror_watcher` must NEVER kill a process that is not ours.
+#
+# Found the hard way: the pid-reuse test above wrote its own shell's pid into
+# the pidfile, and `stop_creds_mirror_watcher` killed the test. On a real host
+# that is an arbitrary process on someone's machine, killed by a dispatch
+# script, because a pidfile outlived the process it named.
+#
+# Asserted with a REAL live process -- a `sleep` this suite owns -- rather
+# than a synthetic pid, because the whole failure is about a pid that is
+# genuinely alive and genuinely not ours.
+setup_fixture
+mkdir -p "$CREDS_MIRROR_DIR"
+sleep 30 &
+bystander=$!
+printf '%s\n' "$bystander" > "$CREDS_MIRROR_WATCHER_PIDFILE"
+stop_creds_mirror_watcher
+if kill -0 "$bystander" 2>/dev/null; then
+    _pass "stop: an unrelated live process named by a stale pidfile is NOT killed"
+else
+    _fail "stop: killed an unrelated process -- a stale pidfile must never be trusted with a signal"
+fi
+kill "$bystander" 2>/dev/null || true
+assert_eq "$(test -f "$CREDS_MIRROR_WATCHER_PIDFILE" && echo present || echo gone)" "gone" \
+    "stop: the stale pidfile is removed anyway, so the next call cannot repeat the mistake"
+teardown_fixture
+
+# The AC6 uid assertion must run in PRODUCTION, not only in this file.
+#
+# [Review finding, MEDIUM] It previously had exactly one caller -- this test
+# -- so the "assert rather than assume" guard was dead code on every real
+# launch. A guard nothing calls is a comment.
+setup_fixture
+uid_callers=$(grep -c 'assert_creds_mirror_uid' "$DISPATCH" || true)
+assert_eq "$uid_callers" "2" \
+    "uid assert: defined AND called from a launch path, not only from this suite"
+guard_body=$(sed -n '/^ensure_creds_mirror_for_mount() {/,/^}/p' "$DISPATCH")
+assert_contains "$guard_body" "assert_creds_mirror_uid" \
+    "uid assert: the caller is the mount guard, which every launch goes through"
+
+# It WARNS rather than refusing: the AC is about a permission failure being
+# legible, not about blocking, and the container uid default is a guess about
+# someone else's environment.
+uid_out=$(bash -c "
+    export CFGMS_HOST_CREDS_FILE='$CFGMS_HOST_CREDS_FILE'
+    export CFGMS_CREDS_MIRROR_DIR='${WORK}/mirror-uid'
+    export CFGMS_CREDS_MIRROR_CONTAINER_UID=999999
+    source '$DISPATCH'
+    ensure_creds_mirror_for_mount
+    echo LAUNCH_PROCEEDED
+" 2>&1)
+assert_contains "$uid_out" "CREDS_MIRROR_UID_MISMATCH" \
+    "uid assert: a mismatch is reported, naming both uids"
+assert_contains "$uid_out" "LAUNCH_PROCEEDED" \
+    "uid assert: it warns and proceeds -- refusing on a guess about the container would be a third outage class"
+teardown_fixture
+
 # An ORPHANED watcher must exit on its own.
 #
 # A watcher outlives its dispatch by design, so nothing reaps it if the

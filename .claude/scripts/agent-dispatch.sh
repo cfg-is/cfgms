@@ -1100,8 +1100,10 @@ _post_quarantine_comment() {
 # below, never the host's live ~/.claude/.credentials.json directly. A LOW or
 # even EXPIRED token is NOT a launch blocker: the host refreshes, and the
 # mirror carries the refreshed value through to a running container. Only a
-# genuinely missing or unparseable creds file — or a stale mirror, meaning
-# the watcher that keeps it current has died — actually blocks a launch.
+# genuinely missing or unparseable creds file blocks a launch. The mirror is
+# NOT checked here at all — see `ensure_creds_mirror_for_mount`, which runs at
+# the `docker run` itself, because several arms call this gate and then refuse
+# before launching anything.
 #
 # TWO CLAIMS THAT USED TO BE HERE WERE FALSE, and are recorded because the
 # second one is why the first survived so long:
@@ -1356,39 +1358,46 @@ ensure_creds_mirror_for_mount() {
     exit 10
   fi
 
-  # Liveness, checked at the launch rather than at the gate. Two states,
-  # deliberately distinguished:
+  # Liveness, checked at the launch rather than at the gate.
+  # AC6: assert the uid assumption rather than trusting it. A mirror the
+  # container cannot read fails as permission-denied, which looks nothing
+  # like the stale-token failure it would be mistaken for.
   #
-  #   NO heartbeat at all -> no watcher has ever run here. Start one; this is
-  #     an ordinary first launch and must not be an error.
-  #   A STALE heartbeat -> a watcher ran and stopped. Refuse. Otherwise the
-  #     mirror drifts out of date during the container's life and nothing
-  #     says so, which is the original bug restored quietly.
-  # A dead or absent watcher is RESTARTED, never a reason to refuse.
+  # WARNS rather than refuses, deliberately. The AC is about legibility -- a
+  # permission failure must not masquerade as something else -- not about
+  # blocking. `CREDS_MIRROR_CONTAINER_UID` defaults to a guess about someone
+  # else's container, and refusing on a guess would invent exactly the kind
+  # of pipeline-wide outage the rest of this block exists to avoid.
+  assert_creds_mirror_uid || {
+    echo "       the container may not be able to read ${CREDS_MIRROR_FILE} (mode 0600)." >&2
+    echo "       Set CFGMS_CREDS_MIRROR_CONTAINER_UID if the container runs as another uid." >&2
+  }
+
+  # A watcher that is absent, dead, or ALIVE-BUT-NOT-WORKING is restarted.
+  # Never a reason to refuse.
   #
-  # The earlier version refused on a stale heartbeat, which -- combined with
-  # a watcher that could not survive its dispatch -- bricked every subsequent
-  # dispatch until a human deleted the heartbeat. "A dead watcher must not be
-  # silent" is satisfied by saying so and fixing it; refusing the launch
-  # converts a recoverable local fault into a pipeline-wide outage, which is
-  # the exact failure mode the read-only mount elsewhere in this file exists
-  # to prevent.
-  if ! creds_mirror_watcher_alive; then
+  # An earlier version refused on a stale heartbeat. Combined with a watcher
+  # that could not survive its dispatch, that bricked every subsequent
+  # dispatch until a human deleted the heartbeat. The refusal was then
+  # narrowed to "stale DESPITE a live watcher" -- which pid reuse walks
+  # straight back into, since a recycled pid reads as a live watcher that is
+  # not beating.
+  #
+  # So there is no refusal path left here at all. Whatever the cause -- pid
+  # reuse, a wedged watcher, a clock jump, something not yet imagined -- the
+  # answer is the same: stop what is there, start a fresh one, carry on. A
+  # redundant restart costs a process; a refusal costs every dispatch until
+  # someone notices.
+  if ! creds_mirror_watcher_alive || ! creds_mirror_is_fresh; then
     local was; was="$(creds_mirror_age_seconds)"
     if [[ "$was" != "never" ]]; then
-      echo "NOTE: credential mirror watcher was not running (heartbeat ${was}s old); restarting it" >&2
+      echo "NOTE: credential mirror watcher was not working (heartbeat ${was}s old); restarting it" >&2
     fi
+    stop_creds_mirror_watcher
     start_creds_mirror_watcher || {
       echo "ERROR: could not start the credential mirror watcher; refusing to launch" >&2
       exit 10
     }
-  fi
-  # Only now is staleness a real failure: a watcher is running and the
-  # heartbeat is still old, which means it is running and not working.
-  if ! creds_mirror_is_fresh; then
-    echo "ERROR: credential mirror is stale ($(creds_mirror_age_seconds)s) despite a live watcher" >&2
-    echo "       refusing to launch rather than hand a container a credential that will go bad" >&2
-    exit 10
   fi
 }
 
@@ -1400,11 +1409,26 @@ CREDS_MIRROR_WATCHER_PIDFILE="${CREDS_MIRROR_DIR}/.watcher.pid"
 # starts the watcher is not the process that needs to know about it later.
 # Every dispatch is a separate one-shot `agent-dispatch.sh` invocation.
 creds_mirror_watcher_alive() {
-  local pid
+  local pid cmdline
   [[ -f "$CREDS_MIRROR_WATCHER_PIDFILE" ]] || return 1
   pid="$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)" || return 1
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null || return 1
+
+  # `kill -0` proves only that SOME process holds that pid. Pids are recycled,
+  # and a watcher that died while an unrelated process later took its number
+  # would read as alive forever -- never restarted, so the mirror goes stale,
+  # and every launch is then refused. Confirm the process is actually ours.
+  if [[ -r "/proc/${pid}/cmdline" ]]; then
+    cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" || return 1
+    [[ "$cmdline" == *"creds-mirror-watch"* ]] || return 1
+    return 0
+  fi
+  # No /proc: fall back to ps. If neither is available, do NOT claim the
+  # watcher is alive -- a false "dead" costs one redundant restart, while a
+  # false "alive" costs every subsequent dispatch.
+  cmdline="$(ps -o args= -p "$pid" 2>/dev/null)" || return 1
+  [[ "$cmdline" == *"creds-mirror-watch"* ]]
 }
 
 # Keep the mirror current for as long as the HOST session lasts -- not the
@@ -1445,12 +1469,22 @@ start_creds_mirror_watcher() {
 # Deliberately NOT called from an EXIT trap -- see above. Exists for an
 # operator, and for tests, to stop a watcher on purpose.
 stop_creds_mirror_watcher() {
-  local pid
-  [[ -f "$CREDS_MIRROR_WATCHER_PIDFILE" ]] || return 0
-  pid="$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)" || return 0
-  if [[ "$pid" =~ ^[0-9]+$ ]]; then
-    kill "$pid" 2>/dev/null || true
+  # Only ever kills a process confirmed to BE our watcher.
+  #
+  # Killing the recorded pid unconditionally is not safe: pids are recycled,
+  # so a stale pidfile can name an unrelated live process -- and this would
+  # then kill it. Found by the pid-reuse test, which wrote its own shell's pid
+  # into the pidfile and watched this function terminate the test.
+  #
+  # `creds_mirror_watcher_alive` already does the identity check, so reuse it
+  # rather than reimplementing the comparison here and letting the two drift.
+  if creds_mirror_watcher_alive; then
+    local pid
+    pid="$(cat "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null)" || pid=""
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill "$pid" 2>/dev/null || true
   fi
+  # The pidfile goes either way: if it does not name our watcher, it is stale
+  # and keeping it only invites the same mistake on the next call.
   rm -f "$CREDS_MIRROR_WATCHER_PIDFILE" 2>/dev/null || true
 }
 
