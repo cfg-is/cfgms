@@ -5,13 +5,15 @@ Three shapes are validated here:
 
 - A **finding** (`validate_finding`): the structured output a lane emits per
   vulnerability, matching the epic's "Finding schema" exactly. The
-  de-duplication key is `file` + `symbol` + `vuln_class` — never a location,
+  de-duplication key is `file` + `symbol` + normalised `cwe` (Issue #4134,
+  plus a per-lane ordinal so one lane's two findings never collapse into
+  one) — never a location,
   because line ranges rot as `develop` advances while symbol names survive.
   That was always right about the *key*; it was implemented, before Issue
   #3983, as "don't record a location at all," which is a different and
   overly strong decision -- a finding naming a file and a symbol but no
   location makes a human open the file and search. Issue #3983 separates the
-  two: the key stays `file` + `symbol` + `vuln_class`, unchanged, while every
+  two: the key stays `file` + `symbol` + the defect class, unchanged, while every
   finding now also carries `cwe` (a normalised identifier from the closed
   vocabulary #3981's methodology document defines, or its `other: <label>`
   escape -- validated and normalised by `normalize_cwe`, never passed through
@@ -203,10 +205,12 @@ def normalize_cwe(value: object) -> str | None:
     `Cwe-295`, `CWE-295: Improper certificate validation` all normalise to
     `"CWE-295"` -- so two lanes naming the same identifier differently are
     recognised as one value downstream (rendering, cross-step grouping).
-    Normalising is deliberately a different operation from de-duplication:
-    this changes what value is *stored*, never what makes two findings the
-    same finding -- the de-duplication key stays `file` + `symbol` +
-    `vuln_class` regardless of what `cwe` says.
+    Normalising is a different operation from de-duplication, but no longer an
+    unrelated one: since Issue #4134 the value this function returns IS the
+    class component of the de-duplication key (`file` + `symbol` + normalised
+    `cwe`, plus a per-lane ordinal). It was previously keyed on the free-text
+    `vuln_class`, which meant two lanes describing one defect in different
+    registers -- prose against an identifier -- never matched.
 
     Never raises: a non-string, an out-of-list number, or an `other:` escape
     with an empty label all return `None`, exactly like every other
@@ -623,7 +627,8 @@ def validate_plan_step(step: object) -> list[str]:
 # "no parseable output means it did not run" consequence in the consolidator.
 #
 # An adjudication ANNOTATES one deterministic finding -- addressed by the
-# consolidator's own de-duplication key (`file` + `symbol` + `vuln_class`)
+# consolidator's own de-duplication key (`file` + `symbol` + normalised `cwe`
+# since Issue #4134)
 # -- with a rubric-applied severity and a written rationale. It carries no
 # evidence, no fix, and no line number: the adjudicator sees findings, never
 # source, so it has nothing new to say about the code. Nothing in this shape

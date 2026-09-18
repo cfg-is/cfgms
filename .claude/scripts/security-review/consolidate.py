@@ -120,6 +120,7 @@ sweep regardless of how much of the sweep actually ran.
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import os
@@ -394,7 +395,12 @@ def _is_valid_repo_file(
 
 def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> dict:
     tree_cache: dict[str, frozenset] = {}
-    groups: dict[tuple[str, str, str], dict] = {}
+    groups: dict[tuple[str, str, str, int], dict] = {}
+    # How many findings this lane has already reported at a given
+    # file/symbol/class -- the ordinal that keeps same-lane findings apart.
+    # Insertion order is the lane's own report order, which is deterministic
+    # because `findings` arrives sorted by lane then step.
+    lane_finding_counts: dict[tuple[str, str, str, str], int] = collections.defaultdict(int)
 
     for lane, step_id, finding in findings:
         file_value = finding["file"]
@@ -443,7 +449,37 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
         normalized_cwe = schema.normalize_cwe(finding.get("cwe"))
         defect_class = normalized_cwe or finding["vuln_class"]
 
-        key = (file_value, finding["symbol"], defect_class)
+        # De-duplication reconciles DIFFERENT lanes. It must never collapse two
+        # findings from the SAME lane (Issue #4134).
+        #
+        # A lane reporting two findings is that lane asserting they are two
+        # things. Merging them overrules the only judgement in the system that
+        # actually read the code, and it loses a defect: the second one
+        # survives as an occurrence bullet while the consolidated record --
+        # title, line, the count itself -- describes only the first.
+        #
+        # Measured on sweep 2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held
+        # two or more findings, swallowing 116 of 2,133 -- 5.4% of everything
+        # reported. Example, codex on pkg/secrets/providers/sops/lock.go
+        # ::acquireCASLock, both CWE-362: one race window at line 83 and
+        # another at line 103. Two defects, twenty lines apart, one record.
+        #
+        # An ordinal per lane keeps them apart: the Nth finding a lane reports
+        # at a key pairs with the Nth from every other lane. Cross-lane
+        # agreement is unaffected in the case that matters -- each lane
+        # reporting one finding still meets at ordinal 0.
+        #
+        # This also removes a fabricated disagreement. `_severity_range`'s
+        # `by_lane` is last-write-wins per lane, so two same-lane findings at
+        # `low` and `critical` rendered "DISAGREEMENT low -> critical ... until
+        # a human resolves it" from ONE lane, with `low` unattributable in
+        # `by_lane` while `lowest` still reported it. A group can now hold at
+        # most one finding per lane, so that shape is unreachable rather than
+        # merely unlikely.
+        lane_ordinal = lane_finding_counts[(lane, file_value, finding["symbol"], defect_class)]
+        lane_finding_counts[(lane, file_value, finding["symbol"], defect_class)] += 1
+
+        key = (file_value, finding["symbol"], defect_class, lane_ordinal)
         group = groups.setdefault(key, {"lanes": set(), "step_ids": set(), "occurrences": []})
         group["lanes"].add(lane)
         group["step_ids"].add(step_id)
@@ -550,7 +586,7 @@ def _first_occurrence_field(occurrences: list[dict], field: str) -> object:
 
 def _finalize_findings(groups: dict, lane_step_state: dict[str, dict[str, str]]) -> list[dict]:
     consolidated = []
-    for (file_value, symbol, defect_class), group in sorted(groups.items()):
+    for (file_value, symbol, defect_class, _lane_ordinal), group in sorted(groups.items()):
         step_ids = sorted(group["step_ids"])
         reported_lanes = sorted(group["lanes"])
         eligible_lanes = _eligible_lanes(step_ids, lane_step_state)
@@ -621,6 +657,31 @@ def _severity_range(occurrences: list[dict]) -> dict:
         "disagreement": lowest != highest,
         "by_lane": {lane: _SEVERITY_BY_RANK[rank] for lane, rank in sorted(by_lane.items())},
     }
+
+
+def _prose_label(finding: dict) -> str:
+    """A human-readable class label for a heading, never the bare identifier.
+
+    Since Issue #4134 the consolidated `vuln_class` IS the normalised cwe, so
+    rendering it beside `cwe` gives "CWE-863 (CWE-863)" -- correct, and useless
+    to read. Each lane's own prose is on its occurrence, so one is picked from
+    there.
+
+    Explicitly SKIPS an occurrence whose label is itself an identifier. Taking
+    the first occurrence in lane order looked right only because `codex` sorts
+    before `ollama` and codex writes prose: rename the lanes, or take a
+    single-lane ollama finding (ollama writes CWE ids into `vuln_class`), and
+    the identifier wins again. That is luck, not design, and this is the line
+    that removes the luck.
+
+    Falls back to the key when no occurrence carries prose -- a finding with no
+    human label anywhere still needs a non-empty heading.
+    """
+    for occurrence in finding.get("occurrences") or []:
+        label = occurrence.get("vuln_class")
+        if isinstance(label, str) and label and schema.normalize_cwe(label) is None:
+            return label
+    return finding["vuln_class"]
 
 
 def _finding_key(finding: dict) -> tuple[str, str, str]:
@@ -1848,10 +1909,7 @@ def render_markdown(report: dict) -> str:
         # always was. The prose is per-lane now, so it comes off an occurrence:
         # a deterministic pick, exactly as `line`/`cwe` already are.
         #
-        # Falls back to the key when no occurrence carries a label, which keeps
-        # the heading non-empty for a finding that somehow has no prose at all.
-        reported_label = _first_occurrence_field(finding["occurrences"], "vuln_class")
-        heading_label = reported_label or finding["vuln_class"]
+        heading_label = _prose_label(finding)
         lines.append(
             f"### {_md_escape_inline(heading_label)}{cwe_suffix} — "
             f"{_md_escape_inline(finding['file'])}{_location_suffix(finding)} :: "
@@ -2057,7 +2115,7 @@ def _cross_step_group_lines(groups: list[dict]) -> list[str]:
             member_steps = ", ".join(_md_escape_inline(s) for s in member["step_ids"])
             lines.append(
                 f"- `{_md_escape_inline(member['file'])}` :: "
-                f"{_md_escape_inline(member['symbol'])} ({_md_escape_inline(member['vuln_class'])}; "
+                f"{_md_escape_inline(member['symbol'])} ({_md_escape_inline(_prose_label(member))}; "
                 f"step(s) {member_steps})"
             )
         assessment = group.get("assessment")

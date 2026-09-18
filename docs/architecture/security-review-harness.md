@@ -506,7 +506,7 @@ was considered and rejected, so a later reader can see it was weighed, not misse
   anchored to worked CFGMS examples. CVSS can be added later as an optional second field without
   changing the anchors.
 - **D2 — CWE vocabulary: a closed shortlist plus an explicit `other` escape, not the full
-  corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + `vuln_class`; with an open
+  corpus.** `consolidate.py` de-duplicates on `file` + `symbol` + normalised `cwe`; with an open
   vocabulary, two lanes describing one defect under two identifiers silently fail to merge. The
   core lists 25 CWE identifiers CFGMS actually cares about (certificate validation,
   authentication and authorization, signature verification, secret handling, logging, injection,
@@ -598,7 +598,7 @@ names which of the step's `hypotheses` this finding resulted from — a finding 
 `candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
 finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
-**The de-duplication key is still `file` + `symbol` + `vuln_class` — never the location.** Line
+**The de-duplication key is still `file` + `symbol` + normalised `cwe` — never the location.** Line
 ranges rot as `develop` advances while symbol names survive, so keying on `line`/`end_line` would
 split one defect two lanes report at two slightly different line numbers into two findings,
 destroying the cross-lane agreement signal the harness is built on. Before Issue #3983, that
@@ -2571,7 +2571,7 @@ the actual diagnostic text (an unrecognised model id, an auth error) beside it �
 of recording the tail in the first place. A step with no tail on disk (an envelope predating this
 story, or a state that genuinely had nothing to show) contributes no entry.
 
-**De-duplication key is `file` + `symbol` + `vuln_class`**, exactly as the Finding schema above —
+**De-duplication key is `file` + `symbol` + normalised `cwe`**, exactly as the Finding schema above —
 never the `line`/`end_line` location Issue #3983 added. Every occurrence across every lane's
 `step-*.findings.json` sharing this key collapses into one consolidated entry; the entry's `lanes`
 field lists exactly the lanes that independently reported it, and `occurrences` keeps each lane's
@@ -2588,7 +2588,7 @@ immediately after `file` (`file.go:42` or `file.go:42-47`) and the picked `cwe` 
 rendered order -- primarily by `agreement.reported` descending, then by the group's
 highest-ranked occurrence `severity` descending (`critical` > `high` > `medium` > `low`), then
 by its highest-ranked occurrence `confidence` descending (`high` > `medium` > `low`), with the
-`file`/`symbol`/`vuln_class` de-duplication key retained only as the final tiebreaker between
+`file`/`symbol`/normalised `cwe` de-duplication key retained only as the final tiebreaker between
 two findings tied on all three ranked fields. Severity/confidence are taken via `max()` over a
 group's `occurrences`, not the first occurrence in insertion order, so a group where only the
 second-listed lane called it `critical` still sorts as critical. This matches

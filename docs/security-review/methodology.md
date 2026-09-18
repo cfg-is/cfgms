@@ -380,7 +380,11 @@ same definition for the reader auditing or reviewing it.
 
 - Which tools a lane may run inside a step. That is a harness concern, tracked
   separately.
-- The finding schema. `vuln_class` carries the identifier chosen above until a dedicated
-  field exists; the schema is defined once in `schema.py`.
+- The finding schema, defined once in `schema.py`. A lane reports BOTH `cwe`
+  (the identifier chosen above, from the closed list) and `vuln_class` (its own
+  short prose label). Since Issue #4134 the consolidator keys on the normalised
+  `cwe`, and a CONSOLIDATED finding's `vuln_class` carries that same normalised
+  class -- each lane's own prose survives on its occurrence and is what a report
+  heading shows.
 - How the consolidator adjudicates severity when lanes disagree. This document gives
   every lane the same scale; reconciling their ratings is the consolidator's job.

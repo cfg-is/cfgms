@@ -2001,6 +2001,166 @@ def test_two_lanes_naming_one_defect_differently_are_one_finding():
         )
 
 
+def test_heading_prose_does_not_depend_on_lane_name_ordering():
+    """REQUIRED TEST (Issue #4134): the heading shows prose whichever lane
+    happens to sort first, and for a single-lane identifier-only finding.
+
+    The first version of this passed by luck. It picked the first occurrence in
+    lane order, and the fixture named the prose lane `laneA` and the identifier
+    lane `laneB` -- so prose won alphabetically. Name them `alpha` (identifier)
+    and `zeta` (prose) and the heading renders `CWE-863 (CWE-863)`: the exact
+    string the code says cannot occur. The same happens for any single-lane
+    ollama finding, since ollama writes identifiers into `vuln_class`; the real
+    sweep was saved only by `codex` < `ollama`.
+
+    So this fixture deliberately inverts the ordering the implementation used
+    to rely on.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        # `alpha` sorts FIRST and writes the identifier.
+        write(
+            os.path.join(sweep, "lanes", "alpha", "step-001.findings.json"),
+            complete_envelope(sha, "alpha", "step-001", [
+                finding(sha, "alpha", "step-001", vuln_class="CWE-863", cwe="CWE-863"),
+            ]),
+        )
+        write(
+            os.path.join(sweep, "lanes", "zeta", "step-001.findings.json"),
+            complete_envelope(sha, "zeta", "step-001", [
+                finding(sha, "zeta", "step-001", vuln_class="Incorrect authorization", cwe="CWE-863"),
+            ]),
+        )
+        md = consolidate.render_markdown(consolidate.consolidate(sweep, repo))
+        check(
+            "CWE-863 (CWE-863)" not in md,
+            "heading: the identifier is never rendered as its own label, whatever the lane names",
+            md,
+        )
+        check(
+            "### Incorrect authorization (CWE-863)" in md,
+            "heading: prose is preferred even when the identifier lane sorts first",
+            md,
+        )
+
+
+def test_heading_falls_back_when_every_lane_wrote_an_identifier():
+    """A finding whose only label anywhere IS the identifier still needs a
+    non-empty heading -- the fallback must not render blank."""
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write(
+            os.path.join(sweep, "lanes", "alpha", "step-001.findings.json"),
+            complete_envelope(sha, "alpha", "step-001", [
+                finding(sha, "alpha", "step-001", vuln_class="CWE-863", cwe="CWE-863"),
+            ]),
+        )
+        md = consolidate.render_markdown(consolidate.consolidate(sweep, repo))
+        check(
+            "### CWE-863 (CWE-863)" in md,
+            "heading: with no prose anywhere the identifier is used rather than an empty heading",
+            md,
+        )
+
+
+def test_two_findings_from_ONE_lane_at_the_same_key_stay_two():
+    """REQUIRED TEST (Issue #4134): de-duplication reconciles DIFFERENT lanes
+    and must never collapse two findings from the same one.
+
+    A lane reporting two findings is that lane asserting they are two things.
+    Merging them overrules the only judgement in the system that read the code,
+    and loses a defect: the second survives as an occurrence bullet while the
+    consolidated record -- title, line, and the count itself -- describes only
+    the first.
+
+    Not a contrived shape, and the likelier one. Measured on sweep
+    2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held two or more findings,
+    swallowing 116 of 2,133 -- 5.4% of everything reported. The fixture below
+    is a real example from it, codex on `acquireCASLock`: two race windows
+    twenty lines apart, both CWE-362.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write(
+            os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"),
+            complete_envelope(sha, "laneA", "step-001", [
+                finding(sha, "laneA", "step-001", line=83, cwe="CWE-362",
+                        vuln_class="Race condition, check-then-act", title="first window"),
+                finding(sha, "laneA", "step-001", line=103, cwe="CWE-362",
+                        vuln_class="Race condition, check-then-act", title="second window"),
+            ]),
+        )
+        report = consolidate.consolidate(sweep, repo)
+        check(
+            len(report["findings"]) == 2,
+            "same-lane: two findings at one key from one lane stay two",
+            str([(f["vuln_class"], f["occurrences"][0].get("title")) for f in report["findings"]]),
+        )
+        titles = {f["occurrences"][0].get("title") for f in report["findings"]}
+        check(
+            titles == {"first window", "second window"},
+            "same-lane: BOTH survive as findings, not one as a bullet under the other",
+            str(titles),
+        )
+        for f in report["findings"]:
+            check(
+                len(f["occurrences"]) == 1 and f["agreement"]["reported"] == 1,
+                "same-lane: neither is credited with agreement it never had",
+                str((f["agreement"], len(f["occurrences"]))),
+            )
+
+
+def test_same_lane_findings_never_fabricate_a_severity_disagreement():
+    """REQUIRED TEST (Issue #4134): a single lane cannot disagree with itself.
+
+    `_severity_range`'s `by_lane` is last-write-wins per lane, so two same-lane
+    findings at `low` and `critical` used to render "DISAGREEMENT low ->
+    critical ... until a human resolves it" -- from ONE lane, with `low`
+    unattributable in `by_lane` while `lowest` still reported it. The reader
+    was told to escalate a dispute that did not exist.
+
+    Keying per-lane makes the shape unreachable rather than merely unlikely: a
+    group can hold at most one finding per lane.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write(
+            os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"),
+            complete_envelope(sha, "laneA", "step-001", [
+                finding(sha, "laneA", "step-001", line=20, cwe="CWE-863",
+                        severity="low", vuln_class="Read path"),
+                finding(sha, "laneA", "step-001", line=90, cwe="CWE-863",
+                        severity="critical", vuln_class="Delete path"),
+            ]),
+        )
+        report = consolidate.consolidate(sweep, repo)
+        for f in report["findings"]:
+            check(
+                f["severity_range"]["disagreement"] is False,
+                "same-lane: no finding reports a disagreement",
+                str(f["severity_range"]),
+            )
+            # Every severity the range names must be attributable to a lane.
+            # `lowest` reporting a value `by_lane` has dropped is the exact
+            # shape that made the old output unreadable.
+            by_lane = set(f["severity_range"]["by_lane"].values())
+            check(
+                {f["severity_range"]["lowest"], f["severity_range"]["highest"]} <= by_lane,
+                "same-lane: every severity in the range is attributable to a lane",
+                str(f["severity_range"]),
+            )
+        md = consolidate.render_markdown(report)
+        check(
+            "DISAGREEMENT" not in md,
+            "same-lane: the report never tells a reader to resolve a dispute that does not exist",
+            md,
+        )
+
+
 def test_same_file_and_symbol_with_different_cwe_stay_separate():
     """REQUIRED TEST (Issue #4134): re-keying must not over-merge. Two
     findings on the same file and symbol but a different cwe are different
@@ -2646,7 +2806,9 @@ def test_the_consolidated_finding_carries_its_evidence():
     occ = [{"lane": "l", "step_id": "s", "severity": "high", "confidence": "high",
             "cwe": "CWE-89", "line": 4, "end_line": None, "title": "t",
             "evidence": "the proof", "suggested_fix": "f"}]
-    groups = {("a.go", "S", "v"): {"step_ids": {"s"}, "lanes": {"l"}, "occurrences": occ}}
+    # The 4th key element is the per-lane ordinal added in Issue #4134, which
+    # is what keeps two findings from ONE lane from collapsing into one.
+    groups = {("a.go", "S", "v", 0): {"step_ids": {"s"}, "lanes": {"l"}, "occurrences": occ}}
     got = consolidate._finalize_findings(groups, {"l": {"s": "complete"}})
     check(got[0]["evidence"] == "the proof",
           "evidence: the consolidated finding carries it", str(got[0].get("evidence")))
