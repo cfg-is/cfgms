@@ -1123,8 +1123,16 @@ gate_credentials_for_launch() {
 
 # Stream an investigator container's log to disk for the container's lifetime.
 #
-# Investigator containers run with `--rm`, so Docker deletes the container AND
-# its log the instant it exits. Step results survive independently in
+# A container's log lives exactly as long as the container, and an investigator
+# container's lifetime is not the sweep's to decide. This `docker run -d`
+# carries NO `--rm` -- see the container-conflict gate's own comment further
+# down -- but two things remove an exited container anyway: that gate reaps one
+# (`docker rm -f`) before reusing its name, which is what makes `resume` work
+# rather than refuse forever, and `cleanup-container`/`cleanup-issue` remove
+# them on request. Either can happen while the sweep is still running, and
+# neither waits for anyone to have read the log.
+#
+# Step results survive independently in
 # `lanes/<lane>/step-*.findings.json`; what is lost is the event stream —
 # `step_written`, `step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and
 # with it the sequencing and timing needed to analyse harness behaviour after a
@@ -3494,8 +3502,8 @@ PY
       --entrypoint /usr/local/bin/investigator-entrypoint.sh \
       cfg-agent:latest \
       "${inv_mode}" 2>&1); then
-      # Before announcing the launch: the container is running with --rm, so
-      # its log exists only while it does.
+      # Before announcing the launch: the log exists only while the container
+      # does, and a later same-name launch reaps this one to reuse its name.
       start_investigator_log_capture "$inv_sweep_dir" "$inv_mode_safe" "$container_id"
       echo "LAUNCHED_INVESTIGATOR:${inv_mode}:${container_id}"
     else

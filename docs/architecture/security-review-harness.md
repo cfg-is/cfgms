@@ -60,6 +60,11 @@ All sweep state lives outside the repository, under a base directory resolved by
     harness_identity.json              SHA-256 over investigator-entrypoint.sh and the
                                         --lane-entrypoint script from the LAST launch-investigator
                                         call (Issue #3952) -- recorded, not frozen
+    container-logs/
+      <mode>.log                       each investigator container's stdout+stderr, streamed to
+                                        disk for the container's lifetime (Issue #4132) -- one
+                                        file per mode: a lane id, `plan`, `verifier`,
+                                        `adjudicator`
     plan/
       step-001.json                    step prompt + scope (generated from metadata only)
       step-002.json
@@ -873,6 +878,8 @@ credential-delivery mechanics are documented at the files themselves rather than
 | Default-deny egress: iptables `OUTPUT` policy `DROP`, HTTPS-only, dnsmasq domain allowlist, `resolv.conf` pinned to `127.0.0.1` | `.devcontainer/init-firewall.sh`, allowlist in `.devcontainer/dnsmasq-allowlist-base.conf` + `.devcontainer/dnsmasq-allowlist.d/` |
 | The read-only/report-only behavioral contract for whichever mode runs `claude` inside the container | `.claude/agents/investigator.md` |
 | Plan-mode-only mount of that same file at `/home/agent/.claude/agents/investigator.md:ro`, so `claude --agent investigator` resolves it (Issue #4003) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm, plan branch) |
+| Streaming each container's log to `<sweep>/container-logs/<mode>.log` for its lifetime, so the event stream outlives the container (Issue #4132) | `.claude/scripts/agent-dispatch.sh` (`start_investigator_log_capture`) |
+
 | Harness-session credential mount (the only credential path — see `--harness`/`--model` below) | `.claude/scripts/agent-dispatch.sh` (`launch-investigator` case arm) |
 | Structural and functional test coverage | `.claude/scripts/tests/investigator_launch.test.sh` |
 | Per-harness egress fragment selection test coverage | `.devcontainer/init-firewall_test.sh` |
@@ -3313,6 +3320,23 @@ is now state-aware (`_container_safe_to_reap` in `agent-dispatch.sh`, reused by
 exactly `exited` is removed and the launch proceeds; a container that is `running`, `restarting`,
 or `created` — or in any state this script cannot positively identify as `exited` — is refused
 exactly as before, never reaped, never raced.
+
+A container's log lives exactly as long as the container, so reaping one destroys it — and the
+reap happens on the NEXT launch for that sweep and mode, which is to say while the sweep is still
+running and before anyone has necessarily read it. (`cleanup-container` / `cleanup-issue` remove
+them on request too.) Step outcomes survive independently in
+`lanes/<lane>/step-*.findings.json`; what is lost is the event stream — `step_written`,
+`step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and the timing between those events,
+which is exactly what is needed to work out why a lane was slow, how often a repair round fired,
+or whether a step's scanners ran.
+
+`start_investigator_log_capture` (Issue #4132) therefore streams `docker logs -f --timestamps`
+into `<sweep>/container-logs/<mode>.log` for the container's lifetime, one file per mode — a lane
+id, `plan`, `verifier`, `adjudicator`. The follow ends by itself when the container exits, so
+there is nothing to clean up. It starts in the launch's success branch before the launch is
+announced, so a short run cannot outrun its own capture, and every failure path returns 0 with a
+warning: an unpersisted log is a diagnostic loss, never a reason to fail an otherwise healthy
+launch.
 
 **Each lane's dispatch is independent (AC6).** Every roster lane's `launch-investigator` call is
 made in a loop (`dispatch_roster_lanes`); a lane that fails to dispatch for a documented,

@@ -1542,7 +1542,8 @@ rm -rf "$MODEL_TEST_DIR"
 
 echo ""
 echo "== REQUIRED TEST — the launch persists the container's log under"
-echo "   <sweep>/container-logs/<mode>.log, because --rm destroys it (Issue #4132) =="
+echo "   <sweep>/container-logs/<mode>.log, because a later same-name launch"
+echo "   reaps the container it lives in (Issue #4132) =="
 
 # Structural: the capture must be wired into the SUCCESS branch, before the
 # launch is announced. A capture started after the caller has already been told
