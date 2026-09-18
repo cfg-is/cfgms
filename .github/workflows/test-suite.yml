@@ -60,7 +60,11 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Measured over 40 PR runs (2026-09-17/18): job 11-14 min against the old
+    # 15-min cap, and runs that passed every step were killed at 15m04s and
+    # reported as "cancelled". 25 restores headroom while #4151 cuts the
+    # runtime itself; that issue owns bringing the cap back down.
+    timeout-minutes: 25
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
