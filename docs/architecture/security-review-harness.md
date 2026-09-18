@@ -3440,6 +3440,15 @@ to have read it:
 `cleanup-issue` is NOT one of them: it only ever constructs `cfg-agent-<num>` or
 `cfg-agent-item-<id>`, neither of which can match `cfg-agent-investigator-*`.
 
+**The capture survives container REMOVAL, not RELAUNCH — and that distinction matters.** The
+capture writes `> "${log_dir}/${mode_safe}.log"`, which truncates. So a `resume` that re-dispatches
+the same lane in the same sweep overwrites the first run's event stream: the container's own log
+is gone with the container, and the file that replaced it now holds only the second run. What is
+lost is the record of a run being deliberately replaced, which is usually the less interesting of
+the two — but it is lost silently, and "the log outlives the container" reads as a stronger
+guarantee than the code gives. A future change wanting both runs should append, or suffix the
+filename per launch; neither is done today.
+
 Step outcomes survive independently in
 `lanes/<lane>/step-*.findings.json`; what is lost is the event stream — `step_written`,
 `step_repair_attempted`, `scan_gap`, `stop_reason_raw` — and the timing between those events,
