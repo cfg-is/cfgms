@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -130,55 +131,33 @@ def harness_identity_env(value: str):
 
 @contextlib.contextmanager
 def stub_ollama_on_path(stdout_text: str, exit_code: int = 0):
-    """Prepends a temp dir holding a stub `ollama` executable to `PATH` for
-    the duration of the block -- the stub ignores its argv/stdin and prints
-    `stdout_text`, then exits `exit_code`. Restores the original `PATH`
-    afterwards."""
-    with tempfile.TemporaryDirectory() as bin_dir:
-        stub_path = os.path.join(bin_dir, "ollama")
-        with open(stub_path, "w") as f:
-            f.write(
-                "#!/usr/bin/env python3\n"
-                "import sys\n"
-                f"sys.stdout.write({stdout_text!r})\n"
-                f"sys.exit({exit_code})\n"
-            )
-        os.chmod(stub_path, 0o755)
+    """Stands in for the daemon, returning `stdout_text` as the model's answer.
 
-        original_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{bin_dir}:{original_path}"
-        try:
-            yield
-        finally:
-            os.environ["PATH"] = original_path
+    Named for what it used to do -- prepend a stub `ollama` executable to
+    `PATH` -- and kept under that name because the property every caller cares
+    about is unchanged: "the model answers with exactly this text". Only the
+    seam moved. The lane speaks HTTP to the local daemon now, so the stub
+    patches `urlopen` rather than planting a binary, and `stdout_text` becomes
+    the API's `response` field, which is where the answer the CLI printed on
+    stdout now arrives.
 
+    `exit_code` keeps its meaning for callers -- non-zero is a call that did
+    not succeed -- mapped to the HTTP equivalent, a non-200 status.
 
-@contextlib.contextmanager
-def stub_ollama_recording_argv(stdout_text: str, exit_code: int = 0):
-    """Like `stub_ollama_on_path`, but the stub also records the argv it was
-    invoked with to a file, so a test can assert exactly which flags
-    `call_ollama_harness` passed to `ollama run` -- not just what it printed.
-    Yields the path to that file (written after the subprocess exits)."""
-    with tempfile.TemporaryDirectory() as bin_dir:
-        argv_path = os.path.join(bin_dir, "argv.json")
-        stub_path = os.path.join(bin_dir, "ollama")
-        with open(stub_path, "w") as f:
-            f.write(
-                "#!/usr/bin/env python3\n"
-                "import json, sys\n"
-                f"with open({argv_path!r}, 'w') as out:\n"
-                "    json.dump(sys.argv[1:], out)\n"
-                f"sys.stdout.write({stdout_text!r})\n"
-                f"sys.exit({exit_code})\n"
-            )
-        os.chmod(stub_path, 0o755)
+    Patching here is also what keeps the suite hermetic. The old PATH stub
+    worked because a subprocess had to resolve `ollama`; nothing resolves a
+    URL, so without this the lane would reach a real daemon on localhost and
+    the tests would acquire a live dependency.
+    """
+    body = json.dumps({"response": stdout_text})
+    status = 200 if exit_code == 0 else 500
 
-        original_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{bin_dir}:{original_path}"
-        try:
-            yield argv_path
-        finally:
-            os.environ["PATH"] = original_path
+    real_urlopen = ollama_lane.urllib.request.urlopen
+    ollama_lane.urllib.request.urlopen = _fake_urlopen(body, status)
+    try:
+        yield
+    finally:
+        ollama_lane.urllib.request.urlopen = real_urlopen
 
 
 def test_complete_clean_sweep() -> None:
@@ -301,30 +280,141 @@ def test_prose_surrounded_findings_object_is_extracted_and_completes() -> None:
         )
 
 
-def test_call_ollama_harness_passes_nowordwrap_hidethinking_and_format_json() -> None:
-    """[REQUIRED TEST] Issue #4014. The pinned client (0.33.3) renders
-    `ollama run`'s output as a terminal would even when stdout is a pipe --
-    word-wrapping at a fixed column, duplicating the cut word fragment at
-    every wrap, and prefixing the answer with thinking text -- which
-    corrupts the printed JSON before extraction ever sees it. Every
-    invocation must ask the CLI never to render at all: `--nowordwrap`,
-    `--hidethinking`, and `--format json`, not just some of them."""
+def test_generate_request_shape() -> None:
+    """[REQUIRED TEST] The request the lane POSTs to the daemon.
+
+    Replaces the argv assertions that guarded the CLI's rendering flags
+    (`--nowordwrap`, `--hidethinking`, `--format json`). Two of those three
+    existed only to stop a terminal renderer corrupting printed JSON; over HTTP
+    there is no renderer and nothing to corrupt. `format: json` survives
+    because it still asks the daemon for a JSON-shaped answer.
+
+    What replaces them is the `think` rule, which is the one that can now do
+    real damage. `think: false` does NOT disable reasoning -- it LEAKS the
+    reasoning into `response`, measured at 11,018 completion tokens against
+    1,194 for the same 202 KB prompt. Omitting the key keeps effort at the
+    default and returns reasoning in its own `thinking` field, which is what
+    the CLI's `--hidethinking` effectively did. So: never `false`, and not set
+    at all unless a measured decision says otherwise.
+    """
+    captured = {}
+
+    def _capture(request, *a, **k):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _fake_urlopen(json.dumps({"response": '{"findings": []}'}))()
+
     with tempfile.TemporaryDirectory() as out_dir:
-        with stub_ollama_recording_argv('{"findings": []}\n') as argv_path:
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        ollama_lane.urllib.request.urlopen = _capture
+        try:
             exit_code, _rate_limited, _output_tail = ollama_lane.call_ollama_harness(
                 MODEL, "prompt text", os.path.join(out_dir, "raw.json")
             )
-            with open(argv_path) as f:
-                argv = json.load(f)
-        check(exit_code == 0, "flags: stub call still succeeds", exit_code)
-        check(argv[0] == "run", "flags: first arg is 'run'", repr(argv))
-        check(argv[1] == MODEL, "flags: model is the second arg", repr(argv))
-        for flag in ("--nowordwrap", "--hidethinking", "--format"):
-            check(flag in argv, f"flags: {flag} is passed to ollama run", repr(argv))
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+
+    body = captured.get("body", {})
+    check(exit_code == 0, "request: a stubbed 200 still succeeds", exit_code)
+    check(
+        captured.get("url", "").endswith("/api/generate"),
+        "request: targets the daemon's /api/generate",
+        repr(captured.get("url")),
+    )
+    check(body.get("model") == MODEL, "request: carries the model", repr(body.get("model")))
+    check(body.get("prompt") == "prompt text", "request: carries the prompt verbatim")
+    check(body.get("stream") is False, "request: is not streamed", repr(body.get("stream")))
+    check(body.get("format") == "json", "request: asks for format json", repr(body.get("format")))
+    check("think" not in body, "request: omits `think` entirely", repr(sorted(body)))
+    check(
+        body.get("think") is not False,
+        "request: never sends think=false, which leaks reasoning into response",
+        repr(body.get("think")),
+    )
+
+
+def test_http_429_is_rate_limited_by_status_not_prose() -> None:
+    """[REQUIRED TEST] A 429 must be recognised from the status code.
+
+    Before this, rate limiting was inferred by matching prose against
+    `_RATE_LIMIT_RE` -- so a limit phrased in words the pattern did not
+    anticipate read as an ordinary failure, and a finding that merely
+    discussed rate limiting could read as one. A status code is a fact.
+
+    The body here deliberately contains NO rate-limit wording, so a pass
+    proves the status drove the result rather than the text fallback.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        err = ollama_lane.urllib.error.HTTPError(
+            url="http://127.0.0.1:11434/api/generate",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=_FakeHeaders({"Retry-After": "42"}),
+            fp=io.BytesIO(b"slow down"),
+        )
+        exit_code, rate_limited, _tail = _run_with_fake_ollama(
+            out_dir, raw_path, stdout="", stderr="", returncode=0, raises=err
+        )
+        check(rate_limited is True, "429: reported rate limited", repr(rate_limited))
+        check(exit_code != 0, "429: reports a non-zero code", repr(exit_code))
+
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if meta:
+            with open(os.path.join(diag, meta[0])) as f:
+                parsed = json.load(f)
+            check(parsed.get("http_status") == 429, "429: status recorded in meta", repr(parsed))
+            check(
+                parsed.get("retry_after") == "42",
+                "429: the server's own Retry-After is recorded, not guessed",
+                repr(parsed),
+            )
+        else:
+            check(False, "429: a meta file is written", str(names))
+
+
+def test_token_counts_are_recorded() -> None:
+    """[REQUIRED TEST] The counts the CLI could never report.
+
+    `prompt_eval_count` and `eval_count` come back on every response and are
+    what makes throughput measurable at all. Note the API returns null
+    `eval_duration`/`prompt_eval_duration` for `:cloud` models, so only an
+    end-to-end rate is derivable -- recorded under a name that says so rather
+    than passed off as a model speed.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        body = json.dumps(
+            {
+                "response": "not json at all",
+                "prompt_eval_count": 51203,
+                "eval_count": 1194,
+                "total_duration": 15_800_000_000,
+                "eval_duration": None,
+            }
+        )
+        _run_with_fake_ollama(out_dir, raw_path, stdout="", stderr="", returncode=0, body=body)
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if not meta:
+            check(False, "tokens: a meta file is written", str(names))
+            return
+        with open(os.path.join(diag, meta[0])) as f:
+            parsed = json.load(f)
+        check(parsed.get("prompt_eval_count") == 51203, "tokens: prompt_eval_count recorded", repr(parsed))
+        check(parsed.get("eval_count") == 1194, "tokens: eval_count recorded", repr(parsed))
         check(
-            argv[argv.index("--format") + 1] == "json",
-            "flags: --format is followed by 'json'",
-            repr(argv),
+            parsed.get("tokens_per_second_end_to_end") == 75.6,
+            "tokens: an end-to-end rate is derived from total_duration",
+            repr(parsed.get("tokens_per_second_end_to_end")),
+        )
+        check(
+            "eval_duration" not in parsed,
+            "tokens: a null per-phase duration is omitted, never recorded as zero",
+            repr(sorted(parsed)),
         )
 
 
@@ -953,23 +1043,76 @@ def test_a_successful_call_writes_no_diagnostics():
         )
 
 
-def _run_with_fake_ollama(out_dir, raw_path, stdout, stderr, returncode):
-    """Drive `call_ollama_harness` against a stubbed subprocess.run."""
+class _FakeHeaders(dict):
+    """Just enough of an HTTPMessage for the lane's `.get("Retry-After")`."""
 
-    class _Result:
-        pass
+    def get(self, key, default=None):  # noqa: A003 - mirrors HTTPMessage
+        for k, v in self.items():
+            if k.lower() == key.lower():
+                return v
+        return default
 
-    result = _Result()
-    result.returncode = returncode
-    result.stdout = stdout
-    result.stderr = stderr
 
-    real_run = ollama_lane.subprocess.run
-    ollama_lane.subprocess.run = lambda *a, **k: result
+def _fake_urlopen(body: str, status: int = 200, headers: dict | None = None):
+    """A urlopen stand-in returning one canned response, usable as a context
+    manager exactly as the real one is."""
+    encoded = body.encode("utf-8")
+    hdrs = _FakeHeaders(headers or {})
+
+    class _Response:
+        def __init__(self):
+            self.status = status
+            self.headers = hdrs
+
+        def read(self):
+            return encoded
+
+        def getcode(self):
+            return status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    return lambda *a, **k: _Response()
+
+
+def _run_with_fake_ollama(out_dir, raw_path, stdout, stderr, returncode,
+                          status=200, headers=None, body=None, raises=None):
+    """Drive `call_ollama_harness` against a stubbed daemon HTTP response.
+
+    Since the lane speaks HTTP to the LOCAL ollama daemon rather than shelling
+    out, the transport being stood in for here is `urlopen`, not
+    `subprocess.run`. The mapping is direct: `stdout` is the model's answer
+    (the API's `response` field) and `stderr` is the reasoning the API returns
+    separately (`thinking`), which is where the CLI's stderr content now lives.
+
+    `returncode` is kept so existing call sites read unchanged -- non-zero
+    stands for a transport that did not return 200. `body`, `status`,
+    `headers` and `raises` are the HTTP-specific hooks the newer tests need.
+
+    Stubbing at this seam is also what keeps the suite hermetic: without it the
+    lane reaches a real daemon on localhost, which is a live dependency these
+    tests must never acquire.
+    """
+    payload = body if body is not None else json.dumps(
+        {"response": stdout, "thinking": stderr}
+    )
+    http_status = status if returncode == 0 else 500
+
+    real_urlopen = ollama_lane.urllib.request.urlopen
+    if raises is not None:
+        def _raise(*a, **k):
+            raise raises
+        ollama_lane.urllib.request.urlopen = _raise
+    else:
+        ollama_lane.urllib.request.urlopen = _fake_urlopen(payload, http_status, headers)
     try:
         return ollama_lane.call_ollama_harness("m", "a prompt", raw_path)
     finally:
-        ollama_lane.subprocess.run = real_run
+        ollama_lane.urllib.request.urlopen = real_urlopen
 
 
 def make_sequenced_harness_stub(responses: list, prompts: list):

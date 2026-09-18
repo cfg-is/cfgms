@@ -99,6 +99,8 @@ import re
 import stat
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -180,6 +182,82 @@ DEFAULT_REPO_ROOT = "/workspace"
 # lane and a slow finder does not need a per-lane edit. See that module for
 # why it is bounded rather than removed.
 OLLAMA_TIMEOUT_SECONDS = harness_runner.lane_timeout_seconds()
+
+# The LOCAL daemon's generate endpoint. Not a direct-to-cloud URL, and pointing
+# it at one does not work: `OLLAMA_HOST=https://ollama.com` returns 401 / "You
+# need to be signed in" no matter what, because it is the local daemon that
+# signs a Cloud request with the `ollama signin` keypair mounted at
+# ~/.ollama/id_ed25519 (Issue #3976, recorded in investigator-entrypoint.sh).
+# `OLLAMA_HOST` is honoured only to select WHICH local daemon to talk to -- a
+# non-default port or bind address -- and that daemon must be one holding the
+# keypair.
+OLLAMA_DEFAULT_HOST = "http://127.0.0.1:11434"
+
+
+def _ollama_generate_url() -> str:
+    """Absolute URL of the daemon's /api/generate endpoint."""
+    host = (os.environ.get("OLLAMA_HOST") or "").strip() or OLLAMA_DEFAULT_HOST
+    if not host.startswith(("http://", "https://")):
+        host = f"http://{host}"
+    return f"{host.rstrip('/')}/api/generate"
+
+
+def _parse_generate_response(body: str) -> tuple:
+    """Split one /api/generate response into `(answer, aux, metrics)`.
+
+    `answer` is the model's reply -- the same text the CLI printed on stdout,
+    so `_extract_json_object` works on it unchanged. `aux` stands in for the
+    old stderr: the reasoning the API returns in its own `thinking` field
+    rather than inline, plus `done_reason` when the model stopped for a reason
+    worth recording. `metrics` is what the CLI could never report at all.
+
+    A body that is not the expected JSON object is returned verbatim as the
+    answer rather than raising: `_extract_json_object` is already the function
+    that decides whether an answer is usable, and a parse failure here must not
+    become a different failure class than the one the caller handles.
+
+    Note `eval_duration`, `prompt_eval_duration` and `load_duration` come back
+    as null for `:cloud` models, so per-phase rates are not derivable. Only
+    `total_duration` is populated, and the tokens-per-second below is therefore
+    an end-to-end figure including queueing -- honest, but not a model speed.
+    """
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body, "", {}
+    if not isinstance(parsed, dict):
+        return body, "", {}
+
+    answer = parsed.get("response") or ""
+    aux_parts = []
+    thinking = parsed.get("thinking")
+    if thinking:
+        aux_parts.append(str(thinking))
+    done_reason = parsed.get("done_reason")
+    if done_reason and done_reason != "stop":
+        aux_parts.append(f"done_reason={done_reason}")
+
+    metrics = {}
+    for key in (
+        "prompt_eval_count",
+        "eval_count",
+        "total_duration",
+        "load_duration",
+        "prompt_eval_duration",
+        "eval_duration",
+        "done_reason",
+    ):
+        if parsed.get(key) is not None:
+            metrics[key] = parsed[key]
+
+    eval_count = parsed.get("eval_count")
+    total_duration = parsed.get("total_duration")
+    if eval_count and total_duration:
+        # Durations are nanoseconds.
+        seconds = total_duration / 1e9
+        if seconds > 0:
+            metrics["tokens_per_second_end_to_end"] = round(eval_count / seconds, 1)
+    return str(answer), "\n".join(aux_parts), metrics
 
 # `ollama run`'s own rate-limit/quota-exhaustion signal. Like the other three
 # lanes, `terminal_state.py` never sniffs this out of prose itself --
@@ -408,18 +486,62 @@ def call_ollama_harness(
     """
     lane_dir = os.path.dirname(output_path)
     diag_base = harness_runner.diagnostic_base(output_path)
+    http_status = None
+    retry_after = None
+    metrics = {}
     try:
-        result = subprocess.run(
-            ["ollama", "run", model, "--nowordwrap", "--hidethinking", "--format", "json"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            # `think` is deliberately OMITTED, not set. It is the API's
+            # reasoning-effort knob and omitting it is the behaviour-preserving
+            # choice: the CLI's `--hidethinking` only HID the model's reasoning,
+            # it never reduced it, and omission likewise leaves effort at the
+            # default while returning reasoning in its own `thinking` field
+            # instead of inline. Changing effort is a separate, measured
+            # decision -- it must be A/B'd against the regression corpus, not
+            # smuggled in with a transport swap.
+            #
+            # `think: false` is the one value that must never be used: measured
+            # on a 202 KB prompt, it LEAKS reasoning into `response` (11,018
+            # completion tokens against 1,194 for the same prompt), which is
+            # both the wrong content and roughly nine times the cost.
+        }
+        request = urllib.request.Request(
+            _ollama_generate_url(),
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        exit_code = result.returncode
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            http_status = getattr(response, "status", None) or response.getcode()
+            retry_after = response.headers.get("Retry-After")
+            body = response.read().decode("utf-8", errors="replace")
+        stdout, stderr, metrics = _parse_generate_response(body)
+        # A transport that reports failure by STATUS CODE has no exit code of
+        # its own. Synthesize one so every downstream consumer --
+        # `terminal_state.classify()` most of all -- keeps the exact contract it
+        # had under the subprocess: 0 only for an unambiguously good response.
+        exit_code = 0 if http_status == 200 else 1
         combined = f"{stdout}\n{stderr}"
+    except urllib.error.HTTPError as exc:
+        # The error body is where the daemon explains itself, and `Retry-After`
+        # is the server stating exactly how long to wait -- far better than the
+        # 30s-doubling guess the shared backoff falls back to. Both are recorded
+        # even though honouring the header needs a wider call contract than the
+        # `(exit_code, rate_limited, output_tail)` tuple every lane shares.
+        http_status = exc.code
+        retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - a body that cannot be read is not fatal
+            body = ""
+        stdout = ""
+        stderr = f"HTTP {exc.code}: {exc.reason}\n{body}"
+        exit_code = 1
+        combined = stderr
     except (OSError, subprocess.SubprocessError) as exc:
         error_text = str(exc)
         # A timeout carries the partial output the model had produced when the
@@ -437,7 +559,10 @@ def call_ollama_harness(
             )
         return 1, harness_runner.looks_rate_limited(error_text), harness_runner.sanitize_harness_output_tail(error_text)
 
-    rate_limited = harness_runner.looks_rate_limited(combined)
+    # A 429 is now a fact, not an inference. The text match stays as a fallback
+    # because the daemon can report an upstream limit inside a 200 body, which
+    # no status code would reveal -- the two are complementary, not redundant.
+    rate_limited = http_status == 429 or harness_runner.looks_rate_limited(combined)
     output_tail = harness_runner.sanitize_harness_output_tail(combined)
 
     extracted = _extract_json_object(stdout)
@@ -461,6 +586,14 @@ def call_ollama_harness(
                     "stdout_chars": len(stdout),
                     "stderr_chars": len(stderr),
                     "timeout_seconds": timeout,
+                    # Transport facts the CLI could not report. `http_status`
+                    # is what makes a 429 distinguishable from a refusal
+                    # without pattern-matching prose; `retry_after` is the
+                    # server's own answer to "how long", recorded here because
+                    # the shared call contract has nowhere to return it yet.
+                    "http_status": http_status,
+                    "retry_after": retry_after,
+                    **metrics,
                 },
                 indent=2,
             ),
