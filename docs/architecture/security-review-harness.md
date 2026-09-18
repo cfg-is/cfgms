@@ -731,6 +731,14 @@ decision. The gain is real, and it would be a silent hazard without the section:
 comparing two lanes has to be able to see that one of them changed partway. A finding is a
 finding whichever version found it — but a *rate* is not a rate across two.
 
+**Drift is a within-lane property, and the section says so positively.** Two lanes on different
+harnesses always carry different `harness_identity` values, because the identity covers the
+harness that ran; that is normal, not drift. This is stated outright rather than left as an
+absence of a warning, because of what a false positive costs *here* specifically. This section is
+read by someone deciding whether to trust a sweep. A false alarm does not cost them a minute — it
+teaches them the section cries wolf, and a real drift then lands in a section nobody reads. A
+report that misreads two legitimate values as a problem is worse than no report at all.
+
 A changed **plan** still re-runs the step, and must: different files and different hypotheses mean
 the recorded answer answers a different question. A mismatched envelope is renamed to `<step_id>.findings.json.quarantined-<timestamp>`
 (see [Writes are atomic](#writes-are-atomic)) and the step is returned as outstanding, exactly

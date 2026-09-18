@@ -1271,7 +1271,12 @@ def _provenance_lines(report: dict) -> list:
     # values below as a problem.
     lines.append(
         "Drift is measured **within** a lane. Two lanes on different harnesses always "
-        "carry different `harness_identity` values; that is not drift."
+        "carry different `harness_identity` values -- that is normal and expected, not "
+        "drift, because the identity covers the harness that ran. Stated here rather "
+        "than left as an absence of a warning: this section is read by someone deciding "
+        "whether to trust a sweep, and a false alarm does not cost them a minute -- it "
+        "teaches them the section cries wolf, and a real drift then lands somewhere "
+        "nobody looks."
     )
     lines.append("")
     lines.append("| Lane | Field | Value | Steps |")
