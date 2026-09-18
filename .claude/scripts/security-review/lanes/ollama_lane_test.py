@@ -1030,17 +1030,207 @@ def test_a_failed_call_preserves_stdout_stderr_and_meta():
             )
 
 
-def test_a_successful_call_writes_no_diagnostics():
+def test_a_successful_call_records_meta_but_not_the_bulky_dumps():
+    """[REQUIRED TEST] AC3: token counts on EVERY step, including the ones that
+    worked.
+
+    This test previously asserted that a successful call left NO diagnostics at
+    all, which was true when meta carried only failure detail. It is the wrong
+    contract now: meta carries `prompt_eval_count`/`eval_count`, and a lane's
+    throughput is a property of the steps that succeeded. Gating meta on
+    failure made the common case record nothing.
+
+    The bulky dumps stay failure-only. `stdout.txt`/`stderr.txt` are the
+    model's entire output, kept to tell a truncated answer from a refusal from
+    a rate-limit notice in prose -- and on a successful step the answer is
+    already on disk as the findings file.
+    """
     with tempfile.TemporaryDirectory() as out_dir:
         raw_path = ollama_lane.LANE_SPEC.raw_output_path(out_dir, "step-901")
+        body = json.dumps(
+            {
+                "response": '{"findings": [], "dispositions": []}',
+                "prompt_eval_count": 4242,
+                "eval_count": 99,
+                "total_duration": 2_000_000_000,
+            }
+        )
         code, _limited, _tail = _run_with_fake_ollama(
-            out_dir, raw_path, stdout='{"findings": [], "dispositions": []}', stderr="", returncode=0
+            out_dir, raw_path, stdout="", stderr="", returncode=0, body=body
         )
         check(code == 0, "ollama: a clean answer reports exit 0", str(code))
+
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        check(len(meta) == 1, "ollama: a SUCCESSFUL call records exactly one meta file", str(names))
         check(
-            not os.path.isdir(harness_runner.step_diagnostics_dir(out_dir)),
-            "ollama: a complete call leaves no diagnostics behind",
+            not any(n.endswith(".stdout.txt") or n.endswith(".stderr.txt") for n in names),
+            "ollama: a successful call does not keep the bulky stdout/stderr dumps",
+            str(names),
         )
+        if not meta:
+            return
+        with open(os.path.join(diag, meta[0])) as f:
+            parsed = json.load(f)
+        check(
+            parsed.get("prompt_eval_count") == 4242 and parsed.get("eval_count") == 99,
+            "ollama: token counts are recorded on the SUCCESS path (AC3)",
+            repr(parsed),
+        )
+        check(
+            parsed.get("extracted_json_object") is True and parsed.get("exit_code") == 0,
+            "ollama: the meta records that this call actually succeeded",
+            repr(parsed),
+        )
+        check(
+            parsed.get("tokens_per_second_end_to_end") == 49.5,
+            "ollama: the end-to-end rate is derived on the success path too",
+            repr(parsed.get("tokens_per_second_end_to_end")),
+        )
+
+
+def test_retry_after_is_honoured_on_429_not_merely_recorded():
+    """[REQUIRED TEST] AC2: a 429 carrying `Retry-After` waits the number the
+    SERVER named, then retries -- it does not fall straight through to the
+    shared backoff's 30s-doubling guess.
+
+    Recording the header without acting on it was the earlier state and does
+    not satisfy AC2: the point of reading a header the CLI could never see is
+    to stop guessing at the number it contains.
+
+    `time.sleep` is stubbed. A test that actually slept the header would take
+    as long as the header says, which is how a suite stops being run.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        slept: list = []
+        calls: list = []
+
+        good = json.dumps({"response": '{"findings": [], "dispositions": []}'})
+
+        def _urlopen(request, *a, **k):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                raise ollama_lane.urllib.error.HTTPError(
+                    url=request.full_url, code=429, msg="Too Many Requests",
+                    hdrs=_FakeHeaders({"Retry-After": "7"}), fp=io.BytesIO(b"slow down"),
+                )
+            return _fake_urlopen(good)()
+
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        real_sleep = ollama_lane.time.sleep
+        ollama_lane.urllib.request.urlopen = _urlopen
+        ollama_lane.time.sleep = lambda s: slept.append(s)
+        try:
+            exit_code, rate_limited, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+            ollama_lane.time.sleep = real_sleep
+
+        check(slept == [7.0], "retry-after: waits exactly the seconds the server named", str(slept))
+        check(len(calls) == 2, "retry-after: the request is retried once after the wait", str(len(calls)))
+        check(exit_code == 0, "retry-after: the retry's success is what is reported", str(exit_code))
+        check(rate_limited is False, "retry-after: a recovered 429 is not reported rate limited")
+
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if meta:
+            with open(os.path.join(diag, meta[0])) as f:
+                parsed = json.load(f)
+            check(
+                parsed.get("retry_after_slept_seconds") == 7.0,
+                "retry-after: the wait actually taken is recorded, not just the header",
+                repr(parsed),
+            )
+
+
+def test_retry_after_is_capped_and_a_second_429_defers_to_the_backoff():
+    """[REQUIRED TEST] A server may name a number this process should not obey
+    unbounded, and a retry may still be refused.
+
+    Capping keeps one step from sleeping away a sweep. Deferring a second 429
+    to the shared backoff is what keeps the existing wait budget in charge of
+    the total -- the in-place retry is an improvement on the FIRST guess, not a
+    replacement for the mechanism.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        slept: list = []
+        calls: list = []
+
+        def _urlopen(request, *a, **k):
+            calls.append(request.full_url)
+            raise ollama_lane.urllib.error.HTTPError(
+                url=request.full_url, code=429, msg="Too Many Requests",
+                hdrs=_FakeHeaders({"Retry-After": "99999"}), fp=io.BytesIO(b"still limited"),
+            )
+
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        real_sleep = ollama_lane.time.sleep
+        ollama_lane.urllib.request.urlopen = _urlopen
+        ollama_lane.time.sleep = lambda s: slept.append(s)
+        try:
+            exit_code, rate_limited, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+            ollama_lane.time.sleep = real_sleep
+
+        check(
+            slept == [ollama_lane.RETRY_AFTER_MAX_SLEEP_SECONDS],
+            "retry-after: an oversized header is capped, never obeyed unbounded",
+            str(slept),
+        )
+        check(len(calls) == 2, "retry-after: still retried exactly once, not repeatedly", str(len(calls)))
+        check(rate_limited is True, "retry-after: a second 429 is reported rate limited")
+        check(exit_code != 0, "retry-after: a second 429 reports a non-zero code", str(exit_code))
+
+
+def test_malformed_retry_after_falls_back_to_the_shared_backoff():
+    """A header this code cannot parse must not fail the step -- it means
+    falling back to the backoff, which is exactly what happened before the
+    header was readable at all."""
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        slept: list = []
+        err = ollama_lane.urllib.error.HTTPError(
+            url="http://127.0.0.1:11434/api/generate", code=429, msg="Too Many Requests",
+            hdrs=_FakeHeaders({"Retry-After": "not-a-number"}), fp=io.BytesIO(b"nope"),
+        )
+        real_sleep = ollama_lane.time.sleep
+        ollama_lane.time.sleep = lambda s: slept.append(s)
+        try:
+            _code, rate_limited, _tail = _run_with_fake_ollama(
+                out_dir, raw_path, stdout="", stderr="", returncode=0, raises=err
+            )
+        finally:
+            ollama_lane.time.sleep = real_sleep
+        check(slept == [], "retry-after: a malformed header causes no sleep at all", str(slept))
+        check(rate_limited is True, "retry-after: it is still reported rate limited for the backoff")
+
+
+def test_retry_after_accepts_an_http_date() -> None:
+    """RFC 9110 allows a date as well as delay-seconds, and both appear in the
+    wild."""
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone as tz
+
+    soon = format_datetime(datetime.now(tz.utc) + timedelta(seconds=30))
+    parsed = ollama_lane._parse_retry_after(soon)
+    check(
+        parsed is not None and 20 <= parsed <= 40,
+        "retry-after: an HTTP-date is converted to a delay in seconds",
+        repr(parsed),
+    )
+    past = format_datetime(datetime.now(tz.utc) - timedelta(seconds=300))
+    check(
+        ollama_lane._parse_retry_after(past) == 0.0,
+        "retry-after: a date already past means retry now, never a negative sleep",
+        repr(ollama_lane._parse_retry_after(past)),
+    )
+    check(ollama_lane._parse_retry_after(None) is None, "retry-after: a missing header parses to None")
+    check(ollama_lane._parse_retry_after("") is None, "retry-after: an empty header parses to None")
 
 
 class _FakeHeaders(dict):

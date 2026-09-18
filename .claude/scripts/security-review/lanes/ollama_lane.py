@@ -99,8 +99,11 @@ import re
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 
@@ -200,6 +203,47 @@ def _ollama_generate_url() -> str:
     if not host.startswith(("http://", "https://")):
         host = f"http://{host}"
     return f"{host.rstrip('/')}/api/generate"
+
+
+# How long a single step may spend obeying a server-supplied `Retry-After`.
+#
+# The header is the server stating exactly how long to wait, which beats the
+# shared backoff's 30s-doubling guess -- but an unbounded sleep on a number
+# this process does not control is how one step swallows a whole sweep. A
+# server asking for longer than this is not refused: the wait is capped, the
+# request is retried anyway, and a still-limited response falls through to the
+# shared backoff exactly as it would have without the header.
+RETRY_AFTER_MAX_SLEEP_SECONDS = 120.0
+
+
+def _parse_retry_after(value: object) -> "float | None":
+    """Seconds to wait, from a `Retry-After` header, or `None`.
+
+    RFC 9110 allows two forms: delay-seconds, and an HTTP-date. Both appear in
+    the wild, so both are handled -- a date is converted to a delay against the
+    local clock and floored at zero, since a date already in the past means
+    "retry now", never "sleep backwards".
+
+    Never raises. A malformed header is not a reason to fail a step; it just
+    means falling back to the shared backoff, which is what happened before
+    the header was read at all.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 def _parse_generate_response(body: str) -> tuple:
@@ -488,60 +532,86 @@ def call_ollama_harness(
     diag_base = harness_runner.diagnostic_base(output_path)
     http_status = None
     retry_after = None
+    retry_after_slept = None
     metrics = {}
-    try:
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            # `think` is deliberately OMITTED, not set. It is the API's
-            # reasoning-effort knob and omitting it is the behaviour-preserving
-            # choice: the CLI's `--hidethinking` only HID the model's reasoning,
-            # it never reduced it, and omission likewise leaves effort at the
-            # default while returning reasoning in its own `thinking` field
-            # instead of inline. Changing effort is a separate, measured
-            # decision -- it must be A/B'd against the regression corpus, not
-            # smuggled in with a transport swap.
-            #
-            # `think: false` is the one value that must never be used: measured
-            # on a 202 KB prompt, it LEAKS reasoning into `response` (11,018
-            # completion tokens against 1,194 for the same prompt), which is
-            # both the wrong content and roughly nine times the cost.
-        }
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "format": "json",
+        # `think` is deliberately OMITTED, not set. It is the API's
+        # reasoning-effort knob and omitting it is the behaviour-preserving
+        # choice: the CLI's `--hidethinking` only HID the model's reasoning,
+        # it never reduced it, and omission likewise leaves effort at the
+        # default while returning reasoning in its own `thinking` field
+        # instead of inline. Changing effort is a separate, measured
+        # decision -- it must be A/B'd against the regression corpus, not
+        # smuggled in with a transport swap.
+        #
+        # `think: false` is the one value that must never be used: measured
+        # on a 202 KB prompt, it LEAKS reasoning into `response` (11,018
+        # completion tokens against 1,194 for the same prompt), which is
+        # both the wrong content and roughly nine times the cost.
+    }
+
+    def _post() -> tuple:
+        """One POST. Returns `(status, retry_after_header, body, reason)` --
+        `reason` is set only for an HTTP error, where the status line is worth
+        keeping beside the body."""
         request = urllib.request.Request(
             _ollama_generate_url(),
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            http_status = getattr(response, "status", None) or response.getcode()
-            retry_after = response.headers.get("Retry-After")
-            body = response.read().decode("utf-8", errors="replace")
-        stdout, stderr, metrics = _parse_generate_response(body)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = getattr(response, "status", None) or response.getcode()
+                header = response.headers.get("Retry-After")
+                return status, header, response.read().decode("utf-8", errors="replace"), None
+        except urllib.error.HTTPError as exc:
+            header = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001 - a body that cannot be read is not fatal
+                body = ""
+            return exc.code, header, body, exc.reason
+
+    try:
+        http_status, retry_after, body, reason = _post()
+
+        # Honour the server's own Retry-After on a 429, once.
+        #
+        # The shared backoff in `harness_runner.call_with_rate_limit_backoff`
+        # guesses -- 30s, doubling -- because a CLI could not read headers. Now
+        # that the status and the header are both readable, waiting the number
+        # the server actually named beats guessing at it.
+        #
+        # Once, and capped. Retrying in place avoids widening the
+        # `(exit_code, rate_limited, output_tail)` tuple every lane returns; a
+        # second 429 falls through to the shared backoff exactly as before, so
+        # its existing budget still bounds the total wait. The cap stops one
+        # step sleeping away a sweep on a number this process does not control.
+        if http_status == 429:
+            wait = _parse_retry_after(retry_after)
+            if wait is not None:
+                slept = min(wait, RETRY_AFTER_MAX_SLEEP_SECONDS)
+                time.sleep(slept)
+                retry_after_slept = slept
+                http_status, retry_after, body, reason = _post()
+
+        if reason is None:
+            stdout, stderr, metrics = _parse_generate_response(body)
+        else:
+            stdout = ""
+            stderr = "HTTP {}: {}\n{}".format(http_status, reason, body)
         # A transport that reports failure by STATUS CODE has no exit code of
         # its own. Synthesize one so every downstream consumer --
         # `terminal_state.classify()` most of all -- keeps the exact contract it
         # had under the subprocess: 0 only for an unambiguously good response.
         exit_code = 0 if http_status == 200 else 1
-        combined = f"{stdout}\n{stderr}"
-    except urllib.error.HTTPError as exc:
-        # The error body is where the daemon explains itself, and `Retry-After`
-        # is the server stating exactly how long to wait -- far better than the
-        # 30s-doubling guess the shared backoff falls back to. Both are recorded
-        # even though honouring the header needs a wider call contract than the
-        # `(exit_code, rate_limited, output_tail)` tuple every lane shares.
-        http_status = exc.code
-        retry_after = exc.headers.get("Retry-After") if exc.headers else None
-        try:
-            body = exc.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001 - a body that cannot be read is not fatal
-            body = ""
-        stdout = ""
-        stderr = f"HTTP {exc.code}: {exc.reason}\n{body}"
-        exit_code = 1
-        combined = stderr
+        combined = "{}\n{}".format(stdout, stderr)
     except (OSError, subprocess.SubprocessError) as exc:
         error_text = str(exc)
         # A timeout carries the partial output the model had produced when the
@@ -566,6 +636,45 @@ def call_ollama_harness(
     output_tail = harness_runner.sanitize_harness_output_tail(combined)
 
     extracted = _extract_json_object(stdout)
+    # Meta is written for EVERY call, not only failures.
+    #
+    # It used to be gated with the two dumps below, which meant the common case
+    # -- a successful step -- recorded nothing at all. Since it now carries
+    # `prompt_eval_count`/`eval_count`, gating it would make throughput
+    # measurable only for steps that went wrong, which is the opposite of
+    # useful: a lane's speed is a property of the steps that worked.
+    #
+    # The two dumps stay on the failure path. They are the model's whole
+    # output, they exist to tell a truncated answer from a refusal from a
+    # rate-limit notice rendered as prose, and on a successful step the answer
+    # is already on disk as the findings file.
+    harness_runner.write_step_diagnostic(
+        lane_dir,
+        f"{diag_base}.meta.json",
+        json.dumps(
+            {
+                "model": model,
+                "exit_code": exit_code,
+                "extracted_json_object": extracted is not None,
+                "rate_limited": rate_limited,
+                "prompt_chars": len(prompt),
+                "stdout_chars": len(stdout),
+                "stderr_chars": len(stderr),
+                "timeout_seconds": timeout,
+                # Transport facts the CLI could not report. `http_status` is
+                # what makes a 429 distinguishable from a refusal without
+                # pattern-matching prose; `retry_after` is the server's own
+                # answer to "how long", recorded alongside the wait actually
+                # taken so the two can be compared after the fact.
+                "http_status": http_status,
+                "retry_after": retry_after,
+                "retry_after_slept_seconds": retry_after_slept,
+                **metrics,
+            },
+            indent=2,
+        ),
+    )
+
     if extracted is None or exit_code != 0:
         # Keep what the model actually printed. Without this the only surviving
         # record of a schema failure is a 4,000-character tail, which is not
@@ -573,31 +682,7 @@ def call_ollama_harness(
         # notice rendered as prose -- see `write_step_diagnostic`.
         harness_runner.write_step_diagnostic(lane_dir, f"{diag_base}.stdout.txt", stdout)
         harness_runner.write_step_diagnostic(lane_dir, f"{diag_base}.stderr.txt", stderr)
-        harness_runner.write_step_diagnostic(
-            lane_dir,
-            f"{diag_base}.meta.json",
-            json.dumps(
-                {
-                    "model": model,
-                    "exit_code": exit_code,
-                    "extracted_json_object": extracted is not None,
-                    "rate_limited": rate_limited,
-                    "prompt_chars": len(prompt),
-                    "stdout_chars": len(stdout),
-                    "stderr_chars": len(stderr),
-                    "timeout_seconds": timeout,
-                    # Transport facts the CLI could not report. `http_status`
-                    # is what makes a 429 distinguishable from a refusal
-                    # without pattern-matching prose; `retry_after` is the
-                    # server's own answer to "how long", recorded here because
-                    # the shared call contract has nowhere to return it yet.
-                    "http_status": http_status,
-                    "retry_after": retry_after,
-                    **metrics,
-                },
-                indent=2,
-            ),
-        )
+
     if extracted is None:
         return (exit_code if exit_code != 0 else 1), rate_limited, output_tail
 
