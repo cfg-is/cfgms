@@ -96,6 +96,16 @@ echo ""
 echo "⏱️  Estimated time: 2-5 minutes"
 echo ""
 
+# A push from a linked worktree runs this hook with GIT_DIR pointing at
+# <main>/.git/worktrees/<name>. Left set, every git command in the test suite
+# targets that directory instead of the repo it runs in: one `git init` in a
+# scratch directory re-initialises the MAIN repository as core.bare=true, and
+# tests that stage files write into the worktree's index. Clear git's
+# repository-local variables so make test finds the repo from its working
+# directory, exactly as it does when run by hand.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 # Run make test (fast validation)
 if ! make test; then
     echo ""
