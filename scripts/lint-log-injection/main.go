@@ -1223,6 +1223,29 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 						tainted[rootID.Name] = struct{}{}
 						changed = true
 					}
+				case *ast.IndexExpr:
+					// An index assignment (m["k"] = tainted) taints the
+					// container the same way a struct-field write does: the
+					// taint is whole-variable and add-only (never cleared by
+					// an unrelated later index write), so a later bare-
+					// identifier use of the container as a log field is
+					// caught by the existing anyArgTainted machinery. Nested
+					// indexing (m["a"]["b"] = tainted) unwraps down to the
+					// root identifier; a base that isn't a plain identifier
+					// (a field access, a function call result, ...) is left
+					// alone rather than guessed at, matching this file's
+					// false-on-any-uncertainty discipline.
+					rootID := rootIdentOfIndexExpr(l)
+					if rootID == nil {
+						continue
+					}
+					if _, already := tainted[rootID.Name]; already {
+						continue
+					}
+					if derived {
+						tainted[rootID.Name] = struct{}{}
+						changed = true
+					}
 				case *ast.Ident:
 					// Root cause B: unlike the struct-field case above, a
 					// plain identifier's taint status is re-derived on every
@@ -1260,6 +1283,25 @@ func collectTaintedVars(root ast.Node, seed map[string]struct{}, recv string, fu
 	}
 
 	return tainted
+}
+
+// rootIdentOfIndexExpr unwraps nested indexing (m["a"]["b"]) down to the
+// plain identifier being indexed. Returns nil when the base doesn't resolve
+// to a plain identifier (a field access, a function call result, another
+// index expression's result, ...) so the caller can leave it alone rather
+// than guess.
+func rootIdentOfIndexExpr(idx *ast.IndexExpr) *ast.Ident {
+	x := idx.X
+	for {
+		switch t := x.(type) {
+		case *ast.IndexExpr:
+			x = t.X
+		case *ast.Ident:
+			return t
+		default:
+			return nil
+		}
+	}
 }
 
 // looksLikeErrorName reports whether name follows the codebase's overwhelming

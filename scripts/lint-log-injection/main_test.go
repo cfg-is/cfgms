@@ -890,6 +890,66 @@ func (s *S) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// TestAnalyzeFile_FlagsTaintedIndexAssignment is the issue #4129 motivating
+// shape: a map built as an empty composite literal, then index-assigned a
+// tainted string, then logged. Mirrors auditAuthorizationDecision
+// (features/controller/api/middleware.go), which builds its audit map with
+// exactly this build-then-index-assign idiom. Fails on revert: without an
+// *ast.IndexExpr case in collectTaintedVars' LHS switch, `m["reason"] =
+// d.Reason` never taints `m`, so this drops to 0 findings.
+func TestAnalyzeFile_FlagsTaintedIndexAssignment(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+type dec struct{ Reason string }
+type logger interface{ Info(string, ...any) }
+type S struct{ logger logger }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	var d dec
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	m := map[string]interface{}{}
+	m["reason"] = d.Reason
+	s.logger.Info("f", "fields", m)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d: %v", len(findings), findings)
+	}
+	if !strings.Contains(findings[0].msg, "m") {
+		t.Errorf("expected m to be the one flagged, got %q", findings[0].msg)
+	}
+}
+
+// TestAnalyzeFile_AcceptsSanitizedIndexAssignment is the negative counterpart
+// of TestAnalyzeFile_FlagsTaintedIndexAssignment: the same build-then-index-
+// assign idiom, but the tainted value is wrapped in logging.SanitizeLogValue
+// before it's written into the map. Guards against the new IndexExpr taint
+// path becoming a blanket "any indexed write taints everything" — if it did,
+// this would still flag despite the sanitizer, since sanitization here
+// happens before the container is tainted, not after.
+func TestAnalyzeFile_AcceptsSanitizedIndexAssignment(t *testing.T) {
+	src := `package api
+import "encoding/json"
+import "net/http"
+import "github.com/cfgis/cfgms/pkg/logging"
+type dec struct{ Reason string }
+type logger interface{ Info(string, ...any) }
+type S struct{ logger logger }
+func (s *S) handle(w http.ResponseWriter, r *http.Request) {
+	var d dec
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	m := map[string]interface{}{}
+	m["reason"] = logging.SanitizeLogValue(d.Reason)
+	s.logger.Info("f", "fields", m)
+}
+`
+	findings := analyzeSnippet(t, src)
+	if len(findings) != 0 {
+		t.Fatalf("expected 0 findings, got %d: %v", len(findings), findings)
+	}
+}
+
 // TestAnalyzeFile_AcceptsSanitizedDerivedValues is the negative counterpart of
 // the five widened-taint-model positive cases above: each one still produces
 // 0 findings once the value is wrapped in logging.SanitizeLogValue at the
