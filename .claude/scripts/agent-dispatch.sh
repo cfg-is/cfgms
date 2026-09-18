@@ -1123,6 +1123,13 @@ gate_credentials_for_launch() {
 
 # Stream an investigator container's log to disk for the container's lifetime.
 #
+# Writes to <sweep_dir>/container-logs/<mode>.log, where sweep_dir is whatever
+# the CALLER passed as --sweep-dir -- which is a sub-sweep directory for three
+# of the four modes (verify.py passes <sweep>/verification, adjudicate.py
+# <sweep>/adjudication, multi-planner <sweep>/planners/<lane>). Only finder
+# lanes and the legacy single planner land at the sweep root. That is also what
+# makes the fixed <mode>.log filename collision-free.
+#
 # A container's log lives exactly as long as the container, and an investigator
 # container's lifetime is not the sweep's to decide. This `docker run -d`
 # carries NO `--rm` -- see the container-conflict gate's own comment further
@@ -3742,10 +3749,10 @@ PY
     # 2026-09-11: ten exited investigators had accumulated over 40 hours,
     # holding ~179MB. Their findings are written to the host sweep directory,
     # never kept inside the container, so an exited one holds nothing of value.
-    # Since Issue #4132 that is true BECAUSE its log is streamed to
-    # <sweep>/container-logs/<mode>.log while it runs -- see
-    # start_investigator_log_capture. Without that capture this reap is
-    # the main path by which a finished sweep's lane log is lost.
+    # Since Issue #4132 that is true BECAUSE its log is streamed to a
+    # container-logs/ directory under whichever --sweep-dir that launch was
+    # given -- see start_investigator_log_capture. Without that capture this
+    # reap is the main path by which a finished sweep's lane log is lost.
     #
     # Grace window rather than immediate: a just-exited investigator may still
     # be being read by the sweep that launched it.

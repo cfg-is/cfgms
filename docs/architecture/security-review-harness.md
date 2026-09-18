@@ -61,10 +61,12 @@ All sweep state lives outside the repository, under a base directory resolved by
                                         --lane-entrypoint script from the LAST launch-investigator
                                         call (Issue #3952) -- recorded, not frozen
     container-logs/
-      <mode>.log                       each investigator container's stdout+stderr, streamed to
-                                        disk for the container's lifetime (Issue #4132) -- one
-                                        file per mode: a lane id, `plan`, `verifier`,
-                                        `adjudicator`
+      <lane-id>.log                    each investigator container's stdout+stderr, streamed to
+                                        disk for the container's lifetime (Issue #4132). Written
+                                        under whichever directory that launch was given as
+                                        --sweep-dir, so only finder lanes and the legacy single
+                                        planner land HERE; the verifier, the adjudicator and each
+                                        multi-planner write under their own sub-sweep dir below
     plan/
       step-001.json                    step prompt + scope (generated from metadata only)
       step-002.json
@@ -3345,8 +3347,13 @@ which is exactly what is needed to work out why a lane was slow, how often a rep
 or whether a step's scanners ran.
 
 `start_investigator_log_capture` (Issue #4132) therefore streams `docker logs -f --timestamps`
-into `<sweep>/container-logs/<mode>.log` for the container's lifetime, one file per mode — a lane
-id, `plan`, `verifier`, `adjudicator`. The follow ends by itself when the container exits, so
+into `<--sweep-dir>/container-logs/<mode>.log` for the container's lifetime — under whichever
+directory that launch was given, not the sweep root. Three of the four launchers pass a SUB-sweep
+directory: `verify.py` passes `<sweep>/verification`, `adjudicate.py` passes
+`<sweep>/adjudication`, and multi-planner dispatch passes `<sweep>/planners/<lane-dir-name>` (the
+same sub-dirs those stages already use for their own `plan/` and `lanes/`). Only finder lanes and
+the legacy single planner land at `<sweep>/container-logs/`. That is also why no two modes can
+collide on a filename. The follow ends by itself when the container exits, so
 there is nothing to clean up. It starts in the launch's success branch before the launch is
 announced, so a short run cannot outrun its own capture, and every failure path returns 0 with a
 warning: an unpersisted log is a diagnostic loss, never a reason to fail an otherwise healthy
