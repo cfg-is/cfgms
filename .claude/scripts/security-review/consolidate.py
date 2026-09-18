@@ -10,10 +10,12 @@ denominator -- a sweep in any state of completeness, mid-run, fully complete,
 or partially parked -- and produces two files under `<sweep_dir>/report/`:
 
 - `consolidated.json` -- machine-readable findings, de-duplicated on
-  `file` + `symbol` + `vuln_class` (never a line number, per
-  docs/architecture/security-review-harness.md), each annotated with exactly
-  the lanes that independently reported it and the number of lanes that
-  actually completed the step it came from.
+  `file` + `symbol` + normalised `cwe` (never a line number, per
+  docs/architecture/security-review-harness.md; never the free-text
+  `vuln_class`, per Issue #4134 -- two lanes describing one defect in
+  different registers are the same defect, and keying on prose made them two),
+  each annotated with exactly the lanes that independently reported it and the
+  number of lanes that actually completed the step it came from.
 - `consolidated.md` -- a per-lane x per-step coverage table followed by the
   de-duplicated findings, rendered as literal Markdown text (no raw HTML, no
   unescaped table/heading syntax from model-generated content).
@@ -408,7 +410,40 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
             )
             continue
 
-        key = (file_value, finding["symbol"], finding["vuln_class"])
+        # The class component of the key is the NORMALISED `cwe`, not the
+        # free-text `vuln_class` (Issue #4134).
+        #
+        # `vuln_class` is described to the model as a "short vulnerability-class
+        # label" -- free prose, and models write it in incompatible registers.
+        # Measured across the 142 steps two lanes both completed in sweep
+        # 2026-09-16T1843Z-a17e6fcc: codex wrote phrases ("Improper input
+        # validation at a trust boundary"), ollama wrote identifiers
+        # ("CWE-20"), 122 distinct values against 203 with only 14 in common.
+        # Keyed on that, the two lanes agreed on 12 findings out of a 974
+        # union -- 1.2%. The report sorts by multi-lane agreement first, so
+        # that sort carried almost no information and the same defect found
+        # twice rendered twice, unlinked.
+        #
+        # `cwe` is the field that was already comparable: required on every
+        # finding, drawn from a closed list, and put through
+        # `schema.normalize_cwe()` so case and formatting variants collapse.
+        # Re-keying on it lifts agreement to 42 of a 927 union (4.5%) on the
+        # same data. The sharper number is the population where it can help at
+        # all: of the 68 file+symbol pairs BOTH lanes flagged, 39 (57%) share a
+        # cwe. That agreement existed all along and was being discarded.
+        #
+        # `_defect_class` below already prefers `cwe` for cross-step grouping,
+        # so this makes one rule out of two that disagreed.
+        #
+        # Falling back to `vuln_class` when `cwe` will not normalise keeps a
+        # pre-#3983 envelope groupable. Not reachable from a current sweep --
+        # `validate_finding` requires a well-formed `cwe`, and 0 of 1,019
+        # findings in the measured sweep failed to normalise -- but a fallback
+        # costs nothing and a KeyError on old data costs a re-run.
+        normalized_cwe = schema.normalize_cwe(finding.get("cwe"))
+        defect_class = normalized_cwe or finding["vuln_class"]
+
+        key = (file_value, finding["symbol"], defect_class)
         group = groups.setdefault(key, {"lanes": set(), "step_ids": set(), "occurrences": []})
         group["lanes"].add(lane)
         group["step_ids"].add(step_id)
@@ -420,6 +455,10 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
             "title": finding["title"],
             "evidence": finding["evidence"],
             "suggested_fix": finding["suggested_fix"],
+            # Carried per-occurrence now that it no longer keys the group: each
+            # lane's own wording is worth showing a reader, and losing it would
+            # trade one kind of information for another rather than gaining.
+            "vuln_class": finding["vuln_class"],
         }
         # Issue #3983's normalised defect classification and location. Every
         # finding this loop sees already passed `schema.validate_finding`
@@ -432,8 +471,9 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
         # `schema.normalize_cwe()` rather than stored raw, so two lanes
         # naming the same identifier with different case or formatting
         # (`cwe-295` vs `CWE-295: ...`) group together downstream instead of
-        # reading as two distinct classes.
-        normalized_cwe = schema.normalize_cwe(finding.get("cwe"))
+        # reading as two distinct classes. Since #4134 that same normalised
+        # value is computed above and used as the key's class component, so it
+        # is reused here rather than recomputed -- one value, one definition.
         if normalized_cwe:
             occurrence["cwe"] = normalized_cwe
         line = finding.get("line")
@@ -462,7 +502,7 @@ def _eligible_lanes(step_ids: list[str], lane_step_state: dict[str, dict[str, st
 def _group_rank_key(finding: dict) -> tuple[int, int, int, str, str, str]:
     """Sort key for one consolidated finding, matching `SKILL.md`'s documented
     order exactly: multi-lane agreement first, then severity, then
-    confidence -- each descending -- with the `file`/`symbol`/`vuln_class`
+    confidence -- each descending -- with the `file`/`symbol`/`cwe`
     key retained only as the final tiebreaker for two findings tied on all
     three ranked fields, so output stays deterministic.
 
@@ -485,20 +525,22 @@ def _group_rank_key(finding: dict) -> tuple[int, int, int, str, str, str]:
         -finding["agreement"]["reported"],
         -severity_rank,
         -confidence_rank,
-        finding["file"],
-        finding["symbol"],
-        finding["vuln_class"],
+        # Tie-break on the de-duplication key itself, not on the picked
+        # `vuln_class`: the key is what makes two findings distinct, so
+        # ordering by anything else can put two distinct findings in an order
+        # that does not follow from what separates them (Issue #4134).
+        *_finding_key(finding),
     )
 
 
 def _first_occurrence_field(occurrences: list[dict], field: str) -> object:
     """The value of `field` on the first occurrence (in the given, already
     deterministic order) that carries it, or `None` if none do. Used to pick
-    one `cwe`/`line`/`end_line` to show at the consolidated-finding level
-    beside `file` -- a deterministic pick, never a merge, since these are
+    one `vuln_class`/`line`/`end_line` to show at the consolidated-finding
+    level beside `file` -- a deterministic pick, never a merge, since these are
     model-generated hints for a human reader, not part of what makes two
-    findings the same finding (that stays the `file`+`symbol`+`vuln_class`
-    key, computed independently of this)."""
+    findings the same finding (that is the `file`+`symbol`+`cwe` key since
+    Issue #4134, computed independently of this)."""
     for occurrence in occurrences:
         value = occurrence.get(field)
         if value is not None:
@@ -508,7 +550,7 @@ def _first_occurrence_field(occurrences: list[dict], field: str) -> object:
 
 def _finalize_findings(groups: dict, lane_step_state: dict[str, dict[str, str]]) -> list[dict]:
     consolidated = []
-    for (file_value, symbol, vuln_class), group in sorted(groups.items()):
+    for (file_value, symbol, defect_class), group in sorted(groups.items()):
         step_ids = sorted(group["step_ids"])
         reported_lanes = sorted(group["lanes"])
         eligible_lanes = _eligible_lanes(step_ids, lane_step_state)
@@ -517,7 +559,22 @@ def _finalize_findings(groups: dict, lane_step_state: dict[str, dict[str, str]])
             {
                 "file": file_value,
                 "symbol": symbol,
-                "vuln_class": vuln_class,
+                # The consolidated `vuln_class` IS the key's class component --
+                # the normalised `cwe` -- not a pick from one lane's prose
+                # (Issue #4134).
+                #
+                # Setting it here rather than re-keying every downstream
+                # consumer is what keeps a finding's identity single. The
+                # verifier and the adjudicator both identify a finding by
+                # `file`/`symbol`/`vuln_class` and echo it back, and both
+                # merges look it up that way; had this stayed one lane's
+                # wording while the key became the cwe, two findings sharing a
+                # file and symbol but differing in cwe could present the same
+                # vuln_class and make those merges ambiguous.
+                #
+                # Each lane's own wording is not lost -- it is on every
+                # occurrence below, which is where a per-lane value belongs.
+                "vuln_class": defect_class,
                 "cwe": _first_occurrence_field(occurrences, "cwe"),
                 "line": _first_occurrence_field(occurrences, "line"),
                 "end_line": _first_occurrence_field(occurrences, "end_line"),
@@ -567,6 +624,15 @@ def _severity_range(occurrences: list[dict]) -> dict:
 
 
 def _finding_key(finding: dict) -> tuple[str, str, str]:
+    """The de-duplication key of an already-consolidated finding.
+
+    Still reads `vuln_class`, and still matches the key `_group_findings`
+    built, because since Issue #4134 a CONSOLIDATED finding's `vuln_class` is
+    the normalised class that keyed it -- not the prose one lane happened to
+    write. That is the whole point of setting it in `_finalize_findings`: one
+    identity, readable the same way by this function, by the verifier merge,
+    and by the adjudicator merge.
+    """
     return (finding["file"], finding["symbol"], finding["vuln_class"])
 
 
@@ -1773,8 +1839,21 @@ def render_markdown(report: dict) -> str:
         agreement = finding["agreement"]
         cwe = finding.get("cwe")
         cwe_suffix = f" ({_md_escape_inline(cwe)})" if cwe else ""
+        # The heading leads with a lane's own prose label, not the key.
+        #
+        # Since Issue #4134 the consolidated `vuln_class` IS the normalised
+        # cwe, so leading with it would render "CWE-863 (CWE-863)" -- correct,
+        # and useless to read. A reader scanning a few hundred headings wants
+        # the human description; the identifier follows in parentheses where it
+        # always was. The prose is per-lane now, so it comes off an occurrence:
+        # a deterministic pick, exactly as `line`/`cwe` already are.
+        #
+        # Falls back to the key when no occurrence carries a label, which keeps
+        # the heading non-empty for a finding that somehow has no prose at all.
+        reported_label = _first_occurrence_field(finding["occurrences"], "vuln_class")
+        heading_label = reported_label or finding["vuln_class"]
         lines.append(
-            f"### {_md_escape_inline(finding['vuln_class'])}{cwe_suffix} — "
+            f"### {_md_escape_inline(heading_label)}{cwe_suffix} — "
             f"{_md_escape_inline(finding['file'])}{_location_suffix(finding)} :: "
             f"{_md_escape_inline(finding['symbol'])}"
         )
