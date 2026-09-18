@@ -369,10 +369,11 @@ def test_matching_bindings_are_not_quarantined():
         )
 
 
-def test_binding_checks_are_skipped_when_both_params_are_none():
-    # Behavior-preserving default: no plan_dir
-    # given -- a caller not yet updated for #3962 sees no change at all,
-    # even though the envelope's recorded bindings would not match anything.
+def test_the_binding_check_is_skipped_when_plan_dir_is_none():
+    # Behavior-preserving default: no plan_dir given -- a caller not yet
+    # updated for #3962 sees no change at all, even though the envelope's
+    # recorded plan_hash would not match anything. There is one such parameter
+    # now, not two: `current_harness_identity` was removed in Issue #4136.
     with tempfile.TemporaryDirectory() as lane_dir:
         write(
             os.path.join(lane_dir, "step-001.findings.json"),

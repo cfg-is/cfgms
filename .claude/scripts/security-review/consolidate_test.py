@@ -265,11 +265,24 @@ def test_only_the_lane_that_actually_drifted_is_named():
             "provenance: the drifted lane is named in the headline",
             headline,
         )
-        check(
-            "`clean-lane` changed instrument" not in headline,
-            "provenance: the clean lane is NOT named as having drifted",
-            headline,
-        )
+        # NOT a substring negative on "`clean-lane` changed instrument".
+        # That phrasing cannot fail for the case it exists to catch: widen the
+        # headline to every lane and it renders "`clean-lane`, `drifted-lane`
+        # changed instrument", in which the searched substring is absent. The
+        # check would pass against the exact output it was written to reject.
+        #
+        # Assert the property instead -- no lane the report itself calls clean
+        # may appear anywhere in the sentence that announces drift -- and derive
+        # the lane list from the rows rather than hardcoding it, so this keeps
+        # holding if the fixture grows a third lane.
+        for row in report["provenance"]:
+            if row["mixed"]:
+                continue
+            check(
+                f"`{row['lane']}`" not in headline,
+                f"provenance: {row['lane']} is not mixed, so it is not named in the drift sentence",
+                headline,
+            )
 
 
 def test_a_mixed_sweep_names_which_steps_ran_which_instrument():
@@ -282,11 +295,17 @@ def test_a_mixed_sweep_names_which_steps_ran_which_instrument():
     one of them changed partway. The gate and this section are two halves of
     one decision, so they are tested together or neither is honest.
 
-    Both fields are exercised in one fixture on purpose. `harness_identity`
-    used to quarantine and `prompt_version` used to be ignored entirely -- the
-    harness was too strict about one and too loose about the other. If only
-    one is asserted, the inconsistency can come back in whichever direction is
-    untested.
+    Both fields are exercised here because `harness_identity` used to
+    quarantine and `prompt_version` used to be ignored entirely -- the harness
+    was too strict about one and too loose about the other, and the
+    inconsistency can return in whichever direction is untested.
+
+    **This fixture alone does not prevent that, and an earlier version of this
+    docstring claimed it did.** It drifts both fields in the SAME envelope, so
+    a `mixed` computed from `harness_identity` alone satisfies every assertion
+    below. Asserting both jointly is not asserting each independently.
+    `test_prompt_version_drift_alone_is_mixed` covers the direction this one
+    cannot.
     """
     with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
         sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
@@ -341,6 +360,69 @@ def test_a_mixed_sweep_names_which_steps_ran_which_instrument():
                 f"provenance: the table row for {field}={value[:6]}... names its step count",
                 section,
             )
+
+
+def test_prompt_version_drift_alone_is_mixed():
+    """REQUIRED TEST (Issue #4136): a lane whose PROMPT changed but whose
+    harness did not is still a mixed lane.
+
+    `test_a_mixed_sweep_names_which_steps_ran_which_instrument` drifts both
+    fields in one envelope, so this implementation --
+
+        "mixed": len(by_field.get("harness_identity") or {}) > 1
+
+    -- passes it, and every other check in this file. It renders "Each lane ran
+    ONE harness version and ONE prompt version from start to finish" directly
+    above a table listing two prompt versions for that lane: the sentence
+    falsified by the rows beneath it, which is the precise failure this section
+    exists to prevent.
+
+    `prompt_version` is the direction that needs its own fixture, because it is
+    the field that was historically ignored. A suite that only ever drifts it
+    alongside `harness_identity` cannot tell the two apart.
+    """
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as sweep:
+        sha = init_repo_with_commit(repo, {"pkg/example/thing.go": "x" * 200})
+        write_plan_step(sweep, "step-001", sha, scope="pkg/example")
+        write_plan_step(sweep, "step-002", sha, scope="pkg/example")
+
+        # Same harness both steps. Only the prompt changed.
+        first = complete_envelope(sha, "laneA", "step-001", [])
+        write(os.path.join(sweep, "lanes", "laneA", "step-001.findings.json"), first)
+        second = complete_envelope(sha, "laneA", "step-002", [])
+        second["prompt_version"] = "f" * 64
+        write(os.path.join(sweep, "lanes", "laneA", "step-002.findings.json"), second)
+
+        report = consolidate.consolidate(sweep, repo)
+        row = report["provenance"][0]
+        check(
+            len(row["harness_identity"]) == 1,
+            "provenance: the harness really did stay constant (else this proves nothing)",
+            str(row["harness_identity"]),
+        )
+        check(
+            len(row["prompt_version"]) == 2,
+            "provenance: two prompt versions recorded",
+            str(row["prompt_version"]),
+        )
+        check(
+            row["mixed"] is True,
+            "provenance: prompt_version drift ALONE makes a lane mixed",
+            str(row),
+        )
+
+        md = consolidate.render_markdown(report)
+        section = md.split("## Provenance")[1].split("\n## ")[0]
+        check(
+            "ONE harness version and ONE prompt version from start to finish" not in section,
+            "provenance: a prompt-drifted sweep is never reported as consistent",
+            section,
+        )
+        check(
+            "`laneA` changed instrument partway" in section,
+            "provenance: and the lane is named",
+            section,
+        )
 
 
 def test_a_single_instrument_sweep_says_so_rather_than_staying_quiet():

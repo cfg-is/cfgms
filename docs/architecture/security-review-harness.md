@@ -661,10 +661,14 @@ binding stays visible on the envelope exactly like `refusal_attempts` does.
   `refused`/`failed`/`parked` step never got far enough to have read anything meaningful or to
   have addressed any hypothesis.
 
-#### Binding fields and quarantine on resume (Issue #3962)
+#### Provenance fields, and the one that quarantines on resume (Issues #3962, #4136)
 
-`plan_hash`, `prompt_version`, and `harness_identity` bind an envelope to the exact plan step,
-system prompt, and harness code it was produced against:
+`plan_hash`, `prompt_version`, and `harness_identity` record the exact plan step, system prompt,
+and harness code an envelope was produced against. **Only `plan_hash` is checked on resume.** The
+other two are recorded and read back through `resume.provenance_by_step()`; neither gates. The
+split is deliberate and is the subject of [Binding an envelope](#binding-an-envelope-to-its-plan-and-harness)
+below: `plan_hash` describes the *question* a step answered, while the other two describe the
+*instrument* that answered it.
 
 - **`plan_hash`** — a SHA-256 hex digest of `plan_dir/<step_id>.json`'s own raw bytes on disk
   (`harness_runner.compute_plan_hash()`), hashed over the file's bytes, never a re-serialization

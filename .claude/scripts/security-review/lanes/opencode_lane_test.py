@@ -186,12 +186,14 @@ def test_run_lane_writes_matching_plan_hash_and_harness_identity() -> None:
 def test_a_changed_PLAN_quarantines_and_reruns_the_step() -> None:
     """[REQUIRED TEST] (Issue #3962) Proves this lane actually passes
     `plan_dir` into `resume.missing_steps()`,
-    which no value check on a single envelope can show: dropping either
-    argument leaves the pre-#3962 default (`None`, check skipped) in place, so
-    the stale `complete` envelope would be accepted and the step never re-run.
+    which no value check on a single envelope can show: dropping the argument
+    leaves the pre-#3962 default (`None`, check skipped) in place, so a stale
+    `complete` envelope would be accepted and the step never re-run.
     Four invocations against one lane dir -- unchanged bindings skip the step,
-    a changed harness identity quarantines and re-runs it, a changed plan step
-    does the same -- and the harness call count is the evidence."""
+    a changed harness identity ALSO skips it (Issue #4136: the harness is the
+    instrument, not the specimen, so its drift is recorded and never gates),
+    and a changed PLAN step is the one case that quarantines and re-runs --
+    with the harness call count as the evidence."""
     with tempfile.TemporaryDirectory() as plan_dir, tempfile.TemporaryDirectory() as out_dir:
         write_plan_step(plan_dir, "step-001")
         calls = {"n": 0}

@@ -3367,7 +3367,11 @@ files = []
 paths = [entrypoint_path, lane_entrypoint_path, agent_profile_path]
 # Issue #3982: a lane runs the whole trusted harness tree (mounted at
 # /opt/cfgms-harness/security-review), not just its entrypoint file, so
-# every Python module in it is part of the harness identity a resume checks.
+# every Python module in it is part of the harness identity RECORDED on each
+# envelope. Since Issue #4136 a resume does not check that identity -- the
+# harness is the instrument, not the specimen -- but the identity still has to
+# cover the whole tree, because its job is to say WHICH harness produced a
+# step, and a digest over the entrypoint alone could not answer that.
 if lane_entrypoint_path:
     paths.append(os.path.join(repo_root, "docs", "security-review", "methodology.md"))
     harness_dir = os.path.join(repo_root, ".claude", "scripts", "security-review")
