@@ -341,17 +341,53 @@ def test_http_429_is_rate_limited_by_status_not_prose() -> None:
     anticipate read as an ordinary failure, and a finding that merely
     discussed rate limiting could read as one. A status code is a fact.
 
-    The body here deliberately contains NO rate-limit wording, so a pass
-    proves the status drove the result rather than the text fallback.
+    The MODEL's text here contains no rate-limit wording, so nothing the model
+    said can be what produced the verdict.
+
+    **The status and the fallback are NOT separable through this API, and an
+    earlier version of this docstring claimed they were.** `call_ollama_harness`
+    synthesizes `stderr = "HTTP {status}: {reason}\n{body}"`, and
+    `_RATE_LIMIT_RE` matches the literal `HTTP 429` in that prefix. So on this
+    path the prose detector fires on EVERY 429 regardless of what the server
+    wrote, and deleting `http_status == 429` leaves the suite green. Found by
+    mutation; the first attempt to fix it swapped the reason phrase to an inert
+    one and the prefix still matched.
+
+    What that means is worth being exact about, because "redundant" and
+    "untested" are different: the status check is not redundant, it is the
+    check that survives a change to that format string. Rewrite the synthesized
+    stderr and the fallback stops firing, leaving the status as the only signal.
+    It is untestable from outside rather than unnecessary.
+
+    So this asserts what it CAN: the model's own body and the reason phrase are
+    both inert, so neither is the source of the verdict, and the status is
+    recorded. The prefix is asserted to be the only remaining prose source, so
+    a future change that makes the model's text matter fails here.
     """
     with tempfile.TemporaryDirectory() as out_dir:
         raw_path = os.path.join(out_dir, "raw.json")
         err = ollama_lane.urllib.error.HTTPError(
             url="http://127.0.0.1:11434/api/generate",
             code=429,
-            msg="Too Many Requests",
+            msg="Slow Down",
             hdrs=_FakeHeaders({"Retry-After": "42"}),
-            fp=io.BytesIO(b"slow down"),
+            fp=io.BytesIO(b"please wait"),
+        )
+        # Neither the server's body nor its reason phrase may carry rate-limit
+        # wording, or this test reverts to proving nothing about the status.
+        for text in ("Slow Down", "please wait"):
+            check(
+                harness_runner.looks_rate_limited(text) is False,
+                f"429-by-status: {text!r} must stay inert to the prose detector",
+                text,
+            )
+        # And the ONLY prose that can still match is the harness's own prefix,
+        # which is the fact that makes the two signals inseparable here. Stated
+        # as an assertion so the limitation cannot quietly change shape.
+        check(
+            harness_runner.looks_rate_limited("HTTP 429: Slow Down") is True,
+            "429-by-status: the synthesized `HTTP 429` prefix is what the fallback matches",
+            "the status check is what survives a change to that format string",
         )
         exit_code, rate_limited, _tail = _run_with_fake_ollama(
             out_dir, raw_path, stdout="", stderr="", returncode=0, raises=err
@@ -1455,6 +1491,47 @@ def test_an_http_exception_is_caught_and_diagnosed():
                 "IncompleteRead: recorded by name in the meta",
                 repr(parsed.get("transport_error")),
             )
+
+
+def test_only_a_200_yields_exit_code_zero():
+    """[REQUIRED TEST] The synthesized exit code promises "0 only for an
+    unambiguously good response". A 4xx is not one.
+
+    `exit_code = 0 if http_status < 500 else 1` passes every other test in this
+    file, because the extraction guard catches the fallout: an HTTPError leaves
+    `stdout` empty, so `_extract_json_object` returns None and the return
+    forces 1 anyway. That makes the status-to-exit-code mapping defence in
+    depth rather than the only defence -- but it is a separate claim, and it
+    was the unasserted one. A 403 or 404 reporting success is the shape this
+    stops.
+    """
+    for status, msg in ((401, "Unauthorized"), (403, "Forbidden"), (404, "Not Found")):
+        with tempfile.TemporaryDirectory() as out_dir:
+            raw_path = os.path.join(out_dir, "raw.json")
+            err = ollama_lane.urllib.error.HTTPError(
+                url="http://127.0.0.1:11434/api/generate",
+                code=status, msg=msg, hdrs=_FakeHeaders({}),
+                fp=io.BytesIO(b"{}"),
+            )
+            exit_code, _rl, _tail = _run_with_fake_ollama(
+                out_dir, raw_path, stdout="", stderr="", returncode=0, raises=err
+            )
+            check(
+                exit_code != 0,
+                f"exit code: HTTP {status} is NOT an unambiguously good response",
+                repr(exit_code),
+            )
+            diag = harness_runner.step_diagnostics_dir(out_dir)
+            names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+            meta = [n for n in names if n.endswith(".meta.json")]
+            if meta:
+                with open(os.path.join(diag, meta[0])) as f:
+                    parsed = json.load(f)
+                check(
+                    parsed.get("http_status") == status,
+                    f"exit code: HTTP {status} recorded in meta",
+                    repr(parsed.get("http_status")),
+                )
 
 
 def test_a_non_finite_retry_after_is_rejected_not_recorded_as_infinity():
