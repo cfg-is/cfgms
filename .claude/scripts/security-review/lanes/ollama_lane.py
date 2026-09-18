@@ -208,8 +208,14 @@ def _ollama_generate_url() -> str:
 # The threshold between "absorb this wait here" and "this belongs to the
 # scheduler". NOT a truncation.
 #
-# A longer `Retry-After` is deferred whole to
-# `harness_runner.call_with_rate_limit_backoff`, never waited partially. That
+# A longer `Retry-After` is deferred whole to the CALLER, never waited
+# partially. For the finder lane (`run_lane`) and the verifier that caller is
+# `harness_runner.call_with_rate_limit_backoff`, which owns the long-wait
+# budget. The adjudicator is the exception: `adjudicator.py` calls this harness
+# directly and PARKS on `rate_limited` rather than waiting, so there a deferral
+# means "park now, resume later" instead of "wait longer". Pre-existing for any
+# 429 in that stage, not something this changes -- but the deferral is not a
+# hand-off to a waiter in all three. That
 # distinction matters more than the number: `Retry-After` is the server saying
 # when it will accept us again, so waiting 120s of a named 300s and retrying is
 # retrying too early BY CONSTRUCTION -- disobeying the instruction while
@@ -247,9 +253,19 @@ def _parse_retry_after(value: object) -> "float | None":
         return None
     raw = value.strip()
     try:
-        return max(0.0, float(raw))
+        seconds = float(raw)
     except ValueError:
-        pass
+        seconds = None
+    if seconds is not None:
+        # Reject inf/-inf/nan rather than carrying them. `json.dumps` writes a
+        # non-finite float as a bare `Infinity`/`NaN`, which is not valid
+        # RFC 8259 -- a header of "inf" would make the whole step meta
+        # unreadable to a strict parser. A value this code cannot use is
+        # treated like any other malformed header: fall back to the shared
+        # backoff.
+        if seconds != seconds or seconds in (float("inf"), float("-inf")):
+            return None
+        return max(0.0, seconds)
     try:
         when = parsedate_to_datetime(raw)
     except (TypeError, ValueError):
@@ -619,7 +635,10 @@ def call_ollama_harness(
                 pass
             elif wait > RETRY_AFTER_MAX_SLEEP_SECONDS:
                 # Too long to absorb here -- defer the WHOLE wait to the
-                # scheduler rather than serving part of it. Recorded separately
+                # caller rather than serving part of it. That is the shared
+                # backoff for the finder lane and the verifier; for the
+                # adjudicator it means the step parks. See
+                # RETRY_AFTER_MAX_SLEEP_SECONDS above. Recorded separately
                 # from an absorbed one: this case neither slept nor recovered,
                 # and collapsing it into an ordinary 429 would hide the very
                 # signal that tells us what the threshold should be.
@@ -636,8 +655,19 @@ def call_ollama_harness(
                 # exactly the symptom that took a day to explain before the API
                 # move. A retry reusing the same result variables erases the
                 # first attempt unless something explicitly preserves it.
-                rate_limited_recovered = True
+                # Set from the RETRY'S OUTCOME, never before it. Assigning
+                # ahead of the call made the field claim a recovery that had
+                # not happened yet and might not: a second 429 left
+                # `rate_limited_recovered: true` sitting beside
+                # `rate_limited: true`, `http_status: 429` and `exit_code: 1`.
+                # Counting recoveries then over-reports, and the truth is only
+                # recoverable through an undocumented conjunction.
+                #
+                # `retry_after` deliberately keeps the FIRST header -- the one
+                # that was obeyed -- so a second 429's own header is discarded
+                # rather than shown beside a status it does not belong to.
                 http_status, _retry_header_after, body, reason = _post()
+                rate_limited_recovered = http_status != 429
 
         if reason is None:
             stdout, stderr, metrics = _parse_generate_response(body)

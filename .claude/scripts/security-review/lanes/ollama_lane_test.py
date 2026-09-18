@@ -1164,6 +1164,89 @@ def test_retry_after_is_honoured_on_429_not_merely_recorded():
             )
 
 
+def test_a_second_429_is_not_recorded_as_a_recovery():
+    """[REQUIRED TEST] The retry is issued, then 429s again. Nothing recovered,
+    and the record must not claim otherwise.
+
+    This is the cell no test covered: one test returns 200 on the retry, the
+    other never retries at all, so a flag set BEFORE the retry passed both. The
+    field's whole stated purpose is to be the only record that a handled 429
+    happened -- firing it for unhandled ones too makes counting recoveries
+    over-report, and leaves the truth recoverable only through an undocumented
+    conjunction with `rate_limited`.
+    """
+    with tempfile.TemporaryDirectory() as out_dir:
+        raw_path = os.path.join(out_dir, "raw.json")
+        slept: list = []
+        calls: list = []
+
+        def _urlopen(request, *a, **k):
+            calls.append(request.full_url)
+            header = "7" if len(calls) == 1 else "9"
+            raise ollama_lane.urllib.error.HTTPError(
+                url=request.full_url, code=429, msg="Too Many Requests",
+                hdrs=_FakeHeaders({"Retry-After": header}), fp=io.BytesIO(b"still limited"),
+            )
+
+        real_urlopen = ollama_lane.urllib.request.urlopen
+        real_sleep = ollama_lane.time.sleep
+        ollama_lane.urllib.request.urlopen = _urlopen
+        ollama_lane.time.sleep = lambda s: slept.append(s)
+        try:
+            exit_code, rate_limited, _tail = ollama_lane.call_ollama_harness("m", "p", raw_path)
+        finally:
+            ollama_lane.urllib.request.urlopen = real_urlopen
+            ollama_lane.time.sleep = real_sleep
+
+        check(slept == [7.0], "second 429: the first header was still obeyed", str(slept))
+        check(len(calls) == 2, "second 429: retried exactly once, never looped", str(len(calls)))
+        check(rate_limited is True, "second 429: reported rate limited for the shared backoff")
+        check(exit_code != 0, "second 429: reports a non-zero code", str(exit_code))
+
+        diag = harness_runner.step_diagnostics_dir(out_dir)
+        names = sorted(os.listdir(diag)) if os.path.isdir(diag) else []
+        meta = [n for n in names if n.endswith(".meta.json")]
+        if not meta:
+            check(False, "second 429: a meta file is written", str(names))
+            return
+        with open(os.path.join(diag, meta[0])) as f:
+            parsed = json.load(f)
+        check(
+            parsed.get("rate_limited_recovered") is False,
+            "second 429: NOT recorded as a recovery -- the retry failed too",
+            repr(parsed),
+        )
+        check(
+            parsed.get("http_status") == 429,
+            "second 429: the final status is the second 429, not the first",
+            repr(parsed.get("http_status")),
+        )
+        check(
+            parsed.get("retry_after") == "7",
+            "second 429: the header shown is the one that was OBEYED, not the second response's",
+            repr(parsed.get("retry_after")),
+        )
+        check(
+            parsed.get("retry_after_slept_seconds") == 7.0,
+            "second 429: the wait taken is recorded even though it did not help",
+            repr(parsed.get("retry_after_slept_seconds")),
+        )
+
+
+def test_a_non_finite_retry_after_is_rejected_not_recorded_as_infinity():
+    """A header of "inf" produced `retry_after_deferred_seconds: Infinity`,
+    which `json.dumps` writes as a bare `Infinity` -- not valid RFC 8259, so a
+    strict reader cannot parse the meta at all. A malformed header must fall
+    back to the shared backoff, exactly as "not-a-number" already does."""
+    for raw in ("inf", "1e400", "-inf"):
+        parsed = ollama_lane._parse_retry_after(raw)
+        check(
+            parsed is None,
+            f"retry-after: a non-finite header ({raw!r}) is rejected, not carried as Infinity",
+            repr(parsed),
+        )
+
+
 def test_an_oversized_retry_after_is_deferred_whole_never_truncated():
     """[REQUIRED TEST] A wait longer than the threshold goes to the scheduler
     ENTIRELY -- it is never served in part.
