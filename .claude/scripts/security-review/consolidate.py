@@ -454,8 +454,14 @@ def _group_findings(findings: list[tuple[str, str, dict]], repo_root: str) -> di
         # title, line, the count itself -- describes only the first.
         #
         # Measured on sweep 2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held
-        # two or more findings, swallowing 116 of 2,133 -- 5.4% of everything
-        # reported. Example, codex on pkg/secrets/providers/sops/lock.go
+        # two or more findings, swallowing 116 of the 2,079 occurrences that
+        # reach grouping -- 5.6%.
+        #
+        # An earlier revision divided by 2,133, which is the PRE-validation
+        # count across all 631 envelopes. 54 findings are dropped by path and
+        # schema validation before `_group_findings` ever sees them, so 2,133
+        # is not the population 116 was measured over. Wrong denominator, in a
+        # comment arguing for measurement discipline. Example, codex on pkg/secrets/providers/sops/lock.go
         # ::acquireCASLock, both CWE-362: one race window at line 83 and
         # another at line 103. Two defects, twenty lines apart, one record.
         #
@@ -576,7 +582,7 @@ def _group_rank_key(finding: dict) -> tuple[int, int, int, str, str, str]:
 def _first_occurrence_field(occurrences: list[dict], field: str) -> object:
     """The value of `field` on the first occurrence (in the given, already
     deterministic order) that carries it, or `None` if none do. Used to pick
-    one `vuln_class`/`line`/`end_line` to show at the consolidated-finding
+    one `cwe`/`line`/`end_line` to show at the consolidated-finding
     level beside `file` -- a deterministic pick, never a merge, since these are
     model-generated hints for a human reader, not part of what makes two
     findings the same finding (that is the `file`+`symbol`+`cwe` key since
@@ -689,6 +695,12 @@ _IDENTIFIER_PREFIX_RE = re.compile(
 )
 # A bare number with no `CWE` at all, which is still not a heading.
 _BARE_IDENTIFIER_RE = re.compile(r"^\s*\d+\s*$")
+# `other: <short label>` is the vocabulary's escape hatch, which
+# `docs/security-review/methodology.md` calls "allowed and expected" -- so a
+# lane using it is behaving correctly, and it must not produce
+# "### other: foo (other: foo)", the exact duplication this helper exists to
+# prevent. The label is the tail; `other:` is the marker, not prose.
+_OTHER_ESCAPE_RE = re.compile(r"^\s*other\s*:\s*(?P<prose>.*)$", re.IGNORECASE)
 
 
 def _prose_label(finding: dict) -> str:
@@ -729,6 +741,14 @@ def _prose_label(finding: dict) -> str:
     for occurrence in finding.get("occurrences") or []:
         label = occurrence.get("vuln_class")
         if not isinstance(label, str) or not label.strip():
+            continue
+        escaped = _OTHER_ESCAPE_RE.match(label)
+        if escaped:
+            tail = escaped.group("prose").strip()
+            # "other: tenant path confusion" -> "tenant path confusion".
+            # A bare "other:" with no label has no prose to offer and skips.
+            if tail:
+                return tail
             continue
         prefixed = _IDENTIFIER_PREFIX_RE.match(label)
         if prefixed:
@@ -811,10 +831,23 @@ def build_cross_step_groups(findings: list[dict]) -> list[dict]:
                         # exists to prevent (Issue #4134).
                         #
                         # These members travel to the adjudicator (see
-                        # `adjudication_input`), and Issue #4080 keeps finder
-                        # evidence out of that payload. Copying `occurrences`
-                        # wholesale would carry `evidence` straight past that
-                        # guard, so only the class label is projected.
+                        # `adjudication_input`), and Issue #4080 keeps verbatim
+                        # SOURCE out of that payload -- not evidence as such.
+                        # The #4080 note below this function is explicit that
+                        # finder evidence DOES travel to the adjudicator; what
+                        # is redacted is a run copied verbatim out of the file
+                        # a finding names. An earlier version of this comment
+                        # said "finder evidence", contradicting that note
+                        # eighteen lines away.
+                        #
+                        # The guard is real and this projection is load-bearing
+                        # for it: `_redact_source_from_reports` runs only over
+                        # `built_findings[].reports` and never over
+                        # `group["members"]`, which `build_adjudication_input`
+                        # passes through verbatim. So copying `occurrences`
+                        # wholesale would carry `evidence` past the redaction
+                        # entirely, not merely duplicate it. Only the class
+                        # label is projected.
                         "occurrences": [
                             {"vuln_class": occurrence["vuln_class"]}
                             for occurrence in member.get("occurrences") or []

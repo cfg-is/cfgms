@@ -600,6 +600,23 @@ names which of the step's `hypotheses` this finding resulted from — a finding 
 `candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
 finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
+**KNOWN GAP: two findings from ONE lane at the same key still merge (Issue #4134).** Measured on
+sweep `2026-09-16T1843Z-a17e6fcc`: 107 same-lane keys held two or more findings, swallowing 116 of
+the 2,079 occurrences that reach grouping — **5.6%**. A lane reporting two findings is that lane
+asserting they are two things, and merging them overrules the only judgement in the system that
+actually read the code: the second survives as an occurrence bullet while the consolidated record —
+title, line, the count itself — describes only the first. Real example: codex on
+`pkg/secrets/providers/sops/lock.go::acquireCASLock`, both CWE-362, race windows twenty lines apart,
+rendered as one finding.
+
+This is **deliberately unfixed.** The obvious repair — a per-lane ordinal in the key — was built and
+reverted, because an ordinal is not recoverable from an already-consolidated finding, so
+`consolidate._finding_key()` collided and the adjudicator's and verifier's verdicts cross-applied
+between distinct findings. A false `guarded` reads as CLEAN, which is worse than losing a finding.
+The real fix is an explicit `finding_id` carried end to end through the lane envelope, the
+adjudicator and the verifier — a schema change across three stages, not yet scheduled. Until then,
+read a single-lane finding's occurrence list, not only its title.
+
 **The de-duplication key is still `file` + `symbol` + normalised `cwe` — never the location.** Line
 ranges rot as `develop` advances while symbol names survive, so keying on `line`/`end_line` would
 split one defect two lanes report at two slightly different line numbers into two findings,
@@ -1862,8 +1879,9 @@ catalogue fails closed.
 
 **The regression corpus (Issue #4059).** `docs/security-review/regression-corpus.md` pins defects
 this repository has had to commits where they are still present, so "model A beats model B" and "this
-change made it worse" are answerable with a number. `corpus.py` scores on file plus `vuln_class` --
-never line numbers, which rot. Right file, wrong class is `near`; an entry with no recorded files is
+change made it worse" are answerable with a number. `corpus.py` scores on file plus the
+consolidated `vuln_class`, which **since Issue #4134 is the normalised `cwe`**, not the free-text
+label a lane wrote -- never line numbers, which rot. Right file, wrong class is `near`; an entry with no recorded files is
 `unscoreable` and leaves the denominator. An entry must be a defect **verified in its fix commit's
 body**: a subject line is not evidence, and an entry that was never a defect marks a model down for
 missing something that never existed. Read the corpus score beside the closure rate, never either

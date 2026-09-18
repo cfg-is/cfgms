@@ -2097,6 +2097,16 @@ def test_heading_label_tests_identifier_SHAPE_not_vocabulary_membership():
          "a bare number is an identifier and never a heading"),
         ("Incorrect authorization", "Incorrect authorization",
          "plain prose is returned unchanged"),
+        # The vocabulary's escape hatch. methodology.md calls it "allowed and
+        # expected", so a lane using it is behaving correctly -- and it used to
+        # render "### other: foo (other: foo)", the exact duplication this
+        # helper exists to prevent. `other:` is a marker, not prose.
+        ("other: tenant path confusion", "tenant path confusion",
+         "the `other:` escape yields its LABEL, never the marker"),
+        ("OTHER: Broken flow", "Broken flow",
+         "and the marker match is case-insensitive"),
+        ("other:", "CWE-863 (fallback)",
+         "a bare `other:` carries no label, so it is skipped"),
         ("   ", "CWE-863 (fallback)",
          "a whitespace-only label is not prose"),
     ]
@@ -2179,7 +2189,7 @@ def test_same_lane_findings_at_one_key_merge_KNOWN_GAP():
     that is a KNOWN, UNFIXED gap -- pinned here so it cannot change silently.
 
     Measured on sweep 2026-09-16T1843Z-a17e6fcc: 107 same-lane keys held two or
-    more findings, swallowing 116 of 2,133 -- 5.4% of everything reported. Real
+    more findings, swallowing 116 of the 2,079 occurrences that reach grouping -- 5.6% of everything reported. Real
     example, codex on `acquireCASLock`, both CWE-362: race windows at line 83
     and line 103. The second survives as an occurrence, so the evidence is
     visible, but the top-level record and the finding COUNT describe only the

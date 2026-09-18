@@ -20,12 +20,20 @@ defects, and does a change to the harness make it find fewer.
 ## Scoring rule
 
 An entry is **found** when a sweep against its `commit` reports a finding whose `file` is one of
-the entry's files and whose `vuln_class` matches. Line numbers are never compared -- they rot. A
+the entry's files and whose `vuln_class` matches. Since Issue #4134 a consolidated finding's
+`vuln_class` **is the normalised `cwe`**, not the free-text label a lane wrote, so an entry's
+`vuln_class` column should hold a CWE identifier. Line numbers are never compared -- they rot. A
 finding on the right file with the wrong class is **near**, counted separately: the reviewer looked
 in the right place and named the wrong thing.
 
-A score is comparable only against another score over the same corpus revision. Record the
-revision beside any number.
+A score is comparable only against another score over the same corpus revision **and the same
+matching rule**. Record both beside any number.
+
+**Scores taken before Issue #4134 are not comparable with scores taken after it**, even over an
+identical corpus revision. That change made the matching class the normalised `cwe` rather than the
+lane's prose, so entries that could previously score `near` at best can now score `found` — the
+number moved because the rule moved, not because a model improved. Re-run any baseline you intend
+to compare against rather than trusting a recorded figure.
 
 ## The corpus is not the only signal
 

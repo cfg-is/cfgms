@@ -5,10 +5,10 @@ Three shapes are validated here:
 
 - A **finding** (`validate_finding`): the structured output a lane emits per
   vulnerability, matching the epic's "Finding schema" exactly. The
-  de-duplication key is `file` + `symbol` + normalised `cwe` (Issue #4134,
-  plus a per-lane ordinal so one lane's two findings never collapse into
-  one) — never a location,
-  because line ranges rot as `develop` advances while symbol names survive.
+  de-duplication key is `file` + `symbol` + normalised `cwe` (Issue #4134) —
+  never a location, because line ranges rot as `develop` advances while symbol
+  names survive. Two findings from ONE lane at the same key still merge; that
+  is a known, measured gap, recorded at `consolidate._group_findings`.
   That was always right about the *key*; it was implemented, before Issue
   #3983, as "don't record a location at all," which is a different and
   overly strong decision -- a finding naming a file and a symbol but no
@@ -208,9 +208,16 @@ def normalize_cwe(value: object) -> str | None:
     Normalising is a different operation from de-duplication, but no longer an
     unrelated one: since Issue #4134 the value this function returns IS the
     class component of the de-duplication key (`file` + `symbol` + normalised
-    `cwe`, plus a per-lane ordinal). It was previously keyed on the free-text
-    `vuln_class`, which meant two lanes describing one defect in different
-    registers -- prose against an identifier -- never matched.
+    `cwe`). It was previously keyed on the free-text `vuln_class`, which meant
+    two lanes describing one defect in different registers -- prose against an
+    identifier -- never matched.
+
+    An earlier revision of #4134 added a per-lane ordinal to that key and this
+    sentence still named it. The ordinal was REVERTED: it is not recoverable
+    from an already-consolidated finding, so `consolidate._finding_key` -- which
+    re-derives the key to attach the adjudicator's and verifier's verdicts --
+    collided, and a verdict could attach to the wrong finding. See
+    `consolidate._group_findings` for the known same-lane gap that leaves open.
 
     Never raises: a non-string, an out-of-list number, or an `other:` escape
     with an empty label all return `None`, exactly like every other
