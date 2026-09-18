@@ -56,7 +56,7 @@ A re-arm is a **resume**, not a fresh arm. The watcher keeps its `last_full` and
 
 Every start re-baselines the probes against current reality. That is a **drop, not a deferral**: whatever changed while the watcher was down is consumed and never reported line by line. A cold start's startup cycle covers it; a resume emits one `full_cycle reason=resume_gap` instead, but only when the baseline actually found something moved. A quiet resume stays silent. Replaying the gap event by event was the rejected alternative — it wakes the session with a burst of stale lines.
 
-The watcher refuses to start if another instance is already running on this host (PID file in the PO cache dir), so double-arming is safe.
+The watcher refuses to start if another instance is already running on this host (PID file in the PO cache dir), so double-arming is safe. Two starts racing each other are safe as well: reading, checking and writing the PID file happen as one step under a lock directory, so exactly one watcher runs and the other exits non-zero naming it. A PID file left by a crashed watcher is reclaimed. A live process this user cannot signal counts as running.
 
 **It needs a long-lived session on the local host.** Two separate constraints meet here. First, the watcher dies when its session ends, unlike a cron loop — so the session has to stay up. Second, every bundle it triggers launches dispatch/review/fix containers, so the session must be the one with Docker access: the **local host session**, not `po-live`. A containerised PO session cannot drive the dispatch containers, so arming the watcher there would produce events nothing can act on.
 
