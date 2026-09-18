@@ -3649,6 +3649,29 @@ SCRIPTEOF
 # Test: resource-sampler.sh report emits no literal ${ placeholder (Issue #2485 AC3)
 # Runs report against a fixture samples file and asserts the emitted
 # RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
+# pipeline_suite_result_kind classifies the exit status a parallel suite
+# subshell recorded, and is the fail-closed half of that runner (Issue #4151).
+# Echoes exactly one of: pass, timeout, missing, fail.
+#
+# "missing" — an absent, empty or non-numeric status — must never be read as a
+# pass. `[[ $rc -eq 0 ]]` would do exactly that: [[ -eq ]] evaluates both
+# operands in arithmetic context, where "" and "garbage" are both 0, so a suite
+# whose subshell was killed (OOM, full or unwritable $TMPDIR) before recording
+# its status would be reported green. Comparison here is on the string, and the
+# numeric shape is checked explicitly first.
+pipeline_suite_result_kind() {
+    local rc="$1"
+    if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+        printf 'missing'
+    elif [[ "$rc" == "0" ]]; then
+        printf 'pass'
+    elif [[ "$rc" == "124" ]]; then
+        printf 'timeout'
+    else
+        printf 'fail'
+    fi
+}
+
 test_claude_pipeline_suites() {
     # The self-contained suites under .claude/scripts/tests/ (30 as of
     # 2026-09-18, up from the 21 measured 2026-08-20) guard the dispatch
@@ -3674,6 +3697,8 @@ test_claude_pipeline_suites() {
     # than a fixed shared path or real repo mutation (verified by inspection
     # 2026-09-18) — confirm that still holds before raising the batch size or
     # adding a suite that touches shared state.
+    #
+    # Aggregation fails closed: see pipeline_suite_result_kind.
     local tests_dir
     tests_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/scripts/tests"
 
@@ -3715,8 +3740,12 @@ test_claude_pipeline_suites() {
             fi
             rc=$?
             set -e
-            printf '%s' "$rc" > "$tmpdir/$i.rc"
             printf '%s' "$out" > "$tmpdir/$i.out"
+            # Write-then-rename: `printf > file` truncates before it writes, so a
+            # subshell killed between those two steps would leave a zero-byte
+            # status file. rename(2) within one directory is atomic, so the reader
+            # sees either no file or a complete one — never a truncated one.
+            printf '%s' "$rc" > "$tmpdir/$i.rc.partial" && mv "$tmpdir/$i.rc.partial" "$tmpdir/$i.rc"
         ) &
         if (( i % parallel == 0 )); then
             wait
@@ -3730,18 +3759,26 @@ test_claude_pipeline_suites() {
         i=$((i + 1))
         base="$(basename "$suite")"
         log_test "Testing ${base}..."
-        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo 1)
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
         out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
 
-        if [[ $rc -eq 0 ]]; then
-            log_pass "${base}"
-        elif [[ $rc -eq 124 ]]; then
-            log_fail "${base}: timed out after 180s"
-            echo "$out" | tail -20
-        else
-            log_fail "${base}: exit ${rc}"
-            echo "$out" | tail -20
-        fi
+        case "$(pipeline_suite_result_kind "$rc")" in
+            pass)
+                log_pass "${base}"
+                ;;
+            timeout)
+                log_fail "${base}: timed out after 180s"
+                echo "$out" | tail -20
+                ;;
+            missing)
+                log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                echo "$out" | tail -20
+                ;;
+            *)
+                log_fail "${base}: exit ${rc}"
+                echo "$out" | tail -20
+                ;;
+        esac
     done
 
     rm -rf "$tmpdir"
@@ -3808,6 +3845,60 @@ test_api_shard_partition_covers_all_tests() {
     fi
 
     log_pass "test-framework-api-sharded: ${total} tests partitioned evenly across ${shards} shards (sizes ${min}-${max})"
+}
+
+# Regression guard for the Makefile's test-go-group-controller-core /
+# test-go-group-heavy-providers / test-go-group-rest split (Issue #4151): the
+# three groups must partition the exact package list the pre-split single
+# `go test ./...` call used — no package dropped, none picked up by two
+# groups. Unlike test-framework-api-sharded above, this split is a
+# hand-maintained package-name partition, not something `go test -list`
+# itself verifies, so a renamed package or a new sub-package under one of the
+# heavy-providers paths could silently drift out of sync with no other
+# signal. Uses CFGMS_TEST_GROUP_LIST_ONLY=1 so this costs a few `go list`
+# calls, not three full -race runs.
+test_go_group_split_partition_covers_all_packages() {
+    log_test "Testing go-group split: controller-core/heavy-providers/rest partition all packages, no drops or duplicates..."
+
+    local full full_rc
+    full=$(go list ./... 2>&1 | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$')
+    full_rc=$?
+    if [[ $full_rc -ne 0 ]]; then
+        log_fail "go list ./...: exited ${full_rc}"
+        echo "$full" | tail -20
+        return
+    fi
+
+    local core heavy rest core_rc heavy_rc rest_rc
+    core=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-controller-core 2>&1)
+    core_rc=$?
+    heavy=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-heavy-providers 2>&1)
+    heavy_rc=$?
+    rest=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make test-go-group-rest 2>&1)
+    rest_rc=$?
+    if [[ $core_rc -ne 0 || $heavy_rc -ne 0 || $rest_rc -ne 0 ]]; then
+        log_fail "CFGMS_TEST_GROUP_LIST_ONLY=1 exited non-zero (core=${core_rc}, heavy=${heavy_rc}, rest=${rest_rc})"
+        return
+    fi
+
+    local full_count core_count heavy_count rest_count union_count
+    full_count=$(echo "$full" | sort -u | grep -c .)
+    core_count=$(echo "$core" | grep -c .)
+    heavy_count=$(echo "$heavy" | grep -c .)
+    rest_count=$(echo "$rest" | grep -c .)
+
+    if [[ $((core_count + heavy_count + rest_count)) -ne "$full_count" ]]; then
+        log_fail "controller-core (${core_count}) + heavy-providers (${heavy_count}) + rest (${rest_count}) = $((core_count + heavy_count + rest_count)), go list reports ${full_count} packages — partition drops or duplicates packages"
+        return
+    fi
+
+    union_count=$(printf '%s\n%s\n%s\n' "$core" "$heavy" "$rest" | sort -u | grep -c .)
+    if [[ "$union_count" -ne "$full_count" ]]; then
+        log_fail "union of the three groups has ${union_count} unique packages, go list reports ${full_count} — a package appears in more than one group"
+        return
+    fi
+
+    log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
 }
 
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
@@ -3877,6 +3968,40 @@ STUB
     fi
 
     log_pass "test-framework-api-sharded: missing shard exit status and unusable temp dir both fail closed"
+}
+
+# Regression guard for the parallel .claude pipeline-suite runner (Issue #4151):
+# a suite whose recorded exit status is absent, empty or non-numeric must be
+# reported as a failure, never as a pass. The same invariant the Makefile shard
+# aggregation holds, on the other side of the same change — and the case
+# `[[ $rc -eq 0 ]]` silently gets wrong, because it compares in arithmetic
+# context where "" and "garbage" are both 0.
+test_pipeline_suite_result_fails_closed() {
+    log_test "Testing .claude pipeline suite aggregation: unusable exit status fails closed..."
+
+    local kind
+    local -a bad_statuses=("" " " "garbage" "0x0" "00abc" $'\n')
+    for kind in "${bad_statuses[@]}"; do
+        local got
+        got=$(pipeline_suite_result_kind "$kind")
+        if [[ "$got" != "missing" ]]; then
+            log_fail "exit status $(printf '%q' "$kind") classified as '${got}', not 'missing' — a suite that recorded no usable status would be reported ${got}"
+            return
+        fi
+    done
+
+    local -a cases=("0:pass" "124:timeout" "1:fail" "2:fail" "137:fail")
+    local c
+    for c in "${cases[@]}"; do
+        local status="${c%%:*}" want="${c##*:}" actual
+        actual=$(pipeline_suite_result_kind "$status")
+        if [[ "$actual" != "$want" ]]; then
+            log_fail "exit status ${status} classified as '${actual}', expected '${want}'"
+            return
+        fi
+    done
+
+    log_pass ".claude pipeline suite aggregation: empty and non-numeric exit statuses fail closed"
 }
 
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
@@ -4371,9 +4496,13 @@ test_resource_sampler_no_placeholder
 echo ""
 test_api_shard_partition_covers_all_tests
 echo ""
+test_go_group_split_partition_covers_all_packages
+echo ""
 test_api_shard_aggregation_fails_closed
 echo ""
 test_api_shard_count_rejects_non_integer
+echo ""
+test_pipeline_suite_result_fails_closed
 echo ""
 test_claude_pipeline_suites
 echo ""

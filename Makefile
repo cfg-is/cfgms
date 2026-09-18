@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -422,38 +422,114 @@ test-install-cfg: build-cli
 	@echo "✅ cfg install tests passed"
 
 # Smart test - core modules + changed modules only
+#
+# The Go work below is split into named groups (test-go-group-*) rather than one
+# `go test ./...` invocation (Issue #4151). `make test` still runs every group
+# sequentially, matching this target's historical local behavior; the CI matrix
+# (.github/workflows/test-suite.yml) is what actually buys wall-clock time, by
+# running each group on its own runner instead of sharing one runner's CPUs.
+# Splitting shell-level jobs on a single runner (the first attempt, PR #4155)
+# measured no improvement: `go test ./...` already parallelizes across packages
+# up to GOMAXPROCS, so pulling one package out of that list and running it as a
+# second sequential step just reorders the same CPU-bound work rather than
+# reducing it. Separate runners are separate CPU pools, which is the only thing
+# that helps a CPU-bound `-race` suite on a 4-vCPU GitHub-hosted runner.
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
 	@if [ "$$GITHUB_ACTIONS" != "true" ]; then go clean -testcache; fi
 	@echo "🧪 Testing OSS Build..."
-	@echo "  Testing framework (excluding modules and long-running tests)..."
+	@$(MAKE) test-go-group-controller-core
+	@$(MAKE) test-go-group-heavy-providers
+	@$(MAKE) test-go-group-rest
+	@$(MAKE) test-framework-api-sharded
+	@echo "✅ OSS build tests complete"
+	@echo ""
+	@$(MAKE) test-scripts
+	@echo ""
+	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
+
 #	-timeout is a HANG DETECTOR, not a performance budget (Issue #2887). It applies
 #	per test binary (per package), so it scales with package size, not test health:
 #	when it fires, Go panics and dumps every goroutine stack so a deadlocked test is
 #	diagnosable instead of hanging CI forever. 10m is Go's own default. The outer
-#	bound on a genuine hang is `timeout-minutes: 15` on the unit-tests job in
-#	.github/workflows/test-suite.yml. Do not tighten this to track how long the
-#	suite currently takes — that turns a hang detector into a false ceiling that
-#	any growing package eventually crosses.
+#	bound on a genuine hang is `timeout-minutes` on the unit-tests-* jobs in
+#	.github/workflows/test-suite.yml. Do not tighten this to track how long any one
+#	group currently takes — that turns a hang detector into a false ceiling that any
+#	growing package eventually crosses.
 #
-#	features/controller/api is excluded here and run separately by
-#	test-framework-api-sharded (Issue #4151): it grew from 863 tests (Issue #2887)
-#	to 2,006 top-level `go test -list` entries (measured 2026-09-18) — every test
-#	builds a fresh SQLite business-store schema, ~7ms plain but ~164ms under the
-#	race detector's amplification, so per-test cost times test count made this one
-#	package alone ~322s of the unit-tests job's ~625s Go-test phase (CI run
-#	35371727977), more than half. No single test dominates (slowest 4.6s, median
-#	0.05s under -race), so splitting evenly by test name is representative rather
-#	than papering over one pathological test.
-	@go test -race -short -timeout=10m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$$')
-	@$(MAKE) test-framework-api-sharded
-	@echo "  Testing core modules (smoke test)..."
-	@for module in $(CORE_MODULES); do \
+#	The three groups below are a manually balanced partition of the same package
+#	list the pre-#4151 single `go test ./...` call used (minus features/modules,
+#	test/integration, test/e2e, and features/controller/api, which has its own
+#	target below). Balanced against CI run 35391321900 (2026-09-18, PR #4155,
+#	4-vCPU ubuntu-latest, single-runner main pass ~600s):
+#	features/controller/server 111.5s, features/controller/initialization 92s,
+#	pkg/cert 81s, pkg/controlplane/providers/grpc 66s, features/steward/client
+#	63s, pkg/storage/providers/sqlite 51s — the six single-package costs that
+#	together made up most of that 600s, with the remaining ~195 packages summing
+#	to the rest. Splitting by package name (not test name, unlike
+#	test-framework-api-sharded) is enough here: none of these packages has
+#	features/controller/api's single-package test-count problem, and go test
+#	already runs multiple packages within one invocation concurrently up to
+#	GOMAXPROCS, so a group's wall time is close to its slowest single package,
+#	not the sum. If a future measurement shows a group's wall time has drifted
+#	far from the others, rebalance by moving a package, not by adding a fourth
+#	group — CI job count is a cost too (checkout + setup-go + cache-restore
+#	overhead per job, see CLAUDE.md "Required CI Checks" runs-on routing notes).
+GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/...
+GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/...
+
+# CFGMS_TEST_GROUP_LIST_ONLY=1 prints the packages each group resolves to and
+# exits without running anything — mirrors CFGMS_API_TEST_SHARD_PLAN_ONLY
+# below. Single source of truth for scripts/test-scripts.sh's
+# test_go_group_split_partition_covers_all_packages, which asserts the three
+# groups partition the same package list the pre-#4151 single `go test ./...`
+# call used (no package dropped, none run by two groups).
+.PHONY: test-go-group-controller-core
+test-go-group-controller-core:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_CONTROLLER_CORE); \
+	else \
+		echo "  Testing controller-core group (features/controller/server, features/controller/initialization)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_CONTROLLER_CORE); \
+	fi
+
+.PHONY: test-go-group-heavy-providers
+test-go-group-heavy-providers:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_HEAVY_PROVIDERS); \
+	else \
+		echo "  Testing heavy-providers group (pkg/cert, controlplane/grpc, steward/client, storage/sqlite)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_HEAVY_PROVIDERS); \
+	fi
+
+.PHONY: test-go-group-rest
+test-go-group-rest:
+	@pkgs=$$(go list ./... \
+		| grep -v '/features/modules/' \
+		| grep -v '/test/integration' \
+		| grep -v '/test/e2e' \
+		| grep -v '/features/controller/api$$' \
+		| grep -v '/features/controller/server$$' \
+		| grep -v '/features/controller/initialization$$' \
+		| grep -v '/pkg/cert$$' \
+		| grep -v '/pkg/cert/bundle$$' \
+		| grep -v '/pkg/cert/interfaces$$' \
+		| grep -v '/pkg/controlplane/providers/grpc$$' \
+		| grep -v '/features/steward/client$$' \
+		| grep -v '/pkg/storage/providers/sqlite$$'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+		exit 0; \
+	fi; \
+	echo "  Testing framework (remaining packages, excluding modules and long-running tests)..."; \
+	go test -race -short -timeout=10m $$pkgs; \
+	echo "  Testing core modules (smoke test)..."; \
+	for module in $(CORE_MODULES); do \
 		echo "  Testing $$module..."; \
 		go test -race -short -timeout=30s ./features/modules/$$module/...; \
-	done
-	@changed_modules="$(CHANGED_MODULES)"; \
+	done; \
+	changed_modules="$(CHANGED_MODULES)"; \
 	if [ -n "$$changed_modules" ]; then \
 		echo "📝 Testing changed modules: $$changed_modules"; \
 		for module in $$changed_modules; do \
@@ -465,23 +541,30 @@ test: fix-git-bare
 	else \
 		echo "📋 No module changes detected - skipping additional module tests"; \
 	fi
-	@echo "✅ OSS build tests complete"
-	@echo ""
+
+.PHONY: test-scripts
+test-scripts:
 	@echo "🔧 Testing Shell Scripts..."
 	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
-	@echo ""
-	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
 
 # Runs features/controller/api's tests as N parallel `go test` processes instead
 # of one (Issue #4151). The package is a single flat directory (2,006 top-level
-# tests as of 2026-09-18, see comment on the `test` target above), so there is
-# no sub-package boundary to matrix on and no per-test hotspot to fix — Go only
-# parallelizes within a package via t.Parallel(), which this suite doesn't use.
-# Splitting by test name into N separate `go test -run` invocations and running
-# them as background shell jobs gets real OS-level parallelism across CPU cores
-# without touching test source, and without adding a CI job/matrix leg (which
-# would require its own required-status-check handling — see CLAUDE.md "Stub
-# exclusivity" for why a needs:-gated fan-in job is the wrong tool here).
+# tests as of 2026-09-18), so there is no sub-package boundary to matrix on and
+# no per-test hotspot to fix — Go only parallelizes within a package via
+# t.Parallel(), which this suite doesn't use. Splitting by test name into N
+# separate `go test -run` invocations and running them as background shell jobs
+# gets real OS-level parallelism across CPU cores without touching test source.
+#
+# This target is invoked as its own CI matrix leg (unit-tests-api in
+# .github/workflows/test-suite.yml) so the N shards get a dedicated runner's
+# CPUs rather than sharing them with every other package — the first attempt
+# (PR #4155, single job) ran this target as a second sequential step on the
+# same runner and measured no wall-clock improvement, because `go test ./...`
+# was already CPU-bound at GOMAXPROCS with or without this package in its
+# argument list. The per-shard internal parallelism here still matters on a
+# dedicated runner: a single serial `go test` of this package is the ~322s
+# critical path described below; N shards on N cores brings that down to
+# roughly (single-package critical path) / N.
 #
 # CFGMS_API_TEST_SHARDS overrides the shard count (defaults to nproc, capped to
 # a sane range so a huge build host doesn't spawn dozens of `go test` binaries
