@@ -164,13 +164,27 @@ mirror sync; it was rejected because a request already in flight 401s however fr
 so it narrows the failure without removing it, at the cost of more machinery in the script that
 launches every container.
 
-**Why there is no retry cap.** The property `failed` protects is that a deterministically broken
-step cannot loop, and it survives for two independent reasons. The classifier is narrow — a
-schema-invalid answer or a rejected model id carries no credential wording and does not match —
-and `resume` is invoked rather than looping, so one invocation attempts each eligible step once.
-If credentials are genuinely broken rather than rotating, every step fails identically and the
-operator sees it on the first resume, which is the "surface to a human" behaviour the state exists
-to provide.
+**Two guards keep a broken step from looping, and neither is sufficient alone.**
+
+1. **The harness-written prefix vetoes first.** A stop reason opening `invalid_findings_schema`,
+   `unhandled_step_error`, `unknown_harness` or `input_unreadable` is deterministic *by
+   construction*, so `is_transient_stop_reason()` returns false without reading the rest of the
+   string. The prefix is written by the harness; the model cannot influence it.
+2. **`resume.MAX_TRANSIENT_RETRIES` caps re-attempts at 2**, counted in `transient_retries` on the
+   step's own envelope so the count survives across separate `resume` invocations. Past the cap
+   the step returns to `failed`'s ordinary surface-to-human meaning. A genuine rotation clears on
+   the very next attempt, so two is generous.
+
+**Why a cap is needed at all.** `stop_reason_raw` is `"<reason>: <harness output tail>"`, and that
+tail is combined stdout+stderr — which for a finder lane contains the model's own answer. This
+harness reviews code for security defects, so that answer routinely contains "unauthorized",
+"invalid token" and "session expired" as **findings**, not as errors. A false positive is not an
+exotic case here; it is the expected shape of a finding. Without the cap, such a step would be
+re-run at full cost on every resume indefinitely.
+
+The prefix rule alone would still loop on a mis-detected `harness_exit_1`, whose tail genuinely is
+the CLI's error output. The cap alone would still burn two full step runs on every finding that
+mentions authentication.
 
 ### The shared terminal-state classifier (epic #3927's contract C3)
 

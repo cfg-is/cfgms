@@ -330,16 +330,35 @@ def missing_steps(
                 # sweep spanning several rotations quietly shed steps it would
                 # never pick up again.
                 #
-                # NO RETRY CAP, deliberately. The property `failed` protects is
-                # that a deterministically broken step cannot loop, and it
-                # survives for two independent reasons. The classifier is
-                # narrow, so a schema-invalid answer or a rejected model id
-                # produces no credential wording and does not match. And this
-                # function is INVOKED, never looping: one resume attempts each
-                # eligible step once. If credentials are genuinely broken
-                # rather than rotating, every step fails identically and the
-                # operator sees it on the first resume -- which is exactly the
-                # "surface to a human" behaviour `failed` exists to give.
+                # TWO GUARDS, and neither is sufficient alone.
+                #
+                # 1. The harness-written PREFIX vetoes first, inside
+                #    `schema.is_transient_stop_reason`. A stop reason opening
+                #    `invalid_findings_schema` means the model's answer failed
+                #    validation -- deterministic by construction, whatever
+                #    that answer happened to say -- so the rest of the string
+                #    is never read.
+                # 2. MAX_TRANSIENT_RETRIES caps how often any one step may be
+                #    re-attempted, counted on its own envelope.
+                #
+                # The prefix rule cannot catch a mis-detected `harness_exit_1`,
+                # whose tail genuinely is the CLI's error output. The cap
+                # cannot make a wrongly-classified step cheap -- it still
+                # burns two full runs. Each covers the other's gap.
+                #
+                # An earlier revision had no cap, arguing that this function is
+                # invoked rather than looping. That bounds re-attempts PER
+                # INVOCATION and says nothing across them, and a sweep is
+                # resumed for days. The argument was true and did not support
+                # the conclusion.
+                #
+                # Why a cap is needed at all: `stop_reason_raw` is
+                # `"<reason>: <harness output tail>"`, and the tail is combined
+                # stdout+stderr -- which for a finder lane contains the model's
+                # own answer. This harness reviews code for security defects,
+                # so that answer routinely contains "unauthorized" and
+                # "invalid token" as FINDINGS. A false positive here is not
+                # exotic; it is the expected shape of a finding.
                 stop_reason = envelope.get("stop_reason_raw") if isinstance(envelope, dict) else None
                 attempts = envelope.get("transient_retries") if isinstance(envelope, dict) else 0
                 attempts = attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
