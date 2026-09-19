@@ -70,13 +70,33 @@ jobs:
         #
         # CFGMS_ENABLE_TEST_ENDPOINTS and CFGMS_SEED_TEST_TOKENS are NOT set.
         # Storage defaults to flatfile (no CFGMS_STORAGE_PROVIDER override).
+        #
+        # No --config flag and nothing mounted at /etc/cfgms/controller.cfg:
+        # cmd/controller/Dockerfile's default CMD is `--config
+        # /etc/cfgms/controller.cfg`, an explicit path that config.findConfigFile
+        # hard-fails on when it doesn't exist ("config file not found at
+        # specified path") rather than falling back to defaults — that failure
+        # was the actual cause of 5 straight red runs (Issue #4169), not a ZAP
+        # finding. --entrypoint sh replaces the Dockerfile CMD with a bare
+        # invocation so configPath is "", which makes findConfigFile fall
+        # through env var / prod path / dev path (none present) to "no config
+        # file found — OK, will use defaults", i.e. DefaultConfig()'s flatfile
+        # storage — the posture this step's own comment above already intended.
+        #
+        # `controller --init` must run first regardless: server.New() refuses
+        # to start with ErrNotInitialized ("run 'controller --init ...' to
+        # perform first-run initialization") until the CA and RBAC defaults
+        # exist on disk — this is the same init-then-exec sequence
+        # docker-compose.test.yml's fleet-controller service uses.
         docker run -d \
           --name cfgms-controller-dast \
           --network host \
+          --entrypoint /bin/sh \
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
-          ${{ env.IMAGE_PREFIX }}/controller:dast
+          ${{ env.IMAGE_PREFIX }}/controller:dast \
+          -c './controller --init && exec ./controller'
 
     - name: Wait for controller to be healthy
       run: |
