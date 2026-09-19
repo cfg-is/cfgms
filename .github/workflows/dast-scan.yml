@@ -59,8 +59,20 @@ jobs:
 
     - name: Create writable data directories and ephemeral secrets key
       run: |
-        mkdir -p /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
-        chmod 777 /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
+        # /etc/cfgms is where --init writes the admin credential bundle
+        # (features/controller/initialization/bundle_marker.go
+        # defaultAdminBundlePath, used whenever no config file sets
+        # admin_bundle_path — the case here, since this workflow runs with
+        # no --config flag). pkg/cert/bundle.Write does `os.MkdirAll(dir,
+        # 0700)` then writes the bundle file inside it; both need the
+        # directory to exist and be writable by container UID 1001
+        # (cmd/controller/Dockerfile's non-root `USER 1001:1001`), which a
+        # bare /etc/cfgms is not. This is 5 straight red DAST runs' actual
+        # cause (Issue #4169): "mkdir /etc/cfgms: permission denied",
+        # surfacing only after the external_url fix cleared the earlier
+        # failure in the same --init call.
+        mkdir -p /tmp/cfgms-dast/data /tmp/cfgms-dast/certs /tmp/cfgms-dast/etc-cfgms
+        chmod 777 /tmp/cfgms-dast/data /tmp/cfgms-dast/certs /tmp/cfgms-dast/etc-cfgms
         # NewSecretStore (features/controller/api/server.go) fails closed
         # without CFGMS_SECRETS_KEY_FILE — plaintext secret storage is
         # prohibited. scripts/generate-test-credentials.sh uses the same
@@ -105,6 +117,12 @@ jobs:
         # CFGMS_EXTERNAL_URL is required by --init itself: initialization.Run
         # refuses to issue the admin bundle without an external_url configured
         # (the externally-reachable HTTPS address operators use to connect).
+        #
+        # /etc/cfgms is mounted from the writable dir created above: with no
+        # --config flag, --init writes the admin bundle to the platform
+        # default (/etc/cfgms/admin.bundle.yaml), which the container's
+        # non-root UID 1001 cannot create on a bare /etc/cfgms — see the
+        # comment on the step above for the full chain.
         docker run -d \
           --name cfgms-controller-dast \
           --network host \
@@ -115,6 +133,7 @@ jobs:
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
           -v /tmp/cfgms-dast/secrets.key:/app/secrets.key:ro \
+          -v /tmp/cfgms-dast/etc-cfgms:/etc/cfgms \
           ${{ env.IMAGE_PREFIX }}/controller:dast \
           -c './controller --init && exec ./controller'
 
