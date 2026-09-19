@@ -65,12 +65,15 @@ jobs:
         # without CFGMS_SECRETS_KEY_FILE — plaintext secret storage is
         # prohibited. scripts/generate-test-credentials.sh uses the same
         # `openssl rand 32` recipe for the fleet-controller integration
-        # stack. World-readable (644, not the script's 600) because the
-        # container runs as a different, non-root UID (1001) than the
-        # runner user that creates this file, same reasoning as the 777
-        # above for the bind-mounted data/certs directories.
+        # stack, at 0600. The SOPS provider (pkg/secrets/providers/sops)
+        # additionally rejects a key file with any group/other bit set, so
+        # unlike the 777 data/certs dirs above — which the non-root
+        # container UID 1001 needs to *write* — this file must instead be
+        # *owned* by 1001 (cmd/controller/Dockerfile's `adduser -D -u 1001`)
+        # so owner-only 0600 still grants it read access.
         openssl rand 32 > /tmp/cfgms-dast/secrets.key
-        chmod 644 /tmp/cfgms-dast/secrets.key
+        chmod 600 /tmp/cfgms-dast/secrets.key
+        sudo chown 1001:1001 /tmp/cfgms-dast/secrets.key
 
     - name: Start controller (flatfile storage, production auth posture)
       run: |
