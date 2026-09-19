@@ -716,8 +716,18 @@ test-watch:
 # Core modules for smoke testing (always tested)
 CORE_MODULES := stdlib/file stdlib/script
 
-# All modules for change detection
-ALL_MODULES := stdlib/file stdlib/script stdlib/firewall stdlib/package stdlib/patch m365 extended/activedirectory extended/network_activedirectory
+# All modules for change detection — derived from the tree so a new module
+# can never silently drop out of smart-mode selection (Issue #4164). Every
+# directory under features/modules/ containing a module.yaml is a module
+# (stdlib/<name>, extended/<name>, or a top-level module like hyperv);
+# adapter/ and conformance/ have no module.yaml and are excluded by this
+# criterion alone. features/workflow/modules/m365 is a separate subsystem
+# outside features/modules/ and is intentionally not picked up here. The
+# grep constrains discovered names to a safe charset before they are
+# expanded into shell recipes below (CHANGED_MODULES, test-module, the
+# smart-mode loops) — a directory name were it ever to contain shell
+# metacharacters would otherwise be interpolated unquoted.
+ALL_MODULES := $(shell find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; | sed 's#^features/modules/##' | grep -E '^[A-Za-z0-9_/-]+$$' | sort -u)
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \
