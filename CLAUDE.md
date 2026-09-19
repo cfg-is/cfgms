@@ -251,23 +251,54 @@ classification — to `code=true`. Anything added to that step must keep this
 direction: a wrongly-run suite costs runner minutes, a wrongly-skipped one ships
 untested code.
 
-**The other six stubbed contexts keep the overlap, and it is not the same
-exposure.** `security-deployment-gate`, `Build Gate`, `integration-tests`,
+**Five of the other six stubbed contexts keep the overlap, and it is not the
+same exposure.** `security-deployment-gate`, `integration-tests`,
 `Controller Integration Tests (Linux)`, `trivy-scan` and `security-validation`
 are all **queue-real**: their authoritative run only ever happens on
-`merge_group`, never on `pull_request`. Every PR-side poster for these six —
+`merge_group`, never on `pull_request`. Every PR-side poster for these five —
 both the check's own `*-pr-stub` job and `documentation.yml`'s docs-only
-stub — is a flat job with no `needs:` of its own, so neither poster is ever
-racing a slow, needs-delayed real run the way the `unit-tests` aggregator was.
-A PR that touches both a code path and a documentation.yml-matched path (e.g.
-this story's own PR, which edits `.github/workflows/*.yml` and `CLAUDE.md`)
-still gets two green stubs for the same context — redundant, but not a
-false-green risk, because neither stub is standing in for a same-side real job
-that could still fail. `security-validation` additionally isn't a required
-context at all (see "Advisory, not required" above), so it has no merge-safety
-exposure regardless. Closing this redundancy everywhere is out of scope for
-#4174; revisit only if one of these six contexts' real job ever gains a
-PR-side `needs:` barrier, which would reproduce the `unit-tests` shape.
+stub — resolves in seconds with no slow `needs:` chain behind it, so neither
+poster is ever racing a slow, needs-delayed real run the way the `unit-tests`
+aggregator was. A PR that touches both a code path and a
+documentation.yml-matched path (e.g. this story's own PR, which edits
+`.github/workflows/*.yml` and `CLAUDE.md`) still gets two green stubs for the
+same context — redundant, but not a false-green risk, because neither stub is
+standing in for a same-side real job that could still fail. `security-validation`
+additionally isn't a required context at all (see "Advisory, not required"
+above), so it has no merge-safety exposure regardless. Closing this
+redundancy everywhere is out of scope for #4174; revisit only if one of these
+five contexts' real job ever gains a PR-side `needs:` barrier, which would
+reproduce the `unit-tests` shape.
+
+**`Build Gate` is the sixth, and its PR-side stub is not flat.**
+`build-gate-pr-stub` (`cross-platform-build-pr.yml`) is
+`needs: [cross-compile-check]` — a multi-minute cross-compilation job, not an
+instant lookup — and has been since #3501. `documentation.yml`'s docs-only
+`build-gate` stub has no `needs:` and can complete within seconds of the
+workflow starting. On a PR that triggers both workflows (any PR touching a
+code path and a documentation.yml-matched path), this reproduces the
+`unit-tests` shape on the PR side: `documentation.yml` can post a green
+`Build Gate` before `cross-compile-check` — and therefore
+`build-gate-pr-stub` — has even started. Measured live on this story's own PR
+(#4185, head `15b890df`): `documentation.yml`'s `Build Gate` check run
+completed at `04:50:00Z`; `build-gate-pr-stub`'s `Build Gate` check run did
+not start until `04:56:23Z` — a 6m23s window where the only `Build Gate` run
+for this PR was the flat docs stub.
+
+This is a **PR-side false green only, and it is not a merge-safety hole.**
+`Build Gate` is queue-real (see above): on `merge_group`,
+`cross-platform-build.yml`'s `build-gate` job is the only possible poster of
+the context, because neither `documentation.yml` nor
+`cross-platform-build-pr.yml` has a `merge_group` trigger. A broken build
+cannot merge through this context — the worst case of the PR-side race is
+that the PR gets enqueued a few minutes earlier than it otherwise would, and
+the queue's own real `build-gate` run then rejects it if the build is
+actually broken. That is the difference from `unit-tests`, which was
+PR-real (queue-stubbed): its PR-side false green was unguarded, because no
+later queue-side job re-validated the code. Applying the single-owner pattern
+used for `unit-tests` would close even the early-enqueue cost, but is not
+required for safety and is not done here; revisit only if that cost itself
+becomes a problem.
 
 **A `skipped` check run satisfies a required status check.** This is the mechanism
 behind all of the above, and it is established, not suspected: a job whose `if:` is
