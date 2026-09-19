@@ -9,7 +9,8 @@ Implements the epic's four-terminal-state table exactly
 | complete   | skip                                    |
 | parked     | retry                                    |
 | refused    | retry once (caller's job to count)       |
-| failed     | surface to human, never auto-retried     |
+| failed     | surface to human; re-attempted ONLY for a |
+|            | transient cause (Issue #4177)             |
 
 A step is complete if and only if `<step_id>.findings.json` exists and
 validates against the step-envelope schema with `state == "complete"`. That
@@ -288,6 +289,36 @@ def missing_steps(
             envelope = _load_json(status_path)
             state = envelope.get("state") if isinstance(envelope, dict) else None
             if state == "failed":
+                # Issue #4177: a step that failed for a TRANSIENT cause is
+                # re-attempted; everything else keeps `failed`'s original
+                # meaning and is skipped.
+                #
+                # Before this, every `failed` step was written off for good.
+                # A host token rotation revokes the old credential instantly,
+                # so a container mid-call dies with a 401 -- and that step's
+                # coverage was then lost permanently, not merely delayed. A
+                # sweep spanning several rotations quietly shed steps it would
+                # never pick up again.
+                #
+                # NO RETRY CAP, deliberately. The property `failed` protects is
+                # that a deterministically broken step cannot loop, and it
+                # survives for two independent reasons. The classifier is
+                # narrow, so a schema-invalid answer or a rejected model id
+                # produces no credential wording and does not match. And this
+                # function is INVOKED, never looping: one resume attempts each
+                # eligible step once. If credentials are genuinely broken
+                # rather than rotating, every step fails identically and the
+                # operator sees it on the first resume -- which is exactly the
+                # "surface to a human" behaviour `failed` exists to give.
+                stop_reason = envelope.get("stop_reason_raw") if isinstance(envelope, dict) else None
+                if schema.is_transient_stop_reason(stop_reason):
+                    schema.log_event(
+                        "step_retried_after_transient_failure",
+                        step_id=step_id,
+                        lane_dir=lane_dir,
+                        stop_reason_raw=str(stop_reason)[:200],
+                    )
+                    missing.append(step_id)
                 continue
             missing.append(step_id)
             continue

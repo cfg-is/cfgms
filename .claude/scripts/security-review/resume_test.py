@@ -222,6 +222,92 @@ def _plan_hash_of(plan_dir: str, step_id: str) -> str:
 # --- Binding checks on resume (Issue #3962) ---------------------------------
 
 
+def test_a_transient_failure_is_re_attempted_and_a_deterministic_one_is_not():
+    """[REQUIRED TEST -- Issue #4177 AC3] `failed` stops meaning "lost forever"
+    for transient causes only.
+
+    A host token rotation revokes the old credential instantly, so a container
+    mid-call dies with a 401. Before this, that step was written off for good:
+    `missing_steps` skipped every `failed` envelope, so a sweep spanning
+    several rotations quietly shed steps it would never pick up again. The cost
+    of a rotation was not 19 seconds of staleness, it was that step's coverage,
+    permanently.
+
+    The pairing is the whole test. Retrying everything would let a
+    deterministically broken step loop, which is the property `failed` exists
+    to protect; retrying nothing is the bug. Both directions are asserted
+    against the same scanner in the same fixture, so a change that collapses
+    them in either direction fails here.
+    """
+    with tempfile.TemporaryDirectory() as lane_dir, tempfile.TemporaryDirectory() as plan_dir:
+        transient = [
+            "harness_exit_1: OAuth access token has been revoked",
+            "harness_exit_1: HTTP 401: Unauthorized",
+            "launch_exception: authentication failed, run `claude setup-token`",
+        ]
+        deterministic = [
+            "invalid_findings_schema: severity must be one of [...]",
+            "no_valid_findings_file",
+            "harness_exit_1: unrecognised model id 'gpt-9'",
+            "rate_limited",
+        ]
+
+        step_ids = []
+        for i, reason in enumerate(transient + deterministic):
+            step_id = f"step-{i + 1:03d}"
+            step_ids.append(step_id)
+            write_plan_step(plan_dir, step_id)
+            write(
+                os.path.join(lane_dir, f"{step_id}.status.json"),
+                status_envelope(step_id, "failed", stop_reason_raw=reason),
+            )
+
+        with redirect_stderr(io.StringIO()):
+            outstanding = resume.missing_steps(lane_dir, step_ids, plan_dir=plan_dir)
+
+        for i, reason in enumerate(transient):
+            step_id = f"step-{i + 1:03d}"
+            check(
+                step_id in outstanding,
+                f"transient retry: {reason.split(':')[-1].strip()[:44]!r} is re-attempted",
+                str(outstanding),
+            )
+        for j, reason in enumerate(deterministic):
+            step_id = f"step-{len(transient) + j + 1:03d}"
+            check(
+                step_id not in outstanding,
+                f"no retry: {reason[:44]!r} stays failed, so a broken step cannot loop",
+                str(outstanding),
+            )
+
+
+def test_a_transient_retry_is_logged_not_silent():
+    """[Issue #4177 AC5] A resume that quietly redoes work is
+    indistinguishable from one that does not, and the difference matters when
+    an operator is deciding whether a sweep is progressing."""
+    with tempfile.TemporaryDirectory() as lane_dir, tempfile.TemporaryDirectory() as plan_dir:
+        write_plan_step(plan_dir, "step-001")
+        write(
+            os.path.join(lane_dir, "step-001.status.json"),
+            status_envelope("step-001", "failed",
+                            stop_reason_raw="harness_exit_1: OAuth access token has been revoked"),
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            resume.missing_steps(lane_dir, ["step-001"], plan_dir=plan_dir)
+        logged = err.getvalue()
+        check(
+            "step_retried_after_transient_failure" in logged,
+            "transient retry: the re-attempt is logged as an event",
+            logged[:200],
+        )
+        check(
+            "revoked" in logged,
+            "transient retry: the log names the reason, so the operator can tell WHY it re-ran",
+            logged[:200],
+        )
+
+
 def test_plan_hash_mismatch_quarantines_and_returns_outstanding():
     # REQUIRED TEST: a complete envelope's plan_hash was computed from one
     # version of step-001.json; the plan file's hypotheses then changes on

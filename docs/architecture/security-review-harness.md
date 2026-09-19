@@ -126,7 +126,7 @@ database to corrupt.
 | `complete` | findings written and schema-valid | skip |
 | `parked` | rate limited or quota exhausted (HTTP 429, plan cap) | retry |
 | `refused` | model declined the request on policy grounds | retry once on fallback, then surface |
-| `failed` | auth error, schema violation, malformed response | surface to human, do not retry |
+| `failed` | auth error, schema violation, malformed response | surface to human; re-attempted ONLY for a transient cause (Issue #4177) |
 
 A step is `complete` if and only if its `<step_id>.findings.json` exists **and** validates
 against the step-envelope schema with `state == "complete"`. A `.findings.json` that fails
@@ -148,8 +148,29 @@ schema validation.
 `<step_id>.status.json` carries the envelope for the three non-terminal outcomes. A `refused`
 step is returned as missing on every scan; distinguishing a first-refusal-retry from a
 second-refusal-surface is a lane-side concern (only the lane knows its own fallback-model
-policy) — `resume.py` only reports "still needs work". A `failed` step is deliberately never
-returned as missing: it is surfaced to a human, never auto-retried, per the table above.
+policy) — `resume.py` only reports "still needs work".
+
+A `failed` step is returned as missing **only when its `stop_reason_raw` names a transient cause**
+(Issue #4177); otherwise it is surfaced to a human and never auto-retried, as before.
+`schema.is_transient_stop_reason()` is the single place that decides, and credential failures are
+its only member today.
+
+**Why the exception exists.** A host token rotation revokes the old credential instantly, so a
+container mid-call dies with a 401 — measured: two containers died 5 s after a rotation, while two
+others that made no call in the window survived. Under the old rule that step's coverage was lost
+**permanently**, not merely delayed, and a sweep spanning several rotations quietly shed steps it
+would never pick up again. The alternative considered was closing the window with event-driven
+mirror sync; it was rejected because a request already in flight 401s however fresh the file is,
+so it narrows the failure without removing it, at the cost of more machinery in the script that
+launches every container.
+
+**Why there is no retry cap.** The property `failed` protects is that a deterministically broken
+step cannot loop, and it survives for two independent reasons. The classifier is narrow — a
+schema-invalid answer or a rejected model id carries no credential wording and does not match —
+and `resume` is invoked rather than looping, so one invocation attempts each eligible step once.
+If credentials are genuinely broken rather than rotating, every step fails identically and the
+operator sees it on the first resume, which is the "surface to a human" behaviour the state exists
+to provide.
 
 ### The shared terminal-state classifier (epic #3927's contract C3)
 
