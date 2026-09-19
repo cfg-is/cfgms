@@ -130,12 +130,15 @@ Three shapes sit behind that column:
 - **Five run for real in the queue.** Their PR-side stub is a `*-pr-stub` job in
   the check's own workflow; on a docs-only PR, where that workflow is
   paths-ignored entirely, `documentation.yml` posts the context instead.
-  `unit-tests` is the inverse — real on the PR, stubbed in the queue by
-  `test-suite.yml`'s `unit-tests-mq-stub`. **`Build Gate` is the exception:** its
+  `unit-tests` is the inverse — real on the PR (an aggregator over matrix legs),
+  stubbed in the queue by the `merge_group`-only `unit-tests-queue-stub.yml`.
+  **`Build Gate` and `unit-tests` are the trigger-exclusive pairs:** `Build Gate`'s
   PR-side stub lives in a separate `pull_request`-only workflow,
   `cross-platform-build-pr.yml`, so that no skipped stub run can appear in the
-  queue — see [Stub exclusivity](#stub-exclusivity) for why that had to be
-  structural rather than an `if:`.
+  queue; `unit-tests`' queue stub lives in a separate `merge_group`-only workflow,
+  so that no skipped stub run can appear on a PR — see
+  [Stub exclusivity](#stub-exclusivity) for why both had to be structural rather
+  than an `if:`.
 - **`CodeQL` runs for real on both sides,** path-filtered on the PR side to Go
   sources, the module graph, `.github/codeql/**`, its own workflow file and
   `web/`. `codeql-stub.yml` covers PRs touching none of those, and deliberately
@@ -180,10 +183,13 @@ real job that has not finished, or has failed.
 **Exclusivity is enforced by trigger, not by `if:`.** Two workflows now hold the
 `Build Gate` context and neither can fire on the other's event:
 `cross-platform-build-pr.yml` triggers only on `pull_request`;
-`cross-platform-build.yml` only on `merge_group` / `workflow_dispatch`.
+`cross-platform-build.yml` only on `merge_group` / `workflow_dispatch`. The
+`unit-tests` context is the mirror image: its real poster is `test-suite.yml`'s
+`needs:`-delayed aggregator (pull_request), and its queue stub lives in
+`unit-tests-queue-stub.yml`, which triggers only on `merge_group`.
 `documentation.yml` — which owns the docs-only stub for all seven stubbed contexts —
 has **no `merge_group` trigger at all**. A workflow that does not trigger posts
-nothing, skipped or otherwise. Each of these three files carries a comment
+nothing, skipped or otherwise. Each of these files carries a comment
 forbidding the trigger it must never gain.
 
 This took three attempts because an event-gated `if:` looks sufficient and is not.
@@ -208,7 +214,10 @@ The history, in order:
 **Path-gated pairs still overlap when a PR touches both sides.** `paths` fires when
 *any* changed file matches and `paths-ignore` fires when *any* changed file does
 not, so a PR touching both a `.go` file and a `.md` file triggers the real job
-and its stub. That case is unfixed and out of scope for #3189.
+and its stub. That case is unfixed. It matters most for `unit-tests`: its real
+poster is `needs:`-delayed, and `documentation.yml` (which fires on any `*.md` or
+`.github/workflows/*.yml` change) posts a **passing** `unit-tests` stub on every
+PR that touches one of those paths, before the real aggregator exists.
 
 **A `skipped` check run satisfies a required status check.** This is the mechanism
 behind all of the above, and it is established, not suspected: a job whose `if:` is
@@ -223,8 +232,12 @@ context. Contexts whose real job starts without a `needs:` barrier (e.g.
 pending run does block the queue. Absence of any run also blocks. The failure needs
 both halves: a `needs:`-delayed real job **and** a skipped run standing in for it.
 
-`test-suite.yml`, `production-gates.yml` and `security-scan.yml` still use
-event-gated `*-pr-stub` jobs, so their skipped runs remain on every queue commit.
+`unit-tests` gained exactly this barrier when its suite became matrix legs behind an
+aggregator, and a same-file skipped stub was then satisfying it on every PR before
+the legs finished — which is why its queue stub is now trigger-exclusive.
+`test-suite.yml` (for `integration-tests`), `production-gates.yml` and
+`security-scan.yml` still use event-gated `*-pr-stub` jobs, so their skipped runs
+remain on every queue commit.
 Those contexts are not exposed today only because their real jobs start without a
 `needs:` barrier — a property of their job graphs, not a guarantee. **Adding a
 `needs:` to any of those real jobs would reopen this hole.** When a queue-real check
