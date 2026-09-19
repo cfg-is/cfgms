@@ -126,7 +126,7 @@ database to corrupt.
 | `complete` | findings written and schema-valid | skip |
 | `parked` | rate limited or quota exhausted (HTTP 429, plan cap) | retry |
 | `refused` | model declined the request on policy grounds | retry once on fallback, then surface |
-| `failed` | auth error, schema violation, malformed response | surface to human, do not retry |
+| `failed` | auth error, schema violation, malformed response | surface to human; re-attempted ONLY for a transient cause (Issue #4177) |
 
 A step is `complete` if and only if its `<step_id>.findings.json` exists **and** validates
 against the step-envelope schema with `state == "complete"`. A `.findings.json` that fails
@@ -148,8 +148,43 @@ schema validation.
 `<step_id>.status.json` carries the envelope for the three non-terminal outcomes. A `refused`
 step is returned as missing on every scan; distinguishing a first-refusal-retry from a
 second-refusal-surface is a lane-side concern (only the lane knows its own fallback-model
-policy) — `resume.py` only reports "still needs work". A `failed` step is deliberately never
-returned as missing: it is surfaced to a human, never auto-retried, per the table above.
+policy) — `resume.py` only reports "still needs work".
+
+A `failed` step is returned as missing **only when its `stop_reason_raw` names a transient cause**
+(Issue #4177); otherwise it is surfaced to a human and never auto-retried, as before.
+`schema.is_transient_stop_reason()` is the single place that decides, and credential failures are
+its only member today.
+
+**Why the exception exists.** A host token rotation revokes the old credential instantly, so a
+container mid-call dies with a 401 — measured: two containers died 5 s after a rotation, while two
+others that made no call in the window survived. Under the old rule that step's coverage was lost
+**permanently**, not merely delayed, and a sweep spanning several rotations quietly shed steps it
+would never pick up again. The alternative considered was closing the window with event-driven
+mirror sync; it was rejected because a request already in flight 401s however fresh the file is,
+so it narrows the failure without removing it, at the cost of more machinery in the script that
+launches every container.
+
+**Two guards keep a broken step from looping, and neither is sufficient alone.**
+
+1. **The harness-written prefix vetoes first.** A stop reason opening `invalid_findings_schema`,
+   `unhandled_step_error`, `unknown_harness` or `input_unreadable` is deterministic *by
+   construction*, so `is_transient_stop_reason()` returns false without reading the rest of the
+   string. The prefix is written by the harness; the model cannot influence it.
+2. **`resume.MAX_TRANSIENT_RETRIES` caps re-attempts at 2**, counted in `transient_retries` on the
+   step's own envelope so the count survives across separate `resume` invocations. Past the cap
+   the step returns to `failed`'s ordinary surface-to-human meaning. A genuine rotation clears on
+   the very next attempt, so two is generous.
+
+**Why a cap is needed at all.** `stop_reason_raw` is `"<reason>: <harness output tail>"`, and that
+tail is combined stdout+stderr — which for a finder lane contains the model's own answer. This
+harness reviews code for security defects, so that answer routinely contains "unauthorized",
+"invalid token" and "session expired" as **findings**, not as errors. A false positive is not an
+exotic case here; it is the expected shape of a finding. Without the cap, such a step would be
+re-run at full cost on every resume indefinitely.
+
+The prefix rule alone would still loop on a mis-detected `harness_exit_1`, whose tail genuinely is
+the CLI's error output. The cap alone would still burn two full step runs on every finding that
+mentions authentication.
 
 ### The shared terminal-state classifier (epic #3927's contract C3)
 
