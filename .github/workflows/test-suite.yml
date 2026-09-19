@@ -3,15 +3,21 @@ name: Test Suite Validation
 on:
   pull_request:
     branches: [ main, develop ]
-    # CONSERVATIVE: Only skip for pure documentation changes
-    # If PR contains ANY code changes, this will still run
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
-      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
+    # No paths-ignore (Issue #4174). This workflow owns the `unit-tests`
+    # required context for every PR, docs-only included — see the `changes`
+    # job below. Before #4174, a paths-ignore here meant this workflow (and
+    # its needs:-delayed unit-tests aggregator) never ran on a docs-only PR,
+    # so documentation.yml's flat unit-tests stub was the only poster there.
+    # On a MIXED PR (code + a path documentation.yml also matches — e.g. a
+    # `.github/workflows/*.yml` or root `*.md` file), that stub still ran
+    # immediately and posted green before the real aggregator existed,
+    # because paths-ignore only excludes a PR when EVERY changed file
+    # matches — one non-ignored `.go` file was enough to keep this workflow
+    # (and the aggregator) running for real, but did nothing to stop
+    # documentation.yml's unconditional stub from posting the same context
+    # first. Removing the path filter and deciding per-PR via `changes`
+    # closes that gap: this workflow is now the only workflow that can ever
+    # post `unit-tests`, on every PR shape.
   merge_group:
   push:
     branches:
@@ -34,6 +40,114 @@ env:
 permissions: {}
 
 jobs:
+  # Change detection (Issue #4174): decides whether a pull_request actually
+  # touches code, so the five unit-tests-* legs below can skip on a docs-only
+  # PR without a workflow-level paths-ignore (which would have made this
+  # workflow — and its unit-tests aggregator — invisible on that PR, handing
+  # the required `unit-tests` context to documentation.yml's stub instead).
+  # Only runs for pull_request; the legs' own `if:` already runs
+  # unconditionally for push-to-main / workflow_dispatch, so `changes` is
+  # skipped there and its (empty) output is simply not consulted.
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Detect non-documentation changes
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The PR payload's own file count, used below to prove the API list
+          # is complete. Not capped the way GET /pulls/{n}/files is.
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          # THIS GATE MUST FAIL CLOSED. `code=false` makes the aggregator below
+          # post a PASSING `unit-tests` — the required context — with zero tests
+          # run, and `unit-tests` is PR-real (the queue only posts a stub), so a
+          # wrong `false` here means the fast suite never runs for that PR
+          # anywhere. That is the false-green class CLAUDE.md "Stub exclusivity"
+          # exists to prevent, reachable through this job's INPUT rather than
+          # through a duplicate poster. Every defect in the input therefore
+          # resolves to `code=true` (run the real legs): a needlessly-run suite
+          # on a docs-only PR costs runner minutes, a wrongly-skipped one ships
+          # untested code.
+          api_status=0
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed_files.txt || api_status=$?
+
+          listed=$(wc -l < changed_files.txt)
+          echo "PR #${PR_NUMBER}: API listed ${listed} file(s); PR payload reports ${PR_CHANGED_FILES:-<unset>}"
+          cat changed_files.txt
+
+          # Defect 1: the API call itself failed (network, rate limit, token).
+          if [ "$api_status" -ne 0 ]; then
+            echo "::warning::gh api exited ${api_status} listing PR files — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 2: an empty or unusable list. Before this check an absent
+          # file list was indistinguishable from a genuine docs-only PR,
+          # because "no line outside the docs regex" is vacuously true for
+          # empty input.
+          if [ "$listed" -eq 0 ]; then
+            echo "::warning::PR file list came back empty — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 3: an incomplete list. GET /pulls/{n}/files returns at most
+          # 3000 files no matter how far --paginate walks, so on a larger PR
+          # any code file past the cap is invisible to the regex below. The
+          # count in the PR payload is not capped, so a mismatch detects both
+          # that truncation and any partial page.
+          if ! [ "${PR_CHANGED_FILES:-}" -eq "${PR_CHANGED_FILES:-}" ] 2>/dev/null; then
+            echo "::warning::PR payload carried no usable changed_files count — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$listed" -ne "$PR_CHANGED_FILES" ]; then
+            echo "::warning::listed ${listed} file(s) but the PR reports ${PR_CHANGED_FILES} (API cap or partial response) — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Mirrors the file set this workflow's pull_request trigger used to
+          # paths-ignore. Any changed file outside this set means the PR is
+          # not docs-only, so the real legs must run.
+          #
+          # Written to a file rather than piped into `grep -q`: under
+          # `pipefail` the consumer exits on its first match and can SIGPIPE
+          # the producer, so the pipeline reports 141 exactly when code files
+          # WERE found — which would take the docs-only branch and skip the
+          # suite. A grep failure (exit >1) is a defect too, handled like the
+          # others.
+          grep_status=0
+          grep -vE '^(docs/|[^/]+\.md$|\.claude/.*\.md$|LICENSE$|\.gitignore$|\.editorconfig$)' \
+            changed_files.txt > non_doc_files.txt || grep_status=$?
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::warning::classifying changed files failed (grep exit ${grep_status}) — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -s non_doc_files.txt ]; then
+            echo "Non-documentation file(s) changed — running the unit-test legs:"
+            cat non_doc_files.txt
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "All ${listed} changed file(s) are documentation — legs will be skipped"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Fast unit tests - runs on every push/PR
   #
   # Split into 5 group legs + an aggregator (Issue #4151), each its own runner.
@@ -62,15 +176,23 @@ jobs:
   # PR-REAL (#2595): unit tests are fast, cheap, and deterministic on the diff
   # itself — real per-PR feedback matters more than re-validating against the
   # merge commit. The merge queue gets a lightweight stub (below); docs-only
-  # PRs/queue entries are covered by documentation.yml's own stub instead (this
-  # workflow is paths-ignored for docs).
+  # PR *queue entries* are covered by unit-tests-queue-stub.yml. Docs-only PRs
+  # themselves are covered by the `changes` job (Issue #4174) short-circuiting
+  # the aggregator below — this workflow is no longer paths-ignored for docs,
+  # so it (and only it) always posts `unit-tests` on the PR side.
+  #
+  # Each leg needs `changes` and requires `always()` so a PR-side skip (via
+  # `needs.changes.outputs.code == 'false'`) doesn't get treated as an
+  # unsatisfied dependency by the default needs-gate — same reasoning as
+  # `integration-tests`'s `needs: unit-tests` below.
 
   unit-tests-controller-core:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -103,7 +225,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -136,7 +259,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -203,7 +327,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -236,7 +361,8 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -274,23 +400,30 @@ jobs:
   # Aggregator: re-creates the single `unit-tests` required-context name so
   # branch protection and integration-tests's `needs: unit-tests` are
   # unaffected by the group split (AC4). `if: always()` is required, not
-  # cosmetic — without it, a failed leg would make the default needs-gate
-  # SKIP this job rather than fail it, and CLAUDE.md "Stub exclusivity"
-  # established that a skipped run satisfies a required status check. This
-  # job explicitly checks every leg's result and fails closed instead.
+  # cosmetic — without it, a failed (or, on a docs-only PR, skipped) leg would
+  # make the default needs-gate SKIP this job rather than run it, and CLAUDE.md
+  # "Stub exclusivity" established that a skipped run satisfies a required
+  # status check. This job explicitly checks every leg's result and fails
+  # closed instead — except on a docs-only PR (Issue #4174), where the legs
+  # were deliberately skipped by the `changes` gate above and a skip there is
+  # the correct, checked outcome rather than a failure to paper over.
   #
   # This aggregator is `needs:`-delayed, so its check run does not exist until
-  # the slowest leg finishes. That makes it exactly the shape CLAUDE.md
-  # "Stub exclusivity" warns about: any other job in THIS file named
-  # `unit-tests` would post a `skipped` run at the start of every
-  # pull_request run -- an event-gated `if:` still posts a skipped run -- and
-  # a skipped run satisfies the required check before the tests finish. The
-  # queue-side stub therefore lives in unit-tests-queue-stub.yml, which has no
-  # pull_request trigger at all.
+  # the slowest leg finishes (or, on a docs-only PR, until `changes` resolves).
+  # That makes it exactly the shape CLAUDE.md "Stub exclusivity" warns about:
+  # any other job in THIS file named `unit-tests` would post a `skipped` run at
+  # the start of every pull_request run -- an event-gated `if:` still posts a
+  # skipped run -- and a skipped run satisfies the required check before the
+  # tests finish. The queue-side stub therefore lives in
+  # unit-tests-queue-stub.yml, which has no pull_request trigger at all, and
+  # documentation.yml no longer defines a `unit-tests` job at all (#4174) —
+  # this aggregator is the only PR-side poster of the context, docs-only PRs
+  # included.
   unit-tests:
     permissions: {}
     runs-on: ubuntu-latest
     needs:
+      - changes
       - unit-tests-controller-core
       - unit-tests-heavy-providers
       - unit-tests-rest
@@ -300,11 +433,18 @@ jobs:
     steps:
       - name: Aggregate group results
         run: |
+          echo "changes.code:     ${{ needs.changes.outputs.code }}"
           echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
           echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
           echo "rest:             ${{ needs.unit-tests-rest.result }}"
           echo "api-sharded:      ${{ needs.unit-tests-api.result }}"
           echo "scripts:          ${{ needs.unit-tests-scripts.result }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.code }}" = "false" ]; then
+            echo "✅ docs-only PR — no code changes, legs intentionally skipped"
+            exit 0
+          fi
+
           if [ "${{ needs.unit-tests-controller-core.result }}" != "success" ] || \
              [ "${{ needs.unit-tests-heavy-providers.result }}" != "success" ] || \
              [ "${{ needs.unit-tests-rest.result }}" != "success" ] || \
@@ -328,9 +468,12 @@ jobs:
   # `merge_group`, so the required `integration-tests` context was silently
   # skipping (and passing) on every merge-queue entry — production-critical tests
   # were never actually validated against a real merge commit. The PR-time stub
-  # (below) posts the required context on code PRs; docs-only PRs/queue entries
-  # are covered by documentation.yml's own stub instead (this workflow is
-  # paths-ignored for docs).
+  # (below) posts the required context on code PRs; docs-only PRs are covered by
+  # documentation.yml's own stub instead. Before #4174 that split was drawn by
+  # this whole workflow being paths-ignored for docs; the path filter is gone
+  # now (this file also owns `unit-tests`, which no longer tolerates one), so
+  # the PR-time stub below reuses the `changes` job's code/docs-only verdict
+  # to reproduce the same split without a workflow-level path filter.
   #
   # runs-on routing (#2337 routed this to self-hosted; reverted 2026-08-01):
   # self-hosted Linux execution measured 2-3.5x faster than hosted
@@ -411,11 +554,22 @@ jobs:
   # PR-time stub for the `integration-tests` required context (#2595). The real
   # run is queue-only (job above) — it validates `make test-production-critical`
   # against the merge commit rather than paying for it twice per PR.
+  #
+  # Gated on `needs.changes.outputs.code == 'true'` (Issue #4174) to preserve
+  # pre-#4174 behavior now that this workflow's paths-ignore is gone: on a
+  # docs-only PR this stub stays skipped, exactly as it was skipped by the
+  # workflow-level path filter before, so documentation.yml's own
+  # `integration-tests` stub remains the sole PR-side poster there. Without
+  # this gate, this job would newly fire on every docs-only PR too (harmless —
+  # it is a flat, non-`needs:`-delayed job racing another flat stub, not the
+  # needs-delayed hazard `unit-tests` had — but a needless second poster of a
+  # context that used to have exactly one).
   integration-tests-pr-stub:
     name: integration-tests
     permissions: {}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: always() && github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     steps:
       - name: PR-time stub (real run happens in the merge queue)
         run: |

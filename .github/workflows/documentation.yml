@@ -220,22 +220,13 @@ jobs:
   # These provide the required check names so docs-only PRs can merge
   # without waiting for code validation workflows that won't run
 
-  # PR-REAL context (#3189): unit-tests-queue-stub.yml (merge_group-only trigger)
-  # is the sole queue-side poster for this context — the real unit-tests
-  # aggregator in test-suite.yml runs on the pull-request side. This stub only
-  # covers docs-only PRs, where test-suite.yml is paths-ignored. It must NOT fire on
-  # merge_group.
-  unit-tests:
-    name: unit-tests
-    permissions: {}
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - name: Docs-only PR validation
-        run: |
-          echo "✅ Documentation-only PR detected"
-          echo "   Skipping code unit tests (no code changes)"
-          echo "   Documentation validation is sufficient for merge"
+  # `unit-tests` no longer has a stub here (Issue #4174). test-suite.yml is no
+  # longer paths-ignored for docs and owns the context unconditionally — its
+  # `changes` job detects a docs-only PR and its aggregator posts a passing
+  # `unit-tests` without running the five legs, so this workflow posting the
+  # same context too would just reintroduce a second, race-prone poster of a
+  # PR-real context. See test-suite.yml's `changes` job and CLAUDE.md
+  # "Stub exclusivity" for why this had to move rather than stay duplicated.
 
   # QUEUE-REAL context (#2595): the real security-deployment-gate scan runs in the
   # merge queue (production-gates.yml). This stub only covers docs-only PRs, where
@@ -274,8 +265,11 @@ jobs:
 
   # QUEUE-REAL context (#3189): test-suite.yml's integration-tests job
   # (if: always() && (workflow_dispatch || merge_group || refs/heads/main)) is the sole
-  # queue-side poster for this context. This stub only covers docs-only PRs, where
-  # test-suite.yml is paths-ignored. It must NOT fire on merge_group.
+  # queue-side poster for this context. This stub only covers docs-only PRs. Since
+  # #4174, test-suite.yml no longer has a workflow-level paths-ignore (it also owns
+  # `unit-tests`, which can't tolerate one); its own PR-side `integration-tests-pr-stub`
+  # instead skips on a docs-only PR via that workflow's `changes` job, which keeps this
+  # stub the sole PR-side poster there, same as before. It must NOT fire on merge_group.
   integration-tests:
     name: integration-tests
     permissions: {}
@@ -332,8 +326,8 @@ jobs:
   # merge_group — in the queue the real job in security-scan.yml is the sole
   # poster. On a PR touching .github/workflows/*.yml both this workflow and
   # security-scan.yml run, so both post this context; that overlap is inherent
-  # to the existing stub design and is shared by trivy-scan, unit-tests and
-  # Build Gate.
+  # to the existing stub design and is shared by trivy-scan and Build Gate.
+  # `unit-tests` no longer has this overlap — see #4174.
   security-validation:
     name: security-validation
     permissions: {}
