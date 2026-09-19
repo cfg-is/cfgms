@@ -727,7 +727,7 @@ CORE_MODULES := stdlib/file stdlib/script
 # expanded into shell recipes below (CHANGED_MODULES, test-module, the
 # smart-mode loops) — a directory name were it ever to contain shell
 # metacharacters would otherwise be interpolated unquoted.
-ALL_MODULES := $(shell find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; | sed 's#^features/modules/##' | grep -E '^[A-Za-z0-9_/-]+$$' | sort -u)
+ALL_MODULES := $(shell find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; | sed 's|^features/modules/||' | grep -E '^[A-Za-z0-9_/-]+$$' | sort -u)
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \
