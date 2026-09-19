@@ -46,6 +46,24 @@ permissions: {}
 jobs:
   # Fast unit tests - runs on every push/PR
   #
+  # Split into 5 group legs + an aggregator (Issue #4151), each its own runner.
+  # Before this split, `unit-tests` ran `make test` as a single job: it measured
+  # 11-14 min for months, then grew to 15m04s and started getting killed by the
+  # 15-min cap (every step green, job reported "cancelled" — run 35371727977).
+  # A same-job shell-level split (PR #4155's first attempt: extract
+  # features/controller/api into its own sequential `make` step, still one
+  # runner) measured NO improvement (run 35391321900, 15m21s, slower than
+  # before): `go test ./...` already parallelizes across packages up to
+  # GOMAXPROCS (4 on this runner size), so reordering work within one runner's
+  # CPU budget doesn't reduce wall time for a CPU-bound `-race` suite. Separate
+  # runners are separate CPU budgets, which is what actually buys margin.
+  #
+  # Group boundaries and the CFGMS_API_TEST_SHARDS internal sharding are
+  # explained on test-go-group-* / test-framework-api-sharded in the Makefile.
+  # The aggregator below re-creates the single `unit-tests` required-context
+  # name so branch protection and `integration-tests`'s `needs: unit-tests`
+  # need no change (AC4).
+  #
   # runs-on routing (#2337, #2501, epic #565): always ubuntu-latest for all
   # events. Measured 2026-07-09: GitHub-hosted queue ~6s vs self-hosted
   # 193–433s under merge-queue burst; hosted exec ~15% faster (511s vs 610s).
@@ -56,15 +74,78 @@ jobs:
   # merge commit. The merge queue gets a lightweight stub (below); docs-only
   # PRs/queue entries are covered by documentation.yml's own stub instead (this
   # workflow is paths-ignored for docs).
-  unit-tests:
+
+  unit-tests-controller-core:
     permissions:
       contents: read
     runs-on: ubuntu-latest
-    # Measured over 40 PR runs (2026-09-17/18): job 11-14 min against the old
-    # 15-min cap, and runs that passed every step were killed at 15m04s and
-    # reported as "cancelled". 25 restores headroom while #4151 cuts the
-    # runtime itself; that issue owns bringing the cap back down.
-    timeout-minutes: 25
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run controller-core group (server, initialization)
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-controller-core
+
+  unit-tests-heavy-providers:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run heavy-providers group (cert, controlplane/grpc, steward/client, storage/sqlite)
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-heavy-providers
+
+  unit-tests-rest:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,10 +178,10 @@ jobs:
       shell: bash
       run: .github/scripts/resource-sampler.sh start "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}"
 
-    - name: Run Fast Unit Tests
+    - name: Run remaining framework packages + module smoke tests
       env:
         CFGMS_TEST_INTEGRATION: "0"
-      run: make test
+      run: make test-go-group-rest
 
     - name: Upload test results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -116,16 +197,124 @@ jobs:
       if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
       shell: bash
-      run: .github/scripts/resource-sampler.sh report "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}" "resource-samples-unit-tests.txt"
+      run: .github/scripts/resource-sampler.sh report "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}" "resource-samples-unit-tests-rest.txt"
 
     - name: Upload resource samples (self-hosted only)
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
       with:
-        name: resource-samples-unit-tests
-        path: resource-samples-unit-tests.txt
+        name: resource-samples-unit-tests-rest
+        path: resource-samples-unit-tests-rest.txt
         retention-days: 30
+
+  unit-tests-api:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run features/controller/api (sharded)
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-framework-api-sharded
+
+  unit-tests-scripts:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Cache Go modules
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run shell-script test suite
+      run: make test-scripts
+
+  # Aggregator: re-creates the single `unit-tests` required-context name so
+  # branch protection and integration-tests's `needs: unit-tests` are
+  # unaffected by the group split (AC4). `if: always()` is required, not
+  # cosmetic — without it, a failed leg would make the default needs-gate
+  # SKIP this job rather than fail it, and CLAUDE.md "Stub exclusivity"
+  # established that a skipped run satisfies a required status check. This
+  # job explicitly checks every leg's result and fails closed instead.
+  #
+  # No stub-exclusivity regression: this aggregator and unit-tests-mq-stub
+  # (below) fire on disjoint events (this job's condition excludes
+  # merge_group; the stub's condition is merge_group only), so they never
+  # both post the `unit-tests` context for the same workflow run — the same
+  # event-exclusive shape integration-tests/integration-tests-pr-stub already
+  # use below. See CLAUDE.md "Stub exclusivity": the exposure that section
+  # documents needs BOTH a needs:-delayed real job AND a same-run skipped
+  # stub; there is no same-run stub here.
+  unit-tests:
+    permissions: {}
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests-controller-core
+      - unit-tests-heavy-providers
+      - unit-tests-rest
+      - unit-tests-api
+      - unit-tests-scripts
+    if: always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    steps:
+      - name: Aggregate group results
+        run: |
+          echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
+          echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
+          echo "rest:             ${{ needs.unit-tests-rest.result }}"
+          echo "api-sharded:      ${{ needs.unit-tests-api.result }}"
+          echo "scripts:          ${{ needs.unit-tests-scripts.result }}"
+          if [ "${{ needs.unit-tests-controller-core.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-heavy-providers.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-rest.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-api.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-scripts.result }}" != "success" ]; then
+            echo "❌ one or more unit-tests groups did not succeed"
+            exit 1
+          fi
+          echo "✅ all unit-tests groups succeeded"
 
   # PR-time stub for the `unit-tests` required context on merge_group entries
   # (code PRs). The real per-PR run above already validated this diff for real;

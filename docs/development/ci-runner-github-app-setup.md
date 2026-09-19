@@ -356,15 +356,22 @@ Steps run only on the self-hosted path (same fork-gate as the job); fork PRs and
 
    | Job | Artifact name |
    |-----|---------------|
-   | `unit-tests` | `resource-samples-unit-tests` |
+   | `unit-tests-rest` | `resource-samples-unit-tests-rest` |
    | `integration-tests` | `resource-samples-integration-tests` |
    | `Native Build (Windows)` | `resource-samples-native-windows` |
 
    Download from the Actions run page → Artifacts section, or via CLI:
 
    ```bash
-   gh run download <run-id> --name resource-samples-unit-tests
+   gh run download <run-id> --name resource-samples-unit-tests-rest
    ```
+
+   `unit-tests-rest` is one of five `unit-tests-*` leg jobs the `unit-tests`
+   required check fans out to (Issue #4151); it's the leg carrying the
+   sampler because it's the closest analog to the pre-#4151 single job. The
+   other four legs (`unit-tests-controller-core`, `unit-tests-heavy-providers`,
+   `unit-tests-api`, `unit-tests-scripts`) and the `unit-tests` aggregator
+   itself don't run the sampler.
 
 **Real-world readings (from Story #2485 PR — runs `28987905900` / `28987905945`):**
 

@@ -7,9 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1265,13 +1269,53 @@ func TestAPIServerStartStop(t *testing.T) {
 	assert.NoError(t, err, "api.Server.Stop() must return no error")
 }
 
+// reservePrivateMetricsAddress returns a loopback host:port that the caller can
+// hand to Server.Start. ValidatePrivateListenerAddress rejects port 0 ("a fixed
+// numeric port from 1 to 65535 is required"), so a test that needs a private
+// listener has to name a concrete port up front, which leaves the port unheld
+// between reservation and Start's bind.
+//
+// The candidate is drawn from BELOW the kernel's ephemeral range rather than
+// from inside it (net.Listen on ":0"). A port inside that range is also what the
+// kernel hands to every other listener and outbound connection on the host, so
+// with a package-parallel test run that window is routinely lost to an unrelated
+// connection — observed as "bind private Raft listener: listen tcp
+// 127.0.0.1:37571: bind: address already in use" with ip_local_port_range at
+// 32768-60999. Below the range, only something asking for that port by number
+// can take it, so the sole competitor is another caller of this helper — which
+// bind-probes first and holds a candidate for microseconds.
 func reservePrivateMetricsAddress(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	address := listener.Addr().String()
-	require.NoError(t, listener.Close())
-	return address
+	low, high := nonEphemeralPortWindow()
+	for attempt := 0; attempt < 100; attempt++ {
+		port := low + rand.IntN(high-low+1)
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			continue // in use by another process — try another port
+		}
+		require.NoError(t, listener.Close())
+		return address
+	}
+	t.Fatalf("no free loopback port in %d-%d after 100 attempts", low, high)
+	return ""
+}
+
+// nonEphemeralPortWindow returns the inclusive port range reservePrivateMetricsAddress
+// draws from: high enough to avoid privileged and well-known ports, and entirely
+// below the lowest port the kernel will allocate on its own. On Linux the
+// ephemeral floor is read from /proc; if that is unavailable the default floor of
+// 32768 applies, which is at or below the floor used by Linux, macOS and Windows.
+func nonEphemeralPortWindow() (low, high int) {
+	high = 32767
+	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		if fields := strings.Fields(string(data)); len(fields) == 2 {
+			if floor, convErr := strconv.Atoi(fields[0]); convErr == nil && floor > 20001 && floor-1 < high {
+				high = floor - 1
+			}
+		}
+	}
+	return 20000, high
 }
 
 func TestAPIServerStart_FailsClosedWithoutPrivateMetricsListener(t *testing.T) {

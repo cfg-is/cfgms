@@ -105,8 +105,14 @@ func TestCrossNode_WebAuthnRevoke_ConcurrentTransition(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, acct.Credentials, 3)
 
+	// Both nodes revoke the SAME credential. Two revokes of two *different*
+	// credentials are two independent, individually-valid transitions: if the
+	// scheduler happens to serialize them, both legitimately succeed and both
+	// credentials are legitimately gone, so "exactly one success" is not a property
+	// of the system under test — it is a property of the interleaving the runner
+	// happened to produce. Targeting one credential makes the outcome invariant
+	// hold under every interleaving, which is what this test is for.
 	credAParam := base64URLEncode(credA)
-	credBParam := base64URLEncode(credB)
 
 	var wg sync.WaitGroup
 	var recA, recB *httptest.ResponseRecorder
@@ -117,26 +123,43 @@ func TestCrossNode_WebAuthnRevoke_ConcurrentTransition(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		recB = doRevokeCredentialCookieAuth(t, nodeB, acct, "cross-node-webauthn", credBParam)
+		recB = doRevokeCredentialCookieAuth(t, nodeB, acct, "cross-node-webauthn", credAParam)
 	}()
 	wg.Wait()
 
+	// Two goroutines started together are not guaranteed to overlap: on a loaded
+	// runner one can complete the whole revoke — reload, guard, compare-and-swap —
+	// before the other reloads. Both interleavings must refuse the second revoke,
+	// for different reasons, and both are asserted here rather than only the one a
+	// fast machine happens to produce:
+	//   - overlapping: both reload the same version, the loser's compare-and-swap is
+	//                  rejected -> 409 ACCOUNT_MODIFIED
+	//   - serialized:  the loser reloads after the winner's write and no longer finds
+	//                  the credential -> 404 CREDENTIAL_NOT_FOUND
+	// What must never happen in either is a second success, which would mean two
+	// writers each acted on the pre-removal state — the lost update this transition
+	// moved onto CompareAndSwapSecret to prevent (Issue #3775).
 	codes := []int{recA.Code, recB.Code}
-	successes, conflicts := 0, 0
+	successes, refusals := 0, 0
 	for _, c := range codes {
 		switch c {
 		case http.StatusNoContent:
 			successes++
-		case http.StatusConflict:
-			conflicts++
+		case http.StatusConflict, http.StatusNotFound:
+			refusals++
 		}
 	}
-	assert.Equal(t, 1, successes, "exactly one concurrent revoke must succeed (204): %v", codes)
-	assert.Equal(t, 1, conflicts, "exactly one concurrent revoke must lose the compare-and-swap (409): %v", codes)
+	assert.Equal(t, 1, successes, "exactly one concurrent revoke of one credential must succeed (204): %v", codes)
+	assert.Equal(t, 1, refusals, "the race loser must be refused — 409 when it loses the compare-and-swap, 404 when the winner already removed the credential: %v", codes)
 
 	final, err := nodeB.getAccount(context.Background(), "cross-node-webauthn")
 	require.NoError(t, err)
-	assert.Len(t, final.Credentials, 2, "exactly one credential must have been removed, never both or neither")
+	remaining := make([][]byte, 0, len(final.Credentials))
+	for _, c := range final.Credentials {
+		remaining = append(remaining, c.ID)
+	}
+	assert.ElementsMatch(t, [][]byte{credB, credC}, remaining,
+		"exactly the revoked credential must have been removed — never a second one, never none")
 }
 
 // ---- 2. enrolment-token spend-then-lodge (formerly credentialRequestMu) ------------

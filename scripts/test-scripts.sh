@@ -3649,8 +3649,32 @@ SCRIPTEOF
 # Test: resource-sampler.sh report emits no literal ${ placeholder (Issue #2485 AC3)
 # Runs report against a fixture samples file and asserts the emitted
 # RESOURCE_PROFILE: line contains no unexpanded variable placeholder.
+# pipeline_suite_result_kind classifies the exit status a parallel suite
+# subshell recorded, and is the fail-closed half of that runner (Issue #4151).
+# Echoes exactly one of: pass, timeout, missing, fail.
+#
+# "missing" — an absent, empty or non-numeric status — must never be read as a
+# pass. `[[ $rc -eq 0 ]]` would do exactly that: [[ -eq ]] evaluates both
+# operands in arithmetic context, where "" and "garbage" are both 0, so a suite
+# whose subshell was killed (OOM, full or unwritable $TMPDIR) before recording
+# its status would be reported green. Comparison here is on the string, and the
+# numeric shape is checked explicitly first.
+pipeline_suite_result_kind() {
+    local rc="$1"
+    if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+        printf 'missing'
+    elif [[ "$rc" == "0" ]]; then
+        printf 'pass'
+    elif [[ "$rc" == "124" ]]; then
+        printf 'timeout'
+    else
+        printf 'fail'
+    fi
+}
+
 test_claude_pipeline_suites() {
-    # The 21 self-contained suites under .claude/scripts/tests/ guard the dispatch
+    # The self-contained suites under .claude/scripts/tests/ (30 as of
+    # 2026-09-18, up from the 21 measured 2026-08-20) guard the dispatch
     # machinery: the Files-In-Scope path parser, lease handling, capacity gating,
     # per-agent credential injection, stalled-dispatch detection, merge-group
     # diagnosis. Every one shipped with a "Run: ..." line in its header and was
@@ -3666,6 +3690,15 @@ test_claude_pipeline_suites() {
     #
     # Each suite owns its own assertions and exits non-zero on failure; this
     # records one pass/fail per suite rather than per assertion.
+    #
+    # Suites run CPU-count-wide batches in parallel rather than one after
+    # another (Issue #4151: this loop alone was ~218s of the ~244s script-test
+    # phase). Safe because every suite here uses its own `mktemp -d` rather
+    # than a fixed shared path or real repo mutation (verified by inspection
+    # 2026-09-18) — confirm that still holds before raising the batch size or
+    # adding a suite that touches shared state.
+    #
+    # Aggregation fails closed: see pipeline_suite_result_kind.
     local tests_dir
     tests_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/scripts/tests"
 
@@ -3675,37 +3708,403 @@ test_claude_pipeline_suites() {
         return
     fi
 
-    local suite base out rc found=0
+    local suite base found=0
+    local -a suites=()
     for suite in "$tests_dir"/*.test.sh "$tests_dir"/test-*.sh "$tests_dir"/test-*.py; do
         [[ -f "$suite" ]] || continue
-        base="$(basename "$suite")"
-        found=$((found + 1))
-        log_test "Testing ${base}..."
-
-        set +e
-        if [[ "$suite" == *.py ]]; then
-            out=$(timeout 180 python3 "$suite" 2>&1)
-        else
-            out=$(timeout 180 bash "$suite" 2>&1)
-        fi
-        rc=$?
-        set -e
-
-        if [[ $rc -eq 0 ]]; then
-            log_pass "${base}"
-        elif [[ $rc -eq 124 ]]; then
-            log_fail "${base}: timed out after 180s"
-            echo "$out" | tail -20
-        else
-            log_fail "${base}: exit ${rc}"
-            echo "$out" | tail -20
-        fi
+        suites+=("$suite")
     done
+    found=${#suites[@]}
 
     if [[ $found -eq 0 ]]; then
         log_test "Testing .claude pipeline suites..."
         log_fail "no suites matched in ${tests_dir} — the glob or the layout changed"
+        return
     fi
+
+    local parallel
+    parallel=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        (
+            set +e
+            if [[ "$suite" == *.py ]]; then
+                out=$(timeout 180 python3 "$suite" 2>&1)
+            else
+                out=$(timeout 180 bash "$suite" 2>&1)
+            fi
+            rc=$?
+            set -e
+            printf '%s' "$out" > "$tmpdir/$i.out"
+            # Write-then-rename: `printf > file` truncates before it writes, so a
+            # subshell killed between those two steps would leave a zero-byte
+            # status file. rename(2) within one directory is atomic, so the reader
+            # sees either no file or a complete one — never a truncated one.
+            printf '%s' "$rc" > "$tmpdir/$i.rc.partial" && mv "$tmpdir/$i.rc.partial" "$tmpdir/$i.rc"
+        ) &
+        if (( i % parallel == 0 )); then
+            wait
+        fi
+    done
+    wait
+
+    local rc out
+    i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        base="$(basename "$suite")"
+        log_test "Testing ${base}..."
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
+        out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
+
+        case "$(pipeline_suite_result_kind "$rc")" in
+            pass)
+                log_pass "${base}"
+                ;;
+            timeout)
+                log_fail "${base}: timed out after 180s"
+                echo "$out" | tail -20
+                ;;
+            missing)
+                log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                echo "$out" | tail -20
+                ;;
+            *)
+                log_fail "${base}: exit ${rc}"
+                echo "$out" | tail -20
+                ;;
+        esac
+    done
+
+    rm -rf "$tmpdir"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# the partition of features/controller/api tests across shards must be
+# complete (every test lands in exactly one shard, none dropped or
+# duplicated) and even (no shard starves while another does most of the
+# work). Uses CFGMS_API_TEST_SHARD_PLAN_ONLY=1 so this runs in milliseconds
+# instead of paying for a full -race run just to check the partition math.
+test_api_shard_partition_covers_all_tests() {
+    log_test "Testing test-framework-api-sharded: partition is complete and even..."
+
+    local list_out list_rc total
+    list_out=$(go test -list '.*' ./features/controller/api/... 2>&1)
+    list_rc=$?
+    if [[ $list_rc -ne 0 ]]; then
+        log_fail "go test -list ./features/controller/api/...: exited ${list_rc}"
+        echo "$list_out" | tail -20
+        return
+    fi
+    total=$(echo "$list_out" | grep -c '^Test')
+    if [[ "$total" -eq 0 ]]; then
+        log_fail "go test -list found no tests in features/controller/api"
+        return
+    fi
+
+    local shards=4
+    local plan_out plan_rc
+    plan_out=$(CFGMS_API_TEST_SHARDS=$shards CFGMS_API_TEST_SHARD_PLAN_ONLY=1 make test-framework-api-sharded 2>&1)
+    plan_rc=$?
+    if [[ $plan_rc -ne 0 ]]; then
+        log_fail "make test-framework-api-sharded (plan-only): exited ${plan_rc}"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    local counts sum min max
+    counts=$(echo "$plan_out" | grep -oE '^shard [0-9]+: [0-9]+ tests' | grep -oE '[0-9]+ tests' | grep -oE '^[0-9]+')
+    if [[ -z "$counts" ]]; then
+        log_fail "could not parse shard counts from plan-only output"
+        echo "$plan_out" | tail -20
+        return
+    fi
+
+    sum=0
+    min=""
+    max=""
+    while read -r n; do
+        sum=$((sum + n))
+        if [[ -z "$min" || "$n" -lt "$min" ]]; then min=$n; fi
+        if [[ -z "$max" || "$n" -gt "$max" ]]; then max=$n; fi
+    done <<< "$counts"
+
+    if [[ "$sum" -ne "$total" ]]; then
+        log_fail "shard counts sum to ${sum}, go test -list reports ${total} tests — partition drops or duplicates tests"
+        return
+    fi
+
+    if [[ $((max - min)) -gt 1 ]]; then
+        log_fail "shard sizes range from ${min} to ${max} tests (across ${shards} shards) — partition is not even"
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: ${total} tests partitioned evenly across ${shards} shards (sizes ${min}-${max})"
+}
+
+# Regression guard for the Makefile's test-go-group-controller-core /
+# test-go-group-heavy-providers / test-go-group-rest split (Issue #4151): the
+# three groups must partition the exact package list the pre-split single
+# `go test ./...` call used — no package dropped, none picked up by two
+# groups. Unlike test-framework-api-sharded above, this split is a
+# hand-maintained package-name partition, not something `go test -list`
+# itself verifies, so a renamed package or a new sub-package under one of the
+# heavy-providers paths could silently drift out of sync with no other
+# signal. Uses CFGMS_TEST_GROUP_LIST_ONLY=1 so this costs a few `go list`
+# calls, not three full -race runs.
+test_go_group_split_partition_covers_all_packages() {
+    log_test "Testing go-group split: controller-core/heavy-providers/rest partition all packages, no drops or duplicates..."
+
+    # Every captured stream is filtered to lines that actually look like this
+    # module's import paths. Not cosmetic: test-go-group-* is invoked here via
+    # `make` from inside a shell that (in CI, via `make test` -> make test-scripts
+    # -> this script) already inherited MAKEFLAGS/MAKELEVEL from an enclosing
+    # make process, which makes GNU Make auto-print "Entering directory" /
+    # "Leaving directory" around the nested invocation — two extra non-empty
+    # lines per call that a bare `grep -c .` counts as packages. Reproduced only
+    # in that nested context, never when running the make target directly from
+    # an interactive shell, which is why this passed locally and failed in CI.
+    local pkg_filter='^github\.com/cfgis/cfgms/'
+
+    local full full_rc
+    full=$(go list ./... 2>&1 | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e' | grep -v '/features/controller/api$' | grep -E "$pkg_filter")
+    full_rc=$?
+    if [[ $full_rc -ne 0 ]]; then
+        log_fail "go list ./...: exited ${full_rc}"
+        echo "$full" | tail -20
+        return
+    fi
+
+    local core heavy rest core_rc heavy_rc rest_rc
+    core=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-controller-core 2>&1 | grep -E "$pkg_filter")
+    core_rc=$?
+    heavy=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-heavy-providers 2>&1 | grep -E "$pkg_filter")
+    heavy_rc=$?
+    rest=$(CFGMS_TEST_GROUP_LIST_ONLY=1 make --no-print-directory test-go-group-rest 2>&1 | grep -E "$pkg_filter")
+    rest_rc=$?
+    if [[ $core_rc -ne 0 || $heavy_rc -ne 0 || $rest_rc -ne 0 ]]; then
+        log_fail "CFGMS_TEST_GROUP_LIST_ONLY=1 exited non-zero (core=${core_rc}, heavy=${heavy_rc}, rest=${rest_rc})"
+        return
+    fi
+
+    local full_count core_count heavy_count rest_count union_count
+    full_count=$(echo "$full" | sort -u | grep -c .)
+    core_count=$(echo "$core" | grep -c .)
+    heavy_count=$(echo "$heavy" | grep -c .)
+    rest_count=$(echo "$rest" | grep -c .)
+
+    if [[ $((core_count + heavy_count + rest_count)) -ne "$full_count" ]]; then
+        log_fail "controller-core (${core_count}) + heavy-providers (${heavy_count}) + rest (${rest_count}) = $((core_count + heavy_count + rest_count)), go list reports ${full_count} packages — partition drops or duplicates packages"
+        return
+    fi
+
+    union_count=$(printf '%s\n%s\n%s\n' "$core" "$heavy" "$rest" | sort -u | grep -c .)
+    if [[ "$union_count" -ne "$full_count" ]]; then
+        log_fail "union of the three groups has ${union_count} unique packages, go list reports ${full_count} — a package appears in more than one group"
+        return
+    fi
+
+    log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# shard aggregation must fail closed. A shard subshell that dies before it can
+# record its exit status (OOM kill, signal, unwritable temp dir) used to be
+# skipped by the aggregation loop, so `make test` reported success while a
+# whole shard of tests never ran. Driven with a stub `go` on PATH so it costs
+# milliseconds instead of a real -race run: the stub kills its own parent
+# subshell for one shard, reproducing the OOM-kill case exactly.
+test_api_shard_aggregation_fails_closed() {
+    log_test "Testing test-framework-api-sharded: a shard with no exit status fails closed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list; for the shard whose -run
+    # pattern includes TestB it SIGKILLs the subshell that launched it, so no
+    # shard-N.exit file is ever written.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+case "$*" in
+    *TestB*) kill -9 "$PPID"; exit 0 ;;
+esac
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # rc captured via || so a non-zero make does not trip the suite's set -e.
+    local out rc=0
+    out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_fail "a shard that died without recording an exit status still produced a passing target (exit 0) — false green in make test"
+        echo "$out" | tail -20
+        return
+    fi
+
+    if ! echo "$out" | grep -q 'no readable exit status'; then
+        log_fail "target failed but printed no diagnostic naming the shard with the missing exit status"
+        echo "$out" | tail -20
+        return
+    fi
+
+    # A temp dir that cannot be created must also fail closed rather than
+    # running zero shards and reporting success.
+    local not_a_dir="${tmp_dir}/tmpdir-is-a-file"
+    : > "$not_a_dir"
+
+    local mk_out mk_rc=0
+    mk_out=$(PATH="${bin_dir}:$PATH" TMPDIR="$not_a_dir" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || mk_rc=$?
+
+    if [[ $mk_rc -eq 0 ]]; then
+        log_fail "target reported success when mktemp -d could not create the shard output dir"
+        echo "$mk_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: missing shard exit status and unusable temp dir both fail closed"
+}
+
+# Regression guard for the parallel .claude pipeline-suite runner (Issue #4151):
+# a suite whose recorded exit status is absent, empty or non-numeric must be
+# reported as a failure, never as a pass. The same invariant the Makefile shard
+# aggregation holds, on the other side of the same change — and the case
+# `[[ $rc -eq 0 ]]` silently gets wrong, because it compares in arithmetic
+# context where "" and "garbage" are both 0.
+test_pipeline_suite_result_fails_closed() {
+    log_test "Testing .claude pipeline suite aggregation: unusable exit status fails closed..."
+
+    local kind
+    local -a bad_statuses=("" " " "garbage" "0x0" "00abc" $'\n')
+    for kind in "${bad_statuses[@]}"; do
+        local got
+        got=$(pipeline_suite_result_kind "$kind")
+        if [[ "$got" != "missing" ]]; then
+            log_fail "exit status $(printf '%q' "$kind") classified as '${got}', not 'missing' — a suite that recorded no usable status would be reported ${got}"
+            return
+        fi
+    done
+
+    local -a cases=("0:pass" "124:timeout" "1:fail" "2:fail" "137:fail")
+    local c
+    for c in "${cases[@]}"; do
+        local status="${c%%:*}" want="${c##*:}" actual
+        actual=$(pipeline_suite_result_kind "$status")
+        if [[ "$actual" != "$want" ]]; then
+            log_fail "exit status ${status} classified as '${actual}', expected '${want}'"
+            return
+        fi
+    done
+
+    log_pass ".claude pipeline suite aggregation: empty and non-numeric exit statuses fail closed"
+}
+
+# Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
+# CFGMS_API_TEST_SHARDS must be validated as a decimal integer before it
+# reaches any arithmetic context. Bash re-evaluates the contents of a variable
+# used inside $(( )) as an arithmetic expression, so an unvalidated value is
+# both command execution (an array-subscript payload runs) and a silent
+# fail-open (a non-numeric value makes `seq 0 $((shards - 1))` emit nothing,
+# so zero shards launch and the target exits 0 with the whole suite unrun).
+# Driven with a stub `go` on PATH so it costs milliseconds.
+test_api_shard_count_rejects_non_integer() {
+    log_test "Testing test-framework-api-sharded: a non-integer shard count is rejected, not executed..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: enumerates four tests for -list, reports success for any run.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+echo "ok  features/controller/api  0.01s"
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    # 1. Arithmetic-injection payload must not execute its command substitution.
+    local marker="${tmp_dir}/injection-executed"
+    local inj_out inj_rc=0
+    inj_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS="a[\$(touch ${marker})]" \
+        make test-framework-api-sharded 2>&1) || inj_rc=$?
+
+    if [[ -e "$marker" ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS reached bash arithmetic unvalidated — the injected command substitution executed"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    if [[ $inj_rc -eq 0 ]]; then
+        log_fail "an injection payload in CFGMS_API_TEST_SHARDS produced a passing target (exit 0) — false green in make test"
+        echo "$inj_out" | tail -20
+        return
+    fi
+
+    # 2. A plain non-integer must fail closed rather than launching zero shards.
+    local bad_out bad_rc=0
+    bad_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=abc \
+        make test-framework-api-sharded 2>&1) || bad_rc=$?
+
+    if [[ $bad_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=abc produced a passing target (exit 0) — zero shards ran and make test still reported success"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    if ! echo "$bad_out" | grep -q 'shard count must be a positive integer'; then
+        log_fail "target failed but printed no diagnostic explaining the invalid shard count"
+        echo "$bad_out" | tail -20
+        return
+    fi
+
+    # 3. Zero is not a positive integer and must not be accepted either.
+    local zero_out zero_rc=0
+    zero_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=0 \
+        make test-framework-api-sharded 2>&1) || zero_rc=$?
+
+    if [[ $zero_rc -eq 0 ]]; then
+        log_fail "CFGMS_API_TEST_SHARDS=0 produced a passing target (exit 0) — zero shards ran"
+        echo "$zero_out" | tail -20
+        return
+    fi
+
+    # 4. A valid count still runs: validation must not break the normal path.
+    local ok_out ok_rc=0
+    ok_out=$(PATH="${bin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 \
+        make test-framework-api-sharded 2>&1) || ok_rc=$?
+
+    if [[ $ok_rc -ne 0 ]]; then
+        log_fail "a valid CFGMS_API_TEST_SHARDS=2 was rejected (exit ${ok_rc}) — validation is too strict"
+        echo "$ok_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: injection payload, non-integer and zero shard counts all fail closed; valid counts still run"
 }
 
 test_resource_sampler_no_placeholder() {
@@ -4105,6 +4504,16 @@ echo ""
 test_resource_sampler_loop_guard
 echo ""
 test_resource_sampler_no_placeholder
+echo ""
+test_api_shard_partition_covers_all_tests
+echo ""
+test_go_group_split_partition_covers_all_packages
+echo ""
+test_api_shard_aggregation_fails_closed
+echo ""
+test_api_shard_count_rejects_non_integer
+echo ""
+test_pipeline_suite_result_fails_closed
 echo ""
 test_claude_pipeline_suites
 echo ""
