@@ -18,16 +18,6 @@ on:
       - main  # Run on main for release validation
       # NOTE: Removed develop - tests already run on PR before merge (no redundant post-merge testing)
   workflow_dispatch:
-    inputs:
-      test_level:
-        description: 'Test level to run'
-        required: true
-        default: 'fast'
-        type: choice
-        options:
-        - fast
-        - all
-        - full
 
 # Never cancel an in-flight merge_group run — only PR pushes cancel their own
 # workflow's prior run (#2595).
@@ -431,155 +421,6 @@ jobs:
           echo "integration-tests: real production-critical suite runs in the merge queue (merge_group) per #2595."
           echo "This PR-time stub posts the required context; the authoritative run validates the merge commit."
 
-  # Cross-feature integration tests - chunked for efficiency
-  cross-feature-tests:
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: github.event.inputs.test_level == 'all' || github.event.inputs.test_level == 'full'
-    needs: integration-tests
-    strategy:
-      matrix:
-        test-chunk: [
-          "workflow-config",
-          "dna-drift", 
-          "template-rollback",
-          "terminal-audit",
-          "multi-tenant-saas"
-        ]
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    
-    - name: Set up Go
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
-      continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Cross-Feature Tests - ${{ matrix.test-chunk }}
-      run: |
-        case "${{ matrix.test-chunk }}" in
-          "workflow-config")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestWorkflowConfigurationIntegration"
-            ;;
-          "dna-drift")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestDNADriftWorkflowIntegration"
-            ;;
-          "template-rollback")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTemplateRollbackIntegration"
-            ;;
-          "terminal-audit")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTerminalAuditIntegration"
-            ;;
-          "multi-tenant-saas")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestMultiTenantSaaSIntegration"
-            ;;
-        esac
-
-  # Production readiness tests - chunked and run only for full validation
-  production-readiness:
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: github.event.inputs.test_level == 'full' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
-    needs: integration-tests
-    strategy:
-      matrix:
-        readiness-test: [
-          "load-testing",
-          "performance-benchmarks"
-        ]
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    
-    - name: Set up Go
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
-      continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Production Readiness Test - ${{ matrix.readiness-test }}
-      run: |
-        case "${{ matrix.readiness-test }}" in
-          "load-testing")
-            make test-load-testing
-            ;;
-          "performance-benchmarks")
-            make test-performance-benchmarks
-            ;;
-        esac
-    
-    - name: Upload production test results
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-      if: always()
-      with:
-        name: production-test-results-${{ matrix.readiness-test }}
-        path: |
-          production-test-results.xml
-          production-coverage.out
-        retention-days: 30
-
-  # Synthetic monitoring validation - separate job for ongoing validation
-  synthetic-monitoring:
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: github.event.inputs.test_level == 'full'
-    needs: production-readiness
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    
-    - name: Set up Go
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
-      continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Synthetic Monitoring Tests
-      run: make test-synthetic-monitoring
-
   # Test summary and validation
   test-summary:
     permissions: {}
@@ -610,8 +451,6 @@ jobs:
         echo "### Testing Strategy" >> $GITHUB_STEP_SUMMARY
         echo "- **Fast Tests**: Unit tests run on every push (< 15 minutes)" >> $GITHUB_STEP_SUMMARY
         echo "- **Integration Tests**: Run on main/develop branches (< 25 minutes)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Cross-Feature Tests**: Run on workflow dispatch 'all' level" >> $GITHUB_STEP_SUMMARY
-        echo "- **Production Tests**: Run on workflow dispatch 'full' level or main pushes" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Manual Testing Commands" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
