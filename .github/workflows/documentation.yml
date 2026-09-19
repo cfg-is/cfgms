@@ -220,9 +220,9 @@ jobs:
   # These provide the required check names so docs-only PRs can merge
   # without waiting for code validation workflows that won't run
 
-  # QUEUE-REAL context (#3189): test-suite.yml's unit-tests-mq-stub
-  # (if: github.event_name == 'merge_group') is the sole queue-side poster for this
-  # context — the real unit-tests job runs on the pull-request side. This stub only
+  # PR-REAL context (#3189): unit-tests-queue-stub.yml (merge_group-only trigger)
+  # is the sole queue-side poster for this context — the real unit-tests
+  # aggregator in test-suite.yml runs on the pull-request side. This stub only
   # covers docs-only PRs, where test-suite.yml is paths-ignored. It must NOT fire on
   # merge_group.
   unit-tests:

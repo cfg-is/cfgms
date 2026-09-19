@@ -280,14 +280,14 @@ jobs:
   # established that a skipped run satisfies a required status check. This
   # job explicitly checks every leg's result and fails closed instead.
   #
-  # No stub-exclusivity regression: this aggregator and unit-tests-mq-stub
-  # (below) fire on disjoint events (this job's condition excludes
-  # merge_group; the stub's condition is merge_group only), so they never
-  # both post the `unit-tests` context for the same workflow run — the same
-  # event-exclusive shape integration-tests/integration-tests-pr-stub already
-  # use below. See CLAUDE.md "Stub exclusivity": the exposure that section
-  # documents needs BOTH a needs:-delayed real job AND a same-run skipped
-  # stub; there is no same-run stub here.
+  # This aggregator is `needs:`-delayed, so its check run does not exist until
+  # the slowest leg finishes. That makes it exactly the shape CLAUDE.md
+  # "Stub exclusivity" warns about: any other job in THIS file named
+  # `unit-tests` would post a `skipped` run at the start of every
+  # pull_request run -- an event-gated `if:` still posts a skipped run -- and
+  # a skipped run satisfies the required check before the tests finish. The
+  # queue-side stub therefore lives in unit-tests-queue-stub.yml, which has no
+  # pull_request trigger at all.
   unit-tests:
     permissions: {}
     runs-on: ubuntu-latest
@@ -316,20 +316,12 @@ jobs:
           fi
           echo "✅ all unit-tests groups succeeded"
 
-  # PR-time stub for the `unit-tests` required context on merge_group entries
-  # (code PRs). The real per-PR run above already validated this diff for real;
-  # this just posts the required context without re-running the fast suite a
-  # second time per queue entry.
-  unit-tests-mq-stub:
-    name: unit-tests
-    permissions: {}
-    runs-on: ubuntu-latest
-    if: github.event_name == 'merge_group'
-    steps:
-      - name: Merge-queue stub (real run already validated this diff on the PR)
-        run: |
-          echo "unit-tests: already validated for real on the source PR (#2595)."
-          echo "This merge-queue stub posts the required context without paying for the fast suite twice."
+  # The merge-queue stub for the `unit-tests` required context lives in
+  # unit-tests-queue-stub.yml, which triggers ONLY on merge_group. It must not
+  # come back here: any job in this file named `unit-tests` other than the
+  # aggregator above posts a `skipped` run on every pull_request, and a skipped
+  # run satisfies the required check before the `needs:`-delayed aggregator
+  # exists. See that file's header and CLAUDE.md "Stub exclusivity".
 
   # Integration tests - QUEUE-REAL (#2595): the real `make test-production-critical`
   # run is queue-only (merge_group) and on push to main/workflow_dispatch — NOT on
