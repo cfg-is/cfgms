@@ -101,11 +101,16 @@ jobs:
         # perform first-run initialization") until the CA and RBAC defaults
         # exist on disk — this is the same init-then-exec sequence
         # docker-compose.test.yml's fleet-controller service uses.
+        #
+        # CFGMS_EXTERNAL_URL is required by --init itself: initialization.Run
+        # refuses to issue the admin bundle without an external_url configured
+        # (the externally-reachable HTTPS address operators use to connect).
         docker run -d \
           --name cfgms-controller-dast \
           --network host \
           --entrypoint /bin/sh \
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+          -e CFGMS_EXTERNAL_URL=https://localhost:8080 \
           -e CFGMS_SECRETS_KEY_FILE=/app/secrets.key \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
