@@ -757,19 +757,46 @@ def looks_auth_revoked(text: str) -> bool:
     return bool(_AUTH_REVOKED_RE.search(text or ""))
 
 
+# Stop-reason prefixes that are deterministic BY CONSTRUCTION. The prefix is
+# written by the harness itself, never by the model, so it is trustworthy in a
+# way the rest of the string is not.
+#
+# `invalid_findings_schema` means the model's answer failed validation --
+# true regardless of what that answer happened to say. `unhandled_step_error`
+# is a defect in the step body. Re-running either changes nothing.
+DETERMINISTIC_STOP_REASON_PREFIXES = (
+    "invalid_findings_schema",
+    "invalid_adjudication_schema",
+    "unhandled_step_error",
+    "unknown_harness",
+    "input_unreadable",
+)
+
+
 def is_transient_stop_reason(stop_reason: object) -> bool:
     """True when a `failed` step's stop reason names a cause a retry can fix.
 
     The single place that decides whether `resume` re-attempts a failed step.
-    Credential failures are the only member today; the shape is a list so a
-    later cause (a network reset, a container OOM) joins it here rather than
-    growing a second decision point somewhere else.
 
-    Everything not named here keeps `failed`'s original meaning -- surface to
-    a human, never auto-retried -- which is what stops a deterministically
-    broken step from looping.
+    **The model's own text is in this string and must not be trusted.**
+    `stop_reason_raw` is `"<reason>: <harness output tail>"`, and the tail is
+    combined stdout+stderr -- which for a finder lane contains the model's
+    answer. This harness reviews code for security defects, so that answer
+    routinely contains "unauthorized", "invalid token", "session expired" and
+    "authentication failed" as FINDINGS rather than as errors. A step whose
+    findings discuss auth and which then failed deterministically would
+    otherwise be re-run at full cost on every resume, forever.
+
+    So the harness-written PREFIX is checked first and can veto on its own.
+    Only then is the rest of the string consulted, and `resume` additionally
+    caps how many times any one step may be re-attempted -- the prefix rule
+    cannot catch a mis-detected `harness_exit_1`, and the cap cannot make a
+    deterministic failure cheap. Neither alone is sufficient.
     """
     if not isinstance(stop_reason, str) or not stop_reason:
+        return False
+    head = stop_reason.strip().lower()
+    if head.startswith(DETERMINISTIC_STOP_REASON_PREFIXES):
         return False
     return looks_auth_revoked(stop_reason)
 
