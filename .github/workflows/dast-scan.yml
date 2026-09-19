@@ -133,6 +133,15 @@ jobs:
         # default (/etc/cfgms/admin.bundle.yaml), which the container's
         # non-root UID 1001 cannot create on a bare /etc/cfgms — see the
         # comment on the step above for the full chain.
+        #
+        # CFGMS_METRICS_LISTEN_ADDR: DefaultConfig() leaves MetricsListenAddr
+        # empty on purpose (features/controller/config/config.go: "Required
+        # explicitly; startup fails closed when absent") and Server.Start
+        # (features/controller/api/server.go) refuses to bind with
+        # "invalid private metrics listener: address is required" until it's
+        # set. ValidatePrivateListenerAddress additionally requires a fixed
+        # loopback/private numeric address, so this is a container-local
+        # 127.0.0.1 port rather than 0.0.0.0, matching the "private" intent.
         docker run -d \
           --name cfgms-controller-dast \
           --network host \
@@ -140,6 +149,7 @@ jobs:
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
           -e CFGMS_EXTERNAL_URL=https://localhost:8080 \
           -e CFGMS_EXTERNAL_HOSTNAME=localhost \
+          -e CFGMS_METRICS_LISTEN_ADDR=127.0.0.1:9090 \
           -e CFGMS_SECRETS_KEY_FILE=/app/secrets.key \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
