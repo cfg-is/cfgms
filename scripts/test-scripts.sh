@@ -3912,6 +3912,53 @@ test_go_group_split_partition_covers_all_packages() {
     log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
 }
 
+# Regression guard for Makefile's ALL_MODULES (Issue #4164): ALL_MODULES drives
+# CHANGED_MODULES, which is how `make test`'s smart mode decides which module's
+# tests to run for a change. A hand-maintained ALL_MODULES list silently drops
+# modules added later -- 5 of 10 stdlib modules and 3 of 5 extended modules were
+# missing before this fix, so a change to one of them never triggered its tests
+# locally even though CI's unbounded `features/...` run still covered it. This
+# independently rediscovers every features/modules/**/module.yaml directory
+# (the same discriminator the Makefile derivation uses) and diffs it against
+# what the Makefile actually reports via `make test-module`'s usage output, so
+# reverting the derivation back to a hand list fails this the moment the tree
+# grows past that list.
+test_all_modules_covers_module_yaml_tree() {
+    log_test "Testing ALL_MODULES: every features/modules/**/module.yaml directory is included..."
+
+    local discovered
+    discovered=$(find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; \
+        | sed 's#^features/modules/##' | sort -u)
+    if [[ -z "$discovered" ]]; then
+        log_fail "found no module.yaml files under features/modules — discovery command itself is broken"
+        return
+    fi
+
+    local make_out reported
+    make_out=$(make --no-print-directory test-module 2>&1 || true)
+    reported=$(echo "$make_out" | grep '^  All: ' | sed 's/^  All: //' | tr ' ' '\n' | sort -u)
+    if [[ -z "$reported" ]]; then
+        log_fail "could not parse ALL_MODULES from 'make test-module' usage output"
+        echo "$make_out" | tail -20
+        return
+    fi
+
+    local missing extra
+    missing=$(comm -23 <(echo "$discovered") <(echo "$reported"))
+    extra=$(comm -13 <(echo "$discovered") <(echo "$reported"))
+
+    if [[ -n "$missing" ]]; then
+        log_fail "ALL_MODULES is missing modules present in the tree: $(echo "$missing" | tr '\n' ' ')"
+        return
+    fi
+    if [[ -n "$extra" ]]; then
+        log_fail "ALL_MODULES lists modules with no module.yaml in the tree: $(echo "$extra" | tr '\n' ' ')"
+        return
+    fi
+
+    log_pass "ALL_MODULES matches the module.yaml tree ($(echo "$discovered" | grep -c .) modules)"
+}
+
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
 # shard aggregation must fail closed. A shard subshell that dies before it can
 # record its exit status (OOM kill, signal, unwritable temp dir) used to be
@@ -4508,6 +4555,8 @@ echo ""
 test_api_shard_partition_covers_all_tests
 echo ""
 test_go_group_split_partition_covers_all_packages
+echo ""
+test_all_modules_covers_module_yaml_tree
 echo ""
 test_api_shard_aggregation_fails_closed
 echo ""
