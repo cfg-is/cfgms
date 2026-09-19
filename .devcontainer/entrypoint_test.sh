@@ -827,8 +827,34 @@ test_22_no_bg_wait_rule_in_prompts() {
         "review entrypoint appends the rule"
     assert_contains "$entry" '"outcome": "${AGENT_OUTCOME}"' \
         "agent-result.json records the outcome"
-    assert_contains "$entry" 'AGENT_OUTCOME="ended_turn_waiting"' \
-        "entrypoint classifies ended_turn_waiting"
+    assert_contains "$entry" 'AGENT_OUTCOME=$(ac_classify_outcome "$MODE" "$PR_URL" "$HEAD_ADVANCED"' \
+        "entrypoint classifies the outcome through ac_classify_outcome"
+}
+
+# ============================================================================
+# TEST 23 — outcome classification per mode (Issue #4178 review finding)
+# fix-pr / resolve-conflict always have a PR_URL (the PR pre-exists), so only
+# HEAD advancing counts as landed work there. 3 of the 4 observed stalls were
+# fix-pr containers; gating on an empty PR_URL made them unclassifiable.
+# ============================================================================
+test_23_outcome_classification_by_mode() {
+    local dir; dir=$(mktemp -d)
+    _t21_transcript "$dir/stall.jsonl" "I'll wait for the background task notification before continuing."
+    _t21_transcript "$dir/done.jsonl" "Done. Fix committed and pushed."
+    local pr="https://github.com/cfg-is/cfgms/pull/1"
+
+    _t23() { # desc want mode pr_url head_advanced jsonl
+        local got; got=$(ac_classify_outcome "$3" "$4" "$5" "$6")
+        if [[ "$got" == "$2" ]]; then echo "    ✓ $1"; else _fail "$1: want $2 got $got"; fi
+    }
+    _t23 "fix-pr, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting fix-pr "$pr" false "$dir/stall.jsonl"
+    _t23 "resolve-conflict, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting resolve-conflict "$pr" false "$dir/stall.jsonl"
+    _t23 "fix-pr, commit landed, waiting text → normal" normal fix-pr "$pr" true "$dir/stall.jsonl"
+    _t23 "fix-pr, no commit, normal ending → normal" normal fix-pr "$pr" false "$dir/done.jsonl"
+    _t23 "issue mode, no PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting issue "" false "$dir/stall.jsonl"
+    _t23 "issue mode, PR opened, waiting text → normal" normal issue "$pr" false "$dir/stall.jsonl"
+    _t23 "issue mode, missing transcript → normal" normal issue "" false "$dir/none.jsonl"
+    rm -rf "$dir"
 }
 
 # ============================================================================
@@ -857,6 +883,7 @@ run_test "T19 — salvage: exit-0 with no work routes for re-dispatch" test_19_s
 run_test "T20 — regression guard: exit-0 branch checks PR_URL" test_20_exit_zero_branch_checks_pr_url
 run_test "T21 — ended-turn-waiting detection (Issue #4178)" test_21_ended_turn_waiting_detection
 run_test "T22 — headless no-bg-wait rule reaches every prompt (Issue #4178)" test_22_no_bg_wait_rule_in_prompts
+run_test "T23 — outcome classification per mode (Issue #4178)" test_23_outcome_classification_by_mode
 
 echo ""
 echo "============================================================"

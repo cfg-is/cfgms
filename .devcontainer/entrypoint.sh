@@ -974,17 +974,14 @@ if [[ -n "${CFGMS_PROJECT_ITEM_ID:-}" ]] && [[ -n "$PR_URL" ]] && [[ "$MODE" != 
 fi
 
 # Classify a lost run (Issue #4178). "ended_turn_waiting" = the agent's last
-# message says it is waiting on background work, AND nothing landed (no PR, HEAD
-# not advanced). This lets the orchestrator tell this apart from a validation
-# failure without reading the transcript. Best-effort: an unreadable transcript
-# leaves the outcome "normal".
-AGENT_OUTCOME="normal"
-if [[ -z "$PR_URL" ]] && [[ "$HEAD_ADVANCED" != "true" ]]; then
-    _session_jsonl=$(ls -t "${HOME}/.claude/projects/-workspace/"*.jsonl 2>/dev/null | head -1 || true)
-    if [[ -n "$_session_jsonl" ]] && ac_detect_ended_turn_waiting "$_session_jsonl"; then
-        AGENT_OUTCOME="ended_turn_waiting"
-        echo "WARN: agent ended its turn waiting on background work; its background task was killed (Issue #4178)"
-    fi
+# message says it is waiting on background work AND nothing landed (see
+# ac_classify_outcome for what "landed" means per mode). This lets the
+# orchestrator tell this apart from a validation failure without reading the
+# transcript. Best-effort: an unreadable transcript leaves the outcome "normal".
+_session_jsonl=$(ls -t "${HOME}/.claude/projects/-workspace/"*.jsonl 2>/dev/null | head -1 || true)
+AGENT_OUTCOME=$(ac_classify_outcome "$MODE" "$PR_URL" "$HEAD_ADVANCED" "$_session_jsonl")
+if [[ "$AGENT_OUTCOME" == "ended_turn_waiting" ]]; then
+    echo "WARN: agent ended its turn waiting on background work; its background task was killed (Issue #4178)"
 fi
 
 # Write result summary

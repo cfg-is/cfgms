@@ -368,6 +368,28 @@ ac_detect_ended_turn_waiting() {
     grep -qiE "(wait|waiting|pause)[^.]{0,80}(notification|background|monitor|validation|to (complete|finish))" <<<"$text"
 }
 
+# ac_classify_outcome <mode> <pr_url> <head_advanced> <session.jsonl>
+# Prints "ended_turn_waiting" or "normal" for agent-result.json.
+#
+# "Nothing landed" differs by mode. fix-pr and resolve-conflict run on a branch
+# that ALREADY has a PR, so PR_URL is always set there and says nothing about
+# this run -- only HEAD advancing does. For the other modes, a new PR also
+# counts as landing work. Gating fix-pr on an empty PR_URL made the check
+# unreachable for the mode behind 3 of the 4 observed stalls.
+ac_classify_outcome() {
+    local mode="$1" pr_url="$2" head_advanced="$3" jsonl="$4" landed="false"
+    if [[ "$head_advanced" == "true" ]]; then
+        landed="true"
+    elif [[ "$mode" != "fix-pr" && "$mode" != "resolve-conflict" && -n "$pr_url" ]]; then
+        landed="true"
+    fi
+    if [[ "$landed" == "false" ]] && ac_detect_ended_turn_waiting "$jsonl"; then
+        echo "ended_turn_waiting"
+    else
+        echo "normal"
+    fi
+}
+
 # ac_no_op_comment_body <container_name>
 # Returns the canonical no-op comment body (used both for posting and for idempotency lookup).
 ac_no_op_comment_body() {
