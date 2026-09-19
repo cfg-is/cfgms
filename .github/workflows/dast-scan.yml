@@ -57,10 +57,35 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Create writable data directories
+    - name: Create writable data directories and ephemeral secrets key
       run: |
-        mkdir -p /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
-        chmod 777 /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
+        # /etc/cfgms is where --init writes the admin credential bundle
+        # (features/controller/initialization/bundle_marker.go
+        # defaultAdminBundlePath, used whenever no config file sets
+        # admin_bundle_path — the case here, since this workflow runs with
+        # no --config flag). pkg/cert/bundle.Write does `os.MkdirAll(dir,
+        # 0700)` then writes the bundle file inside it; both need the
+        # directory to exist and be writable by container UID 1001
+        # (cmd/controller/Dockerfile's non-root `USER 1001:1001`), which a
+        # bare /etc/cfgms is not. This is 5 straight red DAST runs' actual
+        # cause (Issue #4169): "mkdir /etc/cfgms: permission denied",
+        # surfacing only after the external_url fix cleared the earlier
+        # failure in the same --init call.
+        mkdir -p /tmp/cfgms-dast/data /tmp/cfgms-dast/certs /tmp/cfgms-dast/etc-cfgms
+        chmod 777 /tmp/cfgms-dast/data /tmp/cfgms-dast/certs /tmp/cfgms-dast/etc-cfgms
+        # NewSecretStore (features/controller/api/server.go) fails closed
+        # without CFGMS_SECRETS_KEY_FILE — plaintext secret storage is
+        # prohibited. scripts/generate-test-credentials.sh uses the same
+        # `openssl rand 32` recipe for the fleet-controller integration
+        # stack, at 0600. The SOPS provider (pkg/secrets/providers/sops)
+        # additionally rejects a key file with any group/other bit set, so
+        # unlike the 777 data/certs dirs above — which the non-root
+        # container UID 1001 needs to *write* — this file must instead be
+        # *owned* by 1001 (cmd/controller/Dockerfile's `adduser -D -u 1001`)
+        # so owner-only 0600 still grants it read access.
+        openssl rand 32 > /tmp/cfgms-dast/secrets.key
+        chmod 600 /tmp/cfgms-dast/secrets.key
+        sudo chown 1001:1001 /tmp/cfgms-dast/secrets.key
 
     - name: Start controller (flatfile storage, production auth posture)
       run: |
@@ -70,13 +95,68 @@ jobs:
         #
         # CFGMS_ENABLE_TEST_ENDPOINTS and CFGMS_SEED_TEST_TOKENS are NOT set.
         # Storage defaults to flatfile (no CFGMS_STORAGE_PROVIDER override).
+        #
+        # No --config flag and nothing mounted at /etc/cfgms/controller.cfg:
+        # cmd/controller/Dockerfile's default CMD is `--config
+        # /etc/cfgms/controller.cfg`, an explicit path that config.findConfigFile
+        # hard-fails on when it doesn't exist ("config file not found at
+        # specified path") rather than falling back to defaults — that failure
+        # was the actual cause of 5 straight red runs (Issue #4169), not a ZAP
+        # finding. --entrypoint sh replaces the Dockerfile CMD with a bare
+        # invocation so configPath is "", which makes findConfigFile fall
+        # through env var / prod path / dev path (none present) to "no config
+        # file found — OK, will use defaults", i.e. DefaultConfig()'s flatfile
+        # storage — the posture this step's own comment above already intended.
+        #
+        # `controller --init` must run first regardless: server.New() refuses
+        # to start with ErrNotInitialized ("run 'controller --init ...' to
+        # perform first-run initialization") until the CA and RBAC defaults
+        # exist on disk — this is the same init-then-exec sequence
+        # docker-compose.test.yml's fleet-controller service uses.
+        #
+        # CFGMS_EXTERNAL_URL is required by --init itself: initialization.Run
+        # refuses to issue the admin bundle without an external_url configured
+        # (the externally-reachable HTTPS address operators use to connect).
+        #
+        # CFGMS_EXTERNAL_HOSTNAME is a separate guard in server.New()
+        # (features/controller/server/server.go): DefaultConfig() sets
+        # Transport.ListenAddr to "0.0.0.0:4433" regardless of
+        # CFGMS_HTTP_LISTEN_ADDR, and New() refuses to start a 0.0.0.0-bound
+        # transport listener without transport.external_address or this env
+        # var set. This — not the admin-bundle chain above — was the actual
+        # cause of every workflow_dispatch run failing after that chain was
+        # fixed (Issue #4169): "transport.listen_addr binds 0.0.0.0 but no
+        # external address is configured".
+        #
+        # /etc/cfgms is mounted from the writable dir created above: with no
+        # --config flag, --init writes the admin bundle to the platform
+        # default (/etc/cfgms/admin.bundle.yaml), which the container's
+        # non-root UID 1001 cannot create on a bare /etc/cfgms — see the
+        # comment on the step above for the full chain.
+        #
+        # CFGMS_METRICS_LISTEN_ADDR: DefaultConfig() leaves MetricsListenAddr
+        # empty on purpose (features/controller/config/config.go: "Required
+        # explicitly; startup fails closed when absent") and Server.Start
+        # (features/controller/api/server.go) refuses to bind with
+        # "invalid private metrics listener: address is required" until it's
+        # set. ValidatePrivateListenerAddress additionally requires a fixed
+        # loopback/private numeric address, so this is a container-local
+        # 127.0.0.1 port rather than 0.0.0.0, matching the "private" intent.
         docker run -d \
           --name cfgms-controller-dast \
           --network host \
+          --entrypoint /bin/sh \
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+          -e CFGMS_EXTERNAL_URL=https://localhost:8080 \
+          -e CFGMS_EXTERNAL_HOSTNAME=localhost \
+          -e CFGMS_METRICS_LISTEN_ADDR=127.0.0.1:9090 \
+          -e CFGMS_SECRETS_KEY_FILE=/app/secrets.key \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
-          ${{ env.IMAGE_PREFIX }}/controller:dast
+          -v /tmp/cfgms-dast/secrets.key:/app/secrets.key:ro \
+          -v /tmp/cfgms-dast/etc-cfgms:/etc/cfgms \
+          ${{ env.IMAGE_PREFIX }}/controller:dast \
+          -c './controller --init && exec ./controller'
 
     - name: Wait for controller to be healthy
       run: |
