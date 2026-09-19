@@ -241,6 +241,32 @@ func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// notFoundHandler returns the handler wired to s.router.NotFoundHandler for unmatched
+// routes (Issue #4183, DAST 10035/10049). gorilla/mux only builds the router.Use()
+// middleware chain when a route matches (mux.Router.Match skips it whenever MatchErr !=
+// nil), so NotFoundHandler is never reached by securityHeadersMiddleware via Use() —
+// it must be wrapped directly here instead. Cache-Control: no-store is forced
+// unconditionally, not gated on the "/api/" prefix the way securityHeadersMiddleware
+// gates it for matched routes: this handler by construction never serves anything but a
+// 404 body, so there is no path under it that is ever legitimately cacheable.
+func (s *Server) notFoundHandler() http.Handler {
+	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		http.NotFound(w, r)
+	}))
+}
+
+// methodNotAllowedHandler is the router.MethodNotAllowedHandler counterpart to
+// notFoundHandler (Issue #4183) — same unreachable-by-Use() gap, same fix.
+func (s *Server) methodNotAllowedHandler() http.Handler {
+	return s.securityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+}
+
 // contentTypeMiddleware sets appropriate content type headers
 func (s *Server) contentTypeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

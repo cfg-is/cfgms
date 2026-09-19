@@ -68,6 +68,47 @@ func TestSecurityHeadersMiddlewareCoversAPIErrorResponses(t *testing.T) {
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 }
 
+// TestRouterNotFoundHandlerSetsSecurityHeaders covers Issue #4183 (DAST 10035/10049):
+// gorilla/mux's router.Use() middleware chain is only built when a route matches
+// (mux.Router.Match skips it whenever MatchErr != nil), so an unmatched path such as
+// /robots.txt or /sitemap.xml bypassed securityHeadersMiddleware entirely and got a
+// bare http.NotFoundHandler response with none of the hardening headers. Reverting the
+// s.router.NotFoundHandler wiring in setupRouter must fail this test.
+//
+// A placeholder-only embedded SPA is selected before setupTestServer runs so that
+// newEmbeddedSPAHandler errors and the PathPrefix("/") catch-all is never registered —
+// reproducing the CI/DAST container, which has no frontend build (see
+// withDefaultEmbeddedSPA). With the default test SPA build in place, "/robots.txt"
+// would match that catch-all instead of exercising NotFoundHandler at all.
+func TestRouterNotFoundHandlerSetsSecurityHeaders(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsPlaceholderOnly())
+	srv := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/robots.txt", nil)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "max-age=31536000; includeSubDomains", rec.Header().Get("Strict-Transport-Security"))
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
+// TestRouterMethodNotAllowedHandlerSetsSecurityHeaders is the 405 counterpart: gorilla/mux
+// dispatches a method mismatch through router.MethodNotAllowedHandler, which is likewise
+// unreached by router.Use(). /api/v1/health only registers GET and OPTIONS.
+func TestRouterMethodNotAllowedHandlerSetsSecurityHeaders(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsPlaceholderOnly())
+	srv := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.Equal(t, "max-age=31536000; includeSubDomains", rec.Header().Get("Strict-Transport-Security"))
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
 type auditLogEntry struct {
 	level string
 	msg   string

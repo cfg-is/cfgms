@@ -649,6 +649,14 @@ func (s *Server) setupRouter() {
 	s.router.Use(s.corsMiddleware)
 	s.router.Use(s.contentTypeMiddleware)
 
+	// gorilla/mux's Use() middleware chain is only built for matched routes
+	// (mux.Router.Match skips it whenever MatchErr != nil), so unmatched-route 404s and
+	// method-mismatch 405s bypass every middleware registered above — including
+	// securityHeadersMiddleware — unless these two fields are wired explicitly
+	// (Issue #4183, DAST 10035/10049).
+	s.router.NotFoundHandler = s.notFoundHandler()
+	s.router.MethodNotAllowedHandler = s.methodNotAllowedHandler()
+
 	// The private metrics listener retains the same source budgets, browser
 	// hardening, authentication, and request validation as the public API.
 	// It intentionally has no SPA fallback or non-metrics product routes.
