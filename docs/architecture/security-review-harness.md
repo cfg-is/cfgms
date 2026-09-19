@@ -1349,9 +1349,26 @@ The watcher re-invokes this script through a **`BASH_SOURCE`-derived absolute pa
 file — a detached `bash "$0" creds-mirror-watch` would have run po-act.sh with an argument it does
 not understand and exited immediately.
 
-Concurrent orchestrators are fine: the pidfile check means a second finds the first alive and
-returns, and even if two ran, both copy the same source to the same path, so a duplicate is a
-redundant write rather than a conflict.
+**Starting one is serialised by a lock** (Issue #4166). The alive-check, the spawn and the
+pidfile write are one step, held under a `mkdir` lock directory beside the pidfile -- the pattern
+`pipeline-watch.sh` took for the identical read-check-write race in #4137, chosen because `mkdir`
+is atomic on every filesystem bash runs on and `flock` is absent from Git Bash. The check inside
+the lock is the authoritative one; the caller's check outside it is a cheap early-out, and without
+the inner re-check a loser of the race would take the lock the winner just released and start a
+second watcher anyway.
+
+Without it, two dispatches racing through `ensure_creds_mirror_for_mount` both saw "dead" and both
+started a detached watcher. The pidfile recorded whichever wrote last, leaving the other untracked
+and unreachable by `stop_creds_mirror_watcher` -- and since its only self-exit is the mirror
+directory disappearing, which never happens in production, it ran until the host rebooted. Eight
+such watchers accumulated on one host in a single day of testing. Duplicates are harmless to
+correctness, since both write identical bytes to the same inode; they are not harmless in number.
+
+A lock that **cannot** be taken never refuses a launch. It degrades to the pre-#4166 behaviour --
+a possible duplicate -- because a dispatch that does not happen is worse than a spare process, and
+this block has a no-refusal rule earned the hard way: three refuse-forever paths were created and
+removed while building it. A lock left behind by a start that died inside it is reclaimed after a
+minute rather than blocking dispatch until someone removes a directory by hand.
 
 **A watcher exits by itself when its mirror directory is removed.** Outliving the dispatch is the
 point, but it means nothing reaps a watcher whose directory is gone — and the pidfile
