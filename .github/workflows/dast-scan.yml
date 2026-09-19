@@ -118,6 +118,16 @@ jobs:
         # refuses to issue the admin bundle without an external_url configured
         # (the externally-reachable HTTPS address operators use to connect).
         #
+        # CFGMS_EXTERNAL_HOSTNAME is a separate guard in server.New()
+        # (features/controller/server/server.go): DefaultConfig() sets
+        # Transport.ListenAddr to "0.0.0.0:4433" regardless of
+        # CFGMS_HTTP_LISTEN_ADDR, and New() refuses to start a 0.0.0.0-bound
+        # transport listener without transport.external_address or this env
+        # var set. This — not the admin-bundle chain above — was the actual
+        # cause of every workflow_dispatch run failing after that chain was
+        # fixed (Issue #4169): "transport.listen_addr binds 0.0.0.0 but no
+        # external address is configured".
+        #
         # /etc/cfgms is mounted from the writable dir created above: with no
         # --config flag, --init writes the admin bundle to the platform
         # default (/etc/cfgms/admin.bundle.yaml), which the container's
@@ -129,6 +139,7 @@ jobs:
           --entrypoint /bin/sh \
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
           -e CFGMS_EXTERNAL_URL=https://localhost:8080 \
+          -e CFGMS_EXTERNAL_HOSTNAME=localhost \
           -e CFGMS_SECRETS_KEY_FILE=/app/secrets.key \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
