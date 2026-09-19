@@ -906,6 +906,10 @@ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 # Read prompt from file to avoid shell metacharacter corruption.
 # Issue/PR bodies contain backticks and $ in code blocks which break heredoc expansion.
 PROMPT_CONTENT=$(cat "$PROMPT_FILE")
+# The ceiling above does NOT cover background Bash (Issue #4178), so every mode
+# gets the rule explicitly. Appended here, at the single launch point, rather
+# than in each mode's prompt builder, so no mode can be missed.
+PROMPT_CONTENT+=$'\n\n'"${AC_HEADLESS_NO_BG_WAIT_RULE}"
 AGENT_RUN_START=$(date +%s)
 claude --dangerously-skip-permissions --model "$AGENT_MODEL" -p "$PROMPT_CONTENT" || EXIT_CODE=$?
 AGENT_DURATION_SECONDS=$(( $(date +%s) - AGENT_RUN_START ))
@@ -969,6 +973,20 @@ if [[ -n "${CFGMS_PROJECT_ITEM_ID:-}" ]] && [[ -n "$PR_URL" ]] && [[ "$MODE" != 
     fi
 fi
 
+# Classify a lost run (Issue #4178). "ended_turn_waiting" = the agent's last
+# message says it is waiting on background work, AND nothing landed (no PR, HEAD
+# not advanced). This lets the orchestrator tell this apart from a validation
+# failure without reading the transcript. Best-effort: an unreadable transcript
+# leaves the outcome "normal".
+AGENT_OUTCOME="normal"
+if [[ -z "$PR_URL" ]] && [[ "$HEAD_ADVANCED" != "true" ]]; then
+    _session_jsonl=$(ls -t "${HOME}/.claude/projects/-workspace/"*.jsonl 2>/dev/null | head -1 || true)
+    if [[ -n "$_session_jsonl" ]] && ac_detect_ended_turn_waiting "$_session_jsonl"; then
+        AGENT_OUTCOME="ended_turn_waiting"
+        echo "WARN: agent ended its turn waiting on background work; its background task was killed (Issue #4178)"
+    fi
+fi
+
 # Write result summary
 cat > /tmp/agent-result.json <<RESULT_EOF
 {
@@ -985,6 +1003,7 @@ cat > /tmp/agent-result.json <<RESULT_EOF
   "pre_head_sha": "${PRE_FIX_HEAD}",
   "post_head_sha": "${POST_FIX_HEAD}",
   "head_advanced": ${HEAD_ADVANCED},
+  "outcome": "${AGENT_OUTCOME}",
   "timestamp": "$(date -Iseconds)"
 }
 RESULT_EOF
