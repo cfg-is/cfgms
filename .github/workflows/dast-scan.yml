@@ -57,10 +57,20 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
-    - name: Create writable data directories
+    - name: Create writable data directories and ephemeral secrets key
       run: |
         mkdir -p /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
         chmod 777 /tmp/cfgms-dast/data /tmp/cfgms-dast/certs
+        # NewSecretStore (features/controller/api/server.go) fails closed
+        # without CFGMS_SECRETS_KEY_FILE — plaintext secret storage is
+        # prohibited. scripts/generate-test-credentials.sh uses the same
+        # `openssl rand 32` recipe for the fleet-controller integration
+        # stack. World-readable (644, not the script's 600) because the
+        # container runs as a different, non-root UID (1001) than the
+        # runner user that creates this file, same reasoning as the 777
+        # above for the bind-mounted data/certs directories.
+        openssl rand 32 > /tmp/cfgms-dast/secrets.key
+        chmod 644 /tmp/cfgms-dast/secrets.key
 
     - name: Start controller (flatfile storage, production auth posture)
       run: |
@@ -93,8 +103,10 @@ jobs:
           --network host \
           --entrypoint /bin/sh \
           -e CFGMS_HTTP_LISTEN_ADDR=0.0.0.0:8080 \
+          -e CFGMS_SECRETS_KEY_FILE=/app/secrets.key \
           -v /tmp/cfgms-dast/data:/app/data \
           -v /tmp/cfgms-dast/certs:/app/certs \
+          -v /tmp/cfgms-dast/secrets.key:/app/secrets.key:ro \
           ${{ env.IMAGE_PREFIX }}/controller:dast \
           -c './controller --init && exec ./controller'
 
