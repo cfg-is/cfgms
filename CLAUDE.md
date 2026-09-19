@@ -132,6 +132,11 @@ Three shapes sit behind that column:
   paths-ignored entirely, `documentation.yml` posts the context instead.
   `unit-tests` is the inverse — real on the PR (an aggregator over matrix legs),
   stubbed in the queue by the `merge_group`-only `unit-tests-queue-stub.yml`.
+  Unlike the five, `unit-tests`' docs-only-PR case is not covered by
+  `documentation.yml` either (since #4174): `test-suite.yml` has no
+  paths-ignore at all, and its own `changes` job detects a docs-only PR so the
+  aggregator posts a passing context without running the five legs —
+  `test-suite.yml` is `unit-tests`' only PR-side poster, in every shape of PR.
   **`Build Gate` and `unit-tests` are the trigger-exclusive pairs:** `Build Gate`'s
   PR-side stub lives in a separate `pull_request`-only workflow,
   `cross-platform-build-pr.yml`, so that no skipped stub run can appear in the
@@ -187,8 +192,10 @@ real job that has not finished, or has failed.
 `unit-tests` context is the mirror image: its real poster is `test-suite.yml`'s
 `needs:`-delayed aggregator (pull_request), and its queue stub lives in
 `unit-tests-queue-stub.yml`, which triggers only on `merge_group`.
-`documentation.yml` — which owns the docs-only stub for all seven stubbed contexts —
-has **no `merge_group` trigger at all**. A workflow that does not trigger posts
+`documentation.yml` — which owns the docs-only stub for the six remaining stubbed
+contexts (`unit-tests` moved to `test-suite.yml` itself in #4174, so
+`documentation.yml` no longer defines that job) — has **no `merge_group` trigger
+at all**. A workflow that does not trigger posts
 nothing, skipped or otherwise. Each of these files carries a comment
 forbidding the trigger it must never gain.
 
@@ -214,10 +221,53 @@ The history, in order:
 **Path-gated pairs still overlap when a PR touches both sides.** `paths` fires when
 *any* changed file matches and `paths-ignore` fires when *any* changed file does
 not, so a PR touching both a `.go` file and a `.md` file triggers the real job
-and its stub. That case is unfixed. It matters most for `unit-tests`: its real
-poster is `needs:`-delayed, and `documentation.yml` (which fires on any `*.md` or
-`.github/workflows/*.yml` change) posts a **passing** `unit-tests` stub on every
-PR that touches one of those paths, before the real aggregator exists.
+and its stub. This was most dangerous for `unit-tests`: its real poster was
+`needs:`-delayed, and `documentation.yml` (which fires on any `*.md` or
+`.github/workflows/*.yml` change) posted a **passing** `unit-tests` stub on every
+PR that touched one of those paths — mixed PRs included — before the real
+aggregator existed, and neither the merge queue nor branch protection revisited
+that context once the aggregator later reported its own result.
+
+**Fixed for `unit-tests` by #4174.** `test-suite.yml` dropped its paths-ignore
+entirely and gained a `changes` job that inspects the PR's actual file list (via
+the GitHub API, not the trigger's path filter) once per PR. The five legs and the
+aggregator key off `needs.changes.outputs.code` instead of the trigger: on a
+docs-only PR the legs are skipped and the aggregator passes immediately; on any
+PR with a non-doc file — mixed or not — the legs run for real and the aggregator
+still `needs:` all five, so it cannot go green before they finish.
+`documentation.yml` no longer defines a `unit-tests` job at all, so there is
+exactly one workflow that can ever post the context. This closes the specific
+failure mode above; it does not require every context to use this pattern (see
+below).
+
+**That gate fails closed, by construction.** Moving the docs/code decision from
+the trigger into a job moves the false-green risk to that job's *input*:
+`code=false` posts a passing `unit-tests` with zero tests run, and an absent or
+truncated file list is otherwise indistinguishable from a genuine docs-only PR
+(`GET /pulls/{n}/files` returns at most 3000 files regardless of `--paginate`).
+The step therefore resolves **every** input defect — API error, empty list, a
+count that disagrees with the PR payload's uncapped `changed_files`, a failed
+classification — to `code=true`. Anything added to that step must keep this
+direction: a wrongly-run suite costs runner minutes, a wrongly-skipped one ships
+untested code.
+
+**The other six stubbed contexts keep the overlap, and it is not the same
+exposure.** `security-deployment-gate`, `Build Gate`, `integration-tests`,
+`Controller Integration Tests (Linux)`, `trivy-scan` and `security-validation`
+are all **queue-real**: their authoritative run only ever happens on
+`merge_group`, never on `pull_request`. Every PR-side poster for these six —
+both the check's own `*-pr-stub` job and `documentation.yml`'s docs-only
+stub — is a flat job with no `needs:` of its own, so neither poster is ever
+racing a slow, needs-delayed real run the way the `unit-tests` aggregator was.
+A PR that touches both a code path and a documentation.yml-matched path (e.g.
+this story's own PR, which edits `.github/workflows/*.yml` and `CLAUDE.md`)
+still gets two green stubs for the same context — redundant, but not a
+false-green risk, because neither stub is standing in for a same-side real job
+that could still fail. `security-validation` additionally isn't a required
+context at all (see "Advisory, not required" above), so it has no merge-safety
+exposure regardless. Closing this redundancy everywhere is out of scope for
+#4174; revisit only if one of these six contexts' real job ever gains a
+PR-side `needs:` barrier, which would reproduce the `unit-tests` shape.
 
 **A `skipped` check run satisfies a required status check.** This is the mechanism
 behind all of the above, and it is established, not suspected: a job whose `if:` is
