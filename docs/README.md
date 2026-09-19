@@ -173,3 +173,4 @@ If you're new to the project, start with these essential documents:
 |------|---------|-------------|
 | 2025-11-06 | 2.0 | Complete rewrite with accurate links and current structure |
 | 2024-04-11 | 1.0 | Initial documentation structure (deprecated) |
+
