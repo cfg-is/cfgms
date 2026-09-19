@@ -3784,6 +3784,181 @@ test_claude_pipeline_suites() {
     rm -rf "$tmpdir"
 }
 
+# Discovers and runs every .devcontainer/*_test.sh suite (Issue #4163). These
+# suites guard the agent-container security controls -- the egress firewall,
+# the DNS allowlist, the entrypoint, and (once #4154 lands) read-only
+# credential delivery -- and until this story nothing in CI or `make test`
+# ran them: `git grep` across .github/, this script, and the Makefile found
+# no reference to any of the four that exist on develop. They passed when a
+# person ran them by hand; a revert of any one control turned no check red.
+#
+# Mirrors test_claude_pipeline_suites' shape (glob, timeout per suite, one
+# log_pass/log_fail per suite, CPU-wide parallel batches) for the same
+# discovery-not-registration reason: a suite dropped into .devcontainer/ runs
+# without anyone adding its name here.
+#
+# Every ambient CFGMS_* variable is stripped before each suite runs. This is
+# not precautionary: writing this story, running entrypoint_test.sh with this
+# script's own agent-dispatch environment intact (CFGMS_PROJECT_ITEM_ID and
+# CFGMS_LEASE_KEY already exported for the running story) fed that story's
+# real item ID into entrypoint.sh's "CFGMS_PROJECT_ITEM_ID unset" test case
+# instead of the unset the test requires, which drove entrypoint.sh's
+# unconditional exit trap to call the real pipeline-helper.sh lease-release
+# against this story's own lease ref via a live GitHub API call -- caught and
+# re-acquired by hand, not by anything in the suite. CI never sets these
+# vars, so stripping them makes every suite's environment match what CI
+# already gives it rather than whatever the invoking shell happens to carry.
+#
+# Split into a directory-parameterized helper (run_devcontainer_suites) and a
+# thin wrapper (test_devcontainer_suites) that supplies the real .devcontainer
+# path, so the discovery+execution path itself can be pointed at a throwaway
+# directory in a test (see test_devcontainer_suite_discovery below) rather
+# than only ever exercised against the real suites.
+run_devcontainer_suites() {
+    local suites_dir="$1"
+
+    if [[ ! -d "$suites_dir" ]]; then
+        log_test "Testing .devcontainer suites..."
+        log_fail ".devcontainer not found at ${suites_dir}"
+        return
+    fi
+
+    local suite
+    local -a suites=()
+    for suite in "$suites_dir"/*_test.sh; do
+        [[ -f "$suite" ]] || continue
+        suites+=("$suite")
+    done
+
+    if [[ ${#suites[@]} -eq 0 ]]; then
+        log_test "Testing .devcontainer suites..."
+        log_fail "no suites matched in ${suites_dir} — the glob or the layout changed"
+        return
+    fi
+
+    local parallel
+    parallel=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    local -a cfgms_vars=()
+    local v
+    for v in "${!CFGMS_@}"; do
+        cfgms_vars+=("$v")
+    done
+
+    local i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        (
+            set +e
+            for v in "${cfgms_vars[@]}"; do
+                unset "$v"
+            done
+            out=$(timeout 180 bash "$suite" 2>&1)
+            rc=$?
+            set -e
+            printf '%s' "$out" > "$tmpdir/$i.out"
+            # Write-then-rename: see test_claude_pipeline_suites above for why.
+            printf '%s' "$rc" > "$tmpdir/$i.rc.partial" && mv "$tmpdir/$i.rc.partial" "$tmpdir/$i.rc"
+        ) &
+        if (( i % parallel == 0 )); then
+            wait
+        fi
+    done
+    wait
+
+    local rc out base
+    i=0
+    for suite in "${suites[@]}"; do
+        i=$((i + 1))
+        base="$(basename "$suite")"
+        log_test "Testing ${base}..."
+        rc=$(cat "$tmpdir/$i.rc" 2>/dev/null || echo "")
+        out=$(cat "$tmpdir/$i.out" 2>/dev/null || echo "")
+
+        case "$(pipeline_suite_result_kind "$rc")" in
+            pass)
+                log_pass "${base}"
+                ;;
+            timeout)
+                log_fail "${base}: timed out after 180s"
+                echo "$out" | tail -20
+                ;;
+            missing)
+                log_fail "${base}: no exit status recorded — the suite subshell died before writing one"
+                echo "$out" | tail -20
+                ;;
+            *)
+                log_fail "${base}: exit ${rc}"
+                echo "$out" | tail -20
+                ;;
+        esac
+    done
+
+    rm -rf "$tmpdir"
+}
+
+test_devcontainer_suites() {
+    local suites_dir
+    suites_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.devcontainer"
+    run_devcontainer_suites "$suites_dir"
+}
+
+# AC2 (Issue #4163) discovery proof: run_devcontainer_suites must actually
+# discover suites, not just exist. Points the runner at a throwaway directory
+# holding one fixture that always fails and asserts the failure surfaces —
+# then points it at an empty directory and asserts that is reported
+# explicitly ("no suites matched"), not as a silent pass. A glob that stops
+# matching (the regression this guards) makes the first assertion fail; a
+# runner that reports "0 suites, all green" instead of naming the gap makes
+# the second one fail.
+#
+# Runs the target function directly rather than through the main test
+# sequence, so PASS_COUNT/FAIL_COUNT are saved and restored around each call
+# -- the fixture's own deliberate failure must not appear in this script's
+# real summary.
+test_devcontainer_suite_discovery() {
+    log_test "Testing .devcontainer suite runner: discovery gates a failing fixture..."
+
+    local fixture_dir
+    fixture_dir=$(mktemp -d)
+    local empty_dir
+    empty_dir=$(mktemp -d)
+    trap 'rm -rf "$fixture_dir" "$empty_dir"' RETURN
+
+    cat > "$fixture_dir/always-fails_test.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+echo "intentional failure from discovery-proof fixture"
+exit 1
+FIXTURE
+    chmod +x "$fixture_dir/always-fails_test.sh"
+
+    local pass_before=$PASS_COUNT fail_before=$FAIL_COUNT fail_after
+    run_devcontainer_suites "$fixture_dir" >/dev/null 2>&1
+    fail_after=$FAIL_COUNT
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+
+    if [[ "$fail_after" -le "$fail_before" ]]; then
+        log_fail "run_devcontainer_suites did not report a failure for a fixture that exits 1 — discovery is broken or not wired"
+        return
+    fi
+
+    local empty_out
+    empty_out=$(run_devcontainer_suites "$empty_dir" 2>&1)
+    PASS_COUNT=$pass_before
+    FAIL_COUNT=$fail_before
+
+    if ! echo "$empty_out" | grep -q "no suites matched"; then
+        log_fail "run_devcontainer_suites against an empty directory did not report 'no suites matched' — an empty discovery would be indistinguishable from a passing one"
+        return
+    fi
+
+    log_pass "run_devcontainer_suites: discovers and runs .devcontainer/*_test.sh fixtures, and reports explicitly when none match"
+}
+
 # Regression guard for Makefile's test-framework-api-sharded (Issue #4151):
 # the partition of features/controller/api tests across shards must be
 # complete (every test lands in exactly one shard, none dropped or
@@ -4565,6 +4740,10 @@ echo ""
 test_pipeline_suite_result_fails_closed
 echo ""
 test_claude_pipeline_suites
+echo ""
+test_devcontainer_suite_discovery
+echo ""
+test_devcontainer_suites
 echo ""
 
 test_no_tracked_file_mutation

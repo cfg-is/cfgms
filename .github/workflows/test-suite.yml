@@ -259,6 +259,15 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
+    # dnsmasq-allowlist_test.sh and init-firewall_test.sh (Issue #4163) run a
+    # real, unprivileged dnsmasq against the actual allowlist files -- the
+    # same binary init-firewall.sh drives in production, just off port 53.
+    # ubuntu-latest ships dig (dnsutils) but not dnsmasq; unpinned apt install,
+    # matching .devcontainer/Dockerfile's own system-package convention (no
+    # per-package version pins there either).
+    - name: Install dnsmasq
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dnsmasq
+
     - name: Run shell-script test suite
       run: make test-scripts
 
