@@ -8,7 +8,10 @@
 # - Embedded secrets
 #
 # Scans trigger on:
-# - PRs that modify Dockerfiles or dependencies
+# - PRs that modify cmd/**/Dockerfile*, go.mod, or go.sum — in practice this
+#   fires on most PRs: measured at 15 of 50 sampled PR-side runs for
+#   scan-controller (14 of 50 for scan-steward), filling a full 50-run sample
+#   page within 34-40 days. See docs/development/ci-test-tiers.md §AC1.
 # - Manual workflow dispatch
 #
 # Trivy binary is installed once per job and cached across runs.

@@ -6,7 +6,12 @@
 # This workflow covers tools installed via `go install` and binary download
 # that Dependabot cannot track.
 #
-# Runs weekly on Wednesday (offset from Dependabot's Monday schedule).
+# The check-tool-versions and dependency-cve-scan jobs run weekly on Wednesday
+# (offset from Dependabot's Monday schedule). The denylist-check job also runs
+# on PRs that touch .devcontainer/Dockerfile, .github/workflows/**,
+# .github/scripts/install-trivy.sh, or Makefile — that PR-side path filter
+# fires often in practice: measured at 15 of 47 sampled PR-side runs. See
+# docs/development/ci-test-tiers.md §AC1.
 
 name: Dependency Pin Check
 

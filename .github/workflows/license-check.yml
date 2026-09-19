@@ -5,7 +5,9 @@
 # and prevents incompatible licenses from being introduced.
 #
 # Triggers on:
-# - PRs that modify go.mod or go.sum
+# - PRs that modify go.mod or go.sum — in practice this fires on most PRs:
+#   measured at 15 of 50 sampled PR-side runs, filling a full 50-run sample
+#   page within 34-40 days. See docs/development/ci-test-tiers.md §AC1.
 # - Manual workflow dispatch
 #
 # Documentation: https://github.com/google/go-licenses
