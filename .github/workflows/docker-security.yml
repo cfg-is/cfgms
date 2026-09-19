@@ -117,6 +117,21 @@ jobs:
         cache-dir: ${{ github.workspace }}/.cache/trivy
         skip-setup-trivy: true
 
+    - name: Print human-readable report to job log
+      if: always()
+      run: |
+        if [ -f trivy-controller-report.txt ]; then
+          cat trivy-controller-report.txt
+          {
+            echo '### Controller image scan'
+            echo '```'
+            cat trivy-controller-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "trivy-controller-report.txt was not generated (scan did not complete)." | tee -a "$GITHUB_STEP_SUMMARY"
+        fi
+
     - name: Upload scan results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
@@ -206,6 +221,21 @@ jobs:
         timeout: '10m'
         cache-dir: ${{ github.workspace }}/.cache/trivy
         skip-setup-trivy: true
+
+    - name: Print human-readable report to job log
+      if: always()
+      run: |
+        if [ -f trivy-steward-report.txt ]; then
+          cat trivy-steward-report.txt
+          {
+            echo '### Steward image scan'
+            echo '```'
+            cat trivy-steward-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "trivy-steward-report.txt was not generated (scan did not complete)." | tee -a "$GITHUB_STEP_SUMMARY"
+        fi
 
     - name: Upload scan results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
