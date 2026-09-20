@@ -40,6 +40,26 @@ def restore_write(path: str) -> None:
         os.chmod(path, 0o700)
 
 
+def minimal_env(overrides: dict) -> dict:
+    """Build an env dict for `mock.patch.dict(os.environ, ..., clear=True)`
+    isolation tests that still need to spawn a real subprocess (typically
+    git). clear=True truly empties the process environment, not just what
+    Python sees, and POSIX's execvp falls back to a compiled-in default path
+    (:/bin:/usr/bin) when PATH is entirely absent, silently masking that the
+    test never restored it. Windows has no such fallback -- git is simply
+    never found (WinError 2) -- so what worked "by accident" on POSIX must
+    be explicit here: keep the real PATH (and, on Windows, SystemRoot, which
+    process/DLL initialization depends on) alongside whatever the test
+    actually wants to isolate."""
+    env = dict(overrides)
+    env.setdefault("PATH", os.environ.get("PATH", ""))
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT")
+        if system_root:
+            env.setdefault("SystemRoot", system_root)
+    return env
+
+
 def try_symlink(src: str, dst: str) -> bool:
     """Attempt os.symlink(src, dst). Returns True on success. On a Windows
     host lacking SeCreateSymbolicLinkPrivilege, prints an explicit [N/A] line
