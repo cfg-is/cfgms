@@ -1804,15 +1804,40 @@ def scan_tool_env(scratch_dir: str, base_env: dict | None = None) -> dict:
     if goroot:
         env["GOROOT"] = goroot
     if os.name == "nt":
-        # Windows process/DLL initialization (and, empirically, staticcheck's
-        # own build-cache setup) depends on SystemRoot being present even
-        # though it carries no credential or identity information -- without
-        # it a real tool subprocess can misbehave in ways that look like a
-        # GOCACHE problem ("failed to initialize build cache at :") despite
-        # GOCACHE being set correctly above (Issue #4158).
+        # Windows process/DLL initialization depends on SystemRoot being
+        # present even though it carries no credential or identity
+        # information.
         system_root = base.get("SystemRoot") or base.get("SYSTEMROOT")
         if system_root:
             env["SystemRoot"] = system_root
+        # The actual cause of "failed to initialize build cache at :" is
+        # TMP/TEMP, not GOCACHE (which was already set correctly above and
+        # is a red herring in that message): Go's runtime resolves its own
+        # scratch/work directory (separate from GOCACHE, used for e.g. a
+        # build's temporary object files) via os.TempDir(), which on Windows
+        # falls back to the Windows *system* directory itself
+        # (GetWindowsDirectory(), i.e. C:\Windows) when NONE of TMP, TEMP or
+        # USERPROFILE are set. A non-admin user has no write access there,
+        # so any `go`-based tool -- confirmed directly with `go env` in this
+        # exact environment, which failed with "creating work dir: mkdir
+        # C:\WINDOWS\go-build...: Access is denied" -- breaks on Windows
+        # without an explicit scratch TMP/TEMP (Issue #4158).
+        tmp_dir = os.path.join(scratch_dir, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        env["TMP"] = tmp_dir
+        env["TEMP"] = tmp_dir
+        # staticcheck's own in-process caching (golang.org/x/tools'
+        # gocommand layer, not Go's own build cache -- distinct from the
+        # TMP/TEMP fix above) calls os.UserCacheDir(), which on Windows
+        # reads LocalAppData and returns an error if it's unset. Without it,
+        # staticcheck swallows a clean "go.mod requires go >= X" error and
+        # reports an opaque "failed to initialize build cache at :" instead
+        # -- confirmed directly: identical invocation, only LocalAppData
+        # added, and the real version-mismatch message comes through
+        # (Issue #4158). It carries no credential or identity information.
+        local_appdata = base.get("LocalAppData") or base.get("LOCALAPPDATA")
+        if local_appdata:
+            env["LocalAppData"] = local_appdata
     return env
 
 
