@@ -1129,7 +1129,13 @@ def _scope_boundary(path: str, root_files: "frozenset[str] | None" = None) -> st
     worst outcome is that a step grouping several genuine root files is
     rejected as spanning, never that an unbounded one is accepted.
     """
-    if not path or os.path.isabs(path):
+    # Scope strings are always POSIX-style repo-relative paths (as written by
+    # the planning model and read from git blob listings), so a leading "/"
+    # must be rejected as absolute regardless of what platform this runs on.
+    # os.path.isabs() alone is not enough on Windows: ntpath.isabs("/etc/passwd")
+    # is False there (no drive letter), so a POSIX-absolute path silently
+    # passed this check on a Windows host (Issue #4158).
+    if not path or path.startswith("/") or os.path.isabs(path):
         return None
     normalized = os.path.normpath(path)
     if normalized == os.curdir or normalized == os.pardir or normalized.startswith(os.pardir + os.sep):
