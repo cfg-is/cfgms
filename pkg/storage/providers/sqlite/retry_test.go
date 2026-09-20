@@ -95,15 +95,24 @@ func TestRetryOnBusy_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
-// Guard: backoff math stays bounded and small.
+// Guard: backoff math stays bounded and small. The ceiling is what makes
+// busyMaxAttempts a deliberate decision rather than a free knob — the backoff
+// doubles per attempt, so each added attempt costs more than every preceding
+// one combined (busyMaxAttempts=10 would be ~10.2s, measured). Raising
+// busyMaxAttempts therefore means revisiting this ceiling and the reasoning in
+// retry.go, not just this number.
 func TestRetryOnBusy_BackoffBounded(t *testing.T) {
 	start := time.Now()
 	_ = retryOnBusy(context.Background(), func() error {
 		return errors.New("database is locked")
 	})
-	// 10+20+40+80+160+ (5 sleeps after the first 5 failures; last attempt no sleep)
-	// ~310ms worst case; allow generous ceiling to avoid CI flakiness.
+	// retryOnBusy sleeps after every failed attempt, including the last one, so
+	// busyMaxAttempts=6 sleeps six times: 10+20+40+80+160+320 = ~630ms worst
+	// case. The ceiling is deliberately generous against that to avoid CI
+	// flakiness on a loaded runner, not tight to the nominal figure.
+	const wantWorstCase = 630 * time.Millisecond
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("retry backoff took too long: %v", elapsed)
+		t.Fatalf("retry backoff took %v, over the ceiling (nominal worst case %v for busyMaxAttempts=%d)",
+			elapsed, wantWorstCase, busyMaxAttempts)
 	}
 }

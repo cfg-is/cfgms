@@ -705,9 +705,15 @@ func TestTelemetryStream_NoSnapshotOnStreamClose(t *testing.T) {
 	defer cancel()
 	ts.Start(ctx)
 
+	// Bound this wait by the test's own ctx (10s) instead of an independent
+	// fixed 5s timer: a real collector.Snapshot call plus the sampler's first
+	// tick on a hosted windows-latest merge-group runner is not guaranteed to
+	// complete inside a tight fixed window (Issue #4189, the same shape as
+	// #3829's fix to TestTelemetryStream_ReconnectsOnStreamError above). ctx's
+	// own bound still fails the test if sampling genuinely never starts.
 	select {
 	case <-firstSnap:
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("timeout waiting for first snapshot")
 	}
 

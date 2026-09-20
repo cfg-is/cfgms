@@ -13,6 +13,17 @@ import (
 // 10ms→320ms exponential backoff (~630ms worst case) is ample headroom for the
 // single-writer contention SQLite serialises: the contending writer's commit
 // is sub-millisecond, so a retry almost always succeeds on the next attempt.
+//
+// These values are deliberately unchanged by Issue #4189. The Windows
+// merge-queue failure it tracks was a caller that never entered this loop at
+// all (StoreAuditEntry issued its INSERT outside retryOnBusy), not a caller
+// that exhausted the budget — see audit_store.go. Raising busyMaxAttempts is
+// also not free: the backoff doubles per attempt, so each added attempt costs
+// more than every preceding one combined, and 10 attempts would push the
+// worst-case Go-level wait to ~10.2s (measured), past the ceiling
+// TestRetryOnBusy_BackoffBounded pins. Per-attempt waiting belongs in the
+// busy_timeout pragma (15s, openDB), which bounds each attempt; this loop only
+// backstops the BUSY the driver returns without honoring that pragma.
 const (
 	busyMaxAttempts = 6
 	busyBaseBackoff = 10 * time.Millisecond
