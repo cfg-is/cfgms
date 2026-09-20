@@ -68,6 +68,22 @@ supervise loop continues rather than crashing (the steward child is unaffected
 by a missing SCM entry until the next reboot). This behavior is Windows-only —
 the launcher's supervise loop no-ops the check on Linux/macOS.
 
+**Known limitation (Issue #4159):** `DeleteService` only *marks* a registration
+for deletion; the SCM does not purge it until every reference to it — including
+the running service instance itself — is gone. Confirmed live: a registration
+deleted while its service is still running keeps answering as present (both
+`OpenService` and the `EnumServicesStatusEx` enumeration report it unchanged)
+for as long as the service keeps running, only clearing once it stops. Since no
+read-only Win32 API distinguishes "marked for deletion, still open" from
+"healthy," the repair ticker cannot detect or react to this window while the
+compromised-but-still-running launcher instance is alive — repair only becomes
+possible once that instance stops, whatever the trigger. This mirrors the
+original incident's own boundary (the gap this ticker closes is what happens
+*after* the process eventually stops, not proactive detection while it is
+still up) rather than a defect in the per-tick check: reacting to the missing
+state as soon as it is observable is the only sound behavior available at the
+Win32 API level.
+
 ### Normal Operation
 
 The steward runs three concurrent activities:

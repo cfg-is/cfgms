@@ -94,15 +94,21 @@ func TestServiceRegistrationOK_DetectsMissingService(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok, "an existing service must read as present")
 
-	// Delete it → missing again → (false, nil).
+	// Delete it → missing again → (false, nil). DeleteService only marks the
+	// service for deletion; the SCM purges the registration once every open
+	// handle to it has closed, asynchronously relative to CloseServiceHandle
+	// returning (Issue #4159, which evicted an unrelated PR on this exact
+	// race). Poll for the real, observable deleted state rather than
+	// asserting on a state the SCM has not necessarily reached yet.
 	existing, err := scm.OpenService(name)
 	require.NoError(t, err)
 	require.NoError(t, existing.Delete())
 	require.NoError(t, existing.Close())
 
-	ok, err = serviceRegistrationOK(name)
-	require.NoError(t, err)
-	assert.False(t, ok, "a deleted service must read as missing (the repair trigger)")
+	require.Eventually(t, func() bool {
+		ok, err := serviceRegistrationOK(name)
+		return err == nil && !ok
+	}, 5*time.Second, 10*time.Millisecond, "a deleted service must read as missing (the repair trigger)")
 }
 
 // TestRepairServiceRegistration_RecreatesService (REQUIRED, #2465): recreate a

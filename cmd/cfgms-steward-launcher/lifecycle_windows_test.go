@@ -302,9 +302,17 @@ func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
 	require.NoError(t, existing.Delete())
 	require.NoError(t, existing.Close())
 
-	ok, err := serviceRegistrationOK(name)
-	require.NoError(t, err)
-	require.False(t, ok, "precondition: registration deleted")
+	// DeleteService only marks the service for deletion; the SCM purges the
+	// registration once every open handle to it has closed, which happens
+	// asynchronously relative to CloseServiceHandle returning (Issue #4159).
+	// Immediately after Close() above, OpenService can still succeed for a
+	// short, unbounded-in-theory window, so the precondition polls for the
+	// real, observable deleted state instead of asserting on a state the SCM
+	// has not necessarily reached yet.
+	require.Eventually(t, func() bool {
+		ok, err := serviceRegistrationOK(name)
+		return err == nil && !ok
+	}, 5*time.Second, 10*time.Millisecond, "precondition: registration must reach deleted state")
 
 	// Run the repair ticker on a short interval, targeting the test service.
 	// buf is mutex-guarded because the ticker goroutine writes to it concurrently
@@ -333,7 +341,7 @@ func TestSupervise_RepairsMissingServiceRegistration(t *testing.T) {
 	}
 	cancel()
 
-	ok, err = serviceRegistrationOK(name)
+	ok, err := serviceRegistrationOK(name)
 	require.NoError(t, err)
 	require.True(t, ok, "registration must exist after the repair ticker ran")
 	assert.Contains(t, buf.String(), "event=service_registration_repaired",
