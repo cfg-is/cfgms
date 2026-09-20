@@ -49,7 +49,16 @@ func newLeaseLeaderHAManager(t *testing.T) *ha.Manager {
 	require.NoError(t, manager.Start(ctx))
 	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
 
-	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+	// WaitForLeadership blocks on the manager's own acquisition signal instead
+	// of polling HasLeadership() on a wall-clock budget (Issue #4160): a
+	// require.Eventually poll depends on its own goroutine also waking up
+	// promptly on a fixed interval, so under host scheduling pressure both
+	// goroutines competing for the same runnable slots could push the observed
+	// latency past the budget even though the underlying acquisition itself
+	// was fast.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	require.True(t, manager.WaitForLeadership(waitCtx),
 		"test manager must acquire the database lease before the test body runs")
 
 	return manager

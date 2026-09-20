@@ -441,7 +441,13 @@ func TestDeploymentModeProgression(t *testing.T) {
 
 		// Should support cluster operations, acquiring the lease as sole contender.
 		assert.Equal(t, ClusterMode, manager.GetDeploymentMode())
-		require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond,
+		// WaitForLeadership blocks on the manager's own acquisition signal
+		// instead of polling HasLeadership() on a wall-clock budget (Issue
+		// #4160) — see handlers_ha_test.go's newLeaseLeaderHAManager for the
+		// full rationale (same root cause, same fix).
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer waitCancel()
+		require.True(t, manager.WaitForLeadership(waitCtx),
 			"single-node cluster must acquire the cluster leadership lease")
 
 		err = manager.Stop(ctx)
@@ -564,6 +570,126 @@ func TestManager_SingleServerMode_HasLeadership_UnconditionallyTrue(t *testing.T
 	// GetTerm in SingleServerMode has no lease-backed authority; it returns 0.
 	assert.Equal(t, uint64(0), manager.GetTerm(),
 		"SingleServerMode GetTerm() must return 0 (no lease-backed authority)")
+}
+
+// TestManager_WaitForLeadership_SingleServerMode_ReturnsTrueImmediately covers
+// WaitForLeadership's SingleServerMode short-circuit (Issue #4160): it must
+// return true without ever consulting ctx, mirroring HasLeadership's own
+// unconditional-true short-circuit for that mode (ADR-029 Decision 4). Proven
+// with an already-cancelled context — if the short-circuit came after the ctx
+// check, this would return false instead.
+func TestManager_WaitForLeadership_SingleServerMode_ReturnsTrueImmediately(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done before WaitForLeadership is ever called
+
+	assert.True(t, manager.WaitForLeadership(ctx),
+		"SingleServerMode WaitForLeadership must return true even with an already-cancelled context")
+}
+
+// TestManager_WaitForLeadership_NoLeaseManager_ReturnsFalseImmediately covers
+// WaitForLeadership's nil-channel early return (Issue #4160): a ClusterMode
+// manager that has never had SetLeaseStore called has no leaseManager and so
+// no leadershipAcquired channel — there is nothing to wait for, and no
+// acquisition attempt is ever made, so this must return false without
+// blocking on ctx at all (proven with context.Background(), which never
+// cancels on its own).
+func TestManager_WaitForLeadership_NoLeaseManager_ReturnsFalseImmediately(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Mode = ClusterMode
+	cfg.Node.ID = "wait-no-lease-manager-node"
+	cfg.Cluster = FastElectionConfig()
+
+	manager, err := NewManager(cfg, logging.GetLogger(), storageManager)
+	require.NoError(t, err)
+	// Deliberately no SetLeaseStore call.
+
+	done := make(chan bool, 1)
+	go func() { done <- manager.WaitForLeadership(context.Background()) }()
+
+	select {
+	case got := <-done:
+		assert.False(t, got, "WaitForLeadership must return false when no lease manager is wired")
+	case <-time.After(1 * time.Second):
+		t.Fatal("WaitForLeadership blocked instead of returning immediately for a manager with no lease manager")
+	}
+}
+
+// TestManager_WaitForLeadership_ContextCancelled_ReturnsFalse covers
+// WaitForLeadership's ctx.Done() branch (Issue #4160): a Started ClusterMode
+// manager that is genuinely still contending — never acquiring, so
+// leadershipAcquired is a real, non-nil channel that is never closed — must
+// return false once ctx expires rather than hang. Contention is induced by
+// pre-seeding the shared store with a long-lived lease held by a different
+// holder before Start(), so this manager's own TryAcquire calls keep losing
+// for the whole test.
+func TestManager_WaitForLeadership_ContextCancelled_ReturnsFalse(t *testing.T) {
+	store := newTestLeaseStore(t)
+	// Pre-seed a long-lived lease held by a different holder so this test's own
+	// manager keeps losing every TryAcquire for the whole test.
+	seeded, err := store.AcquireOrRenew(context.Background(),
+		clusterLeadershipLeaseName, "other-holder", 10*time.Second)
+	require.NoError(t, err)
+	require.True(t, seeded.Acquired, "seeding the contending lease must itself succeed")
+
+	manager := newLeaseBackedClusterManager(t, "wait-ctx-cancelled-node", store)
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer startCancel()
+	require.NoError(t, manager.Start(startCtx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer waitCancel()
+
+	got := manager.WaitForLeadership(waitCtx)
+	assert.False(t, got, "WaitForLeadership must return false once ctx expires while genuinely still contending")
+}
+
+// TestManager_WaitForLeadership_AfterStop_ReturnsFalse proves
+// leadershipAcquired is a per-run latch, not a live query (Issue #4160
+// security review): once this node has acquired the lease and then Stop()
+// has been called, WaitForLeadership must go back to reporting false, not
+// keep answering true forever from the previous run's now-cleared signal.
+// Stop() clears m.leadershipAcquired precisely so a caller cannot mistake a
+// stopped manager's stale acquisition for current authority.
+func TestManager_WaitForLeadership_AfterStop_ReturnsFalse(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "wait-after-stop-node", store)
+
+	startCtx, startCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer startCancel()
+	require.NoError(t, manager.Start(startCtx))
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	require.True(t, manager.WaitForLeadership(waitCtx),
+		"sole contender must acquire the lease before Stop() is exercised")
+
+	require.NoError(t, manager.Stop(context.Background()))
+
+	// A stopped manager's WaitForLeadership must not block: leadershipAcquired
+	// is nil again post-Stop, so this returns immediately via the nil-channel
+	// branch, the same as a manager that never acquired anything.
+	done := make(chan bool, 1)
+	go func() { done <- manager.WaitForLeadership(context.Background()) }()
+	select {
+	case got := <-done:
+		assert.False(t, got, "WaitForLeadership must return false after Stop(), not the previous run's stale true")
+	case <-time.After(1 * time.Second):
+		t.Fatal("WaitForLeadership blocked after Stop() instead of returning immediately")
+	}
 }
 
 // newLeaseBackedClusterManager returns a ClusterMode *Manager (FastElectionConfig)

@@ -168,6 +168,23 @@ func TestSingletonJob_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *testing.T) {
 	// renewal window (goroutine scheduling delay, not a logic bug) look like a
 	// broken renewal loop. See TestManager_HasLocalAuthority_ExpiresAtSafetyMarginNotTTL's
 	// comment on the same class of flakiness.
+	//
+	// Issue #4160 investigated widening this margin after a single observed
+	// failure on a GitHub-hosted windows-latest merge-queue runner, but measured
+	// evidence did not support it: instrumenting the renewal loop's actual
+	// inter-renewal gaps (watching the store's ExpiresAt from outside, without
+	// touching production code) under this development host's OWN full
+	// `go test ./pkg/... ./features/...` suite running concurrently under -race
+	// — genuine multi-package compile-and-run contention, not a synthetic
+	// busy-loop — measured a worst-case gap of ~290ms against the 200ms
+	// renewInterval, an order of magnitude below the 1.8s margin already in
+	// place. That does not rule out the one-time GitHub-hosted-runner failure
+	// (a shared, resource-constrained host under real merge-queue load is a
+	// different environment this one cannot faithfully reproduce), but it does
+	// mean there is no measured basis for concluding the existing 1.8s margin
+	// is the wrong number, which is what AC2 requires before a margin change
+	// counts as a fix rather than a bare timeout inflation. Left unchanged;
+	// see the story's PR description for the full investigation.
 	ttl := 2 * time.Second
 	renewInterval := 200 * time.Millisecond
 	m1, err := NewManager(store, ttl, renewInterval, renewInterval)

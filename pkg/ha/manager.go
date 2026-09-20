@@ -112,6 +112,28 @@ type Manager struct {
 	// gate); nil whenever the running storage provider does not implement
 	// business.NodeRegistryStoreCreator.
 	nodeRegistryStore business.NodeRegistryStore
+
+	// leadershipAcquired is closed exactly once per Start()/Stop() cycle — by
+	// runLeaseAcquisition, the first time this node's cached local authority
+	// for the cluster leadership lease becomes valid, i.e. the instant
+	// HasLeadership() would first start returning true. WaitForLeadership
+	// blocks on it instead of polling HasLeadership() on a wall-clock budget
+	// (Issue #4160): a channel close is observed by a blocked receiver the
+	// moment it happens, so a caller reacts immediately to the real event
+	// rather than depending on both the acquiring goroutine AND a separate
+	// polling goroutine each independently getting scheduled promptly enough
+	// under load.
+	//
+	// It is a latch, not a live query: once closed it stays closed for the
+	// rest of this Start()/Stop() cycle even if the lease is later lost or
+	// this node is fenced out, so WaitForLeadership answering true must never
+	// gate an authority decision — HasLeadership()/HasLocalAuthority's
+	// safety-margin-bounded check is the only thing to gate on for that.
+	// Reset to nil by Stop() and recreated fresh by the next Start() (see
+	// Stop()'s own comment), so a Start/Stop/Start cycle's WaitForLeadership
+	// callers correctly see the new run as not-yet-acquired rather than
+	// inheriting a channel already closed by the previous run.
+	leadershipAcquired chan struct{}
 }
 
 // backgroundLoopLeaseTTL and backgroundLoopRenewInterval configure every lease
@@ -303,8 +325,19 @@ func (m *Manager) Start(ctx context.Context) error {
 		lm := m.leaseManager
 		nodeID := m.nodeInfo.ID
 		renewalInterval := m.leaseRenewalInterval
+		// Fresh per Start() (see the leadershipAcquired field doc): a prior
+		// Start/Stop cycle's channel, if any, is already closed and must not be
+		// reused, or WaitForLeadership would return immediately on a manager
+		// that has not actually acquired anything yet this run. Both acquired
+		// and once are passed to the goroutine as parameters rather than read
+		// back off m, so signaling never needs to reacquire m.mu; once lives
+		// only as a local here (not a struct field) since nothing else needs to
+		// reference the same Once — the field previously carried it unread.
+		acquired := make(chan struct{})
+		once := &sync.Once{}
+		m.leadershipAcquired = acquired
 		m.bgWG.Add(1)
-		go m.runLeaseAcquisition(m.ctx, lm, nodeID, renewalInterval)
+		go m.runLeaseAcquisition(m.ctx, lm, nodeID, renewalInterval, acquired, once)
 	}
 
 	// Start the shared node-registry self-registration loop (Issue #3763,
@@ -346,6 +379,15 @@ func (m *Manager) Stop(ctx context.Context) error {
 	// moment Stop() returns must not race a write still in flight. Neither loop
 	// takes m.mu, so waiting here while it's held cannot deadlock.
 	m.bgWG.Wait()
+
+	// runLeaseAcquisition has now fully exited, so it will never close a new
+	// channel or reference this one again. Clear leadershipAcquired rather than
+	// leaving the old run's closed channel in place: WaitForLeadership must
+	// answer "not acquired" for a stopped manager, not report the previous
+	// run's now-meaningless true forever (it is a latch — see the field's
+	// doc). A concurrent WaitForLeadership call blocks on m.mu.RLock() until
+	// this Stop() releases m.mu, then correctly observes nil.
+	m.leadershipAcquired = nil
 
 	// Stop all components
 	var stopErrors []error
@@ -478,6 +520,47 @@ func (m *Manager) HasLeadership() bool {
 	}
 
 	return false
+}
+
+// WaitForLeadership blocks until this node's first successful acquisition of
+// the cluster leadership lease, or until ctx is done, whichever comes first.
+// It returns true iff leadership was actually acquired.
+//
+// Prefer this over require.Eventually(t, manager.HasLeadership, ...)-style
+// polling in tests (Issue #4160): polling depends on a separate goroutine
+// waking up on its own fixed interval to observe the acquiring goroutine's
+// result, so under host scheduling pressure both goroutines competing for the
+// same runnable slots can push the observed latency well past what either one
+// alone would need. WaitForLeadership blocks on the exact event instead —
+// runLeaseAcquisition closes the signal channel synchronously with the
+// successful TryAcquire call that grants it, so a receiver unblocks on the
+// next scheduler decision after that close, not on the next tick of an
+// independent poll.
+//
+// SingleServerMode returns true immediately, mirroring HasLeadership's own
+// unconditional-true short-circuit for that mode (ADR-029 Decision 4). A
+// manager with no lease manager wired (BlueGreenMode, or ClusterMode before
+// Start()) returns false immediately: no acquisition is ever attempted, so
+// there is nothing to wait for.
+func (m *Manager) WaitForLeadership(ctx context.Context) bool {
+	m.mu.RLock()
+	mode := m.cfg.Mode
+	acquired := m.leadershipAcquired
+	m.mu.RUnlock()
+
+	if mode == SingleServerMode {
+		return true
+	}
+	if acquired == nil {
+		return false
+	}
+
+	select {
+	case <-acquired:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // GetTerm returns the current fencing token, sourced from the S3 database lease
@@ -620,7 +703,11 @@ func (m *Manager) setLeaseStoreLocked(store business.LeaseStore) error {
 // (ADR-031 Decision 5). Every ClusterMode node with a lease store wired contends
 // for the same lease name — the database lease alone decides authority. Bounded
 // by ctx (m.ctx, cancelled by Stop()) so the goroutine always exits.
-func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, holderID string, renewalInterval time.Duration) {
+//
+// acquired is closed exactly once (guarded by once), the first time TryAcquire
+// succeeds, so WaitForLeadership can react to that instant directly instead of
+// polling HasLeadership() on a wall-clock budget (Issue #4160).
+func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, holderID string, renewalInterval time.Duration, acquired chan struct{}, once *sync.Once) {
 	defer m.bgWG.Done()
 	ttl := lm.LeaseTTL()
 	ticker := time.NewTicker(renewalInterval)
@@ -636,9 +723,13 @@ func (m *Manager) runLeaseAcquisition(ctx context.Context, lm *lease.Manager, ho
 			return
 		}
 
-		if _, _, err := lm.TryAcquire(ctx, clusterLeadershipLeaseName, holderID, ttl); err != nil {
+		_, ok, err := lm.TryAcquire(ctx, clusterLeadershipLeaseName, holderID, ttl)
+		if err != nil {
 			m.logger.Warn("Failed to acquire/renew cluster leadership lease",
 				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		if ok {
+			once.Do(func() { close(acquired) })
 		}
 
 		select {
