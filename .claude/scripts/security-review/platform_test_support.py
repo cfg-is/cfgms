@@ -13,6 +13,31 @@ something it never checked.
 from __future__ import annotations
 
 import os
+import subprocess
+
+
+def deny_write(path: str) -> None:
+    """Make path unwritable to the current user, for a fails-closed test.
+
+    POSIX: os.chmod's owner-write bit does the job directly. Windows: NTFS
+    does not honor POSIX mode bits at all (os.chmod there only toggles the
+    read-only attribute, which a directory ignores for write purposes), so
+    the equivalent is a real deny ACE via icacls -- which a non-admin user
+    can apply to their own file without elevation."""
+    if os.name == "nt":
+        user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["icacls", path, "/deny", f"{user}:(W)"], capture_output=True, text=True, check=True)
+    else:
+        os.chmod(path, 0o500)  # read+execute, no write
+
+
+def restore_write(path: str) -> None:
+    """Undo deny_write, so cleanup (e.g. TemporaryDirectory's) can remove path."""
+    if os.name == "nt":
+        user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["icacls", path, "/grant", f"{user}:(W)"], capture_output=True, text=True, check=True)
+    else:
+        os.chmod(path, 0o700)
 
 
 def try_symlink(src: str, dst: str) -> bool:
