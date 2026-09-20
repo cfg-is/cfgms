@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import claude_lane  # noqa: E402
 import harness_runner  # noqa: E402
+import stub_binary  # noqa: E402
 import terminal_state  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -698,17 +699,14 @@ def _make_argv_and_stdin_capturing_stub(bin_dir: str, name: str, argv_path: str,
     read from stdin, then exits 0 -- used to prove both the tool-restriction
     argv and the stdin prompt transport (Issue #4002) actually reach the real
     subprocess, not just an injected `call_harness_fn` stand-in."""
-    stub_path = os.path.join(bin_dir, name)
-    with open(stub_path, "w") as f:
-        f.write(
-            "#!/usr/bin/env python3\n"
-            "import json, sys\n"
-            f"json.dump(sys.argv[1:], open({argv_path!r}, 'w'))\n"
-            f"open({stdin_path!r}, 'w').write(sys.stdin.read())\n"
-            "sys.exit(0)\n"
-        )
-    os.chmod(stub_path, 0o755)
-    return stub_path
+    return stub_binary.install_stub(
+        bin_dir,
+        name,
+        "import json, sys\n"
+        f"json.dump(sys.argv[1:], open({argv_path!r}, 'w'))\n"
+        f"open({stdin_path!r}, 'w').write(sys.stdin.read())\n"
+        "sys.exit(0)\n",
+    )
 
 
 def test_disallowed_tools_reaches_the_real_subprocess() -> None:
@@ -725,7 +723,7 @@ def test_disallowed_tools_reaches_the_real_subprocess() -> None:
 
         original_path = os.environ.get("PATH", "")
         original_env = os.environ.get(claude_lane.DISALLOWED_TOOLS_ENV)
-        os.environ["PATH"] = f"{bin_dir}:{original_path}"
+        os.environ["PATH"] = stub_binary.prepend_bin_dir(bin_dir)
         os.environ[claude_lane.DISALLOWED_TOOLS_ENV] = "Edit,Write,Bash(gh pr create:*)"
         try:
             exit_code, rate_limited, _output_tail = claude_lane.call_claude_harness(
@@ -771,7 +769,7 @@ def test_large_prompt_reaches_harness_via_stdin() -> None:
 
         large_prompt = "A" * 200_000
         original_path = os.environ.get("PATH", "")
-        os.environ["PATH"] = f"{bin_dir}:{original_path}"
+        os.environ["PATH"] = stub_binary.prepend_bin_dir(bin_dir)
         try:
             exit_code, rate_limited, _output_tail = claude_lane.call_claude_harness(
                 MODEL, large_prompt, os.path.join(work_dir, "raw.json")

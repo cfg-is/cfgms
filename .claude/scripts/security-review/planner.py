@@ -126,6 +126,7 @@ import partition  # noqa: E402
 import scenarios  # noqa: E402
 import roster  # noqa: E402
 import schema  # noqa: E402
+import shell_command  # noqa: E402
 
 PROMPT_FILENAME = ".investigator-plan-prompt.md"
 CONTEXT_FILENAME = ".plan-context.json"
@@ -868,8 +869,8 @@ def launch(
     if not planners:
         try:
             result = subprocess.run(
-                [
-                    script,
+                shell_command.sh_argv(script)
+                + [
                     "launch-investigator",
                     "--sweep-dir",
                     sweep_dir,
@@ -882,7 +883,7 @@ def launch(
                 text=True,
                 timeout=30,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, shell_command.ShellCommandError) as exc:
             raise PlannerError(f"launch-investigator failed to run: {exc}") from exc
 
         if result.returncode != 0:
@@ -915,8 +916,8 @@ def launch(
 
         try:
             result = subprocess.run(
-                [
-                    script,
+                shell_command.sh_argv(script)
+                + [
                     "launch-investigator",
                     "--sweep-dir",
                     lane_sweep_dir,
@@ -933,7 +934,7 @@ def launch(
                 text=True,
                 timeout=30,
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, subprocess.SubprocessError, shell_command.ShellCommandError) as exc:
             failures.append(f"{lane.lane_dir_name}: launch-investigator failed to run: {exc}")
             continue
 
