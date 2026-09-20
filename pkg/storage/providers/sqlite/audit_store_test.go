@@ -271,6 +271,17 @@ func TestAuditStore_GetLastAuditEntry_TenantIsolation(t *testing.T) {
 //
 // Every append must therefore succeed, and the persisted chain must be 1..N with
 // no gaps and no sequence number issued twice.
+//
+// It also guards the plain StoreAuditEntry path, via the unrelated writer below.
+// That is the assertion that actually failed on native Windows in the merge queue
+// (line 343: "unrelated writer failed on entry 86: ... database is locked (5)
+// (SQLITE_BUSY)", run 35424951958, Issue #4189) — not the chained appenders. The
+// cause was a product defect, not a test-environment assumption or a timing
+// budget: StoreAuditEntry was the only writer in this package that issued its
+// INSERT without the retryOnBusy backstop, so a transient BUSY from a sibling
+// pool reached the caller and, through pkg/audit/manager.go writeBatch, would
+// have discarded that audit record in production. Keep the unrelated writer's
+// NoError assertion: it is the regression coverage for that fix.
 func TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "audit-concurrent.db")

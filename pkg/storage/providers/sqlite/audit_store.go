@@ -27,6 +27,21 @@ type SQLiteAuditStore struct {
 
 // StoreAuditEntry appends a single audit entry. The entry's checksum is computed and
 // set here if empty. Returns ErrImmutable if an entry with that ID already exists.
+//
+// The INSERT runs under retryOnBusy, like every other writer in this package
+// (steward_store.go, tenant_store.go, AppendChainedEntry). Without it this was
+// the only audit writer that surfaced a transient SQLITE_BUSY straight to its
+// caller: on a file-backed database several pools share one file, and
+// modernc.org/sqlite does not always honor the connection busy_timeout across
+// the database/sql pool (Issue #2068), so a contended write can return BUSY
+// immediately instead of waiting. That cost an audit record every time, because
+// pkg/audit/manager.go writeBatch logs a failed store and moves on — silently
+// destroyed audit evidence. Observed on native Windows in the merge queue:
+// TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders failed at
+// audit_store_test.go:343 with "unrelated writer failed on entry 86: failed to
+// store audit entry unrelated-86: database is locked (5) (SQLITE_BUSY)" (run
+// 35424951958, job Native Build (Windows), Issue #4189) — the plain-store path,
+// not the BEGIN IMMEDIATE chain append that test was written to guard.
 func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
 	if entry == nil {
 		return fmt.Errorf("audit entry cannot be nil")
@@ -56,7 +71,12 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.
 		return fmt.Errorf("failed to marshal tags: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	// A single autocommit INSERT does not partially apply when it returns BUSY,
+	// so re-running it is safe — retryOnBusy's documented idempotency contract.
+	// A UNIQUE-constraint violation is not a busy error, so the append-only
+	// ErrImmutable case below is still decided on the first attempt.
+	err = retryOnBusy(ctx, func() error {
+		_, e := s.db.ExecContext(ctx, `
 		INSERT INTO audit_entries
 			(id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
 			 resource_type, resource_id, resource_name, result, error_code, error_message,
@@ -64,35 +84,37 @@ func (s *SQLiteAuditStore) StoreAuditEntry(ctx context.Context, entry *business.
 			 details, changes, tags, severity, source, version, checksum,
 			 sequence_number, previous_checksum)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		entry.ID,
-		entry.TenantID,
-		formatTime(entry.Timestamp),
-		string(entry.EventType),
-		entry.Action,
-		entry.UserID,
-		string(entry.UserType),
-		entry.SessionID,
-		entry.ResourceType,
-		entry.ResourceID,
-		entry.ResourceName,
-		string(entry.Result),
-		entry.ErrorCode,
-		entry.ErrorMessage,
-		entry.RequestID,
-		entry.IPAddress,
-		entry.UserAgent,
-		entry.Method,
-		entry.Path,
-		details,
-		changesJSON,
-		tags,
-		string(entry.Severity),
-		entry.Source,
-		entry.Version,
-		entry.Checksum,
-		entry.SequenceNumber,
-		entry.PreviousChecksum,
-	)
+			entry.ID,
+			entry.TenantID,
+			formatTime(entry.Timestamp),
+			string(entry.EventType),
+			entry.Action,
+			entry.UserID,
+			string(entry.UserType),
+			entry.SessionID,
+			entry.ResourceType,
+			entry.ResourceID,
+			entry.ResourceName,
+			string(entry.Result),
+			entry.ErrorCode,
+			entry.ErrorMessage,
+			entry.RequestID,
+			entry.IPAddress,
+			entry.UserAgent,
+			entry.Method,
+			entry.Path,
+			details,
+			changesJSON,
+			tags,
+			string(entry.Severity),
+			entry.Source,
+			entry.Version,
+			entry.Checksum,
+			entry.SequenceNumber,
+			entry.PreviousChecksum,
+		)
+		return e
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return business.ErrImmutable

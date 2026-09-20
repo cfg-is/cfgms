@@ -9,23 +9,23 @@ import (
 )
 
 // busyMaxAttempts and busyBaseBackoff bound the Go-level retry that backstops
-// the connection-level busy_timeout pragma (see openDB). The original six
-// attempts (~630ms of Go-level backoff) assumed each attempt itself resolves
-// in sub-millisecond time, which holds on Linux but not on Windows: measured
-// on this native Windows host under genuine concurrent load (the full
-// pkg/... and features/... suite running alongside
-// TestAuditStore_AppendChainedEntry_FileBacked_ConcurrentAppenders, Issue
-// #4189), a single BEGIN IMMEDIATE attempt was observed blocked for 15.9s —
-// essentially the entire 15s busy_timeout pragma ceiling (openDB's
-// filePragmas) — before returning SQLITE_BUSY, and only recovered on the very
-// next attempt. Six attempts gives at most one such near-ceiling attempt
-// before exhausting the budget and surfacing BUSY to the caller; ten gives
-// meaningfully more chances for one of the retries to land in a fast window,
-// which is what actually resolves contention (SQLite is single-writer, so the
-// contending lock is always released — the question is only how many
-// ceiling-length attempts a caller must absorb before catching a fast one).
+// the connection-level busy_timeout pragma (see openDB). Six attempts with
+// 10ms→320ms exponential backoff (~630ms worst case) is ample headroom for the
+// single-writer contention SQLite serialises: the contending writer's commit
+// is sub-millisecond, so a retry almost always succeeds on the next attempt.
+//
+// These values are deliberately unchanged by Issue #4189. The Windows
+// merge-queue failure it tracks was a caller that never entered this loop at
+// all (StoreAuditEntry issued its INSERT outside retryOnBusy), not a caller
+// that exhausted the budget — see audit_store.go. Raising busyMaxAttempts is
+// also not free: the backoff doubles per attempt, so each added attempt costs
+// more than every preceding one combined, and 10 attempts would push the
+// worst-case Go-level wait to ~10.2s (measured), past the ceiling
+// TestRetryOnBusy_BackoffBounded pins. Per-attempt waiting belongs in the
+// busy_timeout pragma (15s, openDB), which bounds each attempt; this loop only
+// backstops the BUSY the driver returns without honoring that pragma.
 const (
-	busyMaxAttempts = 10
+	busyMaxAttempts = 6
 	busyBaseBackoff = 10 * time.Millisecond
 )
 
