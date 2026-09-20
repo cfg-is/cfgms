@@ -34,6 +34,7 @@ import stub_binary  # noqa: E402
 import terminal_state  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import platform_test_support  # noqa: E402
 import schema  # noqa: E402
 
 FAILURES: list[str] = []
@@ -548,7 +549,8 @@ def test_files_intended_vs_files_read_on_partial_read() -> None:
         with open(outside_target, "w") as f:
             f.write("package secret\n")
         escaping_symlink = os.path.join(repo_root, "escape.go")
-        os.symlink(outside_target, escaping_symlink)
+        if not platform_test_support.try_symlink(outside_target, escaping_symlink):
+            return
 
         write_plan_step(plan_dir, "step-001", files=["pkg/example/thing.go", "escape.go"])
         written = codex_lane.run_lane(

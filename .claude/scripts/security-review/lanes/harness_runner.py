@@ -86,6 +86,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -136,6 +137,24 @@ SYSTEM_PROMPT = (
     "file named in your instructions, in exactly the shape described below, and "
     "nothing else -- no prose before or after it."
 )
+
+def resolve_harness_binary(name: str) -> str:
+    """Resolve `name` (e.g. "claude", "codex", "opencode") to an absolute
+    path via `shutil.which`, falling back to the bare name unchanged if it
+    cannot be found -- the subsequent `subprocess.run` then fails exactly as
+    it always has for a genuinely missing binary.
+
+    Passing an unresolved bare name straight to `subprocess.run` is unreliable
+    on Windows: `CreateProcess`'s own bare-name search does not reliably
+    prefer a directory prepended to this process's PATH over one found via
+    a different PATHEXT extension elsewhere on PATH (observed: a real
+    `claude.exe` installed elsewhere on PATH was launched instead of a test's
+    `claude.cmd` stub placed first in PATH, Issue #4158) -- `shutil.which`
+    performs the same PATH search Python itself trusts elsewhere and returns
+    a single unambiguous answer, which is then passed to `subprocess.run`
+    directly rather than left to platform-specific implicit resolution."""
+    return shutil.which(name) or name
+
 
 # The single output-schema description every harness's lane runner sends,
 # describing the exact shape `schema.py::validate_finding` requires --
