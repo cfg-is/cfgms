@@ -1803,10 +1803,43 @@ def scan_tool_env(scratch_dir: str, base_env: dict | None = None) -> dict:
     }
     if goroot:
         env["GOROOT"] = goroot
+    if os.name == "nt":
+        # Windows process/DLL initialization (and, empirically, staticcheck's
+        # own build-cache setup) depends on SystemRoot being present even
+        # though it carries no credential or identity information -- without
+        # it a real tool subprocess can misbehave in ways that look like a
+        # GOCACHE problem ("failed to initialize build cache at :") despite
+        # GOCACHE being set correctly above (Issue #4158).
+        system_root = base.get("SystemRoot") or base.get("SYSTEMROOT")
+        if system_root:
+            env["SystemRoot"] = system_root
     return env
 
 
 def _killpg(proc: subprocess.Popen) -> None:
+    """Kill proc and its whole process tree, matching what os.killpg does for
+    the POSIX session run_bounded starts each child in.
+
+    os.killpg does not exist on Windows at all (an AttributeError, not one of
+    the exceptions this used to catch), so this silently never killed
+    anything there: a scan tool that hung past its timeout, or produced more
+    output than the byte cap, kept running -- indistinguishable from a
+    Windows-native tempdir cleanup PermissionError with no other explanation,
+    since a subprocess with a locked file/cwd under the temp directory was
+    still alive (Issue #4158). start_new_session=True (run_bounded's Popen
+    call) has no effect on Windows -- there is no POSIX session concept to
+    join -- so taskkill's own tree-kill (/T), which walks the OS's recorded
+    parent-child PID relationships rather than a process group, is the
+    Windows equivalent."""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
@@ -2049,7 +2082,12 @@ def resolve_scopes(repo_root: str, files: list) -> tuple[list[dict], list[dict]]
         if language is None:
             unsupported.append(value)
             continue
-        rel = os.path.relpath(real, root)
+        # Forward slashes always, even on Windows: this becomes the "scope"
+        # grouping key (a cache/reporting identifier compared against
+        # POSIX-style literals elsewhere) and, via scope_dir below, an argv
+        # element passed to external tools -- os.path.relpath's native
+        # separator would otherwise leak backslashes into both (Issue #4158).
+        rel = os.path.relpath(real, root).replace(os.sep, "/")
         if scan_profiles.SCOPE_KIND_BY_LANGUAGE.get(language) == "package":
             go_by_dir.setdefault(os.path.dirname(rel), []).append(rel)
         else:
@@ -2070,7 +2108,7 @@ def resolve_scopes(repo_root: str, files: list) -> tuple[list[dict], list[dict]]
         if problem is not None:
             gaps.append({"kind": "go_module_unscannable", "scope": rel_dir or ".", "reason": problem})
             continue
-        pkg_rel = os.path.relpath(dir_real, module_root)
+        pkg_rel = os.path.relpath(dir_real, module_root).replace(os.sep, "/")
         scopes.append({
             "language": "go",
             "kind": "package",
@@ -2078,7 +2116,7 @@ def resolve_scopes(repo_root: str, files: list) -> tuple[list[dict], list[dict]]
             "files": sorted(go_by_dir[rel_dir]),
             "cwd": module_root,
             "scope_dir": "." if pkg_rel == "." else "./" + pkg_rel,
-            "cwd_files": sorted(os.path.relpath(os.path.join(root, f), module_root) for f in go_by_dir[rel_dir]),
+            "cwd_files": sorted(os.path.relpath(os.path.join(root, f), module_root).replace(os.sep, "/") for f in go_by_dir[rel_dir]),
         })
     for language in sorted(by_language_files):
         scopes.append({
