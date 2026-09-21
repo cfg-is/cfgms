@@ -1,17 +1,17 @@
 <style>
   :root {
-    --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
-    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff;
-    --shadow:0 18px 50px -22px rgba(60,45,30,.4); --radius:14px;
+    --bg:#f5f4f3; --chrome:#ececea; --chrome-2:#ffffff; --border:#d0cfcd;
+    --text:#5f5e58; --text-dim:#6e6d68; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(42, 42, 40,.4); --radius:14px;
   }
   @media (prefers-color-scheme: dark){ :root{
     --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
-    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a;
+    --text:#b8b7b2; --text-dim:#9c9b96; --accent:#7b9fb0; --accent-ink:#16202a;
     --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
-  :root[data-theme="light"]{ --bg:#f7f4ef; --chrome:#f0ebe4; --chrome-2:#ffffff; --border:#d4cfc4;
-    --text:#6b5a4a; --text-dim:#7a6a5a; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(60,45,30,.4); }
+  :root[data-theme="light"]{ --bg:#f5f4f3; --chrome:#ececea; --chrome-2:#ffffff; --border:#d0cfcd;
+    --text:#5f5e58; --text-dim:#6e6d68; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(42, 42, 40,.4); }
   :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
-    --text:#c4b4a4; --text-dim:#a89888; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+    --text:#b8b7b2; --text-dim:#9c9b96; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
   *{box-sizing:border-box;}
   body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
     font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
@@ -105,22 +105,22 @@
 
   const MOCK_CSS = `
     :root{
-      --bg-primary:#f7f4ef; --bg-surface:#ffffff; --bg-elevated:#f0ebe4; --bg-sunk:#f0ebe4; --border:#d4cfc4;
-      --text-primary:#6b5a4a; --text-secondary:#7a6a5a; --text-faint:#8f7d66;
+      --bg-primary:#f5f4f3; --bg-surface:#ffffff; --bg-elevated:#ececea; --bg-sunk:#ececea; --border:#d0cfcd;
+      --text-primary:#5f5e58; --text-secondary:#6e6d68; --text-faint:#82807a;
       --accent:#4a6b7c; --accent-ink:#ffffff;
-      --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#8f4f2e; --state-warn-bg:#f7e8db;
-      --state-crit:#965044; --state-crit-bg:#f2e5e3; --state-neutral:#6b5c4d; --state-neutral-bg:#e8e0d8;
+      --state-ok:#507055; --state-ok-bg:#e8f0e9; --state-warn:#7b5d1e; --state-warn-bg:#f2eadb;
+      --state-crit:#965044; --state-crit-bg:#f0e6e4; --state-neutral:#605f5a; --state-neutral-bg:#e2e1df;
       --radius:9px; --radius-sm:7px; --radius-lg:13px; --radius-pill:20px;
       /* ---- Chart palette (validated; see docs/design/web-ui-design-system.md) ---- */
       --chart-seq-1:#96bad0; --chart-seq-2:#659dbd; --chart-seq-3:#2e80a9; --chart-seq-4:#0a6388; --chart-seq-5:#054561;
       --chart-cat-1:#0171a3; --chart-cat-2:#4f9d60; --chart-cat-3:#7e3e1b; --chart-cat-4:#c27fb0;
     }
     :root[data-theme="dark"]{
-      --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#31313a; --bg-sunk:#101010; --border:#52525c;
-      --text-primary:#c8b8a6; --text-secondary:#a89888; --text-faint:#9a8974;
+      --bg-primary:#1a1a1a; --bg-surface:#242426; --bg-elevated:#323231; --bg-sunk:#101010; --border:#535352;
+      --text-primary:#bcbbb5; --text-secondary:#9c9b96; --text-faint:#8d8c86;
       --accent:#7b9fb0; --accent-ink:#16202a;
-      --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#d4864f; --state-warn-bg:#332518;
-      --state-crit:#d0846f; --state-crit-bg:#2d1f1c; --state-neutral:#a89888; --state-neutral-bg:#2a2520;
+      --state-ok:#7fa985; --state-ok-bg:#1a2e1d; --state-warn:#bd9547; --state-warn-bg:#2f2718;
+      --state-crit:#d0846f; --state-crit-bg:#2b201e; --state-neutral:#9c9b96; --state-neutral-bg:#262624;
       --chart-seq-1:#095b7e; --chart-seq-2:#0475a1; --chart-seq-3:#378eba; --chart-seq-4:#62a8ce; --chart-seq-5:#93c0da;
       --chart-cat-1:#3674a5; --chart-cat-2:#5ba269; --chart-cat-3:#d57018; --chart-cat-4:#a55e93;
     }
