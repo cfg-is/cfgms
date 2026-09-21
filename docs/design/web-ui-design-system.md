@@ -23,12 +23,17 @@ distinctive traits.
 
 **The four pillars:**
 
-1. **Warm grounds, warm text.** Near-black `#1e1e1e` / warm-paper `#f7f4ef`
-   grounds with **warm taupe** body text (`#c4b4a4` / `#6b5a4a`), never a cool
-   grey or stark off-white. This is the single most identity-defining choice.
+1. **Warm grounds, stone text.** Near-black `#1e1e1e` / near-white `#f5f4f3`
+   grounds keep a trace of warmth (OKLCH hue ~95, chroma ≤0.006), never a cool
+   grey or stark off-white. Body text (`#b8b7b2` / `#5f5e58`) is **stone-neutral**.
+   Ground and ink sit in different hue bands deliberately: body text was once
+   warm taupe (`#c4b4a4` / `#6b5a4a`), which put every pixel on the page —
+   ground, border and word alike — inside one orange-brown band, and the whole
+   surface read rust. Warmth in the paper is the identity; warmth in the ink was
+   what made it muddy.
 2. **Colour is information.** Semantic **state** (converged / drift / error /
    queued) owns the colour budget. When everything is coloured, nothing
-   signals — so most surfaces stay warm-neutral and let a red *mean* a problem.
+   signals — so most surfaces stay stone-neutral and let a red *mean* a problem.
 3. **The accent is for interaction only.** The muted slate-blue accent
    (`#7b9fb0` / `#4a6b7c`) marks what is interactive — focus, selection, links,
    primary actions — and is never spent on decoration or on conveying state.
@@ -41,10 +46,10 @@ distinctive traits.
 | Meaning              | Token           | Light     | Dark      |
 |----------------------|-----------------|-----------|-----------|
 | Converged / success  | `--state-ok`    | `#507055` | `#6d9472` |
-| Drift / warning      | `--state-warn`  | `#a05a35` | `#d4864f` |
+| Drift / warning      | `--state-warn`  | `#8a6924` | `#bd9547` |
 | Error (terracotta)   | `--state-crit`  | `#b56a5a` | `#c97a6a` |
 | Error (mauve, alt)   | `--state-mauve` | `#7a5f6e` | `#a58198` |
-| Queued / inert       | `--state-neutral`| `#7a6a5a`| `#a89888` |
+| Queued / inert       | `--state-neutral`| `#6e6d68`| `#9c9b96` |
 
 ### Card tints encode meaning, not decoration
 
@@ -163,22 +168,44 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   in `web-ui-design-tokens.css` as `--ordinal-*` and `--cat-*` custom properties.
 
   **The finding that shapes everything.** The six shipped state/accent tokens
-  (`#4a6b7c`, `#507055`, `#8f4f2e`, `#965044`, `#7a5f6e`, `#6b5c4d`) fail as a
+  (`#4a6b7c`, `#507055`, `#7b5d1e`, `#965044`, `#7a5f6e`, `#605f5a`) fail as a
   categorical series palette — measured, light mode: chroma floor FAIL (all six below
-  the 0.10 floor, 0.030–0.098); CVD separation FAIL (worst adjacent pair `--state-crit`
-  ↔ `--state-warn` ΔE 2.5 deutan); normal-vision floor FAIL (same pair ΔE 3.1 —
-  full-colour readers cannot reliably tell drift-orange from error-terracotta apart
-  either). This is a property of the warm-terminal identity (deliberately desaturated
-  earth tones), not a tokens defect. The resolution is a *separate data layer*: chart
+  the 0.10 floor, 0.008–0.096); CVD separation FAIL (worst pair `--accent` ↔
+  `--state-mauve` ΔE 2.5 protan, `--state-ok` ↔ `--state-crit` ΔE 3.1 deutan).
+  For scale, the validated `--cat-*` series clears ΔE 18.5 under the same test.
+  This is a property of the warm-terminal identity (deliberately desaturated earth
+  tones), not a tokens defect. The resolution is a *separate data layer*: chart
   marks get their own validated palette, held to low chroma so it still reads as CFGMS.
+
+  **Separation metric — reproduce it exactly.** ΔE here is Euclidean distance in
+  **OKLab, scaled ×100**, with CVD simulated by the Machado–Oliveira–Fernandes 2009
+  matrices at severity 1.0. This is not CIE ΔE*ab or ΔE2000; both give materially
+  different figures on these colours (the `--state-crit` ↔ `--state-warn` pair
+  measures 3.1 in OKLab, 8.0 in ΔE2000 and 11.6 in ΔE*ab), so a re-measurement in
+  the wrong space will silently contradict every number on this page.
+
+  **Moving `--state-warn` off rust widened one pair and no others.** Warn moved from
+  OKLCH hue 47 to 82 (rust → ochre) when body text went stone; `--state-crit` was
+  deliberately left untouched, because trial runs that lowered its chroma alongside
+  the neutrals cost more than the hue gain: `--state-ok` ↔ `--state-crit` fell 3.1 →
+  1.4 deutan and `--state-crit` ↔ `--state-neutral` fell to 1.5. As shipped, every
+  pair is the same or better than before: `--state-warn` ↔ `--state-crit` 2.5 → 3.6
+  deutan (8.2 normal), `--state-crit` ↔ `--state-neutral` 1.3 → 3.3, and the
+  palette-wide floor 1.3 → 2.5 light and 0.5 → 2.5 dark. **This does not promote the
+  set to a categorical palette** — 3.6 is still an order below the 18.5 the `--cat-*`
+  series clears, so the hard rules below are unchanged.
 
   **Hard rules — no exceptions:**
 
-  - **Warn/crit never adjacent by colour alone.** `--state-warn` and `--state-crit`
-    must never be adjacent segments distinguished by colour alone — not in a stacked
-    bar, not in a donut, not in a legend. Where both appear they carry an icon + text
-    label and a 2 px surface gap. At ΔE 3.1 the two states are visually the same
-    colour to most readers.
+  - **No two state tokens adjacent by colour alone.** No two of `--state-ok`,
+    `--state-warn`, `--state-crit`, `--state-mauve` and `--state-neutral` may be
+    adjacent segments distinguished by colour alone — not in a stacked bar, not in a
+    donut, not in a legend. Where two appear together they carry an icon + text label
+    and a 2 px surface gap. The rule is stated over the whole set, not over the
+    warn/crit pair alone, because the worst pair is not a fixed one: it was
+    `--state-crit` ↔ `--state-neutral` (ΔE 1.3) before the stone palette and is
+    `--state-ok` ↔ `--state-crit` (ΔE 3.1 deutan) after it. Every pair in the set sits
+    below ΔE 8 for some form of colour vision, so treat none of them as separable.
   - **Ignore server-supplied colours.** `ChartData.Config.Colors` and
     `SeriesData.Color` (`features/reports/interfaces/interfaces.go:143,165`) come off
     the wire and must not be used by the client. Map by series index into the palettes
