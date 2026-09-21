@@ -93,7 +93,9 @@ provision time — never stored in the profile):
 | `{{ .OSFamily }}` | The installer family (`linux` or `windows`). |
 | `{{ .CorrelationID }}` | The correlation identity baked into the answer file. The controller-side completion reconciler matches a registered steward's mTLS CN against this value to flip the provisioning record to `ready`. Use it as the guest hostname / enrollment label. |
 | `{{ .BundleURL }}` | The enrollment-bundle URL from the profile's `enroll.bundle_url`. |
-| `{{ .EnrollToken }}` | A pre-resolved registration token, supplied by the caller when applicable (used by the Windows `SetupComplete.cmd` fallback). |
+| `{{ .EnrollToken }}` | The tenant join token. The controller supplies it to the Hyper-V steward through config sync as the `hyperv` module's `enroll_token` config value (ADR-010 §2). Both built-in profiles pass it to `cfgms-steward install --regtoken`. Empty when the module has no `enroll_token`. |
+| `{{ .CAFingerprint }}` | The controller CA's SHA-256 fingerprint (hex), from the `hyperv` module's `enroll_ca_fingerprint` config value. Passed to `cfgms-steward install --fingerprint`. Not a secret. Empty when not applicable. |
+| `{{ .AdminPassword }}` | A per-VM random local password generated at render time. Windows uses it for the one-shot AutoLogon that runs enrollment; Linux uses it for the local `cfgms` user. It is never persisted or surfaced. |
 | `{{ .ProductEdition }}` | Windows only. The Windows Server image/edition name selected in the autounattend image-install step. Ignored by Linux profiles. |
 | `{{ secret "key-name" }}` | Resolves the named secret from the secrets provider at render time and inserts its value into the rendered output. See [§5 Secret references](#5-secret-references). |
 
@@ -135,8 +137,10 @@ template: |
   d-i passwd/root-login boolean false
   d-i passwd/make-user boolean true
   d-i passwd/username string cfgms
-  # Secret KEY name only — the crypted password VALUE is resolved at render time.
-  d-i passwd/user-password-crypted password {{ secret "hyperv/enroll/user-password-crypted" }}
+  # Per-VM random password generated at render time (ADR-010 §4). The steward
+  # is the management path, so the value is never surfaced.
+  d-i passwd/user-password password {{ .AdminPassword }}
+  d-i passwd/user-password-again password {{ .AdminPassword }}
 
   ### Partitioning (guided, entire disk, LVM)
   d-i partman-auto/method string lvm
@@ -152,7 +156,7 @@ template: |
   d-i preseed/late_command string \
     in-target wget -q {{ .BundleURL }} -O /tmp/cfgms-steward.deb ; \
     in-target dpkg -i /tmp/cfgms-steward.deb ; \
-    in-target cfgms-steward enroll --token {{ secret "hyperv/enroll/regtoken" }} --label {{ .CorrelationID }}
+    in-target cfgms-steward install --regtoken {{ .EnrollToken }}
 ```
 
 Store it with `cfg hyperv profile create`:
@@ -300,11 +304,18 @@ answer-file bytes, which are written to the (transient) seed VHDX and detached a
 There are two ways a profile pulls a secret:
 
 1. **`{{ secret "key-name" }}` in the template** — resolves the named key against
-   the secrets provider at render time. Use this for any credential or sensitive
-   host path the answer file must contain (e.g. a crypted password, the `.ppkg`
-   host path). Example: `{{ secret "hyperv/enroll/regtoken" }}`.
-2. **`enroll.registration_token_secret_key`** — the key name for the enrollment
-   registration token; the module resolves the value when wiring enrollment.
+   the steward's secrets provider at render time. Use this for a sensitive host
+   path the answer file must contain (e.g. the `.ppkg` host path). Example:
+   `{{ secret "ppkg-path-key" }}`.
+2. **`enroll.registration_token_secret_key`** — profile metadata naming the
+   secrets-provider key for the registration token. The built-in profiles do not
+   read it: they take the token from `{{ .EnrollToken }}` (below).
+
+The tenant join token itself is **not** a `{{ secret }}` lookup. ADR-010 §2
+routes it through the existing controller-to-steward config sync: the controller
+sets the `hyperv` module's `enroll_token` config value (and, for a private CA,
+`enroll_ca_fingerprint`), and the renderer exposes them as `{{ .EnrollToken }}`
+and `{{ .CAFingerprint }}`. Mint the token with `cfg token create`.
 
 Resolution flow:
 
@@ -315,16 +326,11 @@ profile (stores KEY name)  ──▶  secrets provider lookup at render time  �
                                           rendered answer file (on transient seed)
 ```
 
-Store the secret VALUE in the secrets provider under the key name your profile
-references — for example, a placeholder password key:
-
-```sh
-cfg secret set --key "hyperv/enroll/user-password-crypted" \
-               --value '<crypted-password-placeholder>'
-
-cfg secret set --key "hyperv/enroll/regtoken" \
-               --value '<registration-token-placeholder>'
-```
+There is no `cfg` command that writes a secret value. ADR-010 rejected
+per-steward manual secret injection and any new secret-setting CLI tooling; secret values
+reach the steward's secrets provider only through controller-to-steward config
+sync. Author a `{{ secret "key-name" }}` reference only for a key that sync
+already delivers to the Hyper-V steward.
 
 Use placeholder values in any documentation or example; never paste a real secret.
 If a referenced key is missing, rendering fails with an error and no answer file is
