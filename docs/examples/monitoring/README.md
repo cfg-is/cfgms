@@ -255,6 +255,6 @@ done
 
 ## Related Documentation
 
-- [CFGMS Monitoring Guide](../monitoring.md) - Complete monitoring documentation
-- [REST API Reference](../api/rest-api.md) - API documentation including monitoring endpoints
-- [Architecture Overview](../architecture.md) - System architecture details
+- [CFGMS Monitoring Guide](../../monitoring.md) - Complete monitoring documentation
+- [REST API Reference](../../api/rest-api.md) - API documentation including monitoring endpoints
+- [Architecture Overview](../../../ARCHITECTURE.md) - System architecture details

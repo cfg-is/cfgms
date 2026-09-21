@@ -140,7 +140,7 @@ CFGMS will detect the change and update only what's needed!
 ### What's Next?
 
 - Try more modules: `package`, `service`, `firewall`
-- Learn about [YAML templating](docs/architecture/template-engine-design.md)
+- Learn about [configuration inheritance](docs/guides/configuration-inheritance.md)
 - Explore [module documentation](docs/modules/)
 
 ---

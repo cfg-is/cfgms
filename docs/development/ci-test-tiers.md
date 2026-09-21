@@ -9,7 +9,7 @@ is a candidate for its own follow-up story, pending founder approval.
 CI has grown one workflow at a time, each with its own trigger and its own reason. No one
 document says, for the fleet as a whole: what does a PR author wait for, what does the merge
 queue re-validate, and does each of those checks still earn its slot. This audit extends the
-method of `docs/development/ci-longpole-audit.md` (2026-07-10, which covered only
+method of `docs/archive/ci-longpole-audit.md` (2026-07-10, which covered only
 `production-gates.yml` and `fleet-e2e.yml`) to every workflow in `.github/workflows/` and to
 `make test`'s internals, and proposes a tiering toward an **8-minute PR-side verdict**.
 

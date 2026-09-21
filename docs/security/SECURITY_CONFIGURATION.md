@@ -314,8 +314,8 @@ This configuration guide addresses findings from the October 2025 security audit
 | M-TENANT-2 | MEDIUM | ✅ Remediated | [Multi-Tenancy Security](#rbac-cross-tenant-protection) |
 | H-TENANT-1 | HIGH | 📋 Recommended | [Multi-Tenancy Security](#tenant-context-validation) |
 
-**Full Audit Report**: `docs/security/audits/security-audit-report-2025-10-17.md`
-**Remediation Plan**: `docs/security/audits/remediation-plan-2025-10-17.md`
+**Full Audit Report**: `docs/archive/security-audits-2025/audit-report-2025-10-17.md`
+**Remediation Plan**: `docs/archive/security-audits-2025/remediation-plan-2025-10-17.md`
 
 ## Additional Resources
 

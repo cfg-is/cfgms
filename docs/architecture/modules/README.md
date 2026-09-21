@@ -424,3 +424,6 @@ Secret params on Windows use `CFGMS_SECRET_` to avoid logging the value via Even
 ## Documentation
 
 - [Module Interface](interface.md) - Essential interface specification and ConfigState details
+- [Module Distribution](distribution.md) - Bundle format, content hashing, signing, and the controller-mediated pull path
+- [Behavioral Envelope](behavioral-envelope.md) - The machine-readable runtime-behaviour declaration in `module.yaml`
+- [Per-module operator reference](../../modules/README.md) - Resource fields and examples for each stdlib module
