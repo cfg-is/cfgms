@@ -519,7 +519,7 @@ gh run download [run-id]
 ### Local Development
 
 1. Run `make security-check` regularly during development
-2. Use `make test-with-security` before commits
+2. Use `make test-commit` before commits
 3. Keep security tools updated monthly
 4. Configure IDE/editor security plugin integration
 

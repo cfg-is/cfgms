@@ -116,7 +116,7 @@ cfg controller signing-cert rotate --bundle /etc/cfgms/admin.bundle.yaml
 **Before you start:**
 
 1. Determine the longest expected offline duration for any steward in the fleet.
-2. Set `--overlap-days` to at least that value (see [Choosing overlap-days](#choosing-overlap-days)).
+2. Set `--overlap-days` to at least that value (see [Choosing overlap-days](#choosing---overlap-days)).
 3. Verify all stewards are currently connected (`cfg controller steward list`).
 4. Confirm no other rotation is in progress (second rotate call returns HTTP 409).
 

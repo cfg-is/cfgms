@@ -100,7 +100,7 @@ make test-integration
 make test-security
 
 # Performance and load testing
-make test-performance
+make test-performance-benchmarks
 
 # Docker environment management
 make test-docker
@@ -189,8 +189,8 @@ cmd := exec.Command("bash", script)
 ### Combined Commands
 
 ```bash
-# Complete validation workflow (test + security + summary)
-make test-with-security
+# Complete validation workflow (test + lint + security-scan)
+make test-commit
 
 # Traditional individual steps
 make test

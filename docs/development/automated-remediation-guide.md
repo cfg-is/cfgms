@@ -295,7 +295,7 @@ After applying any automated fix:
 1. **Run targeted security scan**: `make security-[tool]` for the specific tool
 2. **Run comprehensive security scan**: `make security-scan`
 3. **Run tests**: `make test`
-4. **Run full validation**: `make test-with-security`
+4. **Run full validation**: `make test-commit`
 
 ## Files That Should Not Be Auto-Modified
 

@@ -265,7 +265,7 @@ For production fleets, a steward runs alongside the controller on each node. The
 | Storage backend | Controller | Flatfile + SQLite (default) or PostgreSQL (production scale) operations |
 | Fleet orchestration | Controller | Config distribution, steward registration, workflows |
 
-See [Single Controller Deployment](../../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
+See [Single Controller Deployment](../deployment/single-controller/walkthrough.md) for the deployment guide and [ADR-002](decisions/002-steward-bootstrap-for-controllers.md) for the architectural decision.
 
 ### Normal Operation
 
@@ -513,7 +513,7 @@ Ring `desired_version` mutations applied by the goroutine are in-memory only in 
 
 **Mitigation**: the operator re-issues `POST /api/v1/rollout` after restart. Rings already at the target version will pass their health gate quickly (soak re-runs from scratch); rings not yet reached are processed as if starting fresh. No data is lost; at most a soak period is duplicated.
 
-This risk is tracked in [ADR-008](decisions/008-durable-workflow-execution.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
+This risk is tracked in [ADR-008](decisions/008-durable-execution-substrate.md) and will be addressed when durable workflow execution (DBOS or equivalent) is adopted. Do not engineer around this limitation in v1 stories.
 
 ### Config Signing
 
@@ -525,7 +525,7 @@ The controller maintains awareness of all registered stewards and their state.
 
 ### Fleet Registry Durability (Issue #663)
 
-The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
+The fleet registry is backed by a `StewardStore` (see `pkg/storage/interfaces/business/steward_store.go`). Registrations, heartbeats, and status transitions are persisted to durable storage so the fleet view survives controller restarts without waiting for all stewards to re-register.
 
 **Steward lifecycle states**: `registered` → `active` → `lost` / `deregistered`. Records are retained indefinitely for audit; a `lost` steward can re-register and will have its record updated in place.
 
@@ -1318,7 +1318,7 @@ See `features/controller/api/middleware.go` (`extractAdminPrincipal`, `authentic
 
 The zero-standing-privilege session model (ADR-014) eliminates long-lived admin credentials: a human admin authenticates once with a short-lived mTLS certificate, receives a rolling bearer token, and the token automatically expires if unused.
 
-For the operator-facing CLI workflow (first connect, reconnect, session status, disconnect), see the [cfg Operator Guide](../../deployment/cfg-operator-guide.md). This section documents the server-side mechanics.
+For the operator-facing CLI workflow (first connect, reconnect, session status, disconnect), see the [cfg Operator Guide](../deployment/cfg-operator-guide.md). This section documents the server-side mechanics.
 
 **Session lifecycle:**
 

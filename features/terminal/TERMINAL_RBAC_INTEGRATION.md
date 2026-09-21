@@ -206,7 +206,7 @@ The implementation provides a robust foundation for secure terminal access with 
 
 - `features/terminal/auth_integration.go` - Enhanced with RBAC integration
 - `features/terminal/terminal_rbac_simple_test.go` - Performance and security tests
-- `features/terminal/rbac_integration_test.go` - Comprehensive integration tests
+- `features/terminal/terminal_rbac_comprehensive_test.go` - Comprehensive integration tests
 - `features/terminal/TERMINAL_RBAC_INTEGRATION.md` - This documentation
 
 **Story #128 Status: COMPLETE** ✅

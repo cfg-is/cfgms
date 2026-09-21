@@ -393,7 +393,7 @@ logger.InfoCtx(ctx, "Operation started",
 
 See these modules for reference implementations:
 
-- `features/modules/directory/` - Basic logging integration
+- `features/controller/directory/` - Basic logging integration
 - `features/modules/stdlib/file/` - File operations with error logging
 - `features/modules/stdlib/script/` - Complex module with audit logging
 - `features/modules/stdlib/firewall/` - Network operations logging

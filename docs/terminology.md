@@ -263,7 +263,7 @@ A **module bundle** is a signed archive containing the module binary (cross-comp
 
 ### Module contract
 
-The **module contract** is the gRPC API that every CFGMS module must implement. It is defined in `api/proto/modules/` and documented in [`docs/architecture/modules/interface.md`](modules/interface.md). The contract has two variants: `ModuleService` (steward and outpost modules) and `WorkflowModuleService` (workflow modules). The only difference is the `Handshake` message, which carries the calling context. `Get`, `Set`, `Test`, and `Shutdown` messages are shared.
+The **module contract** is the gRPC API that every CFGMS module must implement. It is defined in `api/proto/modules/` and documented in [`docs/architecture/modules/interface.md`](architecture/modules/interface.md). The contract has two variants: `ModuleService` (steward and outpost modules) and `WorkflowModuleService` (workflow modules). The only difference is the `Handshake` message, which carries the calling context. `Get`, `Set`, `Test`, and `Shutdown` messages are shared.
 
 ### Module runtime
 
@@ -293,7 +293,7 @@ An **outpost module** is a module with `executors: [outpost]` in `module.yaml`. 
 
 A **pluggable provider** is a backend implementation of a central CFGMS infrastructure interface (storage, logging, secrets, directory, control-plane transport, data-plane transport). Pluggable providers live under `pkg/*/providers/` and are selected via YAML configuration at runtime. They register themselves at startup via `init()`.
 
-**Disambiguation from Module**: "Pluggable provider" refers strictly to the central-provider pattern described in `pkg/README.md` and [`docs/architecture/provider-architecture.md`](provider-architecture.md). Modules are a distinct concept: they manage endpoint resources, run out-of-process, and use a different interface (`ModuleService` gRPC). The terms "provider", "plugin", and "pluggable" in CFGMS documentation always refer to the central-provider pattern unless the surrounding context explicitly says "module."
+**Disambiguation from Module**: "Pluggable provider" refers strictly to the central-provider pattern described in `pkg/README.md` and [`docs/architecture/provider-architecture.md`](architecture/provider-architecture.md). Modules are a distinct concept: they manage endpoint resources, run out-of-process, and use a different interface (`ModuleService` gRPC). The terms "provider", "plugin", and "pluggable" in CFGMS documentation always refer to the central-provider pattern unless the surrounding context explicitly says "module."
 
 ### Configuration-Data
 

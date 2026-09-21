@@ -133,7 +133,7 @@ For future contributions with code or substantial documentation changes, you'll 
 If a contributor doesn't want to sign the CLA:
 
 1. Politely explain why we need it (copyright assignment enables AGPL-3.0 enforcement and license discretion)
-2. Point them to the FAQ: [docs/legal/README.md#faq](../docs/legal/README.md#faq)
+2. Point them to the FAQ: [docs/legal/README.md#frequently-asked-questions](README.md#frequently-asked-questions)
 3. If they still refuse, close the PR with thanks
 
 **Example response:**
@@ -237,7 +237,7 @@ If a contributor previously signed CLA while at Company A, then contributes indi
 ## Resources for Maintainers
 
 - **Full CLA Text**: [docs/legal/CLA.md](CLA.md)
-- **CLA FAQ**: [docs/legal/README.md#faq](README.md#faq)
+- **CLA FAQ**: [docs/legal/README.md#frequently-asked-questions](README.md#frequently-asked-questions)
 - **Contributor Guide**: [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - **License Information**: [LICENSING.md](../../LICENSING.md)
 

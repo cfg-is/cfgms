@@ -14,6 +14,8 @@
 > as a compensating control for a compromised-controller scenario is describing a
 > control that does not apply there — see ADR-021's qualification.
 
+<a name="amended-2026-09-01-issue-3754-per-adr-031-decision-1--sequence-assignment"></a>
+
 > **Amended 2026-09-01 (Issue #3754, per ADR-031 Decision 1) — Sequence Assignment.**
 > The Decision section below originally read "Sequence numbers are assigned inside
 > the single drain goroutine in `pkg/audit/Manager` — no concurrent writer can
@@ -51,6 +53,8 @@
 > longer tracked only as a private draft — it is ADR-033 plus Stories 2–5 of Epic
 > [#4033](https://github.com/cfg-is/cfgms/issues/4033).
 
+<a name="amended-2026-09-16-issue-4098--checksum-coverage-and-sequence-zero-rejection"></a>
+
 > **Amended 2026-09-16 (Issue #4098) — Checksum Coverage and Sequence-Zero Rejection.**
 > Two more statements in this ADR were found false against the shipped code and are
 > struck below, not rewritten. (1) The Decision section's exact HMAC formula lists
@@ -80,6 +84,8 @@
 > with no legacy class left to protect by special-casing sequence zero. This
 > amendment does not touch the chosen mechanism (HMAC-keyed hash chain) or any
 > other part of the Decision — only the three statements struck below.
+
+<a name="amended-2026-09-16-issue-4101--threat-model-row-scope"></a>
 
 > **Amended 2026-09-16 (Issue #4101) — Threat Model Row Scope.** The Threat Model
 > table's first row ("Attacker without HMAC key modifies a row | Yes | Checksum

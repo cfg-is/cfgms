@@ -36,7 +36,7 @@ make test-ci
 # Runs: test + lint + security-scan + test-m365-integration + test-integration-complete
 ```
 
-### Layer 3: Full Production Validation (`make test-full`)
+### Layer 3: Full Production Validation (`make test-complete-full`)
 
 - **Runtime**: 60-90 minutes
 - **Scope**: Complete system validation including load testing
@@ -44,8 +44,8 @@ make test-ci
 - **Coverage**: Everything including Story #86 production readiness tests
 
 ```bash
-make test-full
-# Runs: test-fast + test-integration-comprehensive + test-story-86
+make test-complete-full
+# Runs: test-commit + test-fast + test-production-critical + build-cross-validate + test-frontend + test-integration-docker + test-e2e-fast
 ```
 
 ## Test Categories
@@ -99,11 +99,6 @@ make test-integration              # < 20 min - Integration scenarios
 ### CI/CD Integration
 
 ```bash
-# Cross-feature integration (chunked)
-make test-cross-feature-integration # < 25 min - Cross-feature scenarios
-make test-failure-propagation       # < 15 min - Failure recovery
-make test-data-consistency         # < 15 min - Data consistency
-
 # Production readiness (chunked)
 make test-load-testing             # < 25 min - 100+ concurrent sessions
 make test-performance-benchmarks   # < 15 min - SLA validation
@@ -113,11 +108,8 @@ make test-synthetic-monitoring     # < 20 min - Ongoing monitoring
 ### Release Validation
 
 ```bash
-# Complete Story #86 validation
-make test-story-86                 # < 50 min - Full production readiness
-
 # Complete system validation
-make test-full                     # 60-90 min - Everything
+make test-complete-full            # 60-90 min - Everything
 ```
 
 ## GitHub Actions Integration
@@ -219,7 +211,7 @@ Tests automatically detect CI and adjust:
 1. **Always run `make test`** before committing
 2. **Use `make test-commit`** for significant changes
 3. **Use `make test-ci`** for complete validation
-4. **Run `make test-full`** before releases
+4. **Run `make test-complete-full`** before releases
 5. **Write tests with appropriate timeouts**
 6. **Use `-short` flag for development testing**
 
