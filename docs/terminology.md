@@ -111,7 +111,7 @@ The **Cloud Steward** is a specialized component for managing cloud environments
 **Key Characteristics:**
 
 - Specialized for cloud environment management
-- Supports multiple cloud platforms (e.g., AWS, Azure, GCP)
+- Supports multiple cloud platforms
 - Manages various cloud resource types:
 
   - Virtual Machines

@@ -157,7 +157,7 @@ controller:
         enabled: true
         config:
           network: "tcp"
-          address: "splunk-collector.company.com:514"
+          address: "siem-collector.acme-corp.example:514"
           enable_tls: true
           facility: "local0"
           tag: "cfgms-prod"

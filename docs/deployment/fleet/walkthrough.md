@@ -335,7 +335,7 @@ The script:
 ### 4d — Install on Windows (MSI via RMM — `msiexec /qn`)
 
 Download the Windows MSI install package from the controller and deploy it silently via
-your RMM (NinjaOne, Datto, ConnectWise, etc.):
+your RMM tool:
 
 ```bash
 # Download the Windows package (contains the MSI + CA cert)
@@ -360,7 +360,7 @@ msiexec /qn /i C:\cfgms-install\cfgms-steward-amd64.msi `
 curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/darwin/amd64
 ```
 
-Distribute the `.pkg` through your MDM (Jamf, Kandji, Mosyle, etc.) or install manually:
+Distribute the `.pkg` through your MDM tool or install manually:
 
 ```bash
 sudo installer -pkg cfgms-steward-darwin-amd64.pkg -target /

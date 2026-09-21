@@ -94,7 +94,7 @@ refactor/storage-interface-cleanup
 hotfix/security-vulnerability-cve-2023-1234
 
 # Bad examples (avoid)
-feature/jordan-work
+feature/my-work
 fix/broken-stuff
 refactor/cleanup
 docs/updates

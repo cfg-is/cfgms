@@ -16,7 +16,7 @@ Today the steward has a controller URL compiled into the signed binary. The stat
 
 1. **It blocks clustering at scale.** A single compiled URL feels like it ties a steward to one controller. In reality, clustering is a *server-side* concern: a single hostname fronts an arbitrarily large controller cluster via DNS / load-balancer / anycast, and the steward never needs to know there are N nodes. The compiled-URL model already scales — the constraint was imagined, not real.
 
-2. **It makes self-hosting painful.** An independent operator (e.g. an MSP running their own controller instead of the CFGMS SaaS) cannot "install and go" like Salt/Ansible. They must: boot the controller (which generates its CA), export the CA, and **stand up their own build + signing pipeline** to produce stewards pinned to that CA — before deploying the first steward.
+2. **It makes self-hosting painful.** An independent operator (e.g. an MSP running their own controller instead of the CFGMS SaaS) cannot "install and go". They must: boot the controller (which generates its CA), export the CA, and **stand up their own build + signing pipeline** to produce stewards pinned to that CA — before deploying the first steward.
 
 The key realization that resolves both: **the URL was never the security; the pinned trust anchor is.** What actually stops controller substitution is **mTLS certificate validation against a pinned CA**. An attacker's controller cannot present a cert chaining to the pinned CA, so the connection fails before any config/module/script is exchanged — the URL never enters into it. The compiled URL only added defense-in-depth against config-level redirection (which CA pinning already defeats).
 
@@ -52,7 +52,7 @@ The steward generalizes from "baked URL + CA" to a **trust-source** that may be 
 | **Install-pinned** | CA bundle/fingerprint supplied at install (`--controller-ca`) | low — copy a fingerprint | high — no TOFU window; trusts the install process |
 | **Compile-baked** | CA + root compiled into the binary, under the code signature | a build step | max — the binary self-enforces; tamper breaks the signature |
 
-It is a single gradient: *trust first contact → trust the install → trust the build*. Recommended mapping: **SaaS = compile-baked**; **self-hosted default = install-pinned** (Salt-like *and* high-assurance, no build infra); **lab = TOFU**; **sovereign operator = compile-baked with their own re-sign** (see §5).
+It is a single gradient: *trust first contact → trust the install → trust the build*. Recommended mapping: **SaaS = compile-baked**; **self-hosted default = install-pinned** (install-and-go *and* high-assurance, no build infra); **lab = TOFU**; **sovereign operator = compile-baked with their own re-sign** (see §5).
 
 In every mode the pinned CA is stored **immutably and protected** (OS keychain, per the no-cleartext-secrets rule) and locked after enrollment.
 
@@ -76,7 +76,7 @@ The controller *distributes* steward upgrades (pulling signed artifacts from the
 
 **Positive**
 - The compiled-URL security goal is delivered *more* robustly, by making CA pinning explicit and primary; the URL is free to scale behind a single hostname.
-- Self-hosting becomes Salt-like **and** high-assurance via install-pinning — no per-operator build or signing pipeline for the common case.
+- Self-hosting becomes install-and-go **and** high-assurance via install-pinning — no per-operator build or signing pipeline for the common case.
 - One codebase serves SaaS, self-hosted, lab, and sovereign deployments; the difference is a build/install flag, not a fork.
 - The root-domain constraint hardens the compromised-controller case in the threat model.
 
