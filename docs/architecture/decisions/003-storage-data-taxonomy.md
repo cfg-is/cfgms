@@ -1,6 +1,6 @@
 # ADR 003: Storage Data Taxonomy
 
-**Status**: Proposed
+**Status**: Accepted (recorded 2026-09-21; the five-type taxonomy is implemented under `pkg/storage/interfaces/` and is the decision `storage-architecture.md` walks through)
 
 **Date**: 2026-04-13
 

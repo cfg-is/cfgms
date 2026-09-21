@@ -360,7 +360,7 @@ Consult these before implementing steward or controller behavior changes:
 ### Storage
 
 - **Pluggable design** — all components use `pkg/storage/interfaces`
-- **Default:** Git with SOPS encryption
+- **Default:** `flatfile` provider (`data/cfgms-config`); `sqlite` and `database` are the alternatives. Git is not a storage backend — the `git` provider was removed (`cfg storage migrate --from git --to flatfile` migrates an existing deployment). Secrets at rest are SOPS-encrypted.
 - **Write-through caching** pattern (memory → durable storage)
 - **No memory-only storage** — features requiring durability use durable storage everywhere
 

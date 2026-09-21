@@ -351,7 +351,8 @@ was not that it was sensitive — it was that it was deployment state, not produ
 **A deployment's own configuration may live in that deployment's own repository.** Anyone
 running CFGMS — including a maintainer operating a personal lab — keeping their controller
 configuration and SOPS-encrypted secrets in a repository they own is a supported, intended
-pattern. `CLAUDE.md` already names "Git with SOPS encryption" as the default storage backend;
+pattern. The default `flatfile` storage provider keeps that configuration on disk with
+SOPS-encrypted secrets beside it, and git re-enters only as an optional sync source (ADR-003);
 that is what SOPS is for. The product ships a documented pattern for exactly this use.
 
 **This rule constrains maintainers of this repository, not users of the product.** A user of CFGMS
