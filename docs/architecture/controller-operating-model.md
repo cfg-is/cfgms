@@ -754,7 +754,7 @@ The controller can send commands to stewards over the gRPC control plane service
 | `sync_config` | Tell steward to fetch its latest cfg now (optimization — steward also checks on schedule). Save=deploy will automatically issue this command for affected stewards once the storage-watch trigger is wired (see issue #1521). |
 | `sync_dna` | Request fresh DNA collection and upload |
 | `reconnect` | Instruct the steward to reconnect to the controller (used during HA failover) |
-| `execute_script` | Run an ad-hoc script (outside the cfg) — [GAP: not implemented as a control-plane command — see issue #1523. Script execution is available via the REST API (`POST /api/v1/stewards/{id}/scripts`).] |
+| `execute_script` | Run an ad-hoc script (outside the cfg). `CommandExecuteScript` in `pkg/controlplane/types`; the controller dispatcher (`features/controller/dispatcher`) signs and sends it, the steward handles it in `features/steward/commands`. Reachable via `cfg steward run-script` and the REST API (`POST /api/v1/runs/script`). |
 
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
 

@@ -76,7 +76,7 @@ The git-sync component lives in `pkg/gitsync/` and is wired into the controller 
 | `WebhookSecretRef` | Webhook HMAC-SHA256 secret reference (same format as CredentialsRef); required for the binding to be webhook-triggerable |
 | `PollingInterval` | Polling frequency; minimum 60 s; zero disables polling |
 
-**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept an environment-variable name (prefix `env:`) or a filesystem path to a file containing the credential. TODO: migrate to `pkg/secrets` `SecretStore` once sub-story H lands.
+**Credentials (v1):** `CredentialsRef` and `WebhookSecretRef` accept a `pkg/secrets` `SecretStore` key (prefix `secret:`, resolved through `gitsync.WithSecretStore`), an environment-variable name (prefix `env:`), or a filesystem path to a file containing the credential.
 
 **Webhook endpoint:** `POST /api/v1/webhooks/git-push`. Accepts GitHub and GitLab push-event payloads. The HMAC-SHA256 signature is the endpoint's only credential, so validation is mandatory and fails closed: every binding matched by a push event must carry a `WebhookSecretRef`, and `X-Hub-Signature-256` must validate against it. Requests with an invalid or missing signature — and requests matching a binding that has no `WebhookSecretRef` — are rejected with HTTP 401. A binding without a webhook secret is not webhook-triggerable; it still syncs on its `PollingInterval`.
 
@@ -119,7 +119,7 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 ```
 
 **Admin responsibilities**:
-- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. A `cfg backup` CLI helper is planned (sub-story B).
+- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. There is no `cfg backup` command.
 - Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
 - Access control. Directory is readable/writable only by the controller process.
 

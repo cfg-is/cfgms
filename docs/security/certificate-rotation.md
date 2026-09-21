@@ -211,4 +211,4 @@ Align with your heartbeat SLO if you have one.
 - The rotation endpoint is `POST /api/v1/certificates/signing/rotate` (implemented in story B2b, Issue #1816).
 - The overlap model and `RotatingSerial` cursor are implemented in the lifecycle state machine (story B1, Issue #1814).
 - Refresh-on-connect is implemented in story B2d (Issue #1817).
-- The `GetCertificatesByType` internal API will be unexported in story B3 to enforce purpose-based access.
+- The certificates-by-type lookup is unexported (`getCertificatesByType` in `pkg/cert`) to enforce purpose-based access; `TestNoGetCertificatesByTypeOutsideCertPackage` in `pkg/cert/architecture_test.go` enforces the boundary.

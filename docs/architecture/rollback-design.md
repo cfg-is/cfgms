@@ -1,8 +1,19 @@
 # Configuration Rollback Design
 
+## Status
+
+The core of this design is implemented in `features/config/rollback`:
+
+- `RollbackManager`, `RollbackValidator` and `RollbackNotifier` interfaces (`types.go`), with `DefaultRollbackValidator` (`validator.go`), `DefaultRollbackNotifier` and `WebhookNotifier` (`notifier.go`), and `StorageRollbackStore` (`storage_store.go`), which persists operations as `ConfigStore` entries.
+- REST API under `/api/v1/rollback` (`features/controller/api/rollback_handler.go`): `GET /points`, `POST /preview`, `POST /execute`, `GET /{rollback_id}/status`, `POST /{rollback_id}/cancel`, `GET /history`. Every route requires the `config:rollback` permission.
+- CLI: `cfg config rollback <steward-id>` (lists rollback points; `--to` executes, `--dry-run` previews).
+- Rollback types `full`, `partial`, `module` and `emergency`, target types `device`, `group`, `client`, `msp` and `steward`, and the `approval_required` status are all defined in `types.go`.
+
+Not implemented: the dedicated SQL tables in the Database Schema section (operations live in `ConfigStore`, not in `rollback_operations` / `rollback_audit_log` / `rollback_validations`), progressive (canary) rollback, automatic retry with exponential backoff, and the chaos-testing programme. The sections below describe the design as written; where they go beyond the list above they are unbuilt.
+
 ## Overview
 
-This document outlines the design for implementing configuration rollback capabilities in CFGMS. The rollback system integrates with the durable storage layer (`ConfigStore`, `CommandStore`, `AuditStore`) to provide reliable, auditable, and safe configuration rollback functionality. Note: the git storage backend was removed in Issue #664; rollback points are version IDs in the config store, not git commit SHAs.
+This document describes the design of configuration rollback in CFGMS. The rollback system integrates with the durable storage layer (`ConfigStore`, `CommandStore`, `AuditStore`) to provide reliable, auditable, and safe configuration rollback functionality. Note: the git storage backend was removed in Issue #664; rollback points are version IDs in the config store, not git commit SHAs.
 
 ## Goals
 
@@ -394,35 +405,16 @@ CREATE TABLE rollback_validations (
    - Partial failures
    - Recovery procedures
 
-## Implementation Phases
+## Delivery Status
 
-### Phase 1: Core Rollback (Week 1)
+Delivered:
 
-- Implement RollbackManager
-- ConfigStore integration for version history retrieval
-- Simple rollback operations
-- Unit tests
+- `RollbackManager` with `ConfigStore`-backed version history, preview, execute, status, cancel and history operations, with unit tests in `features/config/rollback`.
+- `RollbackValidator` with target, rollback-type, permission, breaking-change, dependency, module-compatibility and system-health checks.
+- REST API, `approval_required` status and progress reporting on `RollbackOperation`.
+- `emergency` and `partial` rollback types.
 
-### Phase 2: Safety & Validation (Week 2)
-
-- Implement RollbackValidator
-- Safety checks
-- Dependency validation
-- Integration tests
-
-### Phase 3: API & UI (Week 3)
-
-- REST API implementation
-- Approval workflow
-- Progress monitoring
-- Documentation
-
-### Phase 4: Advanced Features (Week 4)
-
-- Emergency rollback
-- Partial rollback
-- Performance optimization
-- Chaos testing
+Not delivered: performance optimization work and chaos testing.
 
 ## Success Metrics
 
