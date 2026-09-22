@@ -70,8 +70,8 @@ CFGMS is a zero-trust, multi-tenant configuration management system. A **control
 (central, SaaS or on-premises) manages **stewards** (agents on Windows, Linux and macOS
 endpoints) over mutual-TLS gRPC-over-QUIC. Administrators reach the controller through a
 REST API and the `cfg` CLI using an mTLS bundle. Tenants form a tree
-(`root/msp-a/client-1`); configuration inherits root to leaf. Storage is git with SOPS
-encryption by default; secrets live in the OS keychain or SOPS, never in cleartext on
+(`root/msp-a/client-1`); configuration inherits root to leaf. Storage is the `flatfile`
+provider by default (`sqlite` and `database` are alternatives; git is not a backend); secrets live in the OS keychain or SOPS, never in cleartext on
 disk. Modules are publisher-signed out-of-process binaries; the controller verifies and
 forwards signatures intact and never re-signs.
 
