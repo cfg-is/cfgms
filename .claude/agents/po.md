@@ -484,8 +484,19 @@ Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-do
 
 Include the skill's headline (bumping / holding / up-to-date counts + story numbers) in the cycle summary's pipeline-depth section.
 
-**Step 2 — Tech Lead pass (legacy only):**
-Handles `Draft` stories that were created before the Planning Team was introduced. New epics go through Step 7 (Planning Team) and produce `Ready` stories directly. Once the backlog of legacy drafts clears, this step becomes a no-op.
+**Step 2 — Tech Lead pass (interactive only; cron never promotes):**
+**In cron mode this step is a no-op.** The autonomous cycle never changes a
+`Draft` item's status. Fix issues created by `pipeline-helper.sh create-fix-issue`,
+pin-bump stories, and any other new draft stay in `Draft` until a human-driven
+PO session runs this pass (`/po cycle`, or the founder asks for a Tech Lead
+review of named issues) or sets the status by hand. New epics go through
+Step 7 (Planning Team) and produce `Ready` stories directly, so nothing
+depends on this step for throughput. Verified 2026-09-22: a Draft bug (#4198)
+sat untouched through active cycles; the ones that moved were promoted by the
+founder. When filing a fix issue, say it waits for manual promotion — never
+"the pipeline will pick it up".
+
+When this pass does run (interactive), it works as follows.
 
 Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`.
 **Filter out revision-pending drafts first:** a Draft that already carries an
