@@ -104,7 +104,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 
 **Results**: 12 new E2E tests (100% pass rate), 81 files changed (+5,513/-509 lines), QUICK_START.md validated and corrected
 
-#### v0.8.0 Go public
+#### v0.8.0 Go public - ✅ COMPLETED
 
 - [x] Create security scanning configuration files (`.gitleaks.toml`, `.gosec.json`) (issue #279) ✅ COMPLETED
 - [x] Add public repository workflows (Dependabot, CodeQL, container scanning, license compliance, SBOM) (issue #280) ✅ COMPLETED
@@ -116,7 +116,7 @@ Implemented comprehensive Docker-based E2E testing infrastructure that validates
 - [x] Convert repository to public and activate GitHub Advanced Security features (issue #282) ✅ COMPLETED
 - [x] Update documentation with security badges and public links (issue #284) ✅ COMPLETED
 
-#### v0.8.1 Bug fixes and test completion
+#### v0.8.1 Bug fixes and test completion - ✅ COMPLETED
 
 - [x] Fix single-use registration token enforcement in database storage (issue #299) ✅ COMPLETED
 - [x] Complete E2E test framework for MQTT+QUIC mode (issue #294) ✅ COMPLETED
@@ -154,7 +154,7 @@ Test infrastructure, breaking changes, and communication layer architecture — 
   - [x] Story #267.5: Deprecate Direct MQTT/QUIC Imports (Issue #364 - 5 points) ✅
 - [x] v0.9.x Project Housekeeping (Issue #392) ✅
 
-#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks)
+#### v0.9.1 — Security Baseline & Stability (~15-20 pts, ~1-2 weeks) ✅ COMPLETED
 
 Minimum security hygiene before deploying on a real network.
 
@@ -163,7 +163,7 @@ Minimum security hygiene before deploying on a real network.
 - [x] Implement log injection prevention in pkg/logging (Issue #373 - 3-5 points) - Resolve 25 code scanning alerts, add sanitization infrastructure to prevent log forgery attacks
 - [x] Fix Windows workflow test failures (Issue #309) - Required for Windows VM management in v0.9.2
 
-#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints)
+#### v0.9.1.1 — Agent Dispatch Infrastructure (~60 pts, ~3 sprints) ✅ COMPLETED
 
 Transition from interactive Claude Code sessions to headless agent dispatch in Docker containers. Adapts Stripe's "Minion" model for solo developer workflow: architect writes PRDs/stories, agents implement in sandboxed containers, developer reviews PRs and merges. See [Agent Dispatch PRD](../archive/prd-agent-dispatch.md).
 
@@ -185,7 +185,7 @@ Transition from interactive Claude Code sessions to headless agent dispatch in D
 - [x] Skill: `/agent-setup` one-time bootstrap (Issue #444 - 5 points) - Replaces setup.sh; image build, credential setup, label creation, directory setup
 - [x] Docs: agent dispatch infrastructure developer reference (Issue #445 - 5 points) - Story sizing guidelines, CI failure workflow, troubleshooting
 
-#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints)
+#### v0.9.1.2 — Code Structure Refactoring (~23 pts, ~2 sprints) ✅ COMPLETED
 
 Split oversized Go source files into cohesive, single-responsibility modules. 183 of 598 source files (31%) exceed 500 lines. This milestone targets the 7 worst offenders (1,233–3,110 lines each) that violate SRP with multiple unrelated concerns in a single file. Pure mechanical refactoring — no behavior changes, no API changes.
 
@@ -236,7 +236,7 @@ Deploy on test cluster and manage real VMs — the core beta milestone.
 - [x] Controller: implement multi-node orchestration (Issue #415) ✅ - Closed 2026-07-02
 - [x] Controller: per-tenant config source routing Phases 2-3 (Issue #428) ✅ - Closed 2026-05-20
 
-#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks)
+#### v0.9.3 — Three-Certificate Architecture (~47-65 pts, ~3-5 weeks) ✅ COMPLETED
 
 Proper certificate separation for production security.
 
@@ -252,7 +252,7 @@ Authorization hardening + fixes from deployment validation.
 - [x] Complete high availability validation on real cluster (multi-node, beyond Docker E2E)
 - [ ] Deployment validation fixes (TBD based on v0.9.2 findings)
 
-#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks)
+#### v0.9.5 — Steward-First Controller Bootstrap (~18 pts, ~2 weeks) ✅ COMPLETED
 
 Controller nodes managed by stewards — clean separation of node management from fleet orchestration. See [ADR-002](../architecture/decisions/002-steward-bootstrap-for-controllers.md).
 
@@ -260,7 +260,7 @@ Controller nodes managed by stewards — clean separation of node management fro
 - [x] Steward: implement service module for idempotent OS service management (Issue #577 - 8 points) - systemd/Windows Service/launchd Get→Compare→Set→Verify, replaces script workaround
 - [x] Controller: add install/uninstall/status subcommands (Issue #578 - 5 points) - Mirror steward self-install pattern for OS service registration
 
-#### Post-v0.9.5 epics — shipped in v0.9.6
+#### Post-v0.9.5 epics — shipped in v0.9.6 ✅ COMPLETED
 
 - [x] Epic #786 — CI: pre-merge validation runs against branch state
 - [x] Epic #1414 — mTLS admin authentication for controller REST API
@@ -297,7 +297,7 @@ Controller nodes managed by stewards — clean separation of node management fro
 
 - Epic #1791 — tenant-scoping, breakage-tolerance ceremony, agent guardrails for Tier 1 — closed not-planned 2026-06-25 alongside the Phase 2 epic closeout
 
-#### Post-Phase-2 epics on develop (untagged, in flight)
+#### Post-Phase-2 epics on develop (untagged, shipped) ✅ COMPLETED
 
 - [x] Epic #2418 — cluster.cfg cascade + owner-gated `hyperv.vm` convergence: HA VMs defined once at cluster scope, cascaded to member stewards, lifecycle gated on current role ownership. Closed 2026-07-10 (Layer 1 — convergence components proven in isolation)
 - [x] Epic #2657 — workflow-driven Hyper-V role promotion (standalone → FC-role): `cfg workflow promote-hv-role` writes `ha_role`, soaks for steward convergence, migrates the resource to cluster scope; live-validated on the validation lab cluster (`test/e2e/hyperv/promote_role_test.go`, runbook `docs/testing/hyperv-role-promotion-runbook.md`, #2671)
@@ -332,7 +332,7 @@ asset page (`/stewards/:id`), `/config`, `/modules`, `/workflows`, `/accounts`, 
 reporting surface exists in the SPA. It is **carried forward into v0.10.1 as Epic #2860** rather
 than counted here.
 
-#### v0.10.1 - Web UI operational build-out
+#### v0.10.1 - Web UI operational build-out ✅ COMPLETED
 
 The foundation shipped a usable *viewer*. A 2026-07-21 gap analysis against the live controller
 REST surface found the backend substantially ahead of the UI: most day-to-day operator actions
@@ -400,7 +400,7 @@ engineering gaps are narrower than this section originally assumed.
 
 **Rationale**: After Web Interface Foundation (v0.10.0), we need to mature our security tooling and establish web-specific security practices before deploying web frontend to production. This ensures we maintain our excellent security posture (9/10) as the system grows in complexity.
 
-#### Post-v0.10.0 epics on develop (untagged, in flight)
+#### Post-v0.10.0 epics on develop (untagged, shipped) ✅ COMPLETED
 
 Opened after this document's 2026-07-21 pass; not yet placed in a named milestone.
 

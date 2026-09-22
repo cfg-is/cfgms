@@ -1,17 +1,10 @@
 # Product Documentation
 
-## Overview
+Product direction for CFGMS: what it is for, what ships when, and where the OSS boundary sits.
 
-This directory contains product documentation for CFGMS, including vision statements, comparison with other tools, and roadmap information.
+## Documents
 
-## Contents
-
-- **Vision Statement**: Outlines the vision, mission, and goals of CFGMS
-- **Comparison Document**: Compares CFGMS with other configuration management tools
-- **Roadmap**: Details the planned features and development timeline
-
-## Version Information
-
-- **Document Version:** 1.0
-- **Last Updated:** 2024-04-04
-- **Status:** Draft
+- [Product Vision](vision.md) - Long-term product vision and strategy
+- [Development Roadmap](roadmap.md) - Milestones, release planning, capability tags, and the captured backlog
+- [Feature Boundaries](feature-boundaries.md) - What is part of CFGMS OSS (AGPL-3.0) and what is not
+- [Autonomous Agent Development System](autonomous-agent-system-prd.md) - PRD for the agent-driven development pipeline

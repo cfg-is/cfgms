@@ -6,11 +6,14 @@ This document provides a high-level overview of the CFGMS (Config Management Sys
 
 - [System Overview](#system-overview)
 - [Core Components](#core-components)
+- [Operational Modes](#operational-modes)
 - [Communication Architecture](#communication-architecture)
-- [Storage Architecture](#storage-architecture)
+- [Provider System (Pluggable Architecture)](#provider-system-pluggable-architecture)
 - [Module System](#module-system)
 - [Security Model](#security-model)
 - [Multi-Tenancy](#multi-tenancy)
+- [Platform Architecture](#platform-architecture)
+- [Monitoring and Observability](#monitoring-and-observability)
 - [Design Principles](#design-principles)
 
 ## System Overview
@@ -100,6 +103,22 @@ CFGMS is a modern configuration management system designed for Managed Service P
 
 **Location**: `cmd/cfg/`
 
+## Operational Modes
+
+### Standalone Mode
+
+- **Use Case**: Single endpoints, edge devices, development
+- **Configuration**: Local `hostname.cfg` files
+- **Module Discovery**: Filesystem-based scanning
+- **Benefits**: Simple deployment, no network dependencies
+
+### Controller-Integrated Mode
+
+- **Use Case**: Enterprise fleets, centralized management
+- **Configuration**: Controller distribution via gRPC-over-QUIC
+- **Module Discovery**: Controller registry with versioning
+- **Benefits**: Centralized control, fleet orchestration
+
 ## Communication Architecture
 
 CFGMS uses a **unified gRPC-over-QUIC transport** for efficient, bi-directional communication:
@@ -133,6 +152,13 @@ All communication uses **mutual TLS (mTLS)**:
 - TLS 1.3 encryption
 - Certificate pinning
 - Automatic certificate rotation
+- Stewards initiate all connections (no open ports on managed endpoints)
+
+### External Communication
+
+- **Protocol**: HTTPS
+- **Interface**: REST API for user and system integration
+- **Documentation**: [REST API reference](docs/api/rest-api.md) and the OpenAPI specification in `docs/api/openapi.yaml`
 
 See [docs/architecture/communication-layer-migration.md](docs/architecture/communication-layer-migration.md) for detailed transport specification.
 
@@ -197,40 +223,55 @@ See [docs/architecture/provider-architecture.md](docs/architecture/provider-arch
 
 ## Module System
 
-CFGMS uses a **declarative module system** for configuration management:
+All resource management is performed through modules — out-of-process gRPC binaries that implement a standard contract. The steward (or workflow engine) spawns each module binary as a child process over a local socket. Modules are distributed as publisher-signed bundles cached at the controller; stewards pull bundles from the controller rather than from external registries.
 
-### Module Types
+For the full module packaging architecture, see [ADR-006](docs/architecture/decisions/006-module-packaging-and-distribution.md).
 
-#### Workflow Modules
-Execute on controller as part of workflows, typically for cloud/SaaS API integrations:
-- **M365 Modules**: entra_user, conditional_access, teams, exchange, sharepoint
-- **Cloud Modules**: aws_*, azure_*
-- **Compliance Modules**: compliance_policy, audit_report
+### Three module kinds
 
-These modules run in the workflow engine and make API calls to external services. They execute centrally because they manage organization-wide resources that aren't tied to a specific endpoint.
+Every module commits to exactly one kind, declared via `executors:` in `module.yaml`:
 
-#### Steward Modules
-Execute on managed endpoints for local resource management:
-- **System Modules**: file, directory, package, service
-- **Security Modules**: firewall, user, group
-- **Configuration Modules**: registry (Windows), plist (macOS), config_file (Linux)
-- **Feature or Package Modules**: active_directory, MSSQL, DHCP, DNS
-- **Execution Modules**: script, command
+| Kind | Where it runs | What it manages |
+|------|--------------|-----------------|
+| `steward` | Endpoint agent | Local device resources (files, packages, firewall, services) |
+| `outpost` | Steward host acting as a proxy | Remote LAN devices that cannot run a steward (switches, printers, IoT) |
+| `workflow` | Controller workflow engine | Cloud and SaaS APIs (M365, identity providers, ticketing) |
 
-These modules run locally on stewards because they manage endpoint-specific resources (files, packages, firewall rules) that require local access.
+Cross-kind modules are not supported. The same logical resource on different host kinds is implemented as separate modules.
 
-### Module Interface
+### Four execution paths on a steward
 
-All modules implement a standard interface:
+Every byte of code that runs on a steward arrives through exactly one of these paths:
 
-```go
-type Module interface {
-    Name() string
-    Execute(ctx context.Context, config ModuleConfig) (ModuleResult, error)
-    Validate(config ModuleConfig) error
-    GetSchema() ModuleSchema
-}
-```
+1. **Modules** — publisher-signed bundle spawned as a child process, communicates via gRPC
+2. **Scripts** — operator-authored script staged to disk and executed via OS process (publisher-signed)
+3. **Inline cfg CLI** — admin mTLS-signed payload, end-to-end *(separate epic)*
+4. **Remote shell** — interactive admin session *(separate epic)*
+
+### Three trust modes
+
+The steward verifies module bundles according to the `module_trust.mode` setting in `hostname.cfg`:
+
+| Mode | Verification | When to use |
+|------|-------------|-------------|
+| `controller` | Steward accepts the controller's attestation (default) | Standard managed deployments |
+| `strict` | Steward independently verifies the publisher signature against compiled-in keys | Regulated environments, highest-value modules |
+| `bypass` | Signature verification skipped | Development only; never production |
+
+Publisher public keys are baked into the steward binary at build time and cannot be changed via `cfg push`. See [docs/architecture/modules/distribution.md](docs/architecture/modules/distribution.md) for the full trust and signing model.
+
+### Module contract
+
+- **ConfigState Interface**: Efficient field-level comparison without marshal/unmarshal overhead
+- **System-Level Testing**: Steward automatically compares current vs desired state
+- **Managed Fields**: Only specified fields are modified, others left unchanged
+- **Out-of-process isolation**: A module crash cannot corrupt steward state
+
+The gRPC wire contract is specified in [docs/architecture/modules/interface.md](docs/architecture/modules/interface.md).
+
+### Standard library
+
+The steward installer ships a closed set of stdlib modules (ADR-016): `file`, `service`, `package`, `script`, `firewall`, `patch`, `user`, `cert_trust`, `time`, `hostname`. Everything else is an `extended` module pulled on demand. See [docs/architecture/modules/README.md](docs/architecture/modules/README.md) for the membership criterion and the current module inventory, and [docs/modules/](docs/modules/README.md) for per-module operator reference.
 
 ### Desired State Configuration (DSC)
 
@@ -262,6 +303,8 @@ CFGMS implements a **zero-trust security model**:
 - **Steward-Controller**: Certificate-based mutual TLS
 - **API Access**: API key authentication
 - **User Access**: Username/password with MFA (planned)
+
+For the controller REST API identity assurance model (ADR-021: AssuranceStrong enforcement, assurance level table, and the full strong-assurance endpoint list), see [Security Architecture — Auth-Tier Policy](docs/security/architecture.md#auth-tier-policy).
 
 ### Authorization
 
@@ -331,6 +374,71 @@ Designed for:
 - 100+ clients per MSP
 - Multi-region deployment
 - High availability (Commercial edition)
+
+## Platform Architecture
+
+### Cross-Platform Design Philosophy
+
+CFGMS implements a **platform-agnostic core** with **platform-specific optimizations**:
+
+- **Unified Business Logic**: Core configuration management logic works identically across platforms
+- **Platform-Specific Collectors**: Native system information gathering (WMI on Windows, syscalls on Unix)
+- **Adaptive Module System**: Modules automatically adapt to platform capabilities and constraints
+- **Consistent API**: Same REST API and gRPC-over-QUIC transport protocol regardless of underlying platform
+
+### Platform-Specific Implementations
+
+#### Windows
+
+- **WMI Integration**: Native Windows Management Instrumentation for system data
+- **PowerShell Commands**: Advanced system configuration via PowerShell execution
+- **Windows Services**: Native service management and health monitoring
+- **Registry Management**: Direct Windows Registry manipulation for configuration
+- **ACL Support**: Windows Access Control List integration for security
+
+#### Unix-like (Linux/macOS)
+
+- **Syscall Integration**: Direct system call access for efficient data collection
+- **Package Manager Integration**: Native support for apt, yum, brew, etc.
+- **POSIX Compliance**: Full POSIX file system and process management
+- **Process Control**: Advanced Unix process management and signal handling
+- **Network Stack**: Native network interface and routing table access
+
+### Deployment Pattern
+
+```
+                    ┌─────────────────────┐
+                    │   Linux Controller  │
+                    │   (Primary Target)  │
+                    │                     │
+                    │ - High Performance  │
+                    │ - Container Ready   │
+                    │ - 50k+ Stewards     │
+                    └──────────┬──────────┘
+                               │ mTLS
+           ┌───────────────────┼───────────────────┐
+           │                   │                   │
+    ┌──────▼──────┐    ┌──────▼──────┐    ┌──────▼──────┐
+    │   Linux     │    │   Windows   │    │   macOS     │
+    │  Stewards   │    │  Stewards   │    │  Stewards   │
+    │             │    │             │    │             │
+    │ AMD64/ARM64 │    │ AMD64/ARM64 │    │ ARM64 (M1+) │
+    └─────────────┘    └─────────────┘    └─────────────┘
+```
+
+For detailed platform support information, see [docs/deployment/platform-support.md](docs/deployment/platform-support.md).
+
+## Monitoring and Observability
+
+CFGMS includes comprehensive monitoring capabilities:
+
+- **Distributed Tracing**: OpenTelemetry-based tracing with correlation IDs
+- **Structured Logging**: JSON logs with trace correlation
+- **System Metrics**: Resource usage and application performance monitoring
+- **Third-Party Integration**: Prometheus, Grafana, ELK stack, Jaeger support
+- **REST API**: Monitoring endpoints for external system integration
+
+See the [Monitoring Guide](docs/monitoring.md) for detailed configuration and usage.
 
 ## Design Principles
 
@@ -428,6 +536,11 @@ See [pkg/README.md](pkg/README.md) for provider development guidelines and [docs
 
 ## Additional Resources
 
+- [Documentation index](docs/README.md) - Every documentation directory
+- [Operating model](docs/architecture/operating-model.md) - Runtime behaviour, failure modes, component roles
+- [Steward configuration](docs/architecture/steward-configuration.md) - `hostname.cfg` format and options
+- [Terminology](docs/terminology.md) - Component names and definitions
+- [REST API reference](docs/api/rest-api.md) - Endpoint documentation
 - **Project Website**: https://cfg.is
 - **Documentation**: https://docs.cfg.is
 - **GitHub Repository**: https://github.com/cfg-is/cfgms

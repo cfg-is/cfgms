@@ -161,3 +161,8 @@ short-lived rolling tokens, explicit connect per session, controller-side revoca
 ## Reference
 
 - [Platform Support](platform-support.md) — supported operating systems, architectures, and platform-specific notes
+- [cfg CLI Install Guide](cfg-install.md) — installing the `cfg` binary on Linux, macOS, and Windows
+- [Fleet Upgrades](fleet-upgrades.md) — upgrading steward binaries across a fleet with the `cfg` CLI
+- [Hyper-V Host Role](hyperv-host-role.md) — targeting Hyper-V hosts by tag with the `hyperv-host` role
+- [Release Artifact Verification](release-artifact-verification.md) — verifying signed release artifacts
+- [Steward Registration-Refresh Management](steward-refresh-management.md) — re-admitting stewards whose mTLS certificate expired offline
