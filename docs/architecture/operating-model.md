@@ -83,10 +83,9 @@ Stewards' own heartbeat-driven loops also notice config divergence via DNA hash 
 Safety against bad configs comes from operator-controllable primitives:
 
 - **Targeting precision** — a cfg explicitly lists which stewards / groups / tenant paths / DNA-attributes it applies to. A bad change is bounded by what it was authored to target.
-- **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists. v1 is convention; auto-progressive ring machinery is a future enhancement.
+- **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists.
 - **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status.
-- **E-stop (planned)** — `cfg config halt <id>` cancels remaining queued sends for a config.
-- **Rollback (planned CLI; underlying infrastructure exists)** — restore a previous cfg version via `features/controller/api/rollback_handler.go`.
+- **Rollback** — `cfg config rollback <steward-id>` restores a previous cfg version via `features/controller/api/rollback_handler.go`.
 
 ## Component Roles
 
@@ -263,17 +262,6 @@ risk instead, and both are enforced, not advisory:
   attempt is itself audited as a bound violation, not silently dropped — an operator
   attempting to exceed the bound is a signal worth keeping in the trail, not a benign
   no-op.
-
-### Outpost (Future)
-
-Regional infrastructure component deployed at site level. Two roles:
-
-1. **Proxy cache** — Caches binaries, packages, and cfg artifacts used by multiple stewards at the site, reducing WAN bandwidth and speeding up deployments
-2. **Network operations** — Manages agentless endpoints that can't run a steward (switches, firewalls, APs, printers) via SSH, SNMP, and vendor APIs. Also performs network scans and topology discovery
-
-The outpost runs **outpost-kind modules** (`executors: [outpost]`) to manage remote LAN devices. Outpost modules run on the outpost host and use the outpost as a proxy agent for devices that cannot run a steward. The outpost module runtime is the same gRPC-based runtime as the steward, scoped to the outpost process.
-
-Reports to controller. Not yet implemented.
 
 ## Failure Modes
 
@@ -463,7 +451,7 @@ Operators interact with CFGMS through layered UX surfaces.
 
 **`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows. `cfg steward logs` is available but returns 501 until a log-pull transport is wired.
 
-**Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
+**Web UI.** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows remain CLI-only.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
 

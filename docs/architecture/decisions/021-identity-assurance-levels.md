@@ -966,29 +966,20 @@ The bundle's certificate carries `AdminMarkerOID` (`pkg/cert/admin_marker.go`)
 and — for a `--root-scoped` bundle — also `RootScopeMarkerOID`. It never
 carries `PayloadSigningMarkerOID` (`pkg/cert/payload_signing_marker.go`):
 `IssueAdminBundle`'s `TemplateModifier` composes only the admin marker and,
-conditionally, the root-scope marker, on every path (Epic #3711 D4). Once signer
-verification positively requires the payload-signing marker, a steward will
-refuse to execute a payload whose signer lacks it, and the bootstrap credential
-— however it is obtained, copied, or misused — will not be able to reach code
-execution on a managed endpoint. That is the confinement Epic #3711 D4 names:
-*"a credential whose private key the controller has held cannot reach an
-endpoint."* It is a stated intent, not a shipped control:
-
-> **[GAP: the positive payload-signing-marker requirement is not yet enforced —
-> see Epic #3711, Story #3696. Both signer-verification sites accept any
-> admin-marked certificate and never consult the payload-signing marker:
-> `verifyOperatorCert` (`features/steward/commands/execute_script.go`) for
-> steward-side script execution, and the operator-signature check in
-> `features/controller/api/handlers_runs.go` for controller-side ad-hoc runs.
-> Both test `cert.HasAdminMarker`; `cert.HasPayloadSigningMarker`
-> (`pkg/cert/payload_signing_marker.go`) has no non-test caller repo-wide, and
-> `SetPayloadSigningMarker` has no issuance path yet. `IssueAdminBundle` does
-> stamp `AdminMarkerOID`, `steward:execute-scripts` carries no
-> `RequireUserPresence`, and the bootstrap principal is `ImplicitAdmin` — so
-> until #3696 lands, a bootstrap bundle **can** authorise endpoint code
-> execution. The bundle's absence of the payload-signing marker (locked by
-> `TestIssueAdminBundle_NeverCarriesPayloadSigningMarker`) is a precondition for
-> this confinement, not the confinement itself.]**
+conditionally, the root-scope marker, on every path (Epic #3711 D4). Signer
+verification positively requires the payload-signing marker at both sites
+(Story #3696): `verifyOperatorCert` (`features/steward/commands/execute_script.go`)
+for steward-side script execution and the operator-signature check in
+`features/controller/api/handlers_runs.go` for controller-side ad-hoc runs both
+call `cert.HasPayloadSigningMarker` and reject a signer that lacks it. The
+marker is issued only through `features/controller/api/handlers_signing_credential.go`.
+A steward therefore refuses to execute a payload whose signer lacks the marker,
+and the bootstrap credential — however it is obtained, copied, or misused —
+cannot reach code execution on a managed endpoint. That is the confinement Epic
+#3711 D4 names: *"a credential whose private key the controller has held cannot
+reach an endpoint."* The bundle's absence of the payload-signing marker (locked
+by `TestIssueAdminBundle_NeverCarriesPayloadSigningMarker`) is the precondition
+the verification sites enforce.
 
 The same certificate also cannot approve a credential enrolment or renew
 itself. Both are catastrophic, credential-granting actions and, like

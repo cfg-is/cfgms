@@ -161,12 +161,6 @@ If the signing key is suspected compromised:
 2. Bring offline stewards online as soon as possible so refresh-on-connect can deliver
    the new cert.
 
-3. If a steward cannot reconnect and its cert is known compromised, revoke its client
-   certificate:
-   ```bash
-   # (future: cfg controller steward revoke --id <steward-id>)
-   ```
-
 ### Offline Steward Recovery
 
 If a steward was offline during rotation and reconnects after the overlap window:

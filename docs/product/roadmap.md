@@ -4,7 +4,7 @@
 
 This document outlines the development roadmap for the Configuration Management System (CFGMS). It provides a clear vision for the project's development, including milestones, features, and release planning, incorporating recent strategic adjustments to better align with MSP market voids and core product vision.
 
-**Last Updated**: 2026-09-10
+**Last Updated**: 2026-09-22
 
 ## Versioning Strategy
 
@@ -585,6 +585,25 @@ for the design context they carry — the epic body is authoritative for scope.
 >
 > **Twin/DEX foundation:** the module → OSquery → baseline-DNA → asset-page chain below **is** the Tier-1/Tier-2 foundation of the [Digital Twin & DEX tiered rollout](#digital-twin--digital-employee-experience-dex--tiered-rollout) in Future Features. Entries are tagged with their downstream consumer(s) and tier so the foundation work is built for its end-state, not as isolated plumbing.
 
+### Captured 2026-09-22 — gaps moved out of the docs
+
+Documentation describes only what exists. The 2026-09-21 documentation cleanup removed every "not yet implemented / planned / not possible" note from live docs; the ones that describe real, wanted capability are captured here. Each is capture-now/decompose-later. Suggested homes are notes, not commitments.
+
+- [ ] **Controller state backup and restore CLI** — `cfg backup` / `cfg restore` for the full controller state (config store, secrets, audit, blob) across the flatfile, sqlite and database providers, usable online. Today the documented path is a cold copy of the data directory with the controller stopped. Suggested home: v0.10.5 or the next operations milestone. `cms`
+- [ ] **Steward failover across controller cluster peers** — a steward holds exactly one controller URL (baked at build time) and retries that node indefinitely; there is no failover to a cluster peer. Needs a peer-list discovery mechanism consistent with the any-node service model (ADR-031) and the baked-URL trust anchor (ADR-013). Suggested home: after the cluster beta. `cms`
+- [ ] **Rollback: progressive rollback, retry, approval and verification** — the unbuilt half of the original rollback design: canary/progressive rollback across rings with auto-halt and rollback-of-rollback; automatic retry with backoff, fallback and alerts; resume after network failure; multi-level time-limited approval workflow with per-rollback-type permissions and emergency override; post-rollback health and service verification with anomaly alerts; steward-reported progress; controller rollback reports; batched multi-device execution with pre-staging; chaos and performance test programmes. What shipped is described in `docs/architecture/rollback-design.md`; this entry is the remainder. `cms`
+- [ ] **Workflow debug: rollback and live WebSocket debugging** — the workflow debug system has execution tracing; add step-level rollback and a live WebSocket debug stream for the Workflow Studio. `workflow`
+- [ ] **Advanced configuration inheritance** — conditional inheritance (apply a fragment when a predicate on the target's DNA holds), config templates, and dynamic environment expressions. Depends on the DNA/twin foundation for the predicate source. `cms` `twin`
+- [ ] **`user` module credential distribution** — a secrets-distribution design so the `user` module can set and rotate local account passwords from cfg without cleartext on disk anywhere. Ties to ADR-030 (secret material at rest) and the steward keychain. `cms`
+- [ ] **`network_activedirectory` write path** — the outpost-kind AD module is read-only today; add create/modify for users, groups and OUs, plus the Exchange object, ADFS and DirSync-notification surfaces the module README described. `directory`
+- [ ] **Terminal session administration** — list and terminate remote-shell sessions from `cfg` and the REST API, and a controller config key for the session cap and idle timeout. `cms` `web`
+- [ ] **Windows Credential Manager path for the admin bundle** — the Tier-1 bringup doc assumed a Windows keychain path that does not exist; the `cfg` credential store on Windows needs a Credential Manager backend equal to the macOS/Linux keychain path. Windows-first priority applies. `cms`
+- [ ] **Stdlib module platform coverage** — `firewall` has no Windows or macOS backend (stdlib, Windows-first: high priority); `patch` has no Linux or macOS backend; `cert_trust` has no RPM-family trust-store backend; `file` has no `type: symlink`. One story per backend. `cms`
+- [ ] **`script` module publisher PKI verification** — signature verification in the module is basic; bring it to the full publisher chain described in `docs/guides/script-signing-ci.md` and ADR-006, so the two documents describe the same mechanism. `cms`
+- [ ] **`github_runner` module on Linux and macOS** — the executor exists for Windows only. `cms`
+- [ ] **`activedirectory` module custom schema extensions** — support custom AD schema attributes in the steward-kind AD module. `directory`
+- [ ] **DNA collector attribute gaps** — Windows motherboard serial, Linux firewall state, macOS `domain_joined` / `domain_name`, a unified `encryption_state`, macOS AV products, Linux `certificate_info`. One story each, or one small epic under the observe-DNA work (ADR-024). `twin` `dex`
+
 - [ ] **Asset detail page — Task Manager + Services views** — The Web UI asset page needs a live Windows Task Manager equivalent (running processes with per-process CPU/memory/disk/network) and a `services.msc` equivalent (service enumeration with state + start/stop/restart control). Requires new steward-side **monitor streams** (process table, per-process resource metrics, service inventory + state) surfaced over the data plane and exposed through the backend API for the Web UI to consume. *Note:* these live views are **telemetry, not DNA** (ADR-017 excludes ephemeral state from the hashed DNA); live service read/control also overlaps the `service` module's desired-state enforcement — clarify the boundary. *Filed as:* **Epic #2738** (Web UI live operations — remote shell + live steward telemetry), decomposed. The read side shipped early: the asset page's Live Activity tab streams the process table and service list over `/api/v1/telemetry/ws/{id}`; the control side (kill process, start/stop/restart service) and the Shell tab remain. · **Tags:** `dex`, `twin`, `web` · **Tier 2** — this is DEX collection v0 (the endpoint experience-signal seed).
 
 - [x] **Full OSquery support** — Integrate osquery as the **unmanaged-host-fact** data source for DNA plus ad-hoc fleet queries. Per ADR-017, osquery feeds DNA only through a **curated stable-fact allowlist** (`host:*` fragments, observe-only) — never its dynamic tables — and the specific query list is gated on the stdlib set being confirmed (ADR-016). Decisions remaining: bundled vs. host-detected binary, scheduling, security envelope. *Filed as:* **Epic #2855** (OSquery integration — observe-only host facts via curated allowlist + ad-hoc fleet queries), awaiting decomposition; sequenced **before** baseline DNA. · **Tags:** `twin`, `cms` · **Tier 1–2** — host-fact source feeds both baseline DNA and later twin *discovery of the undeclared*.
@@ -643,8 +662,8 @@ Multi-layered validation approach:
 
 ## Version Information
 
-- **Document Version**: 4.5
-- **Last Updated**: 2026-09-10
+- **Document Version**: 4.6
+- **Last Updated**: 2026-09-22
 
 ### Related Documentation
 

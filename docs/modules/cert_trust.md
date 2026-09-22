@@ -21,7 +21,7 @@ No private key material is handled. Trust-store entries are public certificates 
 | Windows | ✓ | ✓ | ✓ | `certutil.exe -addstore/-delstore Root` |
 | macOS | ✓ | ✓ | ✓ | `security add-trusted-cert / delete-certificate` (System keychain) |
 
-**Linux note:** This module targets Debian-family distributions (Debian, Ubuntu, and derivatives). RPM-based distributions (RHEL, Fedora, CentOS) use a different trust store path and refresh command and are not supported in this version.
+**Linux note:** This module targets Debian-family distributions (Debian, Ubuntu, and derivatives).
 
 **Privilege requirement:** All platforms require administrator/root privileges to modify the system trust store.
 

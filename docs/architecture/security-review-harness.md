@@ -655,7 +655,7 @@ names which of the step's `hypotheses` this finding resulted from — a finding 
 `candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
 finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
-**KNOWN GAP: two findings from ONE lane at the same key still merge (Issue #4134).** Measured on
+**Two findings from ONE lane at the same key merge (Issue #4134).** Measured on
 sweep `2026-09-16T1843Z-a17e6fcc`: 107 same-lane keys held two or more findings, swallowing 116 of
 the 2,079 occurrences that reach grouping — **5.6%**. A lane reporting two findings is that lane
 asserting they are two things, and merging them overrules the only judgement in the system that

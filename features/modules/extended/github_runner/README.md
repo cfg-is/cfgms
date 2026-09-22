@@ -159,9 +159,7 @@ auto-derived names. No command-string composition, no `iex` / `-Command` /
 
 ## Platforms
 
-Linux (systemd) and Windows (SCM), amd64 + arm64. On other platforms the service
-executor is a stub returning `ErrUnsupportedPlatform`, so the package still
-compiles everywhere.
+Linux (systemd) and Windows (SCM), amd64 + arm64.
 
 ## Files
 

@@ -68,7 +68,7 @@ supervise loop continues rather than crashing (the steward child is unaffected
 by a missing SCM entry until the next reboot). This behavior is Windows-only —
 the launcher's supervise loop no-ops the check on Linux/macOS.
 
-**Known limitation (Issue #4159):** `DeleteService` only *marks* a registration
+**SCM delete-pending window:** `DeleteService` only *marks* a registration
 for deletion; the SCM does not purge it until every reference to it — including
 the running service instance itself — is gone. Confirmed live: a registration
 deleted while its service is still running keeps answering as present (both
@@ -237,7 +237,7 @@ The steward verifies module bundle signatures according to the `module_trust.mod
 
 In `strict` mode, the trusted publisher set is:
 1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push.
-2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (v1: by name only; key material lookup from a durable trust store is future work).
+2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (by name).
 
 **Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
 
@@ -357,9 +357,7 @@ Fragments are sourced by class:
 > partition step that reads the already-collected flat attribute map. The gatherers are reused
 > unmodified. The `commonpb.DNA.attributes` proto field (the legacy flat surface) was retired in
 > Issue #3331; all controller consumers now project attributes from `DNA.Fragments` via
-> `service.FlattenDNAFragments`. The osquery integration will later **swap the source** of the
-> same `host:*` fragment ids — a source change only, invisible to fragment consumers, deferred
-> to a follow-on epic.
+> `service.FlattenDNAFragments`.
 
 Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
@@ -392,12 +390,11 @@ registry (`features/controller/clusterregistry`) reads from `StewardData.DNAFrag
 and decodes the canonical bytes via `DecodeCanonicalFragment` to extract role
 ownership.
 
-> **Wire protocol note:** Fragment transmission steward→controller via
-> `DNATransfer` / `reassembleDNA` is deferred to a follow-on story; the fragment
-> wire shape is defined but not yet wired. The identity check
-> (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`) applies to the
-> full DNA sync and continues to protect all DNA — including any future fragment
-> payloads — from spoofing.
+> **Wire protocol note:** Fragment transmission steward→controller is carried
+> by `DNATransfer` and reassembled by `reassembleDNA` (`dna_handler.go`). The
+> identity check (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`)
+> applies to the full DNA sync and protects all DNA — fragment payloads
+> included — from spoofing.
 
 A resource that leaves monitoring (module close, steward shutdown) is evicted
 from the cache, so its flat keys disappear from the next collected map and its
@@ -832,27 +829,21 @@ How a steward joins a controller.
 
 The steward binary is built with the controller's URL compiled in at link time (`-ldflags="-X main.ControllerURL=..."`). A given steward binary will only ever talk to its compile-time controller. Scope: per controller (or controller cluster), not per tenant — one steward binary serves all tenants the controller manages.
 
-A steward binary today connects to exactly one controller URL. Multi-controller deployments — where a steward might fail over between geographically distributed controllers (e.g., `east.cfg.ms`, `west.cfg.ms`) — are not yet supported. [GAP: multi-controller / subdomain-matching binary support — still open, re-confirmed live 2026-08-20 by story #3096; see `docs/testing/controller-ha-real-cluster-runbook.md` §6]
+A steward binary connects to exactly one controller URL.
 
-> The citation on this gap previously pointed at issue #1517, which is closed and
-> was **controller-trust anchoring** (ADR-013: install-time vs compile-time trust
-> options), not multi-controller failover. That was a mis-citation, corrected here.
+**Behaviour in a controller cluster (story #3096).** Measured against the real
+3-node cluster, a single controller URL survives a *leader* failover. A steward
+attached to a surviving node keeps its gRPC-over-QUIC ControlChannel open across
+a Raft re-election and misses no heartbeats — the leader changing is invisible
+to it, because every node serves steward traffic directly against the shared
+backend and no request is forwarded to the leader. Measured: leader SIGKILLed,
+re-election 12.02s, steward's next heartbeat landed 6s after the kill, zero
+reconnects (`test/e2e/ha/steward_continuity_real_test.go`).
 
-**What story #3096 established about the scope of this gap.** Measured against the
-real 3-node cluster, a single controller URL is **not** a barrier to
-surviving a *leader* failover. A steward attached to a surviving node keeps its
-gRPC-over-QUIC ControlChannel open across a Raft re-election and misses no
-heartbeats — the leader changing is invisible to it, because every node serves
-steward traffic directly against the shared backend and no request is forwarded
-to the leader. Measured: leader SIGKILLed, re-election 12.02s, steward's next
-heartbeat landed 6s after the kill, zero reconnects
-(`test/e2e/ha/steward_continuity_real_test.go`).
-
-The gap therefore bites in exactly one case: when the steward's **own** node is
-the one that fails. There is no second URL to fall back to, so that steward is
-offline until its node returns. The existing options are an LB/VIP in front of
-the cluster or per-steward node assignment; neither is built. Both are recorded,
-with the evidence, in runbook §6.
+When the steward's **own** node fails, the steward retries that URL until the
+node returns. To keep stewards attached through a node outage, place an LB/VIP
+in front of the cluster and point `--controller-url` at it; see runbook §6 and
+the [controller cluster walkthrough](../deployment/controller-cluster/walkthrough.md).
 
 ### Registration Credentials
 

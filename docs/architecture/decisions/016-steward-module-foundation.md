@@ -28,7 +28,7 @@ features/modules/
 There is no build-level or directory-level boundary between "ships in the installer" and "pulled on demand." A survey done for this ADR found:
 
 - All six stdlib modules build (`cmd/main.go` present in each).
-- **`patch` has no `module.yaml`** — the only stdlib module missing a manifest, so it is not a fully-declared bundle under ADR-006. It also carries a `stub_patch_manager.go` whose real-vs-placeholder status is unverified.
+- All ten stdlib modules carry a `module.yaml` manifest (`features/modules/stdlib/*/module.yaml`), so each is a fully-declared bundle under ADR-006.
 
 "Builds" is therefore not the same as "is a compliant, fully-declared, installer-shipped bundle." We need an enforceable definition of stdlib completeness, not a one-time cleanup.
 
@@ -53,7 +53,7 @@ The standard library is exactly these **ten** modules:
 | `package` | OS package installation/removal | exists |
 | `script` | Staged, signed script execution — **execution primitive** (path 2) | exists |
 | `firewall` | Host firewall rules | exists |
-| `patch` | OS patch/update compliance | exists (no `module.yaml`, stub unverified) |
+| `patch` | OS patch/update compliance | exists |
 | `user` | Local users & groups, membership, password/lock state, disable defaults | **net-new** |
 | `cert_trust` | System trust store — install/trust CA & certs; keeps the CFGMS mTLS chain healthy fleet-wide | **net-new** |
 | `time` | Timezone + NTP/time-sync (skew breaks Kerberos, cert validation, log correlation) | **net-new** |

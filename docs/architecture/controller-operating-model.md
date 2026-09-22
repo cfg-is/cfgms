@@ -1001,9 +1001,6 @@ Integrations are organized by type. Initial integrations focus on MSP operationa
 | **Distribution / Licensing** | License provisioning, reconciliation, billing | Distributor marketplaces |
 | **Cloud Identity** | User/group management, policy enforcement | M365, Azure AD, Google Workspace |
 | **Endpoint Management** | Device configuration, compliance | CFGMS stewards (Windows, Linux, macOS) |
-| **Documentation** (future) | Automated documentation updates | Knowledge base and IT documentation platforms |
-| **Automation Bridge** (future) | Extend workflows via external automation | Third-party workflow/automation platforms |
-| **AI Processing** (future) | Classification, anomaly detection, NLP | LLM and ML services |
 
 ### Design Principle: Same Mental Model
 
@@ -1093,9 +1090,6 @@ The workflow engine uses a node-based architecture where each integration is a p
 
 - **Service nodes** — PSA, distributor, cloud identity, endpoint management
 - **Logic nodes** — conditionals, loops, filters, transforms
-- **AI nodes** (future) — LLM-powered data classification, anomaly detection, natural language processing
-- **Automation bridge nodes** (future) — integration with external workflow/automation platforms
-- **Documentation nodes** (future) — automated updates to IT documentation platforms
 
 ### Workflow Engine Capabilities
 
@@ -1622,7 +1616,7 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
-| **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
+| **Orchestration** | Initiate and monitor multi-node operations |
 | **Modules** | List cached modules, approve queued bundles |
 | **Live telemetry** | `GET /api/v1/telemetry/ws/{steward_id}` — WebSocket endpoint that fans steward telemetry snapshots (process/service) to browser subscribers in real time. Requires `steward:telemetry` permission. The controller subscribes upstream to the steward (via `TelemetryRequest{subscribe=true}`) on the first browser connection and unsubscribes on the last browser disconnect, preserving the "collect only while watched" property. |
 

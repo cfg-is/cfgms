@@ -149,10 +149,9 @@ The admin bundle (`/etc/cfgms/admin.bundle.yaml`) grants full admin access to th
 controller REST API. Treat it like a root SSH key: never leave it on disk longer than
 necessary to copy it to the keychain.
 
-**Windows operators:** the steps below only cover Linux (`secret-tool`) and
-macOS (`security`) — there is no Windows keychain path yet. This is a known,
-tracked gap; until it is closed, store the bundle in your platform's own
-credential manager rather than leaving it on disk.
+**Windows operators:** the steps below cover Linux (`secret-tool`) and
+macOS (`security`). On Windows, store the bundle in the platform credential
+manager rather than leaving it on disk.
 
 **Step 1 — Copy bundle to workstation (operator machine):**
 

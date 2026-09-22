@@ -81,23 +81,6 @@ The CLI also accepts:
 | New canonical fails readiness | CLI surfaces `cutover: post-swap readiness probe failed: <reason>` | The new binary is broken. The orchestrator stopped it. The CANONICAL PORTS ARE FREE; stewards have no controller to talk to. Immediately re-run with the previous binary path, or run `cfg controller upgrade rollback` if a quarantined slot exists. |
 | `cfg controller upgrade rollback` fails | CLI surfaces a swap or spawn error | The state file still records the previously-canonical binary; re-run rollback after addressing the underlying error. |
 
-## What's NOT in this version (deferred follow-ups)
-
-- **Bundle signature verification.** The orchestrator's `Validator`
-  interface is implemented as a no-op pending epic #1882. Operators
-  must trust the binary path they supply.
-- **Stewards-stay-connected integration test.** The full
-  connected-steward-survives-upgrade test (#1920 [REQUIRED TEST])
-  needs Docker infrastructure with a real controller + steward and
-  belongs to follow-up work.
-- **Quarantined-backend running on alternate ports.** This MVP's
-  quarantine slot records only the path of the previous binary, not
-  a live process. Rollback respawns the previous binary on canonical
-  ports (another ~2s of unavailability). A future enhancement could
-  keep the previous binary RUNNING on alternate ports for instant
-  rollback, but it requires runtime port-rebind in the controller
-  server.
-
 ## See also
 
 - [Operating model — Concurrent Controller Execution](../architecture/operating-model.md)

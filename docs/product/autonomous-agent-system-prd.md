@@ -65,7 +65,6 @@ Pipeline coordination uses GitHub Issues and GitHub Projects rather than local f
 | Review queue | Directory of files | `pipeline:review` label on PR, assigned to founder. |
 | Audit trail | Git history on pipeline files | GitHub Issue / PR / comment history — richer, searchable, linked. |
 | Mobile access | None | Full — GitHub mobile, push notifications, PR assignments. |
-| Multi-person routing | Not supported | Assignee field routes blocked items to correct person automatically. |
 | Git history cleanliness | Pipeline churn pollutes code history | Pipeline state lives in GitHub — code history stays clean. |
 
 ### 3.1 What Is Lost

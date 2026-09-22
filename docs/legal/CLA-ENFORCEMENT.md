@@ -175,17 +175,7 @@ I see you've signed the CLA (your name is in CONTRIBUTORS.md) - thank you!
 Could you please check the CLA box in the PR description? This helps us track that you're aware of the CLA requirement.
 ```
 
-### 6. Automated CLA Verification (Future)
-
-**Note:** Currently CLA verification is manual. In the future, we may implement automated checking via:
-
-- **CLA Assistant Bot** - Automatically checks CONTRIBUTORS.md and comments on PRs
-- **GitHub Actions** - Workflow that verifies CLA signature
-- **Status Check** - Required check that fails if CLA not signed
-
-When automation is implemented, this guide will be updated.
-
-### 7. CLA Verification Checklist for Reviewers
+### 6. CLA Verification Checklist for Reviewers
 
 Before approving any PR with code changes:
 

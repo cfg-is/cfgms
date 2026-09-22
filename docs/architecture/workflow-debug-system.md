@@ -50,7 +50,6 @@ The CFGMS Workflow Debug System provides interactive step-by-step debugging capa
 - **Isolated debug sessions** - Each workflow execution can have independent debug sessions
 - **Session lifecycle** - Proper creation, management, and cleanup of debug sessions
 - **Multi-session support** - Multiple concurrent debug sessions
-- **Rollback capabilities** - Planned support for rolling back to previous execution states
 - **Safe testing environment** - Debug operations don't affect production workflows
 
 ## Architecture Components
@@ -101,7 +100,6 @@ type DebugEngine interface {
 
 - **REST API endpoints** - Complete HTTP API for debug operations
 - **Session management** - RESTful session creation and management
-- **Real-time updates** - WebSocket support for live debugging (planned)
 - **Authentication integration** - API key and tenant-based access control
 
 ## Debug Session Lifecycle
@@ -258,22 +256,6 @@ curl -X PUT /debug/sessions/{sessionId}/variables/retry_count \
 - **Workflow engine compatibility** - Debug system doesn't impact normal workflow performance
 - **Scalability verified** - Multiple concurrent debug sessions supported
 - **Resource limits enforced** - Debug sessions have appropriate resource constraints
-
-## Future Enhancements
-
-### Planned Features
-
-- **Rollback implementation** - Complete rollback to previous execution states
-- **WebSocket API** - Real-time debug updates via WebSocket connections
-- **Visual debugger** - Web-based visual debugging interface
-- **Advanced breakpoints** - Complex conditional breakpoints with expressions
-
-### Performance Improvements
-
-- **Lazy loading** - On-demand loading of debug information
-- **Streaming protocol** - Efficient streaming of debug data
-- **Distributed debugging** - Debug support for distributed workflow execution
-- **Debug snapshots** - Point-in-time snapshots of workflow execution state
 
 ## Conclusion
 

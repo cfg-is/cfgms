@@ -84,8 +84,6 @@ LTS versions will be designated starting with v1.0.0:
 
 ## Release Cadence
 
-### Planned Cadence
-
 - **Minor releases**: Every 6-8 weeks during active development
 - **Patch releases**: As needed for critical bug fixes
 - **Major releases**: When significant breaking changes are required
