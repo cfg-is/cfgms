@@ -4,11 +4,10 @@
 
 CFGMS, the Configuration Management System, is an open-source, zero-trust
 configuration management system for Windows, macOS, Linux, and Microsoft 365,
-built for managed service providers (MSPs) and the IT teams that run large
-fleets. You declare how each client's devices and Microsoft 365 tenant should
-be set up. CFGMS makes them match and keeps them matching. When a machine
-drifts, you know. When you change the standard, every device that should
-follow it does.
+built for managed service providers (MSPs) and IT teams that run large fleets.
+You declare how each client's devices and Microsoft 365 tenant should be set
+up. CFGMS makes them match and keeps them matching. When a machine drifts, you
+know. When you change the standard, every device that follows it changes.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
@@ -19,38 +18,35 @@ follow it does.
 ## How it works
 
 Every managed object has a **DNA** record: its exact state, versioned over
-time. CFGMS links those records into a **knowledge graph**, so it knows which
-server an application depends on, which policy set a registry key, and what
-changed on a device last Tuesday. Three engines draw on that graph:
+time. CFGMS links those records into a **knowledge graph**: which server an
+application depends on, which policy set a registry key, what changed on a
+device last Tuesday. Three engines draw on that graph:
 
 - **Live fleet query and execution.** Ask the fleet a question and get a live
   answer from every endpoint at once: which machines run a given software
-  version, who is logged in right now, which service is down. Then act on the
-  answer at the same speed, across the whole fleet, when a new attack vector
-  cannot wait for a scheduled rollout.
-- **The reactor.** Events happen: a device drifts, a user is added, a
-  certificate nears expiry. The reactor matches each event against the
-  reactions you declared and runs them.
+  version, who is logged in, which service is down. Then act on the answer at
+  the same speed when a fix cannot wait for a scheduled rollout.
+- **The reactor.** A device drifts, a user is added, a certificate nears
+  expiry. The reactor matches each event against the reactions you declared
+  and runs them.
 - **The workflow engine.** Multi-step processes built once and run for every
   tenant: onboard a user, decommission a laptop, rotate a secret across a
   client.
 
 Other tools make a technician browse to the problem. CFGMS is being built to
-bring the assembled case to them: connect an affected device or application to
-its dependencies and recent changes, identify the likely cause, and remediate
-it through the same engines that made the change. The
-[product vision](docs/product/vision.md) says why; the
+bring the assembled case to them: the affected device, its dependencies, its
+recent changes, the likely cause, and a fix through the same engines that made
+the change. The [product vision](docs/product/vision.md) says why; the
 [roadmap](docs/product/roadmap.md) says when.
 
 ## What CFGMS provides
 
 - Desired-state configuration and policy-as-code for Windows, macOS, Linux,
   and Microsoft 365
-- Configuration drift detection and enforcement, per object, over time
+- Configuration drift detection and enforcement
 - Live fleet query and execution across every managed endpoint
 - Event-driven reactions and multi-step workflow automation
-- Hierarchical multi-tenancy for MSPs and their clients, with each client's
-  data and access kept apart
+- Hierarchical multi-tenancy, with each client's data and access kept apart
 - Endpoint inventory, live telemetry, and historical state
 - Microsoft 365, Active Directory, endpoint, and infrastructure integrations
 - Zero-trust internals: mutual TLS on every internal connection, role-based
@@ -61,11 +57,11 @@ it through the same engines that made the change. The
 
 CFGMS uses three cooperating components:
 
-- **Controller** — the central control plane for configuration, orchestration,
+- **Controller.** The central control plane for configuration, orchestration,
   workflows, fleet state, APIs, and multi-tenant administration.
-- **Steward** — the agent that observes and manages a Windows, Linux, or macOS
+- **Steward.** The agent that observes and manages a Windows, Linux, or macOS
   endpoint.
-- **Outpost** — a planned local proxy and discovery component for networks and
+- **Outpost.** A planned local proxy and discovery component for networks and
   devices that cannot run a Steward.
 
 Internal control and data-plane communication uses gRPC over QUIC with mutual
@@ -100,8 +96,8 @@ architectures and [deployment docs](docs/deployment/) for other topologies.
 
 ## Security
 
-CFGMS is designed around the assumption that endpoints—and occasionally
-administrator accounts—may be compromised. Internal communication requires
+CFGMS assumes that endpoints, and sometimes administrator accounts, will be
+compromised. Internal communication requires
 mutual TLS, secrets are encrypted, executable modules are signed, authorization
 is tenant-aware, and security-relevant activity is audited.
 
@@ -129,7 +125,7 @@ covers the development workflow. Contributors must sign the
 
 [Open an issue](https://github.com/cfg-is/cfgms/issues/new) for bugs and feature
 requests. Issues labelled `internal` are locked automated pipeline items, not
-closed to contribution — see
+closed to contribution; see
 [issue classes](CONTRIBUTING.md#issue-classes--why-some-issues-are-locked).
 
 - [Documentation](docs/)

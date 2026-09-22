@@ -4,168 +4,140 @@
 
 CFGMS is the Configuration Management System: an open-source, zero-trust
 configuration management system for Windows, macOS, Linux and Microsoft 365,
-built for managed service providers (MSPs) and the IT teams that run large
-fleets. It manages one control plane's worth of endpoints and tenants, at a
-target scale of 50,000 or more endpoints per deployment. On top of the
-configuration system sit three engines, all drawing on a knowledge graph
-built from the DNA of every managed object: live fleet query and execution,
-the reactor, and the workflow engine.
+built for managed service providers (MSPs) and IT teams that run large
+fleets. The target scale is 50,000 or more endpoints per deployment, across
+many tenants. Three engines sit on top of the configuration system, all
+drawing on a knowledge graph built from the DNA of every managed object:
+live fleet query and execution, the reactor, and the workflow engine.
 
-This document says why CFGMS exists, who it is for, what it is today, and the
-direction it is building toward. The [roadmap](roadmap.md) holds the plan.
-The [architecture decision records](../architecture/decisions/README.md) hold
-the decisions. This page holds the intent those two serve.
+This page holds the intent. The [roadmap](roadmap.md) holds the plan. The
+[decision records](../architecture/decisions/README.md) hold the decisions.
 
 ## The problem
 
-An MSP technician who gets a ticket does not have the problem in front of
-them. They have a symptom on one device. The cause is somewhere in the
-device's dependencies, in a recent change, or in the tenant's configuration,
-and each of those lives in a different tool. Remote monitoring, ticketing,
-documentation, remote access and the configuration system are separate
-products with separate logins. The technician navigates between them to
-assemble the case by hand. That navigation is the waste. Senior technicians
-spend their day doing it for routine tickets, and the fleet's configuration
-drifts while nobody is looking at it.
+A technician with a ticket has a symptom on one device. The cause is in a
+dependency, a recent change, or the tenant's configuration, and each lives in
+a different tool with its own login. The technician moves between monitoring,
+ticketing, documentation, remote access and the configuration system to
+assemble the case by hand. Senior people spend their day doing this for
+routine tickets, and the fleet drifts while nobody is looking.
 
-The configuration systems that exist today were built for a single
-organisation's servers, not for one provider managing hundreds of client
-environments. They assume a trusted network, a trusted host, a trusted
-administrator. An MSP has none of those guarantees. Their management plane
-is a high-value target: a compromised MSP controller compromises every
-client at once.
+Existing configuration systems were built for one organisation's servers.
+They assume a trusted network, a trusted host and a trusted administrator.
+An MSP managing hundreds of client environments has none of those. Its
+management plane is the one target that opens every client at once.
 
 ## Who it is for
 
-**Primary: MSPs.** A provider managing many clients from one platform,
-where tenancy, delegated access and blast-radius bounds are the product,
-not a feature. The tenant model is recursive: an MSP under a distributor,
-clients under the MSP, sites under the client, with configuration
-inherited root to leaf.
+**MSPs first.** Many clients on one platform, where tenancy, delegated access
+and bounded blast radius are the product. Tenants nest: distributor, MSP,
+client, site, with configuration inherited from root to leaf.
 
-**Secondary: IT teams running their own fleet.** A single-root deployment
-of the same system, self-hosted under the AGPL.
+**IT teams running their own fleet.** The same system as a single-root,
+self-hosted deployment.
 
-**Also: the operator of a hosted CFGMS service.** The same code runs as a
-multi-tenant cell with a shared root of trust ([ADR-032](../architecture/decisions/032-saas-deployment-topology-and-trust.md)).
+**Operators of a hosted CFGMS service.** The same code as a multi-tenant cell
+with a shared root of trust ([ADR-032](../architecture/decisions/032-saas-deployment-topology-and-trust.md)).
 Single-root and multi-root are deployment shapes, not licence tiers.
 
 ## What CFGMS is
 
-CFGMS is three cooperating components:
+Three components:
 
-- **Controller** — the central control plane. Configuration store, fleet
-  orchestration, tenancy, REST API, workflow engine, web UI. Runs on Linux
-  and Windows; Linux is primary.
-- **Steward** — the agent on every managed endpoint. Converges the host to
-  its desired state, reports its observed state, and runs signed modules.
-  Runs on Windows, Linux and macOS. Windows is the first platform.
-- **Outpost** — a planned proxy for networks and devices that cannot host a
+- **Controller.** The control plane: configuration store, fleet state,
+  tenancy, REST API, workflow engine, web UI. Runs on Linux and Windows.
+  Linux is primary.
+- **Steward.** The agent on every managed endpoint. It converges the host to
+  its desired state, reports what it observes, and runs signed modules. Runs
+  on Windows, Linux and macOS. Windows is the first platform.
+- **Outpost.** A planned proxy for networks and devices that cannot host a
   steward. Not built yet.
 
 Administrators use the `cfg` command line and the REST API. The web UI is
 served by the controller and is in early development.
 
-**Desired state, expressed as DNA.** Every managed object has a
-deterministic, hashable representation of its state. Stewards converge to
-the desired DNA, report the observed DNA, and the controller keeps the
-history. Drift is the difference between the two, per object, over time.
-Saving configuration is deploying it. Safety comes from targeting, rings and
-an emergency stop, not from throttling.
+**DNA.** Every managed object has a deterministic, hashable record of its
+state. Stewards converge to the desired DNA and report the observed DNA. The
+controller keeps the history. Drift is the difference between the two, per
+object, over time. Saving configuration deploys it. Safety comes from
+targeting, rings and an emergency stop, not from throttling.
 
-**Zero trust, end to end.** Every internal connection is mutual-TLS gRPC
-over QUIC. Modules are publisher-signed and verified end to end; the
-controller never strips and re-signs. Secrets live in the OS keychain or
-encrypted at rest, never in cleartext on disk, even in development. The
-threat model assumes managed hosts may be compromised and administrator
-accounts may be phished; rarely-touched settings bound the blast radius of
-either. Code that runs on endpoints behaves like predictable administrative
-tooling: declared paths, signed binaries, no runtime code composition.
+**Knowledge graph.** CFGMS links DNA records to each other: which server an
+application depends on, which policy set a registry key, what changed on a
+device last Tuesday. The three engines read from the graph and write back
+to it.
 
-**One binary, no runtime.** Controller and steward are self-contained Go
-binaries. No interpreter, no external runtime to patch.
+**Zero trust.** Every internal connection is mutual-TLS gRPC over QUIC.
+Modules are publisher-signed and verified end to end; the controller never
+strips and re-signs. Secrets live in the OS keychain or encrypted at rest,
+never in cleartext on disk, in any environment. The threat model assumes
+managed hosts get compromised and administrator accounts get phished, and
+bounds the damage when they do. Code that runs on endpoints looks like
+ordinary administrative tooling: declared paths, signed binaries, no runtime
+code composition.
 
-**Modules as the unit of management.** Files, services, packages, scripts,
-firewall, patching, users, certificate trust, time and hostname ship as the
-standard library in the steward installer. Everything else is an extended
-module, pulled on demand and trusted through the same signing chain.
+**Modules.** Files, services, packages, scripts, firewall, patching, users,
+certificate trust, time and hostname ship as the standard library in the
+steward installer. Everything else is an extended module, pulled on demand
+and trusted through the same signing chain.
 
-**Integrations as facts.** Microsoft 365, Active Directory and endpoint
-management APIs are integrated where the code exists, and described only
-where it does.
+**One binary.** Controller and steward are self-contained Go binaries. No
+interpreter, no external runtime to patch.
 
 ## The three engines
 
-**Live fleet query and execution.** Ask the infrastructure a question and get
-a live answer in seconds, from every endpoint at once, not from a stale
-inventory. Which machines run the vulnerable version? Who is logged in right
-now? Where is this user working from today? Then act on the answer at the
-same speed: a new attack vector appears, and the whole fleet is hardened
-against it in one pass. This is distinct from rollout of desired state,
-which moves through rings; live execution is for the question and the
-response that cannot wait.
+**Live fleet query and execution.** Ask the fleet a question and get a live
+answer from every endpoint at once. Which machines run the vulnerable
+version? Who is logged in right now? Then act on the answer at the same
+speed, across the whole fleet, when a fix cannot wait for a ringed rollout.
 
-**The reactor.** Events happen: a device drifts, a user is added, a
-certificate nears expiry, a workflow fails. The reactor matches each event
-against the reactions the administrator declared and runs them.
+**The reactor.** A device drifts, a user is added, a certificate nears
+expiry. The reactor matches each event against the reactions the
+administrator declared and runs them.
 
 **The workflow engine.** Multi-step processes built once and run for every
 tenant: onboard a user, decommission a laptop, rotate a secret across a
-client. Workflow modules run on the controller against cloud APIs;
-steward and outpost modules run where the resource is.
-
-**The knowledge graph underneath.** Every managed object has a DNA record,
-its exact state, versioned over time. CFGMS links those records: which
-server this application depends on, which policy set this registry key,
-what changed on this device last Tuesday. The three engines read from the
-graph and write back to it.
+client. Workflow modules run on the controller against cloud APIs. Steward
+and outpost modules run where the resource is.
 
 ## Where it is going
 
-The direction is the **troubleshooting cockpit**: the screen that brings the
-assembled case to the technician instead of making them browse to it. A case
-starts from an affected device or application, shows its dependencies and
-recent changes from the knowledge graph, identifies the likely cause, and
-offers remediation through the same engines that made the change. Other
-tools report that something is wrong. CFGMS is built to connect the symptom
-to the cause and fix it.
+The **troubleshooting cockpit**: the screen that brings the assembled case
+to the technician. A case starts from an affected device or application,
+shows its dependencies and recent changes from the knowledge graph, names
+the likely cause, and offers remediation through the same engines that made
+the change.
 
-The longer arc, the digital twin and Digital Employee Experience layers that
-build on the same DNA foundation, is sequenced in the
-[roadmap](roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout).
-Milestones, sequencing and what is built at any moment live there. This
-document does not claim any of it is built.
+The digital twin and Digital Employee Experience layers that follow are
+sequenced in the [roadmap](roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout),
+which is also the record of what is built.
 
 ## Principles
 
 - **The threat model is the product.** Design for the compromised host and
-  the phished admin. No insecure defaults, ever, in any environment.
-- **Docs describe what exists.** A capability is documented when it ships.
-  What is coming lives in the roadmap.
-- **The CLI is the interface.** Anything an administrator can do exists as
-  a documented `cfg` command, not only as an API route.
+  the phished admin. No insecure defaults, in any environment.
+- **The CLI is the interface.** Anything an administrator can do is a
+  documented `cfg` command, not only an API route.
 - **Pluggable by default.** Storage, logging, secrets, directory and
-  transport are central providers with interchangeable backends, so the
-  same code runs as a single self-hosted controller or a hosted cell.
-- **Pre-release means clean breaks.** Until 1.0, a breaking change with a
-  clear error beats a migration shim.
+  transport are providers with interchangeable backends, so one codebase
+  runs as a self-hosted controller or a hosted cell.
+- **Clean breaks before 1.0.** A breaking change with a clear error beats a
+  migration shim.
 
 ## Non-goals
 
-- CFGMS is not a ticketing or documentation system. It integrates with
-  them; it does not replace them.
-- CFGMS does not throttle configuration delivery as a safety mechanism.
-  Safety is targeting, rings and the emergency stop.
-- CFGMS does not run unsigned or composed code on endpoints, and offers no
-  setting that makes it do so outside a development trust mode.
+- Not a ticketing or documentation system. CFGMS integrates with them.
+- No throttling as a safety mechanism. Safety is targeting, rings and the
+  emergency stop.
+- No unsigned or composed code on endpoints, and no setting that allows it
+  outside a development trust mode.
 
 ## Licensing
 
-All CFGMS code is licensed under the AGPL-3.0. Self-hosting and using it to
-manage client environments is covered by that licence. A commercial
-embedding licence is available by private agreement for third parties
-shipping CFGMS inside proprietary products. There is no separate
-"commercial edition" and no feature gated behind one. See
+All CFGMS code is AGPL-3.0. Self-hosting it to manage client environments is
+covered by that licence. A commercial embedding licence is available for
+third parties shipping CFGMS inside proprietary products. There is no
+commercial edition and no feature gated behind one. See
 [LICENSING.md](../../LICENSING.md).
 
 ---
