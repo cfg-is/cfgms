@@ -240,6 +240,8 @@ cfg steward dna acme-corp/web-01
 # Fan out to all hosts starting with 'db-' (glob must be quoted)
 cfg steward status 'db-*'
 
+# Logs from a specific host, last 50 lines
+cfg steward logs web-01 --tail 50
 ```
 
 ### Target by attribute
