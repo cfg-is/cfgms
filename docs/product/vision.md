@@ -1,10 +1,13 @@
 # CFGMS Product Vision
 
 CFGMS is the Configuration Management System: an open-source, zero-trust
-configuration management system for managed service providers (MSPs) and the
-IT teams that run large fleets. It manages Windows, Linux and macOS endpoints
-from one control plane, at a target scale of 50,000 or more endpoints per
-deployment, across many tenants.
+configuration management system for Windows, macOS, Linux and Microsoft 365,
+built for managed service providers (MSPs) and the IT teams that run large
+fleets. It manages one control plane's worth of endpoints and tenants, at a
+target scale of 50,000 or more endpoints per deployment. On top of the
+configuration system sit three engines, all drawing on a knowledge graph
+built from the DNA of every managed object: live fleet query and execution,
+the reactor, and the workflow engine.
 
 This document says why CFGMS exists, who it is for, what it is today, and the
 direction it is building toward. The [roadmap](roadmap.md) holds the plan.
@@ -89,30 +92,47 @@ module, pulled on demand and trusted through the same signing chain.
 management APIs are integrated where the code exists, and described only
 where it does.
 
+## The three engines
+
+**Live fleet query and execution.** Ask the infrastructure a question and get
+a live answer in seconds, from every endpoint at once, not from a stale
+inventory. Which machines run the vulnerable version? Who is logged in right
+now? Where is this user working from today? Then act on the answer at the
+same speed: a new attack vector appears, and the whole fleet is hardened
+against it in one pass. This is distinct from rollout of desired state,
+which moves through rings; live execution is for the question and the
+response that cannot wait.
+
+**The reactor.** Events happen: a device drifts, a user is added, a
+certificate nears expiry, a workflow fails. The reactor matches each event
+against the reactions the administrator declared and runs them.
+
+**The workflow engine.** Multi-step processes built once and run for every
+tenant: onboard a user, decommission a laptop, rotate a secret across a
+client. Workflow modules run on the controller against cloud APIs;
+steward and outpost modules run where the resource is.
+
+**The knowledge graph underneath.** Every managed object has a DNA record,
+its exact state, versioned over time. CFGMS links those records: which
+server this application depends on, which policy set this registry key,
+what changed on this device last Tuesday. The three engines read from the
+graph and write back to it.
+
 ## Where it is going
 
 The direction is the **troubleshooting cockpit**: the screen that brings the
 assembled case to the technician instead of making them browse to it. A case
 starts from an affected device or application, shows its dependencies and
-recent changes, identifies the likely cause, and offers safe remediation
-through the same configuration and workflow system that made the change.
-Other tools report that something is wrong. CFGMS is built to connect the
-symptom to the cause and fix it.
+recent changes from the knowledge graph, identifies the likely cause, and
+offers remediation through the same engines that made the change. Other
+tools report that something is wrong. CFGMS is built to connect the symptom
+to the cause and fix it.
 
-Two layers make that possible, and they are built in tiers on the DNA
-foundation that exists today ([roadmap: tiered rollout](roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout)):
-
-- **Digital twin** — a live model of the estate: typed entities, their
-  relationships, and their state over time. CFGMS already owns the
-  expensive half, actuation and desired state, that observe-only twins
-  lack.
-- **Digital Employee Experience (DEX)** — knowing whether a user's
-  experience on a device or application is degraded, and why, against fleet
-  baselines, with remediation through configuration. DEX is the twin's
-  first consumer.
-
-Milestones, sequencing and what is built at any moment are in the roadmap.
-This document does not claim any of that is built.
+The longer arc, the digital twin and Digital Employee Experience layers that
+build on the same DNA foundation, is sequenced in the
+[roadmap](roadmap.md#digital-twin--digital-employee-experience-dex--tiered-rollout).
+Milestones, sequencing and what is built at any moment live there. This
+document does not claim any of it is built.
 
 ## Principles
 

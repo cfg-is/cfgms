@@ -1,8 +1,9 @@
 # CFGMS
 
 CFGMS, the Configuration Management System, is an open-source, zero-trust
-configuration management system built for managed service providers (MSPs) and
-the IT teams that run large fleets.
+configuration management system for Windows, macOS, Linux, and Microsoft 365,
+built for managed service providers (MSPs) and the IT teams that run large
+fleets.
 
 It is designed to manage large, multi-tenant fleets across Windows, Linux, and
 macOS from a single control plane, combining desired-state configuration, policy
@@ -33,11 +34,10 @@ remediate it, not merely report that something is wrong. The
   access control, publisher-signed modules, and encrypted secrets
 - A `cfg` CLI and REST API; a controller-served web UI is in early development
 
-A digital twin — an entity graph of systems, their relationships, and their
-state over time — and Digital Employee Experience (DEX) capabilities —
-experience signals, fleet baselines, root-cause analysis, and remediation
-through the same configuration and workflow system — are planned on this
-foundation. See the
+A knowledge graph linking every managed object's DNA — its exact state,
+versioned over time — to its dependencies and changes is the foundation the
+next layers build on. Live fleet query and execution, the reactor, and the
+workflow engine draw on it. The longer arc is sequenced in the roadmap. See the
 [roadmap](docs/product/roadmap.md).
 
 ## Architecture
