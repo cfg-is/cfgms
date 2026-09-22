@@ -2,13 +2,16 @@
 
 > CFGMS manages your clients' Windows, Mac, Linux, and Microsoft 365 estates from one place, keeps every setting where you said it should be, auto-investigates problems, and answers questions about the whole fleet in seconds.
 
-CFGMS is the Configuration Management System: an open-source, zero-trust
-configuration management system for Windows, macOS, Linux and Microsoft 365,
-built for managed service providers (MSPs) and IT teams that run large
-fleets. The target scale is 50,000 or more endpoints per deployment, across
-many tenants. Three engines sit on top of the configuration system, all
-drawing on a knowledge graph built from the DNA of every managed object:
-live fleet query and execution, the reactor, and the workflow engine.
+CFGMS is an open-source current-state intelligence and configuration
+management platform for managed service providers (MSPs) and IT teams that
+run large fleets. It stands on two pillars: zero-trust configuration
+management for Windows, macOS, Linux and Microsoft 365, and live query and
+execution across every endpoint. Configuration management is one component of
+current-state intelligence, not the whole of it; larger configuration systems
+exist, and CFGMS does not compete on that axis alone. The target scale is
+50,000 or more endpoints per deployment, across many tenants. The reactor and
+the workflow engine act on what the two pillars know, through a knowledge
+graph built from the DNA of every managed object.
 
 This page holds the intent. The [roadmap](roadmap.md) holds the plan. The
 [decision records](../architecture/decisions/README.md) hold the decisions.
