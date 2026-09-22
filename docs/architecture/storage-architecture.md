@@ -119,7 +119,7 @@ The flat-file provider (`pkg/storage/providers/flatfile`) is the OSS default for
 ```
 
 **Admin responsibilities**:
-- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent. There is no `cfg backup` command.
+- Backups. CFGMS does not version at the storage layer. Use filesystem snapshots, rsync, restic, or an equivalent.
 - Filesystem durability. SSD + regular snapshots is sufficient for single-controller OSS.
 - Access control. Directory is readable/writable only by the controller process.
 

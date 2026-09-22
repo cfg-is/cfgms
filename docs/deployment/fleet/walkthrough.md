@@ -12,7 +12,7 @@ observe convergence and drift correction — end to end on fresh Linux VMs.
 - Drift observable via controller logs and metrics
 
 > **This walkthrough is the spec** that the docker fleet test (Epic #1501) validates
-> on every PR. Where a step has no CLI command yet, the REST API call is shown instead.
+> on every PR. Steps are shown as `cfg` commands or REST API calls.
 
 ## How this differs from the single-controller walkthrough
 
@@ -674,11 +674,8 @@ cat /etc/myapp/config.yaml
 > `steward.mode` field controls connectivity mode (`standalone` vs `controller`), not
 > drift behavior.
 >
-> The `Monitor` interface in `features/modules/module.go` defines real-time
-> change-detection for modules that support it. No steward module implements it; all
-> modules use the polling-based convergence loop (`Get → Compare → Set`). Real-time
-> drift notification via `Monitor()` is deferred until user demand justifies it
-> (decision recorded in #1590); there is no implementation issue.
+> All steward modules detect drift through the polling-based convergence loop
+> (`Get → Compare → Set`).
 
 ---
 
@@ -815,7 +812,6 @@ The table below collects the remaining gaps noted in this walkthrough for easy r
 
 | Gap | Issue | Phase affected |
 |-----|-------|----------------|
-| `modules.Monitor()` not implemented by any module | deferred until demand ([#1590](https://github.com/cfg-is/cfgms/issues/1590) records the decision) | Phase 8 |
 | Multi-controller / failover not supported | (backlog) | Phase 4 |
 
 ---

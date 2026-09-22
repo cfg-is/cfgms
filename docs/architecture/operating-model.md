@@ -71,7 +71,7 @@ Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOp
 ```
 
 - **Single write path.** All sources write to ConfigStore via the same path.
-- **Write triggers fanout.** A successful ConfigStore write inside `ConfigurationServiceV2.SetConfiguration` invokes the registered fanout callback (`RegisterFanoutCallback`) synchronously. There is no debounce window; burst edits each trigger fanout, and idempotency (below) absorbs the repeats.
+- **Write triggers fanout.** A successful ConfigStore write inside `ConfigurationServiceV2.SetConfiguration` invokes the registered fanout callback (`RegisterFanoutCallback`) synchronously. Burst edits each trigger fanout, and idempotency (below) absorbs the repeats.
 - **Durable queue.** Fanout uses the controller's durable job queue — the same primitive used for retries, deferred operations, and HA failover replay.
 - **Idempotency carries load.** A steward already at the target DNA hash treats a sync command as a no-op.
 - **Resource-bounded fanout.** Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
