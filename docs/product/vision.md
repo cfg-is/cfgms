@@ -1,5 +1,7 @@
 # CFGMS Product Vision
 
+> CFGMS manages your clients' Windows, Mac, Linux, and Microsoft 365 estates from one place, keeps every setting where you said it should be, auto-investigates problems, and answers questions about the whole fleet in seconds.
+
 CFGMS is the Configuration Management System: an open-source, zero-trust
 configuration management system for Windows, macOS, Linux and Microsoft 365,
 built for managed service providers (MSPs) and the IT teams that run large
