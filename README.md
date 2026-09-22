@@ -5,18 +5,10 @@
 CFGMS, the Configuration Management System, is an open-source, zero-trust
 configuration management system for Windows, macOS, Linux, and Microsoft 365,
 built for managed service providers (MSPs) and the IT teams that run large
-fleets.
-
-It is designed to manage large, multi-tenant fleets across Windows, Linux, and
-macOS from a single control plane, combining desired-state configuration, policy
-enforcement, drift detection, workflow automation, live endpoint telemetry, and a
-historical model of the systems it manages.
-
-Other tools make a technician browse to the problem. CFGMS is being built to
-bring the assembled case to them: connect an affected device or application to
-its dependencies and recent changes, identify the likely cause, and safely
-remediate it, not merely report that something is wrong. The
-[product vision](docs/product/vision.md) says why.
+fleets. You declare how each client's devices and Microsoft 365 tenant should
+be set up. CFGMS makes them match and keeps them matching. When a machine
+drifts, you know. When you change the standard, every device that should
+follow it does.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
@@ -24,23 +16,46 @@ remediate it, not merely report that something is wrong. The
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/cfg-is/cfgms/badge)](https://securityscorecards.dev/viewer/?uri=github.com/cfg-is/cfgms)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
+## How it works
+
+Every managed object has a **DNA** record: its exact state, versioned over
+time. CFGMS links those records into a **knowledge graph**, so it knows which
+server an application depends on, which policy set a registry key, and what
+changed on a device last Tuesday. Three engines draw on that graph:
+
+- **Live fleet query and execution.** Ask the fleet a question and get a live
+  answer from every endpoint at once: which machines run a given software
+  version, who is logged in right now, which service is down. Then act on the
+  answer at the same speed, across the whole fleet, when a new attack vector
+  cannot wait for a scheduled rollout.
+- **The reactor.** Events happen: a device drifts, a user is added, a
+  certificate nears expiry. The reactor matches each event against the
+  reactions you declared and runs them.
+- **The workflow engine.** Multi-step processes built once and run for every
+  tenant: onboard a user, decommission a laptop, rotate a secret across a
+  client.
+
+Other tools make a technician browse to the problem. CFGMS is being built to
+bring the assembled case to them: connect an affected device or application to
+its dependencies and recent changes, identify the likely cause, and remediate
+it through the same engines that made the change. The
+[product vision](docs/product/vision.md) says why; the
+[roadmap](docs/product/roadmap.md) says when.
+
 ## What CFGMS provides
 
-- Desired-state configuration and policy-as-code
-- Configuration drift detection and enforcement
-- Workflow and event-driven automation
-- Hierarchical multi-tenancy for MSPs and their clients
+- Desired-state configuration and policy-as-code for Windows, macOS, Linux,
+  and Microsoft 365
+- Configuration drift detection and enforcement, per object, over time
+- Live fleet query and execution across every managed endpoint
+- Event-driven reactions and multi-step workflow automation
+- Hierarchical multi-tenancy for MSPs and their clients, with each client's
+  data and access kept apart
 - Endpoint inventory, live telemetry, and historical state
 - Microsoft 365, Active Directory, endpoint, and infrastructure integrations
 - Zero-trust internals: mutual TLS on every internal connection, role-based
   access control, publisher-signed modules, and encrypted secrets
 - A `cfg` CLI and REST API; a controller-served web UI is in early development
-
-A knowledge graph linking every managed object's DNA — its exact state,
-versioned over time — to its dependencies and changes is the foundation the
-next layers build on. Live fleet query and execution, the reactor, and the
-workflow engine draw on it. The longer arc is sequenced in the roadmap. See the
-[roadmap](docs/product/roadmap.md).
 
 ## Architecture
 
