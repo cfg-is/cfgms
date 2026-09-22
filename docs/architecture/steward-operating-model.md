@@ -923,7 +923,7 @@ The convergence loop behaviour is controlled by fields in the cfg:
 | `steward.converge_interval` | `30m` | How often the steward re-converges against the cfg. Accepts any Go duration string: `"5m"`, `"30m"`, `"1h"`, etc. |
 | `steward.drift_mode` | `apply` | How the steward handles detected drift. `apply`: correct drift with `Set()` + `Verify()`. `monitor`: emit `drift.detected.monitor` event, skip `Set()` and `Verify()`. **Controller-delivered only** — local file value is ignored. |
 
-Industry reference intervals: CFEngine 5 min, DSC 15 min, Chef/Puppet 30 min.
+Typical convergence intervals for configuration-management agents fall in the 5–30 minute range; the `30m` default sits at the conservative end of that range.
 
 ## Deployment-Independent Behavior
 

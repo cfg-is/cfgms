@@ -12,7 +12,7 @@
 
 ## Context
 
-`cfg` is a **stateless, invoke-and-exit** admin CLI (the kubectl/gh class): each subcommand independently resolves an API client and makes HTTPS calls to the **controller's REST API**, managing the controller and managing stewards **only through the controller**. It has no resident process between invocations.
+`cfg` is a **stateless, invoke-and-exit** admin CLI: each subcommand independently resolves an API client and makes HTTPS calls to the **controller's REST API**, managing the controller and managing stewards **only through the controller**. It has no resident process between invocations.
 
 Today, authentication is the admin **mTLS bundle**, auto-discovered from disk (`--bundle` flag → `CFGMS_ADMIN_BUNDLE` → `os.UserConfigDir()/cfgms/admin.bundle.yaml` → system path). This works, but it means **using `cfg` at all silently exercises the long-lived admin credential on every invocation** — the credential is standing, always-usable authority. For a tool that pushes config, modules, and scripts to endpoints through the controller, an admin credential that is silently usable for its entire lifetime is a large blast radius if the workstation, account, or controller is compromised.
 

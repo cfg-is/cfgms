@@ -17,7 +17,7 @@ This is **not** about Go source naming — that follows standard Go (see
 | PowerShell transport functions + params | `PascalCase` / `-PascalCase` | `Cfgms-CopyToSeedVHD -StewardSrc` |
 | Module manifest cmdlet / behavioral-envelope references | `PascalCase` | `Get-VM`, `Add-ClusterVirtualMachineRole` |
 
-Rationale: declarative config lives next to cloud-init, Kubernetes, Ansible, and
+Rationale: declarative config lives next to cloud-init, Kubernetes, and
 GitHub Actions — all `snake_case`; matching them keeps CFGMS config unsurprising and
 lint-clean. The scripting surface is PowerShell, so it stays `PascalCase` — a
 PowerShell-native operator writes modules/scripts in `PascalCase` and pushes

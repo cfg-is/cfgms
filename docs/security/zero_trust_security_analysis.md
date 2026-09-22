@@ -292,7 +292,6 @@ After comprehensive analysis, no critical security vulnerabilities were identifi
 **Processing Time Limits**
 
 - Maximum evaluation time enforced (15ms for DoS protection)
-- Industry-leading performance (faster than AWS IAM, Google Cloud IAM, Auth0)
 - Timeout handling with fail-secure behavior
 - Background processing for non-blocking operations
 
