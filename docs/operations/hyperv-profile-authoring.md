@@ -326,10 +326,8 @@ profile (stores KEY name)  ──▶  secrets provider lookup at render time  �
                                           rendered answer file (on transient seed)
 ```
 
-There is no `cfg` command that writes a secret value. ADR-010 rejected
-per-steward manual secret injection and any new secret-setting CLI tooling; secret values
-reach the steward's secrets provider only through controller-to-steward config
-sync. Author a `{{ secret "key-name" }}` reference only for a key that sync
+Secret values reach the steward's secrets provider only through
+controller-to-steward config sync (ADR-010). Author a `{{ secret "key-name" }}` reference only for a key that sync
 already delivers to the Hyper-V steward.
 
 Use placeholder values in any documentation or example; never paste a real secret.

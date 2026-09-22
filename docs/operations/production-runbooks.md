@@ -186,9 +186,8 @@ loaded at startup.
 
 **When to use**: Terminal sessions stuck, resource exhaustion
 
-There is no CLI command or REST endpoint that lists or terminates terminal
-sessions. Terminal sessions end when the WebSocket closes or when
-the terminal manager's session timeout elapses; restarting `cfgms-controller` ends all of them.
+Terminal sessions end when the WebSocket closes or when the terminal
+manager's session timeout elapses; restarting `cfgms-controller` ends all of them.
 
 Login sessions (cfg CLI and web) are a separate object and can be managed:
 
@@ -228,16 +227,14 @@ cfg registration pending
 cfg registration approve <pending_id>
 ```
 
-There is no command that regenerates a steward's certificate from the
-controller side. The steward requests a refresh itself; approve it with
+The steward requests its own certificate refresh; approve it with
 `cfg steward refresh approve`.
 
 ### 5. Database Maintenance
 
 **When to use**: Scheduled maintenance, performance issues
 
-There is no `cfg backup` command. Before maintenance, take the complete cold
-controller-state backup documented in
+Before maintenance, take the complete cold controller-state backup documented in
 [`tier1-controller-bringup.md`](tier1-controller-bringup.md#cold-backup).
 Backing up only SQLite is not sufficient: flat-file data, certificates, the
 configuration, and the external secrets key are also required for recovery.
@@ -322,7 +319,6 @@ sqlite3 /var/lib/cfgms/cfgms.db "PRAGMA integrity_check;"
 
 2. **Mitigation Actions**
 
-   There is no CLI command that changes a controller setting at runtime.
    Connection limits are keys in `/etc/cfgms/controller.cfg` and take effect
    on restart:
 
@@ -402,9 +398,9 @@ sqlite3 /var/lib/cfgms/cfgms.db "PRAGMA integrity_check;"
      https://<controller>:8080/api/v1/sessions/<session_id>
    ```
 
-   There is no password-reset command. CFGMS accounts authenticate with mTLS
-   certificates and passkeys, not passwords; disabling the account and
-   revoking its certificates and passkeys is the full containment step.
+   CFGMS accounts authenticate with mTLS certificates and passkeys; disabling
+   the account and revoking its certificates and passkeys is the full
+   containment step.
 
 ## Disaster Recovery Procedures
 
@@ -475,8 +471,6 @@ archive safe to extract.
    systemctl restart cfgms-controller
    ```
 
-   There is no runtime setting for the terminal session limit or timeout.
-
 ### High CPU Usage
 
 1. **Diagnosis**
@@ -499,8 +493,8 @@ archive safe to extract.
    systemctl restart cfgms-controller
    ```
 
-   There is no rate-limiting setting. To add capacity, deploy a controller
-   cluster (see the `ha` section of `controller.cfg`).
+   To add capacity, deploy a controller cluster (see the `ha` section of
+   `controller.cfg`).
 
 ### Slow Terminal Response
 
@@ -563,9 +557,6 @@ cfg credential list-orphaned
 # Certificate inventory
 cert-manager list
 ```
-
-There is no CLI command for a security audit report, a performance baseline,
-or an e-mailed health report.
 
 ### Upgrade Procedures
 
