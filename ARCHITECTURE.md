@@ -66,7 +66,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 - Provide REST API for external integrations
 - Manage certificates and authentication
 
-**Deployment**: Typically deployed as a single instance (OSS) or HA cluster (Commercial)
+**Deployment**: A single instance or a controller cluster ([ADR-031](docs/architecture/decisions/031-controller-cluster-service-model.md)). Both shapes run the same AGPL-3.0 code.
 
 **Location**: `cmd/controller/`, `features/controller/`
 
@@ -217,7 +217,6 @@ pkg/{provider}/providers/   ← Never import directly
 - Swap infrastructure without refactoring business logic
 - Test with lightweight providers (memory) without mocks
 - Scale from single-server to distributed deployments
-- Gate commercial features through provider selection
 
 See [docs/architecture/provider-architecture.md](docs/architecture/provider-architecture.md) for detailed provider development guidelines.
 
@@ -361,11 +360,11 @@ acme-msp (root)
 - **Resource Isolation**: CPU/memory limits per tenant
 - **Network Isolation**: Separate certificate chains per tenant
 - **Audit Isolation**: Separate audit logs per tenant
-- **Multi-Root Isolation** (Commercial): Independent root tenants are fully isolated
+- **Multi-Root Isolation**: Independent root tenants are fully isolated
 
 ### Licensing Boundary
 
-CFGMS is licensed under AGPL-3.0. Each controller deployment has a single root tenant. See [LICENSING.md](LICENSING.md) for commercial licensing details.
+All CFGMS code is licensed under AGPL-3.0. Single-root and multi-root deployments are architectural shapes, not licence tiers; every deployment shape runs the same AGPL-3.0 code. A commercial embedding licence exists only for third parties shipping CFGMS inside proprietary products. See [LICENSING.md](LICENSING.md).
 
 ### Scale
 
@@ -373,7 +372,7 @@ Designed for:
 - 50,000+ stewards
 - 100+ clients per MSP
 - Multi-region deployment
-- High availability (Commercial edition)
+- High availability via controller clustering ([ADR-031](docs/architecture/decisions/031-controller-cluster-service-model.md))
 
 ## Platform Architecture
 
@@ -498,7 +497,6 @@ See [pkg/README.md](pkg/README.md) for provider development guidelines and [docs
 
 **Benefits**:
 - Multi-tenant SaaS flexibility
-- Commercial/OSS feature gating
 - Testing without mocks
 - Future-proofing
 

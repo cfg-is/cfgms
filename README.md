@@ -1,16 +1,19 @@
 # CFGMS
 
-CFGMS is an open-source configuration, automation, and infrastructure management
-platform built for managed service providers and IT teams.
+CFGMS, the Configuration Management System, is an open-source, zero-trust
+configuration management system built for managed service providers (MSPs) and
+the IT teams that run large fleets.
 
 It is designed to manage large, multi-tenant fleets across Windows, Linux, and
 macOS from a single control plane, combining desired-state configuration, policy
 enforcement, drift detection, workflow automation, live endpoint telemetry, and a
 historical model of the systems it manages.
 
-CFGMS is being built to connect an affected device or application to its
-dependencies and recent changes, identify the likely cause, and safely remediate
-it—not merely report that something is wrong.
+Other tools make a technician browse to the problem. CFGMS is being built to
+bring the assembled case to them: connect an affected device or application to
+its dependencies and recent changes, identify the likely cause, and safely
+remediate it, not merely report that something is wrong. The
+[product vision](docs/product/vision.md) says why.
 
 [![Build Status](https://github.com/cfg-is/cfgms/workflows/Cross-Platform%20Build%20Validation/badge.svg)](https://github.com/cfg-is/cfgms/actions)
 [![Security Scan](https://github.com/cfg-is/cfgms/workflows/Security%20Scanning%20Workflow/badge.svg)](https://github.com/cfg-is/cfgms/actions)
@@ -25,14 +28,16 @@ it—not merely report that something is wrong.
 - Workflow and event-driven automation
 - Hierarchical multi-tenancy for MSPs and their clients
 - Endpoint inventory, live telemetry, and historical state
-- An entity graph for modeling systems and their relationships
 - Microsoft 365, Active Directory, endpoint, and infrastructure integrations
-- Mutual TLS, role-based access control, signed modules, and encrypted secrets
+- Zero-trust internals: mutual TLS on every internal connection, role-based
+  access control, publisher-signed modules, and encrypted secrets
 - A `cfg` CLI and REST API; a controller-served web UI is in early development
 
-Digital Employee Experience (DEX) capabilities — experience signals, fleet
-baselines, root-cause analysis, predictive insight, and remediation through the
-same configuration and workflow system — are planned on this foundation. See the
+A digital twin — an entity graph of systems, their relationships, and their
+state over time — and Digital Employee Experience (DEX) capabilities —
+experience signals, fleet baselines, root-cause analysis, and remediation
+through the same configuration and workflow system — are planned on this
+foundation. See the
 [roadmap](docs/product/roadmap.md).
 
 ## Architecture
