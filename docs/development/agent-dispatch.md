@@ -96,7 +96,7 @@ Agents cannot ask clarifying questions. Everything they need must be in the issu
 ### Checklist
 
 - [ ] **Self-contained**: all context in the issue body, no "see our discussion in Slack"
-- [ ] **Reference files explicitly**: "follow the pattern in `pkg/storage/providers/git/`" not "follow existing patterns"
+- [ ] **Reference files explicitly**: "follow the pattern in `pkg/storage/providers/sqlite/`" not "follow existing patterns"
 - [ ] **Testable acceptance criteria**: `- [ ]` checkboxes that can be mechanically verified
 - [ ] **Single concern**: one focused change, not "refactor X and also add Y"
 - [ ] **No vague verbs**: "add", "implement", "fix" — not "improve", "enhance", "clean up"
@@ -105,9 +105,9 @@ Agents cannot ask clarifying questions. Everything they need must be in the issu
 
 **Good** — agent can succeed:
 ```
-Add `RetryConfig` field to `pkg/config/types.go` following the pattern in
-`pkg/config/timeout_config.go`. Add validation in `pkg/config/validate.go`
-following `validateTimeoutConfig`. Tests in `pkg/config/config_test.go`.
+Add `RetryConfig` field to `pkg/config/manager.go` following the pattern in
+`pkg/config/rollback_types.go`. Add validation in `pkg/config/validation.go`
+following `validateResources`. Tests in `pkg/config/manager_test.go`.
 
 Acceptance criteria:
 - [ ] RetryConfig struct has MaxAttempts (int), BackoffMs (int), fields

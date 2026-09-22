@@ -237,7 +237,7 @@ jobs:
 ### Local Development
 ```bash
 # Run all tiers sequentially
-make test-e2e
+make test-e2e-local
 
 # Run specific tier
 cd test/integration/standalone && go test -v

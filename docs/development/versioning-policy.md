@@ -186,7 +186,7 @@ All configuration changes through CFGMS support rollback:
 
 - Git-based storage provides full history
 - Rollback manager supports previewing and executing rollbacks
-- See [Configuration Rollback](../architecture/configuration-management.md) for details
+- See [Configuration Rollback](../architecture/rollback-design.md) for details
 
 ## Related Documentation
 

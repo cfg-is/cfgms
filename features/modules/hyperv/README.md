@@ -544,7 +544,7 @@ steward binary + CA are staged from `enroll_steward_path` / `enroll_ca_path` (th
 linux steward built for the guest). For a launcher-managed (push-upgradeable)
 guest steward, also set `enroll_launcher_path` to the host path of
 `cfgms-steward-launcher` — it is staged alongside the steward and the guest install
-requires it. See [ADR-009](../../../docs/architecture/decisions/009-vm-from-iso-managed-endpoint.md).
+requires it. See [ADR-009](../../../docs/architecture/decisions/009-hyperv-vm-provisioning-from-install-media.md).
 
 Optional provisioning-debug config:
 

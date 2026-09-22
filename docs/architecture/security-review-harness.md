@@ -3019,7 +3019,7 @@ never instead of it — and write the result to `<sweep_dir>/plan/coverage.json`
 `security`, `dataaccess`, `business` and `presentational`; the exempt tiers are `vendor`,
 `generated`, `test`, `docs`, `tooling` and `config` (`planner.CODE_TIERS`, the complement of
 `metadata.CLOSED_TIER_SET`'s six non-code tiers). Demanding a review step for `README.md` or
-`.github/workflows/ci.yml` would make G-2 fail on every real sweep and turn a genuine signal into
+`.github/workflows/test-suite.yml` would make G-2 fail on every real sweep and turn a genuine signal into
 noise the harness would learn to ignore — the exempt set exists specifically so G-2 measures code
 that could carry a vulnerability, not every byte in the tree. On `origin/develop`'s tree the
 non-exempt population is 1,383 files against 576 exempt ones.

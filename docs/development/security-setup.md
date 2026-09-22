@@ -595,7 +595,7 @@ CFGMS uses GitHub Advanced Security features for comprehensive security scanning
 2. Click "Code scanning" to view CodeQL findings
 3. Review alerts with severity ratings and remediation guidance
 
-**Configuration**: See `.github/workflows/codeql.yml` for query configuration and scan schedule.
+**Configuration**: See `.github/workflows/codeql-analysis.yml` for query configuration and scan schedule.
 
 **Local Testing**: CodeQL requires GitHub infrastructure and cannot be run locally, but findings are visible in pull requests.
 

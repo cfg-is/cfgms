@@ -54,7 +54,7 @@ go test -v -run TestE2EFlowDiagnostic
 ⚙️  Phase 6 PASS: Module executed and file created
 ```
 
-**If Phase 1 fails**: [REST API Issues](#rest-api-issues)
+**If Phase 1 fails**: REST API not reachable — see [Transport Connectivity Issues](#transport-connectivity-issues)
 **If Phase 2 fails**: [Config Upload Issues](#config-sync-issues)
 **If Phase 3 fails**: [Transport Connectivity Issues](#transport-connectivity-issues)
 **If Phase 4–5 fail**: [gRPC Stream Issues](#grpc-stream-issues)

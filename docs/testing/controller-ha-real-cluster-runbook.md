@@ -1613,7 +1613,7 @@ foreign listener.
 Live-fleet proof for the in-memory comparison logic in
 `features/steward/client/client_transport.go` (`checkTermFence` /
 `receiveCommand`) — see
-[`steward-operating-model.md`](../architecture/steward-operating-model.md#raft-term-command-fence-adr-029-decision-6)
+[`steward-operating-model.md`](../architecture/steward-operating-model.md#fencing-token-command-fence-adr-029-decision-6-substrate-updated-by-adr-031-decision-5--issue-3760)
 for the design. This story implements comparison only; persistence across a
 steward restart and the authenticated reset path are #3437.
 

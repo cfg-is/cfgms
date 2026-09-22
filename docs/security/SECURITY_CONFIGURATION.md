@@ -28,7 +28,7 @@ This document provides essential security configuration guidance for CFGMS deplo
    ```
 
 2. **Use Secret Management Systems**
-   - **HashiCorp Vault**: Recommended for enterprise deployments
+   - **OpenBao**: Recommended for enterprise deployments (integrated via `pkg/secrets/providers/openbao/`)
    - **AWS Secrets Manager**: For AWS cloud deployments
    - **Azure Key Vault**: For Azure cloud deployments
    - **SOPS**: For GitOps workflows (see [SOPS Integration](#sops-integration))
@@ -60,8 +60,6 @@ sops .env.encrypted
 export $(sops -d .env.encrypted | xargs)
 ./cfgms-controller
 ```
-
-**Reference**: See `docs/configuration/sops.md` for detailed SOPS configuration.
 
 #### API Key Rotation
 
@@ -319,10 +317,9 @@ This configuration guide addresses findings from the October 2025 security audit
 
 ## Additional Resources
 
-- **SOPS Integration**: `docs/configuration/sops.md`
-- **Certificate Management**: `docs/security/certificate-management.md`
-- **Mutual TLS Configuration**: `docs/security/mtls.md`
-- **Audit Logging**: `docs/security/audit-logging.md`
+- **Certificate Management**: `docs/security/certificate-architecture.md`
+- **Mutual TLS Configuration**: `docs/security/architecture.md`
+- **Audit Logging**: `docs/architecture/decisions/004-audit-chain-integrity.md`
 
 ## Security Contact
 

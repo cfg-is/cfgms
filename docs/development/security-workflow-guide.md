@@ -426,7 +426,7 @@ make security-scan-nonblocking
 make security-remediation-report
 
 # Unified development validation
-make test-with-security
+make test-commit
 ```
 
 ### Integration with CLAUDE.md Workflow
@@ -438,7 +438,7 @@ The security workflow is integrated into the mandatory CLAUDE.md development pro
 make security-scan  # MUST pass before proceeding
 
 # Alternative: Unified validation (RECOMMENDED)
-make test-with-security  # Runs: test + security-scan + summary
+make test-commit  # Runs: test + lint + security-scan
 ```
 
 ## GitHub Actions Integration
@@ -717,13 +717,10 @@ The security workflow collects the following metrics:
 
 ```bash
 # Workflow effectiveness analysis
-make analyze-security-metrics
+make security-workflow-metrics
 
 # Performance benchmarking
 make benchmark-security-workflow
-
-# Developer experience survey
-make security-workflow-survey
 ```
 
 ### Metrics Dashboard

@@ -88,11 +88,7 @@ graph TD
 - Seamless integration with existing security
 - Configuration-driven enablement
 
-For detailed information about our security decisions, see:
-
-- [SDR-001: Security Protocol Standardization](decisions/001-remove-dark-ports.md)
-- [SDR-002: Dual Protocol Communication Strategy](decisions/002-dual-protocol-communication.md)
-- [SDR-003: Optional OpenZiti Integration](decisions/003-optional-openziti.md)
+For detailed information about our security decisions, see the [architecture decision records](../architecture/decisions/README.md).
 
 ## Authentication & Authorization
 
@@ -554,4 +550,4 @@ ziti:
 
 ## Related Documentation
 
-For module-specific security requirements, see [Module Security Requirements](../architecture/modules/security.md).
+For module-specific security requirements, see [Module Behavioral Envelope](../architecture/modules/behavioral-envelope.md).

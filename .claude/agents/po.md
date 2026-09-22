@@ -1290,7 +1290,7 @@ Do **not** treat `parse_warnings` as proof a story is stuck. It is proof a gate 
 
 ## Reference: Pipeline Status Taxonomy
 
-Work queue is managed via GitHub Projects V2 (see `scripts/project-queue.sh` and `scripts/pipeline.yaml`).
+Work queue is managed via GitHub Projects V2 (see `scripts/project-queue.sh` and `.claude/pipeline.yaml`).
 
 | Project Status | Meaning |
 |----------------|---------|

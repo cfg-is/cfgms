@@ -42,7 +42,7 @@ Work-items originate on the **private project board** and become public issues o
 
 ## Infrastructure
 
-- **Project board**: configured in `scripts/pipeline.yaml` (project_id, status_field_id, option IDs)
+- **Project board**: configured in `.claude/pipeline.yaml` (project_id, status_field_id, option IDs)
 - **Queue script**: `scripts/project-queue.sh` — all project queue operations
 - **Key operations**: `list-by-status`, `update-field`, `add-issue`, `get-item`, `create-draft`, `delete-item`
 
