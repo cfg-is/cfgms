@@ -746,7 +746,6 @@ after `applyDefaults`.
 | Field / rule | Constraint |
 |---|---|
 | `steward.id` | Must not be empty after applying defaults |
-| `steward.mode` | Must be `standalone` or `controller` |
 | `steward.logging.level` | Must be `debug`, `info`, `warn`, or `error` |
 | `steward.converge_interval` | When set, must be a valid Go duration string and greater than zero |
 | `steward.dna_refresh_interval` | When set, must be a valid Go duration string and greater than zero |
