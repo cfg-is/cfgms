@@ -37,7 +37,7 @@ A cfg is a YAML file (`hostname.cfg`) that declares the desired state of a devic
 
 - **Resource configurations**: each block references a module and describes the desired state for that resource (e.g., a `file` module block declares a file's path, content, and permissions)
 - **Schedule**: how often to re-check compliance
-- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) [GAP: apply/monitor mode toggle not yet implemented in steward cfg or execution engine — see issue #1524]
+- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) — the `drift_mode` cfg field (`stewardtypes.DriftMode`, consumed by the steward execution engine)
 
 The cfg is the single source of truth for a steward. Whether it came from a local file or was pushed by a controller, the steward treats it the same way.
 
@@ -55,7 +55,7 @@ If a feature can use an existing primitive, that's the path. Building a parallel
 
 ## Save = Deploy
 
-Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. [GAP: storage-watch auto-trigger not yet wired; config saves currently require an explicit `POST /api/v1/config/push` call — see issue #1525]
+Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. The trigger is the fanout callback invoked from `ConfigurationServiceV2.SetConfiguration` after the ConfigStore write; `POST /api/v1/config/push` remains available for an explicit re-push.
 
 ```
  ┌───────────────┐   write   ┌─────────────┐  storage-watch  ┌──────────┐
@@ -71,7 +71,7 @@ Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOp
 ```
 
 - **Single write path.** All sources write to ConfigStore via the same path.
-- **Debounce.** Storage-watch waits ~500ms (configurable) before triggering fanout. Absorbs burst edits invisibly. [GAP: debounce not yet implemented — see issue #1525]
+- **Write triggers fanout.** A successful ConfigStore write inside `ConfigurationServiceV2.SetConfiguration` invokes the registered fanout callback (`RegisterFanoutCallback`) synchronously. Burst edits each trigger fanout, and idempotency (below) absorbs the repeats.
 - **Durable queue.** Fanout uses the controller's durable job queue — the same primitive used for retries, deferred operations, and HA failover replay.
 - **Idempotency carries load.** A steward already at the target DNA hash treats a sync command as a no-op.
 - **Resource-bounded fanout.** Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
@@ -96,12 +96,12 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 **Core behaviors:**
 
-1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes [GAP: monitor mode not yet implemented — see issue #1524]
+1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes
 2. **Maintain** — Re-check compliance on the schedule defined in the cfg. In `apply` mode, correct any drift. In `monitor` mode, report drift. Respond to module-defined event hooks (e.g., file change triggers re-check of that resource)
 3. **Know itself** — Collect DNA (hardware, software, network, security attributes). Monitor its own health and performance
 4. **Report** — Always log locally. When connected to a controller, also report events, status, and DNA upstream. When disconnected, queue reports locally and resync on reconnect
 
-**Apply mode vs Monitor mode (configurable per steward):** [GAP: apply/monitor mode toggle not yet implemented — see issue #1524]
+**Apply mode vs Monitor mode (configurable per steward via `drift_mode`):**
 
 - **`apply` mode** (default for managed devices): the steward actively converges the device to match its cfg. When drift is detected, the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event.
 - **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
