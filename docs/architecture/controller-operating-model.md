@@ -1302,7 +1302,7 @@ Two operational consequences follow, and both cut against the operator's expecta
 - **Granting a role does not grant API or web access.** The permission must be present on the account record (`account.Permissions`) for any surface to honour it.
 - **Revoking a role assignment does not revoke access.** This is the direction that matters for containment: a grant already written to `account.Permissions` keeps authorizing after the role assignment is removed. Removing a permission from the account record — or disabling the account, which is rejected at authentication on every surface — is what actually revokes it.
 
-Unifying the two — resolving subject-role assignments into effective permissions on the request path, so the RBAC surface becomes the authoritative grant source for both web and CLI/API — is production work not yet done. *Deferred: tracked in #3178 — wire subject-role → effective-permission resolution into the API authorization path.* Until it lands, treat the RBAC subject-role surface as role modelling, and `account.Permissions` as the enforced grant set.
+Subject-role assignments are role modelling. `account.Permissions` is the enforced grant set on every surface; `requirePermission` in `features/controller/api/middleware.go` checks it directly.
 
 When a role *is* assigned, the subject ID must be the account ID returned by `GET /api/v1/accounts/{username}` — never the certificate's CN field. `handleAssignSubjectRole` validates no foreign key against the account type, so a CN string is accepted as a subject ID and records a grant against an identity the auth chain never produces.
 

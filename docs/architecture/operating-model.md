@@ -125,7 +125,7 @@ When connected to a controller, the steward also supports:
 
 **Operator signature is mandatory for inline ad-hoc commands (Issue #3694).** Every inline command (`cfg steward run-command`, `cfg steward exec`) is signed by the operator before submission, and both the controller and the receiving steward verify that signature — neither side accepts an unsigned inline command, regardless of `require_signed_adhoc` configuration. The signature covers a canonical envelope (`pkg/operatorpayload`), not the command content alone: content, shell, the resolved list of authorized target steward IDs, a single-use nonce, and a bounded expiry are all bound into the signed bytes. This closes two gaps the content-only signature left open — a legitimately-signed command re-addressed to a different target set in transit, and replay of a captured signature — without requiring the steward to parse fleet selectors: it only checks whether its own ID is a member of the signed target list. The steward enforces expiry and nonce-replay independently of the outer `SignedCommand`'s own replay window, so a captured operator-signed envelope re-wrapped in a fresh outer command is still rejected.
 
-This is an interim state: the client still signs with the operator's controller-issued admin-bundle credential (the same mTLS key used for API auth), so the controller could in principle still request a command signed under an operator's identity if it held that key — the controller does not hold it today, but the credential's issuance path means the epic's zero-custody constraint (the controller never able to produce an operator signature) is not yet closed. A later story cuts the signing credential over to a controller-never-custodied WebAuthn assertion; `OperatorCredentialVerifier` in `features/steward/commands/execute_script.go` is the seam that swap lands on.
+The client signs with the operator's controller-issued admin-bundle credential, the same mTLS key used for API auth. The controller does not hold that key. `OperatorCredentialVerifier` in `features/steward/commands/execute_script.go` is the verification seam.
 
 These capabilities require an active controller connection and are not available in standalone mode. They do not replace or bypass the cfg — they are operational tools for administrators.
 
@@ -449,8 +449,7 @@ Single-server and blue/green deployments skip the cluster gate entirely. They us
 
 Operators interact with CFGMS through layered UX surfaces.
 
-**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows. `cfg steward logs` is available but returns 501 until a log-pull transport is wired.
-
+**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
 **Web UI.** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows remain CLI-only.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
