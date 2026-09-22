@@ -2,9 +2,9 @@
 
 > CFGMS manages your clients' Windows, Mac, Linux, and Microsoft 365 estates from one place, keeps every setting where you said it should be, auto-investigates problems, and answers questions about the whole fleet in seconds.
 
-CFGMS, the Configuration Management System, is an open-source, zero-trust
+CFGMS, is an open-source, zero-trust
 configuration management system for Windows, macOS, Linux, and Microsoft 365,
-built for managed service providers (MSPs) and IT teams that run large fleets.
+built for managed service providers (MSPs).
 You declare how each client's devices and Microsoft 365 tenant should be set
 up. CFGMS makes them match and keeps them matching. When a machine drifts, you
 know. When you change the standard, every device that follows it changes.
@@ -35,8 +35,7 @@ device last Tuesday. Three engines draw on that graph:
 
 Other tools make a technician browse to the problem. CFGMS is being built to
 bring the assembled case to them: the affected device, its dependencies, its
-recent changes, the likely cause, and a fix through the same engines that made
-the change. The [product vision](docs/product/vision.md) says why; the
+recent changes, the likely cause, and a fix through the same engine. The [product vision](docs/product/vision.md) says why; the
 [roadmap](docs/product/roadmap.md) says when.
 
 ## What CFGMS provides
@@ -51,7 +50,7 @@ the change. The [product vision](docs/product/vision.md) says why; the
 - Microsoft 365, Active Directory, endpoint, and infrastructure integrations
 - Zero-trust internals: mutual TLS on every internal connection, role-based
   access control, publisher-signed modules, and encrypted secrets
-- A `cfg` CLI and REST API; a controller-served web UI is in early development
+- A `cfg` CLI, REST API and web UI
 
 ## Architecture
 
