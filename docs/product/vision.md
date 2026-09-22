@@ -53,8 +53,7 @@ Three components:
 - **Outpost.** A planned proxy for networks and devices that cannot host a
   steward. Not built yet.
 
-Administrators use the `cfg` command line and the REST API. The web UI is
-served by the controller and is in early development.
+Administrators use the `cfg` command line and web UI served by the controller.
 
 **DNA.** Every managed object has a deterministic, hashable record of its
 state. Stewards converge to the desired DNA and report the observed DNA. The
@@ -78,8 +77,7 @@ code composition.
 
 **Modules.** Files, services, packages, scripts, firewall, patching, users,
 certificate trust, time and hostname ship as the standard library in the
-steward installer. Everything else is an extended module, pulled on demand
-and trusted through the same signing chain.
+steward installer. Anything else can be added with an extended module, pulled on demand and trusted through the same signing chain.
 
 **One binary.** Controller and steward are self-contained Go binaries. No
 interpreter, no external runtime to patch.
@@ -124,23 +122,9 @@ which is also the record of what is built.
 - **Clean breaks before 1.0.** A breaking change with a clear error beats a
   migration shim.
 
-## Non-goals
-
-- Not a ticketing or documentation system. CFGMS integrates with them.
-- No throttling as a safety mechanism. Safety is targeting, rings and the
-  emergency stop.
-- No unsigned or composed code on endpoints, and no setting that allows it
-  outside a development trust mode.
-
 ## Licensing
 
 All CFGMS code is AGPL-3.0. Self-hosting it to manage client environments is
 covered by that licence. A commercial embedding licence is available for
-third parties shipping CFGMS inside proprietary products. There is no
-commercial edition and no feature gated behind one. See
+third parties shipping CFGMS inside proprietary products. See
 [LICENSING.md](../../LICENSING.md).
-
----
-
-**Status:** Draft for founder review, 2026-09-22. Replaces the 2024-04-07
-draft.
