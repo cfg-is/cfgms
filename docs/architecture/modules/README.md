@@ -353,7 +353,7 @@ by a steward) and have no steward-pull DNA observation path (see Workflow module
 | `firewall` | stdlib | `os=linux` | Bounded: firewall rule enumeration; Linux-only in current implementation |
 | `hostname` | stdlib | `os=windows\|linux\|darwin` | Bounded: single-value host-identity fact present on every platform |
 | `package` | stdlib | `os=windows\|linux\|darwin` | Bounded: installed-package inventory; universal domain — every OS ships a package manager |
-| `patch` | stdlib | `os=windows` | Bounded: installed-update inventory; Windows-only (Linux/macOS backends not yet implemented) |
+| `patch` | stdlib | `os=windows` | Bounded: installed-update inventory; Windows-only |
 | `script` | stdlib | omitted (permanent) | Execution primitive with no observation domain; executes signed files on demand (ADR-024 §3) |
 | `service` | stdlib | `os=windows\|linux\|darwin` | Bounded: service inventory via systemd/SCM/launchd; present on every platform |
 | `time` | stdlib | `os=windows\|linux\|darwin` | Bounded: single-value timezone + NTP-sync facts; foundational on every platform |
@@ -369,12 +369,12 @@ by a steward) and have no steward-pull DNA observation path (see Workflow module
 
 Shipped in the steward installer, all `executors: [steward]` (closed set — see ADR-016):
 
-- `file` - File content, directory creation, and permissions (`type: file` / `type: directory`; `type: symlink` planned for a future story)
+- `file` - File content, directory creation, and permissions (`type: file` / `type: directory`)
 - `service` - OS service state management
 - `package` - Software package management
 - `script` - Cross-platform script execution (file-based, no inline eval) — *execution primitive*
 - `firewall` - Firewall rules and policies
-- `patch` - OS patch management (Windows Update COM API on Windows; `modules.ErrUnsupportedPlatform` fallback on Linux/macOS — real non-Windows backends are out of scope per ADR-016 PM Notes)
+- `patch` - OS patch management (Windows Update COM API on Windows)
 - `user` - Local users & groups, membership, lock/disable state, password presence (observed only)
 - `cert_trust` - System trust store: install/trust CA & certs; keeps the CFGMS mTLS chain healthy fleet-wide
 - `time` - Timezone + NTP/time-sync configuration (`timezone`, `ntp_servers`, `ntp_sync_enabled`)

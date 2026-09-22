@@ -42,7 +42,7 @@ observe convergence and drift correction end to end.
 **Use when**: You have a working single-controller deployment and want to connect remote
 stewards, push configs, and verify the full fleet management loop.
 
-### [Controller Cluster](controller-cluster/walkthrough.md) *(planned)*
+### [Controller Cluster](controller-cluster/walkthrough.md)
 
 Geo-redundant controller deployment with failover. Starts from a working single-controller environment.
 

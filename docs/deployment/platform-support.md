@@ -36,7 +36,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 - **Process Management**: Full Unix process control and monitoring
 - **File System**: POSIX-compliant file and directory management with ownership/permissions
 - **Network**: Native network interface and routing table access
-- **Security**: User/group management, SSH key handling, firewall configuration (iptables — Linux only; Windows/macOS not yet implemented)
+- **Security**: User/group management, SSH key handling, firewall configuration (iptables, Linux)
 
 #### Windows
 
@@ -263,14 +263,6 @@ Each platform logs to appropriate system locations:
 - **Windows**: Windows Event Log and `C:\ProgramData\CFGMS\logs\`
 - **macOS**: System log and `/usr/local/var/log/cfgms/`
 
-## Future Platform Support
-
-### Planned Additions
-
-- **Linux ARM32**: Raspberry Pi and embedded device support
-- **FreeBSD**: Advanced networking appliance support
-- **Container Platforms**: Native Kubernetes operator deployment
-
-### Community Contributions
+## Community Contributions
 
 Platform support contributions are welcome. Open a GitHub issue describing the target platform before starting work.

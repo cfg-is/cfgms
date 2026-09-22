@@ -250,7 +250,6 @@ logging:
 - **Read-Heavy Operations**: Optimized for read operations; write operations may have higher latency
 - **PowerShell Dependency**: Requires PowerShell and AD module availability
 - **Local Domain Only**: Cannot query remote domains without trust relationships
-- **No Schema Extensions**: Does not support custom AD schema extensions in current version
 
 ### Performance Considerations
 - **PowerShell Overhead**: PowerShell execution adds processing overhead compared to native LDAP

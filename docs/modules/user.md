@@ -39,7 +39,7 @@ The resource ID is the OS-level username (e.g., `alice`, `svc-backup`).
 - **Windows**: `true` when `net user` reports `Password required: Yes`.
 - **macOS**: always `false` in this version (shadow password inspection requires root and is out of scope).
 
-`Set` silently ignores `has_credential` if it appears in the config. Password distribution through `cfg` has no secrets-distribution design yet and is explicitly deferred.
+`Set` silently ignores `has_credential` if it appears in the config.
 
 ## Examples
 

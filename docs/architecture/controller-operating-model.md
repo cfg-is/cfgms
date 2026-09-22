@@ -1001,9 +1001,6 @@ Integrations are organized by type. Initial integrations focus on MSP operationa
 | **Distribution / Licensing** | License provisioning, reconciliation, billing | Distributor marketplaces |
 | **Cloud Identity** | User/group management, policy enforcement | M365, Azure AD, Google Workspace |
 | **Endpoint Management** | Device configuration, compliance | CFGMS stewards (Windows, Linux, macOS) |
-| **Documentation** (future) | Automated documentation updates | Knowledge base and IT documentation platforms |
-| **Automation Bridge** (future) | Extend workflows via external automation | Third-party workflow/automation platforms |
-| **AI Processing** (future) | Classification, anomaly detection, NLP | LLM and ML services |
 
 ### Design Principle: Same Mental Model
 
@@ -1093,9 +1090,6 @@ The workflow engine uses a node-based architecture where each integration is a p
 
 - **Service nodes** — PSA, distributor, cloud identity, endpoint management
 - **Logic nodes** — conditionals, loops, filters, transforms
-- **AI nodes** (future) — LLM-powered data classification, anomaly detection, natural language processing
-- **Automation bridge nodes** (future) — integration with external workflow/automation platforms
-- **Documentation nodes** (future) — automated updates to IT documentation platforms
 
 ### Workflow Engine Capabilities
 
@@ -1308,7 +1302,7 @@ Two operational consequences follow, and both cut against the operator's expecta
 - **Granting a role does not grant API or web access.** The permission must be present on the account record (`account.Permissions`) for any surface to honour it.
 - **Revoking a role assignment does not revoke access.** This is the direction that matters for containment: a grant already written to `account.Permissions` keeps authorizing after the role assignment is removed. Removing a permission from the account record — or disabling the account, which is rejected at authentication on every surface — is what actually revokes it.
 
-Unifying the two — resolving subject-role assignments into effective permissions on the request path, so the RBAC surface becomes the authoritative grant source for both web and CLI/API — is production work not yet done. *Deferred: tracked in #3178 — wire subject-role → effective-permission resolution into the API authorization path.* Until it lands, treat the RBAC subject-role surface as role modelling, and `account.Permissions` as the enforced grant set.
+Subject-role assignments are role modelling. `account.Permissions` is the enforced grant set on every surface; `requirePermission` in `features/controller/api/middleware.go` checks it directly.
 
 When a role *is* assigned, the subject ID must be the account ID returned by `GET /api/v1/accounts/{username}` — never the certificate's CN field. `handleAssignSubjectRole` validates no foreign key against the account type, so a CN string is accepted as a subject ID and records a grant against an identity the auth chain never produces.
 
@@ -1622,7 +1616,7 @@ The REST API is the admin interface to the controller. All operations are authen
 | **Compliance** | Compliance status, reports |
 | **HA** | Cluster status, leader info, node list |
 | **Workflows** | Create, trigger, monitor workflows |
-| **Orchestration** | Initiate and monitor multi-node operations [GAP: not implemented — see Orchestration section above] |
+| **Orchestration** | Initiate and monitor multi-node operations |
 | **Modules** | List cached modules, approve queued bundles |
 | **Live telemetry** | `GET /api/v1/telemetry/ws/{steward_id}` — WebSocket endpoint that fans steward telemetry snapshots (process/service) to browser subscribers in real time. Requires `steward:telemetry` permission. The controller subscribes upstream to the steward (via `TelemetryRequest{subscribe=true}`) on the first browser connection and unsubscribes on the last browser disconnect, preserving the "collect only while watched" property. |
 

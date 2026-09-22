@@ -16,8 +16,8 @@ lives in its own sub-package so that callers pull in only the types they need.
 pkg/storage/interfaces/
   business/     // durable business data (tenants, RBAC, audit, sessions, stewards, commands, tokens)
   config/       // human-editable configuration data (YAML/JSON, inheritance)
-  secrets/      // (placeholder) future storage-layer secret integration
-  timeseries/   // (placeholder) metrics and structured log persistence
+  secrets/      // package doc only; secret persistence lives in pkg/secrets/interfaces
+  timeseries/   // package doc only; no contract defined
   blob/         // large binary objects (installers, reports, DNA snapshots)
 ```
 
@@ -62,16 +62,15 @@ tenant, and command stores.
 |------|--------------|---------|
 | `blob_store.go` | `BlobStore`, `BlobKey`, `BlobMeta`, `BlobInfo`, `BlobProvider`, registry helpers | Stream-oriented blob storage (installers, reports, DNA snapshots). `PutBlobIfAbsent` is the conditional-create write (Issue #3895) — see "Compare-and-Swap Writes" below |
 
-### `secrets/` — Placeholder
+### `secrets/`
 
-Reserved for a future storage-layer integration. Today, secret persistence is
-defined in `pkg/secrets/interfaces`. The placeholder exists so that ADR-003's
-five-type taxonomy is visible even while secrets remain in their dedicated
-package.
+Holds a package doc and no interfaces. Secret persistence is defined in
+`pkg/secrets/interfaces`; the directory keeps ADR-003's five-type taxonomy
+visible in the tree while secrets remain in their dedicated package.
 
-### `timeseries/` — Placeholder
+### `timeseries/`
 
-Reserved for a future `MetricsStore` and `LogStore` contract (separate ADR).
+Holds a package doc and no interfaces.
 
 ## Root Package — Provider Registry
 

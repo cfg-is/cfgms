@@ -560,7 +560,7 @@ A `selector` field is **required** — there is no implicit "all" default. Use t
 
 Use `GET /api/v1/config/push/{push_id}` to poll delivery status after receiving the 202.
 
-> **[GAP: save=deploy auto-distribution not yet wired to ConfigStore]** The push endpoint fans out `CommandSyncConfig` to active stewards but does not write through the ConfigStore. Once Epic #1501 lands, save=deploy will automatically trigger distribution on config write, making explicit pushes unnecessary for most workflows.
+> Writing configuration through the ConfigStore triggers distribution to the affected stewards (save=deploy; see `features/controller/push` `Fanout`). This endpoint is the explicit re-sync for a targeted set of stewards.
 
 #### GET /api/v1/config/push/{id}
 

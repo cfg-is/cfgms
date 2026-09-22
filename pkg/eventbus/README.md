@@ -44,7 +44,7 @@ bus := channelBus.New(bufSize) // bufSize matches LoggingConfig.BufferSize
 `bus.Subscribe` during initialization. Additional subscribers can be attached at any
 time via `manager.AddSubscriber(sub)`.
 
-## NATS swap path (deferred to #2051)
+## NATS swap path
 
 When fleet volume demands a durable broker, implement a NATS JetStream provider that
 satisfies `EventBus`:

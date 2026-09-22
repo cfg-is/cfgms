@@ -68,7 +68,7 @@ supervise loop continues rather than crashing (the steward child is unaffected
 by a missing SCM entry until the next reboot). This behavior is Windows-only —
 the launcher's supervise loop no-ops the check on Linux/macOS.
 
-**Known limitation (Issue #4159):** `DeleteService` only *marks* a registration
+**SCM delete-pending window:** `DeleteService` only *marks* a registration
 for deletion; the SCM does not purge it until every reference to it — including
 the running service instance itself — is gone. Confirmed live: a registration
 deleted while its service is still running keeps answering as present (both
@@ -237,7 +237,7 @@ The steward verifies module bundle signatures according to the `module_trust.mod
 
 In `strict` mode, the trusted publisher set is:
 1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push.
-2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (v1: by name only; key material lookup from a durable trust store is future work).
+2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (by name).
 
 **Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
 
@@ -357,9 +357,7 @@ Fragments are sourced by class:
 > partition step that reads the already-collected flat attribute map. The gatherers are reused
 > unmodified. The `commonpb.DNA.attributes` proto field (the legacy flat surface) was retired in
 > Issue #3331; all controller consumers now project attributes from `DNA.Fragments` via
-> `service.FlattenDNAFragments`. The osquery integration will later **swap the source** of the
-> same `host:*` fragment ids — a source change only, invisible to fragment consumers, deferred
-> to a follow-on epic.
+> `service.FlattenDNAFragments`.
 
 Ephemeral runtime values (utilisation, PIDs, per-process metrics, health) are **not DNA** (ADR-017 clause 4) — see [Performance](#performance) below. DNA serves two purposes:
 1. **Device identity** — the typed entity ids the controller uses to identify and classify devices, and the shared join key for the topology graph and DEX
@@ -392,12 +390,11 @@ registry (`features/controller/clusterregistry`) reads from `StewardData.DNAFrag
 and decodes the canonical bytes via `DecodeCanonicalFragment` to extract role
 ownership.
 
-> **Wire protocol note:** Fragment transmission steward→controller via
-> `DNATransfer` / `reassembleDNA` is deferred to a follow-on story; the fragment
-> wire shape is defined but not yet wired. The identity check
-> (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`) applies to the
-> full DNA sync and continues to protect all DNA — including any future fragment
-> payloads — from spoofing.
+> **Wire protocol note:** Fragment transmission steward→controller is carried
+> by `DNATransfer` and reassembled by `reassembleDNA` (`dna_handler.go`). The
+> identity check (`firstChunk.GetStewardId() != peerID` in `dna_handler.go`)
+> applies to the full DNA sync and protects all DNA — fragment payloads
+> included — from spoofing.
 
 A resource that leaves monitoring (module close, steward shutdown) is evicted
 from the cache, so its flat keys disappear from the next collected map and its
@@ -530,7 +527,7 @@ A legitimate controller-cluster rebuild restarts the fencing-token source from i
 
 **Physical isolation.** `resetFenceRatchetOnEnrollment` is unexported and lives in the steward-side enrollment client, and it is the only production caller of `ClearRatchet` in the codebase. `features/steward/client` (the command-receive package) therefore cannot name it — the Go compiler, not a convention, is the primary enforcement. The AST-walk test `TestNoRatchetClearCallerOutsideRegistration` (`features/steward/registration/architecture_test.go`) covers `ClearRatchet`, the reset function, and its exported spelling, so neither a direct call nor a re-exported wrapper can reintroduce a path from the command-receive package. An attacker who controls the command channel cannot trigger the reset.
 
-**Safety contingency.** The enrollment exchange is TLS-authenticated in the server direction — the steward verifies the controller against its pinned or installed CA — and the steward presents a registration token; it is not mutual TLS, and the certificate-set verification above proves only that the material came from whichever CA that exchange presented. Closing the registration-gating gap is a forthcoming (private/deferred) story. Until it lands, the reset is safe against the failure modes this story exists for — a routine steward restart and a legitimate controller-cluster rebuild — but not unconditionally safe against a network adversary who can both spoof the registration endpoint and be trusted by the steward's configured trust store. See `features/steward/registration/client_http.go:resetFenceRatchetOnEnrollment` for the inline contingency notice.
+**Enrollment trust boundary.** The enrollment exchange is TLS-authenticated in the server direction only: the steward verifies the controller against its pinned or installed CA and presents a registration token. The certificate-set verification above therefore proves that the material came from whichever CA that exchange presented. The reset is safe for a routine steward restart and a legitimate controller-cluster rebuild. See `features/steward/registration/client_http.go` `resetFenceRatchetOnEnrollment`.
 
 Whether a given steward is capable of enforcing the fence at all is determinable from the controller via the existing `GET /api/v1/stewards` `StewardInfo.Version` field — no separate capability flag was introduced. A steward at a fence-capable version that has not yet seen a stamped command is in the accept-unstamped bootstrap state, not actively rejecting anything; that is expected for a freshly enrolled or freshly upgraded steward, not itself a sign of compromise.
 
@@ -832,27 +829,21 @@ How a steward joins a controller.
 
 The steward binary is built with the controller's URL compiled in at link time (`-ldflags="-X main.ControllerURL=..."`). A given steward binary will only ever talk to its compile-time controller. Scope: per controller (or controller cluster), not per tenant — one steward binary serves all tenants the controller manages.
 
-A steward binary today connects to exactly one controller URL. Multi-controller deployments — where a steward might fail over between geographically distributed controllers (e.g., `east.cfg.ms`, `west.cfg.ms`) — are not yet supported. [GAP: multi-controller / subdomain-matching binary support — still open, re-confirmed live 2026-08-20 by story #3096; see `docs/testing/controller-ha-real-cluster-runbook.md` §6]
+A steward binary connects to exactly one controller URL.
 
-> The citation on this gap previously pointed at issue #1517, which is closed and
-> was **controller-trust anchoring** (ADR-013: install-time vs compile-time trust
-> options), not multi-controller failover. That was a mis-citation, corrected here.
+**Behaviour in a controller cluster (story #3096).** Measured against the real
+3-node cluster, a single controller URL survives a *leader* failover. A steward
+attached to a surviving node keeps its gRPC-over-QUIC ControlChannel open across
+a Raft re-election and misses no heartbeats — the leader changing is invisible
+to it, because every node serves steward traffic directly against the shared
+backend and no request is forwarded to the leader. Measured: leader SIGKILLed,
+re-election 12.02s, steward's next heartbeat landed 6s after the kill, zero
+reconnects (`test/e2e/ha/steward_continuity_real_test.go`).
 
-**What story #3096 established about the scope of this gap.** Measured against the
-real 3-node cluster, a single controller URL is **not** a barrier to
-surviving a *leader* failover. A steward attached to a surviving node keeps its
-gRPC-over-QUIC ControlChannel open across a Raft re-election and misses no
-heartbeats — the leader changing is invisible to it, because every node serves
-steward traffic directly against the shared backend and no request is forwarded
-to the leader. Measured: leader SIGKILLed, re-election 12.02s, steward's next
-heartbeat landed 6s after the kill, zero reconnects
-(`test/e2e/ha/steward_continuity_real_test.go`).
-
-The gap therefore bites in exactly one case: when the steward's **own** node is
-the one that fails. There is no second URL to fall back to, so that steward is
-offline until its node returns. The existing options are an LB/VIP in front of
-the cluster or per-steward node assignment; neither is built. Both are recorded,
-with the evidence, in runbook §6.
+When the steward's **own** node fails, the steward retries that URL until the
+node returns. To keep stewards attached through a node outage, place an LB/VIP
+in front of the cluster and point `--controller-url` at it; see runbook §6 and
+the [controller cluster walkthrough](../deployment/controller-cluster/walkthrough.md).
 
 ### Registration Credentials
 

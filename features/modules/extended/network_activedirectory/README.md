@@ -268,8 +268,7 @@ GET /modules/activedirectory/query:trust:external.partner.com
 - Best security for domain environments
 
 ### NTLM (`ntlm`)
-- Windows NTLM authentication (planned)
-- Fallback for environments without Kerberos
+- Accepted as a configuration value; the LDAP client has no SASL/NTLM binding, so `authenticateNTLM` returns an error directing the caller to `simple` or `kerberos`
 
 ## Deployment
 
@@ -347,13 +346,10 @@ trusts, err := module.Get(ctx, "list:trust")
 
 ## Known limitations
 
-- **Write Operations**: Currently read-only mode; write operations planned for future release
-- **Real-time Monitoring**: DirSync change notifications require an LDAP change notification channel; the LDAP client does not expose one
+- **Read-only**: the module exposes `Get` queries against the directory
 - **Linux Limitations**: Full functionality requires Windows deployment; Linux provides LDAP-only access
 - **Forest Topology**: Complex forest topologies may require additional trust configuration
 - **Performance**: Large forests with 100k+ objects may require performance tuning
-- **Exchange Objects**: Mailbox and Exchange-specific attributes not currently supported
-- **ADFS Integration**: Active Directory Federation Services not directly supported
 
 ## Security considerations
 
@@ -471,12 +467,3 @@ logging:
 ```
 
 This provides verbose LDAP operation logging for troubleshooting.
-
-## Future Enhancements
-
-- **Write Operations**: User/group creation and modification
-- **Real-time Monitoring**: DirSync for change notifications
-- **Multi-Forest Support**: Cross-forest trust relationships
-- **Computer Management**: Full computer object lifecycle
-- **Group Policy Integration**: Read GP assignments and settings
-- **Exchange Integration**: Mailbox and distribution list management

@@ -365,7 +365,3 @@ Current implementations following this pattern:
 - **Control/data plane**: `pkg/controlplane/providers/grpc`, `pkg/dataplane/providers/grpc`
 - **Secrets**: `pkg/secrets` (SOPS-based, default)
 - **Logging**: `pkg/logging` (file, timescale)
-
-Future:
-- **KMS Providers**: Vault, AWS KMS, Azure Key Vault
-- **Timeseries backends**: ClickHouse, InfluxDB, Timescale

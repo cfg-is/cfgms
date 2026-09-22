@@ -806,16 +806,6 @@ cfg token list --tenant-id=default
 
 ---
 
-## Known Gaps
-
-The table below collects the remaining gaps noted in this walkthrough for easy reference:
-
-| Gap | Issue | Phase affected |
-|-----|-------|----------------|
-| Multi-controller / failover not supported | (backlog) | Phase 4 |
-
----
-
 ## Next Steps
 
 - **Register a browser passkey**: `cfg webauthn register` cannot complete a browser
@@ -831,4 +821,4 @@ The table below collects the remaining gaps noted in this walkthrough for easy r
 - **Docker fleet test**: Epic #1501 will validate this walkthrough against a docker-based
   fleet on every PR.
 - **Controller cluster**: When you need high availability, see
-  [Controller Cluster](../controller-cluster/walkthrough.md) *(planned)*.
+  [Controller Cluster](../controller-cluster/walkthrough.md).

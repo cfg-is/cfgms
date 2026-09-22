@@ -428,21 +428,20 @@ browser passkey assertion that mints a session token, never a file containing a
 private key. Issuing another bundle with `bootstrap-admin` is the bootstrap
 exception, not the routine way to add an operator: every bundle the controller
 issues is a credential whose private key the controller itself generated and
-held. It cannot approve a credential enrolment or renew itself, and is
-*intended* also to be unable to authorise code execution on a managed endpoint
-(see
-[ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md));
-read the second gap note below before relying on that last part.
+held. It cannot approve a credential enrolment or renew itself, and cannot
+authorise code execution on a managed endpoint (see
+[ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md)).
 
-> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
-> lands, this is the only way to issue additional operator credentials.]**
+> `cfg login` (`cmd/cfg/cmd/login.go`) lodges a login request with the controller,
+> opens the approval URL in a browser, and stores the minted session token in the
+> OS keychain. The bundle path below is the bootstrap exception for the first
+> operator only.
 
-> **[GAP: the bundle's confinement against endpoint code execution is not yet
-> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
-> (`features/steward/commands/execute_script.go`) and the controller
-> (`features/controller/api/handlers_runs.go`) accepts any admin-marked
-> certificate and does not require the payload-signing marker, so any bundle you
-> issue here **can** today authorise code execution on managed endpoints.]**
+> Signer verification on both the steward (`features/steward/commands/execute_script.go`)
+> and the controller (`features/controller/api/handlers_runs.go`) requires the
+> payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
+> certificate alone cannot authorise code execution on an endpoint (Issue #3696).
+> Protect and transfer every bundle file accordingly.
 
 ```bash
 sudo cfgms-controller bootstrap-admin \

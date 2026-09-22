@@ -88,6 +88,6 @@ reintroduction of label-based queue logic.
 
 ## Rollback
 
-There is no automated rollback path — the labels are deleted and the pipeline operates
+Rollback is a manual procedure: the labels are deleted and the pipeline operates
 entirely on Projects V2 status. If the Projects V2 API becomes unavailable, the PO cycle
 will fail at the `list-by-status` step and pause until restored.

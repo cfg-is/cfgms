@@ -197,7 +197,7 @@ resources:
 
 ## Deployment Topology
 
-Each controller deployment has a single root tenant. Multi-root (multiple independent MSP trees on shared infrastructure) is a future deployment topology not yet implemented.
+Each controller deployment has a single root tenant.
 
 ## Practical Examples
 
@@ -620,25 +620,9 @@ The effective cfg for a steward is the result of **all applicable layers merged 
 
 Every cfg distributed to a steward is signed with the controller's signing certificate. The steward verifies this signature before applying, ensuring cfgs cannot be tampered with in transit.
 
-### Future: Advanced Inheritance Features
+### Variable Expansion
 
-The following are **not yet implemented** and are listed for planning purposes only:
-
-**Conditional inheritance** (planned):
-```yaml
-# NOT YET IMPLEMENTED
-resources:
-  - name: dev-ports
-    module: firewall
-    condition: "environment == 'development'"
-    config:
-      ports: [3000, 8080, 9000]
-      action: allow
-```
-
-**Configuration templates** (planned): template-based inheritance for common resource patterns.
-
-**Dynamic environment expressions** (planned): conditional expressions like `${env:production ? 'prod-db' : 'dev-db'}`. Current support is limited to direct variable expansion (`${VAR}` and `${VAR:-default}`).
+Cfg values support direct variable expansion: `${VAR}` and `${VAR:-default}`.
 
 ## Migration Guide
 

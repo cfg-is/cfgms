@@ -132,10 +132,9 @@ pre-seeded at startup from:
 
 1. `CFGMSPublisherIdentity()` — the baked-in CFGMS publisher.
 2. Additional publishers declared in `steward.cfg` (steward) or controller tenant
-   configuration (controller). Persistence is a S5 (controller) and S7 (steward) concern.
+   configuration (controller).
 
-The trust store is rebuilt at each startup. There is no durable persistence of trust
-store state in this story — that is deferred to S5 and S7.
+The trust store is rebuilt at each startup.
 
 ---
 

@@ -43,8 +43,7 @@ group: root        # Optional, defaults to current group
 
 1. File creation requires write permissions in the target directory
 2. Ownership changes require appropriate system permissions
-3. Symbolic links are not currently supported
-4. Large files (>1GB) may impact performance
+3. Large files (>1GB) may impact performance
 
 ## Security considerations
 

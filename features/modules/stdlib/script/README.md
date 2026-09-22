@@ -310,7 +310,6 @@ go test -v ./features/modules/stdlib/script/
 - Scripts must be self-contained (no external dependencies unless pre-installed)
 - Network access depends on system configuration and firewall rules
 - File system access limited to steward process permissions
-- Signature verification is basic (full PKI integration planned for future releases)
 - Script execution timeout cannot exceed system-defined maximum
 - Environment variables are limited by system constraints
 - Shell availability depends on target system configuration
