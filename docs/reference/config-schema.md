@@ -507,9 +507,8 @@ acts on each key.
 | YAML field | Type | Default | Req | Read by | Description |
 |---|---|---|---|---|---|
 | `id` | string | `<hostname>` | **required** | steward, controller | Unique steward identifier; the controller uses it to route pushed configs |
-| `mode` | string | `"standalone"` | optional | steward | Operation mode: `standalone` or `controller` (`OperationMode`). Validated at load. |
 | `module_paths` | list[string] | `[]` | optional | steward | Additional directories searched for module binaries |
-| `logging` | object | see [`steward.logging`](#stewardlogging) | optional | steward | Log verbosity and output format |
+| `logging` | object | see [`steward.logging`](#stewardlogging) | optional | steward | Log verbosity |
 | `error_handling` | object | see [`steward.error_handling`](#stewarderror_handling) | optional | steward | Per-condition error response policies |
 | `secrets` | object | see [`steward.secrets`](#stewardsecrets) | optional | steward | Secret store configuration |
 | `converge_interval` | duration string | `"30m"` | optional | steward | How often the steward re-converges desired state (`GetConvergeInterval`) |
@@ -532,7 +531,6 @@ acts on each key.
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
 | `level` | string | `"info"` | optional | Verbosity: `debug`, `info`, `warn`, or `error` (validated) |
-| `format` | string | `"text"` | optional | Output format label. Defaulted by `applyDefaults`; the value is not validated. |
 
 #### `steward.error_handling`
 
@@ -698,7 +696,7 @@ before YAML parsing: `features/controller/config/config.go` `expandEnvWithDefaul
 | `${VAR:-default}` | Expands to `VAR`'s value if set, otherwise `default`. |
 | `$VAR` | Expands like `${VAR}` but is not checked by `validateEnvVars`; an unset `VAR` expands to an empty string. Prefer the braced form. |
 
-Only the `:-` default form is recognised. Other shell-style modifiers are not supported.
+Supported forms: `${VAR}` and `${VAR:-default}`.
 
 **Controller only:** a `${VAR}` reference also resolves from a companion file variable
 `<VAR>_FILE` (`EnvFileSuffix`, `resolveEnvValue`). When `VAR` is unset and `VAR_FILE` names a
