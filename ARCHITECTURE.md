@@ -63,7 +63,7 @@ CFGMS is a modern configuration management system designed for Managed Service P
 - Store and version configurations
 - Manage multi-tenant hierarchy (MSP → Client → Group → Device)
 - Integrate with cloud services (M365, AWS, Azure)
-- Provide REST API for external integrations
+- API first development to support integrations
 - Manage certificates and authentication
 
 **Deployment**: A single instance or a controller cluster ([ADR-031](docs/architecture/decisions/031-controller-cluster-service-model.md)). Both shapes run the same AGPL-3.0 code.
@@ -245,7 +245,7 @@ Every byte of code that runs on a steward arrives through exactly one of these p
 1. **Modules** — publisher-signed bundle spawned as a child process, communicates via gRPC
 2. **Scripts** — operator-authored script staged to disk and executed via OS process (publisher-signed)
 3. **Inline cfg CLI** — admin mTLS-signed payload, end-to-end *(separate epic)*
-4. **Remote shell** — interactive admin session *(separate epic)*
+4. **Remote shell** — interactive admin session
 
 ### Three trust modes
 
