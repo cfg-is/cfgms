@@ -807,8 +807,9 @@ test-scripts:
 # tests as of 2026-09-18), so there is no sub-package boundary to matrix on and
 # no per-test hotspot to fix — Go only parallelizes within a package via
 # t.Parallel(), which this suite doesn't use. Splitting by test name into N
-# separate `go test -run` invocations and running them as background shell jobs
-# gets real OS-level parallelism across CPU cores without touching test source.
+# `-test.run` invocations of one prebuilt test binary and running them as
+# background shell jobs gets real OS-level parallelism across CPU cores
+# without touching test source.
 #
 # This target is invoked as its own CI matrix leg (unit-tests-api in
 # .github/workflows/test-suite.yml) so the N shards get a dedicated runner's
@@ -835,13 +836,29 @@ test-scripts:
 # value makes `seq 0 $((shards - 1))` emit nothing, so zero shards launch and
 # the target exits 0 with the whole suite silently unrun.
 #
+# The test binary is COMPILED ONCE, before the fan-out, and each shard execs
+# that binary (Issue #4239). Shards used to run `go test -run ...` directly,
+# which made every shard responsible for producing its own build: `go test
+# -list` populates the build cache only for the non-race configuration, so the
+# race-instrumented build of this package was cold when N shards started and
+# all N invoked the compiler on the same 115k-line package at the same moment.
+# One such build peaks around 1.5GB resident here, so eight concurrent ones
+# exhaust a 30GB host and the kernel kills `compile` mid-build - observed as
+# `compile: signal: killed` / `[build failed]` on 5 of 8 shards, while the
+# shards that happened to win the race passed in ~30s. Building once bounds
+# peak memory at one compiler regardless of the shard count, and the shards
+# then do test execution only.
+#
 # Aggregation fails closed: every shard that was launched must produce a
 # readable exit status, and at least one shard must have been launched. A
 # shard subshell killed before it records one (OOM kill under N concurrent
 # -race binaries, any signal, a full or unwritable temp dir) counts as a
 # failure, because a skipped shard is a whole slice of the suite that
 # silently never ran - see test_api_shard_aggregation_fails_closed and
-# test_api_shard_count_rejects_non_integer for the regression guards.
+# test_api_shard_count_rejects_non_integer for the regression guards. The
+# build itself fails closed the same way: a build that reports success but
+# leaves no runnable binary stops the target instead of launching shards that
+# would each exit non-zero for an unrelated reason.
 .PHONY: test-framework-api-sharded
 test-framework-api-sharded:
 	@race_flag="-race"; \
@@ -872,7 +889,7 @@ test-framework-api-sharded:
 		echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
 		exit 1; \
 	fi; \
-	echo "  Sharding $$total features/controller/api tests across $$shards parallel go test processes..."; \
+	echo "  Sharding $$total features/controller/api tests across $$shards parallel test processes..."; \
 	if [ -n "$${CFGMS_API_TEST_SHARD_PLAN_ONLY:-}" ]; then \
 		for i in $$(seq 0 $$((shards - 1))); do \
 			n=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | grep -c .); \
@@ -880,18 +897,33 @@ test-framework-api-sharded:
 		done; \
 		exit 0; \
 	fi; \
+	pkg_count=$$(go list ./features/controller/api/... 2>/dev/null | grep -c .); \
+	if [ "$$pkg_count" != "1" ]; then \
+		echo "❌ ./features/controller/api/... resolves to $$pkg_count packages, but this target compiles a single test binary. Build one binary per package before adding sub-packages - do not fall back to per-shard builds."; \
+		exit 1; \
+	fi; \
 	tmpdir=$$(mktemp -d); \
 	if [ -z "$$tmpdir" ] || [ ! -d "$$tmpdir" ]; then \
 		echo "❌ could not create a temp dir for shard output - refusing to report a pass"; \
 		exit 1; \
 	fi; \
+	case "$$tmpdir" in /*) ;; *) tmpdir="$$PWD/$$tmpdir";; esac; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
+	echo "  Compiling the features/controller/api test binary once (shards exec it; N concurrent compiles of this package exhaust memory)..."; \
+	if ! go test $$race_flag -c -o "$$tmpdir/api.test" ./features/controller/api; then \
+		echo "❌ failed to build the features/controller/api test binary - no shards were run"; \
+		exit 1; \
+	fi; \
+	if [ ! -x "$$tmpdir/api.test" ]; then \
+		echo "❌ the test build reported success but produced no runnable binary at $$tmpdir/api.test - refusing to report a pass"; \
+		exit 1; \
+	fi; \
 	pids=""; \
 	launched=""; \
 	for i in $$(seq 0 $$((shards - 1))); do \
 		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
 		if [ -n "$$pattern" ]; then \
-			( go test $$race_flag -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
+			( cd ./features/controller/api && "$$tmpdir/api.test" -test.short -test.timeout=10m -test.paniconexit0 -test.run "^($$pattern)$$" > "$$tmpdir/shard-$$i.log" 2>&1; \
 			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
 			pids="$$pids $$!"; \
 			launched="$$launched $$i"; \
@@ -907,7 +939,7 @@ test-framework-api-sharded:
 		if [ -f "$$tmpdir/shard-$$i.log" ]; then cat "$$tmpdir/shard-$$i.log"; fi; \
 		if code=$$(cat "$$tmpdir/shard-$$i.exit" 2>/dev/null) && [ -n "$$code" ]; then \
 			if [ "$$code" != "0" ]; then \
-				echo "❌ shard $$i: go test exited $$code"; \
+				echo "❌ shard $$i: the features/controller/api test binary exited $$code"; \
 				fail=1; \
 			fi; \
 		else \
