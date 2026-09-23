@@ -34,7 +34,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1387,14 +1386,17 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	// Verify the DNA collector itself is non-fatal on a non-Windows host
 	// (wmic / powershell absent → subprocess errors → collector logs + returns).
+	// Issue #4222: this test asserts non-fatal behavior, not specific hardware
+	// values, so it uses a snapshot-backed collector rather than the platform
+	// default's wmic/powershell subprocesses.
 	logger := logging.NewLogger("error")
-	collector := dna.NewCollector(logger)
+	collector := newSnapshotDNACollector(t, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Collect must not panic or call os.Exit — it either succeeds (Linux
-	// generic path) or returns partial/nil data with an internal warning.
+	// Collect must not panic or call os.Exit — it either succeeds (snapshot
+	// replay) or returns partial/nil data with an internal warning.
 	result, dnaErr := collector.Collect(ctx)
 	// Reaching this line proves the call was non-fatal.
 	if dnaErr != nil {
@@ -1480,7 +1482,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 		"cluster:cfg-lab.member_nodes":          "CFG-70-02,CFG-AB-02,CFG-C3-02",
 		"cluster:cfg-lab.resource_owner.web-01": "CFG-70-02",
 	}
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
 
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
@@ -1501,7 +1503,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 // Issue #3332: hardware-facts-only mode still returns host attrs; fragments are a
 // parallel channel, not a replacement for the flat map in this path.
 func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), nil)
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), nil)
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")
