@@ -51,12 +51,12 @@ func WithOsquerySource(src OsquerySource) CollectorOption {
 
 // WithHardwareCollector returns an option that selects the HardwareCollector
 // implementation Collect uses, in place of the platform default
-// newPlatformHardwareCollector would build. The intended use is to select
-// GenericHardwareCollector — the cross-platform implementation this package
-// already ships and factory_generic.go already wires on platforms without a
-// specialised collector — on a host whose platform default is expensive
-// (the Windows collector issues nine WMI queries per run, Issue #4222).
-// Both implementations probe the live host; they differ in how deeply.
+// newPlatformHardwareCollector would build. The intended use is test
+// injection: a snapshot-backed HardwareCollector (pkg/testing/dnasnapshot)
+// that replays data captured once from a real collector run, so tests that
+// assert on Collect's assembly, caching and partitioning logic don't pay the
+// cost of probing real hardware on every run (the Windows platform collector
+// issues nine WMI queries per run, Issue #4222).
 func WithHardwareCollector(h HardwareCollector) CollectorOption {
 	return func(c *Collector) { c.hardware = h }
 }

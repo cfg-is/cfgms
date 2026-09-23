@@ -20,7 +20,7 @@ func TestDNACollectionBasic(t *testing.T) {
 		// given OS can be inspected — TestDNACollectionPerformance below keeps
 		// the platform default and asserts the richer real-collect counts.
 		logger := logging.NewLogger("error") // Minimal noise
-		collector := newGenericCollector(logger)
+		collector := newSnapshotCollector(t, logger)
 
 		ctx := context.Background()
 
@@ -36,19 +36,20 @@ func TestDNACollectionBasic(t *testing.T) {
 		}
 
 		// Every fast-path gatherer must have contributed. Assert the keys each
-		// one guarantees on every platform rather than a bare count threshold,
-		// which only ever measured how richly the host's platform collector
-		// happens to report.
+		// one guarantees — either from the snapshot fixture (hardware, network)
+		// or from the live host (basic info, environment) — rather than a bare
+		// count threshold, which only ever measured how richly a given host's
+		// platform collector happens to report.
 		required := []string{
 			"hostname",                // collectBasicInfo
 			"num_cpu",                 // collectBasicInfo
-			"cpu_count",               // collectHardwareInfo
-			"memory_go_sys",           // collectHardwareInfo
-			"disk_info",               // collectHardwareInfo
-			"system_info",             // collectHardwareInfo
-			"network_interface_count", // collectNetworkInfo
-			"dns_info",                // collectNetworkInfo
-			"firewall_info",           // collectNetworkInfo
+			"cpu_count",               // collectHardwareInfo (CollectCPU)
+			"memory_total_kb",         // collectHardwareInfo (CollectMemory)
+			"disk_mount_count",        // collectHardwareInfo (CollectDisk)
+			"kernel_info",             // collectHardwareInfo (CollectMotherboard)
+			"network_interface_count", // collectNetworkInfo (CollectInterfaces)
+			"dns_servers",             // collectNetworkInfo (CollectDNS)
+			"firewall_state",          // collectNetworkInfo (CollectFirewall)
 			"timezone",                // collectEnvironmentInfo
 		}
 		attrs := collector.RawAttributes(ctx)

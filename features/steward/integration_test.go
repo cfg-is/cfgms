@@ -80,7 +80,7 @@ func TestStandaloneSubsystemsInitialized(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 

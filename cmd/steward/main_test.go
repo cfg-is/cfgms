@@ -1349,16 +1349,16 @@ func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	// Verify the DNA collector itself is non-fatal on a non-Windows host
 	// (wmic / powershell absent → subprocess errors → collector logs + returns).
 	// Issue #4222: this test asserts non-fatal behavior, not specific hardware
-	// values, so it uses the dna package's cross-platform sub-collectors rather
-	// than the platform default's wmic/powershell subprocesses.
+	// values, so it uses a snapshot-backed collector rather than the platform
+	// default's wmic/powershell subprocesses.
 	logger := logging.NewLogger("error")
-	collector := newGenericDNACollector(logger)
+	collector := newSnapshotDNACollector(t, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Collect must not panic or call os.Exit — it either succeeds (Linux
-	// generic path) or returns partial/nil data with an internal warning.
+	// Collect must not panic or call os.Exit — it either succeeds (snapshot
+	// replay) or returns partial/nil data with an internal warning.
 	result, dnaErr := collector.Collect(ctx)
 	// Reaching this line proves the call was non-fatal.
 	if dnaErr != nil {

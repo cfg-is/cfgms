@@ -396,7 +396,7 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	require.NoError(t, err)
 	steward.RegisterTestModule(s, "testmonitor", testMon)
 	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -431,9 +431,9 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// synchronization — no sleep needed.
 	//
 	// 30s timeout: generous headroom on loaded CI runners while still catching
-	// cases where the DNA is never refreshed. The DNA collector uses the dna
-	// package's cross-platform sub-collectors (Issue #4222), so in practice this
-	// resolves almost immediately.
+	// cases where the DNA is never refreshed. The DNA collector is
+	// snapshot-backed (Issue #4222), so in practice this resolves almost
+	// immediately.
 	require.Eventually(t, func() bool {
 		dna := steward.GetPreviousDNA(s)
 		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"

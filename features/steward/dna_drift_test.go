@@ -38,7 +38,7 @@ func TestDNACollectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -59,7 +59,7 @@ func TestDriftDetectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -99,7 +99,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Before Start, no DNA snapshot exists.
 	prevDNA := steward.GetPreviousDNA(s)
@@ -129,7 +129,7 @@ func TestRunConvergenceCapturesDNASnapshot(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -153,7 +153,7 @@ func TestRunConvergenceDetectsDNADriftOnSecondRun(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -208,7 +208,7 @@ func TestDetectUnmanagedDNADrift_NilDriftDetector(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Set a previous snapshot so we reach the driftDetector nil check.
 	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"test": "value"})
@@ -240,7 +240,7 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	steward.SetDNACollector(s, newGenericDNACollector(logger))
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Inject a previous DNA with a different ID than the DNA collector will produce.
 	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"fake": "previous"})
@@ -292,7 +292,7 @@ func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
-	collector := newGenericDNACollector(logger)
+	collector := newSnapshotDNACollector(t, logger)
 	steward.SetDNACollector(s, collector)
 
 	ctx := context.Background()
