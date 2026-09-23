@@ -1444,7 +1444,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 		"cluster:cfg-lab.member_nodes":          "CFG-70-02,CFG-AB-02,CFG-C3-02",
 		"cluster:cfg-lab.resource_owner.web-01": "CFG-70-02",
 	}
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
 
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
@@ -1465,7 +1465,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 // Issue #3332: hardware-facts-only mode still returns host attrs; fragments are a
 // parallel channel, not a replacement for the flat map in this path.
 func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), nil)
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), nil)
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")
