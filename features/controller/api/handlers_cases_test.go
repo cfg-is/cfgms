@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,37 +669,75 @@ func TestHandleUpdateCase_NonexistentReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// readBarrierCaseStore wraps a CaseStore so every UpdateCaseCAS call blocks
+// until n GetCase calls have completed (Issue #4241). It forces genuine CAS
+// contention deterministically: both concurrent writers are guaranteed to
+// have read the same version before either is allowed to write, rather than
+// depending on wall-clock scheduling to make two goroutines overlap. Every
+// other method passes through to the embedded store unchanged.
+type readBarrierCaseStore struct {
+	business.CaseStore
+	pending int32
+	ready   chan struct{}
+}
+
+func newReadBarrierCaseStore(store business.CaseStore, n int) *readBarrierCaseStore {
+	return &readBarrierCaseStore{CaseStore: store, pending: int32(n), ready: make(chan struct{})}
+}
+
+func (b *readBarrierCaseStore) GetCase(ctx context.Context, id string) (*business.Case, error) {
+	c, err := b.CaseStore.GetCase(ctx, id)
+	if atomic.AddInt32(&b.pending, -1) == 0 {
+		close(b.ready)
+	}
+	return c, err
+}
+
+func (b *readBarrierCaseStore) UpdateCaseCAS(ctx context.Context, c *business.Case, expectedVersion int) (int, bool, error) {
+	<-b.ready
+	return b.CaseStore.UpdateCaseCAS(ctx, c, expectedVersion)
+}
+
 // TestUpdateCase_ConcurrentUpdateLosesCleanly is the [REQUIRED TEST] for Issue
 // #3895: handleUpdateCase's GetCase-then-UpdateCase was a blind overwrite with no
 // version check — two concurrent updates could both read the same starting state
 // and the second write to land would silently clobber the first. The fix routes
 // the write through CaseStore.UpdateCaseCAS, keyed on the version read alongside
-// GetCase, so of two concurrent updates racing the same case, exactly one wins
-// and the other loses cleanly (409) rather than being silently overwritten. Two
-// *Server instances share one durable CaseStore, modeling two cluster nodes
-// behind the same database. Run under -race.
+// GetCase — a monotonically increasing integer column (SQLiteCaseStore.
+// UpdateCaseCAS: "UPDATE cases SET ... version = ? ... WHERE id = ? AND
+// version = ?", newVersion := expectedVersion + 1), never a timestamp — so of
+// two concurrent updates racing the same case, exactly one wins and the other
+// loses cleanly (409) rather than being silently overwritten. Two *Server
+// instances share one durable CaseStore, modeling two cluster nodes behind the
+// same database. Run under -race.
 //
-// The two goroutines are not guaranteed to overlap. When the second request
-// reads the first one's committed write it carries the current version, so the
-// compare-and-swap is never contended and both updates legitimately return 200.
-// That is not a defect, but asserting exactly one 409 on a single unsynchronised
-// attempt failed whenever it happened — this test evicted PRs from the merge
-// queue on the macOS, Windows and Linux legs of Cross-Platform Build Validation,
-// including PRs touching neither this file nor handleUpdateCase.
+// Issue #4241: a prior version of this test released both goroutines from a
+// shared channel and retried up to 50 times, hoping the two requests would
+// overlap. On windows-latest merge-queue runs every one of the 50 attempts
+// returned [200 200] — not because the CAS accepted two same-version writes
+// (it does not; see the version column above), but because a
+// GOMAXPROCS-constrained runner let node A's entire read-validate-write
+// sequence finish before node B's read even started, so node B legitimately
+// read node A's committed version and was never contended. Retrying a
+// wall-clock race doesn't fix a runner that never schedules the overlap.
 //
-// Each attempt therefore releases both goroutines from a shared barrier so they
-// enter the read-validate-write sequence together, and retries with a freshly
-// seeded case when they serialize anyway. A compare-and-swap that never yields a
-// 409 fails every attempt and still fails the test deterministically — the retry
-// filters scheduling, not regressions.
+// readBarrierCaseStore removes the scheduling dependency instead: it holds
+// both UpdateCaseCAS calls until both GetCase calls have completed, so the two
+// writers are guaranteed to share the same expected version and the
+// compare-and-swap is guaranteed contended, deterministically, in one attempt.
 func TestUpdateCase_ConcurrentUpdateLosesCleanly(t *testing.T) {
 	nodeA := setupCasesTestServer(t)
-	cs := nodeA.CasesStore()
+	realStore := nodeA.CasesStore()
 	nodeB := setupTestServer(t)
-	nodeB.SetCasesStore(cs)
+
+	barrier := newReadBarrierCaseStore(realStore, 2)
+	nodeA.SetCasesStore(barrier)
+	nodeB.SetCasesStore(barrier)
 
 	apiKeyA := newCasesTestKey(t, nodeA, "test-tenant")
 	apiKeyB := newCasesTestKey(t, nodeB, "test-tenant")
+
+	c := seedCase(t, realStore, "test-tenant")
 
 	bodyA := map[string]interface{}{
 		"status": "closed",
@@ -717,78 +756,51 @@ func TestUpdateCase_ConcurrentUpdateLosesCleanly(t *testing.T) {
 	bytesB, err := json.Marshal(bodyB)
 	require.NoError(t, err)
 
-	// Bounded: a contended attempt is the expected case, and a working
-	// compare-and-swap cannot serialize indefinitely. A broken one exhausts every
-	// attempt and fails below with the observed codes.
-	const maxAttempts = 50
-	var lastCodes []int
-	var lastBodyA, lastBodyB string
+	var wg sync.WaitGroup
+	var recA, recB *httptest.ResponseRecorder
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesA))
+		req.Header.Set("X-API-Key", apiKeyA)
+		req.Header.Set("Content-Type", "application/json")
+		recA = httptest.NewRecorder()
+		nodeA.router.ServeHTTP(recA, req)
+	}()
+	go func() {
+		defer wg.Done()
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesB))
+		req.Header.Set("X-API-Key", apiKeyB)
+		req.Header.Set("Content-Type", "application/json")
+		recB = httptest.NewRecorder()
+		nodeB.router.ServeHTTP(recB, req)
+	}()
+	wg.Wait()
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		c := seedCase(t, cs, "test-tenant")
-
-		release := make(chan struct{})
-		var wg sync.WaitGroup
-		var recA, recB *httptest.ResponseRecorder
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesA))
-			req.Header.Set("X-API-Key", apiKeyA)
-			req.Header.Set("Content-Type", "application/json")
-			recA = httptest.NewRecorder()
-			<-release
-			nodeA.router.ServeHTTP(recA, req)
-		}()
-		go func() {
-			defer wg.Done()
-			req := httptest.NewRequest(http.MethodPut, "/api/v1/cases/"+c.ID, bytes.NewReader(bytesB))
-			req.Header.Set("X-API-Key", apiKeyB)
-			req.Header.Set("Content-Type", "application/json")
-			recB = httptest.NewRecorder()
-			<-release
-			nodeB.router.ServeHTTP(recB, req)
-		}()
-		close(release)
-		wg.Wait()
-
-		codes := []int{recA.Code, recB.Code}
-		successes, conflicts := 0, 0
-		for _, code := range codes {
-			switch code {
-			case http.StatusOK:
-				successes++
-			case http.StatusConflict:
-				conflicts++
-			}
+	codes := []int{recA.Code, recB.Code}
+	successes, conflicts := 0, 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusOK:
+			successes++
+		case http.StatusConflict:
+			conflicts++
 		}
-		lastCodes = codes
-		lastBodyA, lastBodyB = recA.Body.String(), recB.Body.String()
-
-		if successes == 2 {
-			// The requests serialized: the second read the first's committed version,
-			// so the compare-and-swap was never contended. Retry.
-			continue
-		}
-
-		require.Equal(t, 1, successes, "exactly one contended update must succeed: %v (A: %s, B: %s)",
-			codes, lastBodyA, lastBodyB)
-		require.Equal(t, 1, conflicts, "exactly one contended update must lose the compare-and-swap (409): %v", codes)
-
-		final, err := cs.GetCase(context.Background(), c.ID)
-		require.NoError(t, err)
-		if recA.Code == http.StatusOK {
-			assert.Equal(t, business.CaseStatusClosed, final.Status, "final state must match only the winner's write")
-			assert.Equal(t, "closed by node A", final.Ticket.Title.Value)
-		} else {
-			assert.Equal(t, business.CaseStatusOpen, final.Status, "final state must match only the winner's write")
-			assert.Equal(t, "reopened by node B", final.Ticket.Title.Value)
-		}
-		return
 	}
 
-	t.Fatalf("no contended update in %d attempts — every pair returned %v; a compare-and-swap that never yields a 409 is the Issue #3895 regression (last bodies A: %s, B: %s)",
-		maxAttempts, lastCodes, lastBodyA, lastBodyB)
+	require.Equal(t, 1, successes, "exactly one contended update must succeed: %v (A: %s, B: %s)",
+		codes, recA.Body.String(), recB.Body.String())
+	require.Equal(t, 1, conflicts, "exactly one contended update must lose the compare-and-swap (409): %v", codes)
+
+	final, err := realStore.GetCase(context.Background(), c.ID)
+	require.NoError(t, err)
+	if recA.Code == http.StatusOK {
+		assert.Equal(t, business.CaseStatusClosed, final.Status, "final state must match only the winner's write")
+		assert.Equal(t, "closed by node A", final.Ticket.Title.Value)
+	} else {
+		assert.Equal(t, business.CaseStatusOpen, final.Status, "final state must match only the winner's write")
+		assert.Equal(t, "reopened by node B", final.Ticket.Title.Value)
+	}
 }
 
 // ── PIN helpers ─────────────────────────────────────────────────────────────
