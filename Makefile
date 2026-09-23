@@ -540,7 +540,9 @@ test-go-group-rest:
 	for module in $(ALL_MODULES); do \
 		echo "  Testing $$module..."; \
 		go test -race -short -timeout=2m ./features/modules/$$module/...; \
-	done
+	done; \
+	echo "  Testing features/modules/adapter, features/modules/conformance..."; \
+	go test -race -short -timeout=2m ./features/modules/adapter/... ./features/modules/conformance/...
 
 # Windows/macOS PR-side native leg targets (Issue #4219).
 #
@@ -584,6 +586,12 @@ test-go-group-windows-controller:
 		go test $$race_flag -short -timeout=10m $$pkgs; \
 	fi
 
+# -v is scoped to ./cmd/... only (matching cross-platform-build.yml's queue
+# job, Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
+# per-test output to tell a passing test from one that skipped for lack of
+# Administrator rights — a non-verbose run only prints one "ok <package>" line
+# per package with no per-test result. features/steward stays non-verbose to
+# keep the rest of the log readable.
 .PHONY: test-go-group-windows-steward
 test-go-group-windows-steward:
 	@race_flag="-race"; \
@@ -591,8 +599,10 @@ test-go-group-windows-steward:
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
 	else \
-		echo "  Testing windows-steward group (features/steward, cmd)..."; \
-		go test $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+		echo "  Testing windows-steward group (features/steward)..."; \
+		go test $$race_flag -short -timeout=10m ./features/steward/...; \
+		echo "  Testing windows-steward group (cmd, verbose)..."; \
+		go test -v $$race_flag -short -timeout=10m ./cmd/...; \
 	fi
 
 # Everything the queue's Native Build (Windows) job tests (./pkg/... ./features/...
