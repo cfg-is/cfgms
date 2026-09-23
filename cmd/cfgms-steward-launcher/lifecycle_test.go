@@ -1236,11 +1236,48 @@ func TestSupervise_KnownGood_FastExitRestartsInPlace(t *testing.T) {
 		ExtraArgs:         []string{"-test.run=TestHelperProcess"},
 	}
 
-	// Run with a short timeout; the known-good loop must not return an error.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Issue #4227: this test used to bound the whole run at a fixed 2s and
+	// only check the marker file once, right after that window closed. On a
+	// cold windows-latest runner the first exec.Cmd.Start of the (large) test
+	// binary can itself take longer than 2s, so the child was still being
+	// spawned — and had not yet reached the point of writing its marker —
+	// when the context fired; Supervise correctly reported a clean,
+	// known-good-suppressed shutdown (err == nil) with no child having run at
+	// all, and the marker assertion failed. "The child ran at least once" is
+	// a claim about the marker file, not about wall-clock elapsed against a
+	// budget shared with the shutdown assertion below, so prove it by polling
+	// for the marker directly and cancelling only once it is observed —
+	// exactly the pattern TestSupervise_CleanStartup_WritesFlagAndPrunesVersions
+	// above already uses (waitForFile + cancel + drain) for the same kind of
+	// "spawn a real child, wait for on-disk evidence" assertion on this same
+	// runner class, and the same 5s bound it already relies on.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	err := s.Supervise(ctx)
-	// Context timeout is a clean cancel — Supervise must return nil.
+
+	superviseDone := make(chan error, 1)
+	go func() {
+		superviseDone <- s.Supervise(ctx)
+	}()
+
+	spawnStart := time.Now()
+	if !waitForFile(markerFile, 5*time.Second) {
+		cancel()
+		t.Fatalf("child never ran within 5s (marker absent) — spawn-to-marker latency exceeded budget")
+	}
+	// AC1 evidence: measured spawn-to-marker latency on the CI runner.
+	t.Logf("spawn-to-marker latency: %s", time.Since(spawnStart))
+
+	// The marker proves the child ran; cancel now to exercise the same
+	// clean-shutdown-on-cancel path the original fixed-window version did.
+	cancel()
+
+	var err error
+	select {
+	case err = <-superviseDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Supervise did not return within 10s of context cancel")
+	}
+	// Context cancel is a clean shutdown — Supervise must return nil.
 	if err != nil {
 		t.Errorf("Supervise returned %v on known-good fast-exit; want nil (restart in place, not terminal failure)", err)
 	}
@@ -1252,11 +1289,6 @@ func TestSupervise_KnownGood_FastExitRestartsInPlace(t *testing.T) {
 	}
 	if cur != "v1" {
 		t.Errorf("current = %q after known-good fast-exit, want v1 (rollback must be suppressed)", cur)
-	}
-
-	// The child must have run at least once (marker file written).
-	if _, statErr := os.Stat(markerFile); statErr != nil {
-		t.Errorf("child never ran (marker absent): %v", statErr)
 	}
 
 	// Stderr must mention the restart-in-place decision.
