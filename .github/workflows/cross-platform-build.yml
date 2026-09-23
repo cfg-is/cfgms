@@ -71,7 +71,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): this job runs on merge_group /
+    # workflow_dispatch, whose ref is gh-readonly-queue/* or the manual
+    # dispatch ref — neither is refs/heads/develop, so a save here would be
+    # just as unreadable to other PRs as the per-PR-ref caches this story
+    # removes, and would count as a second writer alongside
+    # develop-sanity.yml. The develop-scoped writer is the only save path.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -142,9 +161,14 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this job runs on merge_group /
+    # workflow_dispatch (gh-readonly-queue/* or a dispatch ref, neither
+    # refs/heads/develop), so a save here is unreadable to other PRs and
+    # would be a second writer alongside develop-sanity.yml.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod

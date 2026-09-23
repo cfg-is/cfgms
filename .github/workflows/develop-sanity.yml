@@ -5,7 +5,7 @@ on:
     branches:
       - develop
 
-# Deny by default at the workflow level; the single job re-grants what it needs.
+# Deny by default at the workflow level; each job re-grants what it needs.
 # Scorecard's Token-Permissions check scores any top-level write grant as a
 # finding, because it applies to every job the workflow may grow later.
 permissions: {}
@@ -97,3 +97,61 @@ jobs:
       - name: Fail job if build failed
         if: steps.build.outcome == 'failure'
         run: exit 1
+
+  # Develop-scoped Go cache writer (Issue #4234). This workflow's only
+  # trigger is `push: branches: [develop]`, so every cache this job saves is
+  # scoped to refs/heads/develop — GitHub's default-branch cache scope, the
+  # only scope every PR and merge-queue run can read regardless of its own
+  # ref. This is now the SINGLE writer of each OS's `<os>-go-modules-<go.sum
+  # hash>` entry; cross-platform-build-pr.yml, cross-platform-build.yml,
+  # test-suite.yml and fleet-e2e.yml only ever restore it — verifiable with
+  # `grep -rn 'go-modules-' .github/workflows/`, where every other hit is an
+  # `actions/cache/restore` step. Runs independently of build-sanity
+  # above — a cache-warm failure must never block or incident-page the
+  # develop build check, so its steps are continue-on-error.
+  warm-go-cache:
+    name: Warm Go cache (${{ matrix.platform }})
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+          - os: windows-latest
+            platform: Windows
+          - os: macos-latest
+            platform: macOS
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Download dependencies
+        continue-on-error: true
+        run: go mod download
+
+      - name: Warm build cache
+        continue-on-error: true
+        run: go build ./...
+
+      - name: Save Go module/build cache
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            ~\AppData\Local\go-build
+            ~\go\pkg\mod
+          key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}

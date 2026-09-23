@@ -186,13 +186,25 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this step used to be a combined
+    # actions/cache restore+save. This job is ungated and runs on
+    # ubuntu-latest for every pull_request, so it was the highest-frequency
+    # writer of `Linux-go-modules-<go.sum hash>` in the repo — each save
+    # PR-ref-scoped, unreadable by any other PR, and evicting the
+    # develop-scoped entry at the 10 GB cache ceiling. The develop-scoped
+    # writer (develop-sanity.yml) is the only save path — PR legs only ever
+    # restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
           ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
@@ -239,7 +251,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -267,7 +298,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -296,7 +346,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -325,7 +394,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -364,7 +452,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -394,7 +501,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -424,7 +550,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -452,7 +597,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -480,7 +644,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -508,7 +691,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -538,7 +740,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download
@@ -571,7 +792,26 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-        cache: true
+        cache: false
+
+    # Restore-only (Issue #4234): setup-go's cache:true both restores AND
+    # saves via a post-job hook; on a pull_request run that save is scoped to
+    # this PR's ref, invisible to every other PR, and was evicting the
+    # develop-scoped Linux-go-modules cache at the 10 GB ceiling. The
+    # develop-scoped writer (develop-sanity.yml) is the only save path — PR
+    # legs only ever restore into whatever it last wrote.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
 
     - name: Download dependencies
       run: go mod download

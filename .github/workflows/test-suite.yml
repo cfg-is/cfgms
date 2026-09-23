@@ -200,9 +200,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
@@ -234,9 +243,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
@@ -268,9 +286,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
@@ -336,9 +363,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
@@ -370,9 +406,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
@@ -502,9 +547,18 @@ jobs:
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/go/pkg/mod
