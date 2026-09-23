@@ -396,6 +396,7 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	require.NoError(t, err)
 	steward.RegisterTestModule(s, "testmonitor", testMon)
 	steward.SetDebounceWindowForTest(s, 40*time.Millisecond)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -408,7 +409,7 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 		_ = s.Stop(context.Background())
 	})
 
-	// Initial convergence has run; previousDNA is now the real system DNA.
+	// Initial convergence has run; previousDNA is now the snapshot-backed DNA.
 	// Inject a sentinel so we can detect when detectUnmanagedDNADrift is called again.
 	steward.SetPreviousDNA(s, &commonpb.DNA{
 		Id: "sentinel-id-dna-refresh-test",
@@ -429,10 +430,9 @@ func TestMonitorDNARefreshAfterChange(t *testing.T) {
 	// same monitorEventLoop goroutine, so polling GetPreviousDNA is the correct
 	// synchronization — no sleep needed.
 	//
-	// 30s timeout: macOS CI runners are slow and detectUnmanagedDNADrift runs
-	// multiple network OS commands (networksetup, scutil, netstat, etc.) that can
-	// collectively take 10-20s on loaded CI runners. 30s gives ample headroom
-	// while still catching cases where the DNA is never refreshed.
+	// 30s timeout: generous headroom on loaded CI runners while still catching
+	// cases where the DNA is never refreshed. The DNA collector is snapshot-backed
+	// (Issue #4222), so in practice this resolves almost immediately.
 	require.Eventually(t, func() bool {
 		dna := steward.GetPreviousDNA(s)
 		return dna != nil && dna.Id != "sentinel-id-dna-refresh-test"

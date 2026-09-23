@@ -14,9 +14,12 @@ import (
 // TestDNACollectionBasic tests core DNA collection functionality quickly
 func TestDNACollectionBasic(t *testing.T) {
 	if !testing.Short() {
-		// In non-short mode, do minimal real collection for validation
+		// In non-short mode, validate assembly (ID derivation, attribute counting)
+		// with a snapshot-backed collector — these assertions are about the
+		// collector's assembly logic, not about timing real OS calls, so a
+		// snapshot exercises the same code path without probing real hardware.
 		logger := logging.NewLogger("error") // Minimal noise
-		collector := NewCollector(logger)
+		collector := newSnapshotCollector(t, logger)
 
 		// Quick validation that collection works
 		dna, err := collector.Collect(context.Background())

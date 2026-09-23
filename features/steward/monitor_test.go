@@ -304,7 +304,6 @@ func TestMonitorModeNeverSets(t *testing.T) {
 	// reconciles run in monitor mode.
 	steward.SetDriftModeForTest(s, config.DriftModeMonitor)
 	// Disable DNA collection: this test exercises drift-mode-never-sets only.
-	// DNA collection runs system_profiler and network commands that take 30-60s on macOS CI.
 	steward.SetDNACollector(s, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())

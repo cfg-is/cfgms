@@ -34,7 +34,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -1349,8 +1348,10 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	// Verify the DNA collector itself is non-fatal on a non-Windows host
 	// (wmic / powershell absent → subprocess errors → collector logs + returns).
+	// Snapshot-backed (Issue #4222): this test asserts non-fatal behavior, not
+	// specific hardware values, so it does not need real hardware collection.
 	logger := logging.NewLogger("error")
-	collector := dna.NewCollector(logger)
+	collector := newSnapshotDNACollector(t, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
