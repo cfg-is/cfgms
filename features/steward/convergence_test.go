@@ -138,11 +138,11 @@ func TestDetectUnmanagedDNADrift_IDMismatch(t *testing.T) {
 
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
-	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
+	steward.SetDNACollector(s, newGenericDNACollector(logger))
 
-	// Inject a previousDNA with a sentinel ID that the snapshot DNA collector will not
+	// Inject a previousDNA with a sentinel ID that the DNA collector will not
 	// produce. The collector derives IDs from stable hardware identifiers (MAC +
-	// hostname), so the snapshot's ID will always differ from the sentinel below.
+	// hostname), so the collected ID will always differ from the sentinel below.
 	steward.SetPreviousDNA(s, &commonpb.DNA{Id: "guaranteed-mismatch-id-xyz"})
 
 	ctx := context.Background()
@@ -165,7 +165,7 @@ func TestDetectUnmanagedDNADrift_SameID(t *testing.T) {
 
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
-	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
+	steward.SetDNACollector(s, newGenericDNACollector(logger))
 
 	ctx := context.Background()
 

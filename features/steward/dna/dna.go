@@ -49,28 +49,35 @@ func WithOsquerySource(src OsquerySource) CollectorOption {
 	return func(c *Collector) { c.osquery = src }
 }
 
-// WithHardwareCollector returns an option that replaces the platform hardware
-// collector normally built by collectHardwareInfo. Tests use this to inject a
-// snapshot-backed HardwareCollector so Collect exercises real assembly, cache,
-// and partitioning logic without probing real hardware.
+// WithHardwareCollector returns an option that selects the HardwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformHardwareCollector would build. The intended use is to select
+// GenericHardwareCollector — the cross-platform implementation this package
+// already ships and factory_generic.go already wires on platforms without a
+// specialised collector — on a host whose platform default is expensive
+// (the Windows collector issues nine WMI queries per run, Issue #4222).
+// Both implementations probe the live host; they differ in how deeply.
 func WithHardwareCollector(h HardwareCollector) CollectorOption {
 	return func(c *Collector) { c.hardware = h }
 }
 
-// WithSoftwareCollector returns an option that replaces the platform software
-// collector normally built by collectSoftwareInfo. See WithHardwareCollector.
+// WithSoftwareCollector returns an option that selects the SoftwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSoftwareCollector would build. See WithHardwareCollector.
 func WithSoftwareCollector(s SoftwareCollector) CollectorOption {
 	return func(c *Collector) { c.software = s }
 }
 
-// WithNetworkCollector returns an option that replaces the platform network
-// collector normally built by collectNetworkInfo. See WithHardwareCollector.
+// WithNetworkCollector returns an option that selects the NetworkCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformNetworkCollector would build. See WithHardwareCollector.
 func WithNetworkCollector(n NetworkCollector) CollectorOption {
 	return func(c *Collector) { c.network = n }
 }
 
-// WithSecurityCollector returns an option that replaces the platform security
-// collector normally built by collectSecurityInfo. See WithHardwareCollector.
+// WithSecurityCollector returns an option that selects the SecurityCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSecurityCollector would build. See WithHardwareCollector.
 func WithSecurityCollector(s SecurityCollector) CollectorOption {
 	return func(c *Collector) { c.security = s }
 }

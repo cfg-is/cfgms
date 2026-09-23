@@ -124,7 +124,7 @@ resources:
 // Every assertion goes through adapter.CollectAttributes, not the source directly.
 func TestDNACollectorAdapter_SetModuleDNASource_PurityTest(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 	ctx := context.Background()
 
 	// Real executor #1 produces "res-a.state=running".
@@ -182,10 +182,10 @@ func TestDNACollectorAdapter_PreWiredVsPostWired(t *testing.T) {
 	})
 
 	// Pre-wired adapter (construction-time wiring, as standalone mode does).
-	preWired := newSnapshotDNACollectorAdapter(t, logger, src)
+	preWired := newGenericDNACollectorAdapter(logger, src)
 
 	// Post-wired adapter (construction with nil, then setter, as controller mode does).
-	postWired := newSnapshotDNACollectorAdapter(t, logger, nil)
+	postWired := newGenericDNACollectorAdapter(logger, nil)
 	postWired.setModuleDNASource(src)
 
 	// Invoke each adapter's CollectAttributes — the actual production path.
@@ -223,7 +223,7 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 	ctx := context.Background()
 
 	// Nil source: only host:* fragments from the real dna.Collector (Issue #3332).
-	bare := newSnapshotDNACollectorAdapter(t, logger, nil)
+	bare := newGenericDNACollectorAdapter(logger, nil)
 	bareFrags := bare.CollectFragments(ctx)
 	assert.NotEmpty(t, bareFrags,
 		"an adapter with no module source must yield host:* fragments from the real dna.Collector")
@@ -240,7 +240,7 @@ func TestDNACollectorAdapter_CollectFragments_ForwardsToModuleSource(t *testing.
 		"resource_owner": map[string]string{"web-01": "CFG-70-02"},
 	})
 
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 	adapter.setModuleDNASource(src)
 
 	// Wait on the MODULE SOURCE, then call the adapter exactly once (Issue #3483).
@@ -367,7 +367,7 @@ func TestDNACollectorAdapter_EndToEnd_ControllerMode(t *testing.T) {
 	e.SetMonitorDebounceWindow(20 * time.Millisecond)
 
 	// Build the DNA adapter with nil moduleDNASource (as main.go does pre-wiring).
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 
 	// Wire the executor as the module DNA source (as main.go does post-InitializeConfigExecutor).
 	adapter.setModuleDNASource(e)
@@ -439,7 +439,7 @@ func TestDNACollectorAdapter_CollectFragments_HostFragmentsAloneWhenNoModuleSour
 	ctx := context.Background()
 
 	// Hardware-facts-only mode: no module source wired.
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 
 	frags := adapter.CollectFragments(ctx)
 
@@ -466,7 +466,7 @@ func TestDNACollectorAdapter_CollectFragments_UnionsHostAndModuleFragments(t *te
 		"member_nodes":   []string{"CFG-70-02", "CFG-AB-02"},
 	})
 
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 	adapter.setModuleDNASource(src)
 
 	// Wait on the module source, then call the adapter once — see the comment in
@@ -511,7 +511,7 @@ func TestDNACollectorAdapter_CollectFragmentsTracked_SatisfiesFragmentCollector(
 	logger := logging.NewLogger("error")
 	ctx := context.Background()
 
-	adapter := newSnapshotDNACollectorAdapter(t, logger, nil)
+	adapter := newGenericDNACollectorAdapter(logger, nil)
 
 	frags, err := adapter.CollectFragmentsTracked(ctx)
 	require.NoError(t, err, "CollectFragmentsTracked must never return an error")

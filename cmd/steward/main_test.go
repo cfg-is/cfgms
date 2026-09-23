@@ -1348,10 +1348,11 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	// Verify the DNA collector itself is non-fatal on a non-Windows host
 	// (wmic / powershell absent → subprocess errors → collector logs + returns).
-	// Snapshot-backed (Issue #4222): this test asserts non-fatal behavior, not
-	// specific hardware values, so it does not need real hardware collection.
+	// Issue #4222: this test asserts non-fatal behavior, not specific hardware
+	// values, so it uses the dna package's cross-platform sub-collectors rather
+	// than the platform default's wmic/powershell subprocesses.
 	logger := logging.NewLogger("error")
-	collector := newSnapshotDNACollector(t, logger)
+	collector := newGenericDNACollector(logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
