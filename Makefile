@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -197,6 +197,17 @@ build-stdlib-modules: check-stdlib-payload-boundary
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
+# Targets build-cross-validate actually needs to cross-compile (Issue #4219).
+# linux/amd64 is natively built and tested by every ubuntu-latest job
+# (unit-tests-*, the e2e leg, the queue's Native Build (Linux)); windows/amd64
+# by the four Windows PR legs and the queue's Native Build (Windows);
+# darwin/arm64 by the two macOS PR legs and the queue's Native Build (macOS) —
+# macos-latest runners are arm64. Only linux/arm64 and darwin/amd64 have no
+# native runner anywhere in CI, so cross-compilation is the only validation
+# they get. Kept separate from PLATFORMS: build-cross-platform is the release
+# matrix and must still produce binaries for all five.
+CROSS_VALIDATE_PLATFORMS := linux/arm64 darwin/amd64
+
 # Build all binaries for all platforms (outputs to bin/platform/)
 .PHONY: build-cross-platform
 build-cross-platform:
@@ -226,7 +237,7 @@ build-cross-validate:
 	@echo "🔍 Validating Cross-Platform Compilation"
 	@echo "========================================"
 	@FAILED=0; \
-	for platform in $(PLATFORMS); do \
+	for platform in $(CROSS_VALIDATE_PLATFORMS); do \
 		export GOOS=$${platform%/*}; \
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
@@ -522,24 +533,110 @@ test-go-group-rest:
 		echo "$$pkgs"; \
 		exit 0; \
 	fi; \
-	echo "  Testing framework (remaining packages, excluding modules and long-running tests)..."; \
+	echo "  Testing framework (remaining packages, including ./test/unit/... which"; \
+	echo "  go list ./... already covers - excludes only modules and long-running tests)..."; \
 	go test -race -short -timeout=10m $$pkgs; \
-	echo "  Testing core modules (smoke test)..."; \
-	for module in $(CORE_MODULES); do \
+	echo "  Testing all modules..."; \
+	for module in $(ALL_MODULES); do \
 		echo "  Testing $$module..."; \
-		go test -race -short -timeout=30s ./features/modules/$$module/...; \
-	done; \
-	changed_modules="$(CHANGED_MODULES)"; \
-	if [ -n "$$changed_modules" ]; then \
-		echo "📝 Testing changed modules: $$changed_modules"; \
-		for module in $$changed_modules; do \
-			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
-				echo "  Testing changed module: $$module"; \
-				go test -race -short -timeout=2m ./features/modules/$$module/...; \
-			fi; \
-		done; \
+		go test -race -short -timeout=2m ./features/modules/$$module/...; \
+	done
+
+# Windows/macOS PR-side native leg targets (Issue #4219).
+#
+# The queue's Native Build (Windows) job (cross-platform-build.yml) runs
+# `go test -short ./pkg/... ./features/...` plus a separate `-v ./cmd/...` on
+# one windows-latest runner, with NO -race (Windows -race is out of scope, and
+# unchanged by this story). Of the last 15 queue `Cross-Platform Build
+# Validation` failures (measured 2026-09-22), all 15 were Native Build
+# (Windows), spread across features/controller/api, pkg/storage/providers/sqlite,
+# cmd/cfgms-steward-launcher, pkg/ha, pkg/lease, features/controller/registration,
+# features/controller/fleet/storage and features/workflow/trigger — no small
+# subset would have caught them, so the PR side needs to run everything the
+# queue job runs, split across four legs to stay under a 7-minute-per-leg
+# budget. Measured serial per-package wall time on windows-latest (queue run
+# 35678629960, job 106590441360): features/... 1111s/109 pkgs (api alone 205s),
+# pkg/... 350s/80 pkgs, cmd/... 147s/6 pkgs.
+#
+# CFGMS_TEST_RACE=0 (consumed by test-framework-api-sharded and the race_flag
+# checks below) drops -race for these targets without duplicating the sharding
+# or package-list logic the Linux legs already use.
+GO_GROUP_WINDOWS_CONTROLLER_EXTRA := ./pkg/cert/... ./pkg/controlplane/... ./pkg/storage/providers/sqlite/...
+GO_GROUP_WINDOWS_STEWARD_CMD := ./features/steward/... ./cmd/...
+
+.PHONY: test-go-group-windows-api
+test-go-group-windows-api:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
 	else \
-		echo "📋 No module changes detected - skipping additional module tests"; \
+		CFGMS_TEST_RACE=0 $(MAKE) test-framework-api-sharded; \
+	fi
+
+.PHONY: test-go-group-windows-controller
+test-go-group-windows-controller:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs="$$(go list ./features/controller/... | grep -v '/features/controller/api$$') $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA)"; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $$pkgs; \
+	else \
+		echo "  Testing windows-controller group (features/controller minus api, pkg/cert, pkg/controlplane, pkg/storage/sqlite)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+.PHONY: test-go-group-windows-steward
+test-go-group-windows-steward:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	else \
+		echo "  Testing windows-steward group (features/steward, cmd)..."; \
+		go test $$race_flag -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	fi
+
+# Everything the queue's Native Build (Windows) job tests (./pkg/... ./features/...
+# ./cmd/...) that isn't already claimed by the api/controller/steward legs above -
+# includes the module packages, matching the queue job's unfiltered ./features/....
+.PHONY: test-go-group-windows-rest
+test-go-group-windows-rest:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs=$$(go list ./pkg/... ./features/... ./cmd/... \
+		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/steward' \
+		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing windows-rest group (remaining pkg/features/cmd packages, including modules)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+# The queue's Native Build (macOS) job runs the same package set as Linux WITH
+# -race (`go test -race -short ./pkg/... ./features/... ./cmd/...`). macOS
+# accounted for only 1 of the last 15 queue Cross-Platform Build Validation
+# failures (2026-09-22), so two legs is enough to keep each under 7 minutes.
+.PHONY: test-go-group-macos-api
+test-go-group-macos-api:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
+	else \
+		$(MAKE) test-framework-api-sharded; \
+	fi
+
+.PHONY: test-go-group-macos-rest
+test-go-group-macos-rest:
+	@pkgs=$$(go list ./pkg/... ./features/... ./cmd/... | grep -v '/features/controller/api$$'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-rest group (pkg, features minus api, cmd)..."; \
+		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
 .PHONY: test-scripts
@@ -589,7 +686,9 @@ test-scripts:
 # test_api_shard_count_rejects_non_integer for the regression guards.
 .PHONY: test-framework-api-sharded
 test-framework-api-sharded:
-	@shards="$${CFGMS_API_TEST_SHARDS:-}"; \
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	shards="$${CFGMS_API_TEST_SHARDS:-}"; \
 	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
 	case "$$shards" in \
 	''|*[!0-9]*) \
@@ -634,7 +733,7 @@ test-framework-api-sharded:
 	for i in $$(seq 0 $$((shards - 1))); do \
 		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
 		if [ -n "$$pattern" ]; then \
-			( go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
+			( go test $$race_flag -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
 			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
 			pids="$$pids $$!"; \
 			launched="$$launched $$i"; \

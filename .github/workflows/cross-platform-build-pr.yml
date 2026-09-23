@@ -22,6 +22,22 @@ name: Cross-Platform Build Validation (PR)
 #
 # DO NOT add `merge_group:` to this file. The queue-side `Build Gate` must be
 # posted only by cross-platform-build.yml's `build-gate` job.
+#
+# Issue #4219: the PR side used to be cross-compile-check alone, with every
+# native build/test deferred to the queue — but 15 of the last 15 queue
+# `Cross-Platform Build Validation` failures (measured 2026-09-22) were
+# `Native Build (Windows)`, spread across ordinary packages
+# (features/controller/api, pkg/storage/providers/sqlite,
+# cmd/cfgms-steward-launcher, pkg/ha, pkg/lease, features/controller/registration,
+# features/controller/fleet/storage, features/workflow/trigger) with no small
+# Windows-specific subset that would have caught them. This file now also runs
+# the unit suite natively on windows-latest (4 legs, no -race, matching the
+# queue job) and macos-latest (2 legs, -race, matching the queue job), plus the
+# non-Docker e2e suite on ubuntu-latest — so a Windows- or macOS-only failure
+# shows up on the PR instead of only after it reaches the merge queue. Nothing
+# is removed from the queue by this story: cross-platform-build.yml still
+# independently re-validates the merge commit with its own native-build matrix
+# and Docker integration tests (follow-up story removes the redundancy).
 
 on:
   pull_request:
@@ -46,11 +62,113 @@ env:
 permissions: {}
 
 jobs:
-  # Fast cross-compilation check (single runner, all platforms)
-  # PR-REAL (#2595): fast single-runner compile check across all targets — cheap
-  # and deterministic on the diff. Native per-platform builds and Docker
-  # integration tests are queue-only (cross-platform-build.yml); this job alone
-  # backs the PR-time Build Gate stub below.
+  # Change detection (Issue #4219), duplicated from test-suite.yml's `changes`
+  # job with identical fail-closed semantics rather than shared across
+  # workflows — GitHub Actions has no cross-workflow-run output sharing short
+  # of a `workflow_call` reusable workflow, and this keeps the split structural
+  # (see the file-level comment above) without adding a third workflow file.
+  # Any edit to test-suite.yml's classification step should be mirrored here.
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Detect non-documentation changes
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The PR payload's own file count, used below to prove the API list
+          # is complete. Not capped the way GET /pulls/{n}/files is.
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          # THIS GATE MUST FAIL CLOSED, same as test-suite.yml's `changes` job.
+          # `code=false` skips the Windows/macOS/e2e legs below; every defect in
+          # the input resolves to `code=true` (run them for real) — a
+          # needlessly-run suite costs runner minutes, a wrongly-skipped one
+          # ships untested code.
+          api_status=0
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed_files.txt || api_status=$?
+
+          listed=$(wc -l < changed_files.txt)
+          echo "PR #${PR_NUMBER}: API listed ${listed} file(s); PR payload reports ${PR_CHANGED_FILES:-<unset>}"
+          cat changed_files.txt
+
+          # Defect 1: the API call itself failed (network, rate limit, token).
+          if [ "$api_status" -ne 0 ]; then
+            echo "::warning::gh api exited ${api_status} listing PR files — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 2: an empty or unusable list. Before this check an absent
+          # file list was indistinguishable from a genuine docs-only PR,
+          # because "no line outside the docs regex" is vacuously true for
+          # empty input.
+          if [ "$listed" -eq 0 ]; then
+            echo "::warning::PR file list came back empty — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 3: an incomplete list. GET /pulls/{n}/files returns at most
+          # 3000 files no matter how far --paginate walks, so on a larger PR
+          # any code file past the cap is invisible to the regex below. The
+          # count in the PR payload is not capped, so a mismatch detects both
+          # that truncation and any partial page.
+          if ! [ "${PR_CHANGED_FILES:-}" -eq "${PR_CHANGED_FILES:-}" ] 2>/dev/null; then
+            echo "::warning::PR payload carried no usable changed_files count — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$listed" -ne "$PR_CHANGED_FILES" ]; then
+            echo "::warning::listed ${listed} file(s) but the PR reports ${PR_CHANGED_FILES} (API cap or partial response) — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Mirrors the file set this workflow's pull_request trigger uses in
+          # paths-ignore above. Any changed file outside this set means the PR
+          # is not docs-only, so the native legs below must run.
+          #
+          # Written to a file rather than piped into `grep -q`: under
+          # `pipefail` the consumer exits on its first match and can SIGPIPE
+          # the producer, so the pipeline reports 141 exactly when code files
+          # WERE found — which would take the docs-only branch and skip the
+          # suite. A grep failure (exit >1) is a defect too, handled like the
+          # others.
+          grep_status=0
+          grep -vE '^(docs/|[^/]+\.md$|\.claude/.*\.md$|LICENSE$|\.gitignore$|\.editorconfig$)' \
+            changed_files.txt > non_doc_files.txt || grep_status=$?
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::warning::classifying changed files failed (grep exit ${grep_status}) — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -s non_doc_files.txt ]; then
+            echo "Non-documentation file(s) changed — running the native Windows/macOS/e2e legs:"
+            cat non_doc_files.txt
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "All ${listed} changed file(s) are documentation — legs will be skipped"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Fast cross-compilation check (single runner, all platforms not natively
+  # tested below)
+  # PR-REAL (#2595): fast single-runner compile check across the two targets
+  # (linux/arm64, darwin/amd64) that no native runner in this workflow or the
+  # queue's exercises. Native per-platform builds and Docker integration tests
+  # for linux/amd64, windows/amd64 and darwin/arm64 come from the legs below and
+  # the queue (cross-platform-build.yml).
   cross-compile-check:
     name: Cross-Platform Compilation Check
     permissions:
@@ -87,41 +205,323 @@ jobs:
       run: |
         echo "## Cross-Platform Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "All target platforms compile successfully:" >> $GITHUB_STEP_SUMMARY
-        echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
-        echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
-        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
+        echo "Cross-compiled (no native runner exercises these directly):" >> $GITHUB_STEP_SUMMARY
+        echo "- Linux (ARM64)" >> $GITHUB_STEP_SUMMARY
+        echo "- macOS (AMD64)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "Natively built and tested by the legs below:" >> $GITHUB_STEP_SUMMARY
+        echo "- Linux (AMD64) — unit-tests-* legs (test-suite.yml) and the e2e leg" >> $GITHUB_STEP_SUMMARY
+        echo "- Windows (AMD64) — windows-* legs" >> $GITHUB_STEP_SUMMARY
+        echo "- macOS (ARM64) — macos-* legs" >> $GITHUB_STEP_SUMMARY
 
-  # PR-side `Build Gate` context. Native builds and Docker integration tests are
-  # deferred to the merge queue, where cross-platform-build.yml's `build-gate`
-  # job posts the authoritative result for this same context.
+  # Native Windows unit-test legs (Issue #4219). No -race, matching the queue's
+  # Native Build (Windows) job — Windows -race support is out of scope for this
+  # story. Partitioned by measured serial per-package wall time on
+  # windows-latest (queue run 35678629960, job 106590441360) to keep each leg
+  # under the 7-minute PR budget; see the Makefile comment above
+  # GO_GROUP_WINDOWS_CONTROLLER_EXTRA for the measurements.
+  windows-api:
+    name: Windows Unit Tests (controller/api)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run features/controller/api (sharded, no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-windows-api
+
+  windows-controller:
+    name: Windows Unit Tests (controller, cert, controlplane, sqlite)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run controller (minus api), cert, controlplane, storage/sqlite (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-controller
+
+  windows-steward:
+    name: Windows Unit Tests (steward, cmd)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run features/steward and cmd (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-steward
+
+  windows-rest:
+    name: Windows Unit Tests (rest + modules)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run remaining pkg/features/cmd packages, including modules (no -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_TEST_RACE: "0"
+      run: make test-go-group-windows-rest
+
+  # Native macOS unit-test legs (Issue #4219). -race, matching the queue's
+  # Native Build (macOS) job. macOS accounted for only 1 of the last 15 queue
+  # Cross-Platform Build Validation failures (measured 2026-09-22), so two legs
+  # are enough to stay under the 7-minute PR budget.
+  macos-api:
+    name: macOS Unit Tests (controller/api)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run features/controller/api (sharded, -race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-api
+
+  macos-rest:
+    name: macOS Unit Tests (rest + modules)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run pkg, features (minus api), cmd, including modules (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-rest
+
+  # Non-Docker e2e suite (Issue #4219). Mirrors production-gates.yml's
+  # "Comprehensive E2E Testing" job exactly (same command, same -run filter),
+  # which is otherwise queue-only.
+  e2e:
+    name: E2E Scenarios (no Docker)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run Full E2E Test Suite (no Docker)
+      run: go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
+
+  # PR-side `Build Gate` context. Docker integration tests and the queue's own
+  # re-validation of the merge commit remain deferred to the merge queue, where
+  # cross-platform-build.yml's `build-gate` job posts the authoritative result
+  # for this same context.
   build-gate-pr-stub:
     name: Build Gate
     permissions: {}
-    needs: [cross-compile-check]
+    needs:
+      - changes
+      - cross-compile-check
+      - windows-api
+      - windows-controller
+      - windows-steward
+      - windows-rest
+      - macos-api
+      - macos-rest
+      - e2e
     runs-on: ubuntu-latest
     if: always()
     steps:
     - name: Check PR-time Build Results
       env:
         CROSS_COMPILE_RESULT: ${{ needs.cross-compile-check.result }}
+        WINDOWS_API_RESULT: ${{ needs.windows-api.result }}
+        WINDOWS_CONTROLLER_RESULT: ${{ needs.windows-controller.result }}
+        WINDOWS_STEWARD_RESULT: ${{ needs.windows-steward.result }}
+        WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
+        MACOS_API_RESULT: ${{ needs.macos-api.result }}
+        MACOS_REST_RESULT: ${{ needs.macos-rest.result }}
+        E2E_RESULT: ${{ needs.e2e.result }}
+        CHANGES_RESULT: ${{ needs.changes.result }}
+        CODE_CHANGES: ${{ needs.changes.outputs.code }}
       run: |
         echo "## Build Gate Results (PR)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-
-        cross_compile="$CROSS_COMPILE_RESULT"
-
         echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
-        echo "| Native Builds + Docker Integration | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
+        echo "| Cross-Compile Check | $CROSS_COMPILE_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: controller/api | $WINDOWS_API_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: controller/cert/controlplane/sqlite | $WINDOWS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: steward/cmd | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: controller/api | $MACOS_API_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: rest + modules | $MACOS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| Docker Integration + Queue Re-validation | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
+        echo "| Change detection (\`changes\`) | $CHANGES_RESULT (code=${CODE_CHANGES:-<unset>}) |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
 
-        if [[ "$cross_compile" == "success" ]]; then
+        # THIS AGGREGATION MUST FAIL CLOSED, same as test-suite.yml's
+        # `unit-tests` aggregator (which accepts skipped legs only when it has
+        # explicitly observed `changes.outputs.code == 'false'`).
+        #
+        # Every native leg below is gated `if: always() && needs.changes.outputs.code == 'true'`,
+        # so the legs also skip when that output is the EMPTY STRING — which is
+        # what it is whenever the `changes` job failed, was cancelled, or hit
+        # its `timeout-minutes`. Accepting `skipped` unconditionally would
+        # therefore report a green `Build Gate` with zero Windows, macOS or e2e
+        # validation on a genuine code PR. `skipped` is only ever a legitimate
+        # outcome when `changes` SUCCEEDED and explicitly classified the PR as
+        # documentation-only.
+        fail=0
+
+        # cross-compile-check is unconditional and must be a real success.
+        [ "$CROSS_COMPILE_RESULT" = "success" ] || fail=1
+
+        # The gate's own input: an unsuccessful `changes` job, or an output
+        # that is anything other than the two values it is defined to emit,
+        # is a defect and fails closed.
+        if [ "$CHANGES_RESULT" != "success" ]; then
+          echo "::error::change detection did not succeed (result: ${CHANGES_RESULT:-<unset>}) — cannot prove the native legs were legitimately skipped"
+          fail=1
+          docs_only=no
+        elif [ "$CODE_CHANGES" = "false" ]; then
+          docs_only=yes
+        elif [ "$CODE_CHANGES" = "true" ]; then
+          docs_only=no
+        else
+          echo "::error::change detection emitted an unexpected code output (${CODE_CHANGES:-<unset>}) — failing closed"
+          fail=1
+          docs_only=no
+        fi
+
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_API_RESULT" "$MACOS_REST_RESULT" "$E2E_RESULT"; do
+          if [ "$result" = "success" ]; then
+            continue
+          fi
+          if [ "$result" = "skipped" ] && [ "$docs_only" = "yes" ]; then
+            continue
+          fi
+          echo "::error::native leg result '${result:-<unset>}' is not acceptable (docs-only PR: ${docs_only})"
+          fail=1
+        done
+
+        if [ "$fail" -eq 0 ]; then
           echo "### BUILD GATE PASSED (PR stub)" >> $GITHUB_STEP_SUMMARY
-          echo "Cross-compilation validated. Native builds and Docker integration tests run for real in the merge queue (#2595)." >> $GITHUB_STEP_SUMMARY
+          echo "Cross-compilation, native Windows/macOS unit tests, and the e2e suite all validated. Docker integration tests and a full re-validation of the merge commit run in the merge queue (#2595)." >> $GITHUB_STEP_SUMMARY
         else
           echo "### BUILD GATE FAILED" >> $GITHUB_STEP_SUMMARY
-          echo "Cross-compilation check failed." >> $GITHUB_STEP_SUMMARY
+          echo "One or more PR-side build/test legs failed." >> $GITHUB_STEP_SUMMARY
           exit 1
         fi
