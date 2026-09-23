@@ -4151,9 +4151,11 @@ test_api_shard_aggregation_fails_closed() {
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
 
-    # Stub go: enumerates four tests for -list; for the shard whose -run
-    # pattern includes TestB it SIGKILLs the subshell that launched it, so no
-    # shard-N.exit file is ever written.
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, and for `go test -c -o <path>` writes a stub test binary in place
+    # of a real compile. That stub binary is what the shards exec: for the
+    # shard whose -test.run pattern includes TestB it SIGKILLs the subshell
+    # that launched it, so no shard-N.exit file is ever written.
     cat > "${bin_dir}/go" <<'STUB'
 #!/bin/sh
 for arg in "$@"; do
@@ -4162,9 +4164,29 @@ for arg in "$@"; do
         exit 0
     fi
 done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        cat > "$arg" <<'BIN'
+#!/bin/sh
 case "$*" in
     *TestB*) kill -9 "$PPID"; exit 0 ;;
 esac
+echo "ok  features/controller/api  0.01s"
+exit 0
+BIN
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
+done
 echo "ok  features/controller/api  0.01s"
 exit 0
 STUB
@@ -4200,7 +4222,45 @@ STUB
         return
     fi
 
-    log_pass "test-framework-api-sharded: missing shard exit status and unusable temp dir both fail closed"
+    # The shards exec one prebuilt test binary (Issue #4239), so a build that
+    # exits 0 without producing that binary must stop the target rather than
+    # launch N shards that all fail for an unrelated reason — or worse, a
+    # future edit that treats "no binary" as "nothing to run".
+    local nobin_dir="${tmp_dir}/nobin"
+    mkdir -p "$nobin_dir"
+    cat > "${nobin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+if [ "$1" = "list" ]; then
+    echo "github.com/cfgis/cfgms/features/controller/api"
+    exit 0
+fi
+# `go test -c` succeeds but writes nothing to the -o path.
+exit 0
+STUB
+    chmod +x "${nobin_dir}/go"
+
+    local nobin_out nobin_rc=0
+    nobin_out=$(PATH="${nobin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || nobin_rc=$?
+
+    if [[ $nobin_rc -eq 0 ]]; then
+        log_fail "a test build that produced no binary still produced a passing target (exit 0) — zero tests ran"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    if ! echo "$nobin_out" | grep -q 'no runnable binary'; then
+        log_fail "target failed but printed no diagnostic explaining that the test build produced no binary"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: missing shard exit status, unusable temp dir and a binary-less build all fail closed"
 }
 
 # Regression guard for the parallel .claude pipeline-suite runner (Issue #4151):
@@ -4255,7 +4315,9 @@ test_api_shard_count_rejects_non_integer() {
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
 
-    # Stub go: enumerates four tests for -list, reports success for any run.
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, writes a succeeding stub test binary for `go test -c -o <path>`,
+    # and reports success for any run.
     cat > "${bin_dir}/go" <<'STUB'
 #!/bin/sh
 for arg in "$@"; do
@@ -4263,6 +4325,22 @@ for arg in "$@"; do
         printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
         exit 0
     fi
+done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        printf '#!/bin/sh\necho "ok  features/controller/api  0.01s"\nexit 0\n' > "$arg"
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
 done
 echo "ok  features/controller/api  0.01s"
 exit 0
