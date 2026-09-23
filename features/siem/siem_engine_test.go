@@ -49,6 +49,16 @@ func newTestTriggerManager(tb testing.TB, wt trigger.WorkflowTrigger) *trigger.T
 	return trigger.NewTriggerManager(provider, nil, nil, nil, wt, nil)
 }
 
+// setTestShutdownWait overrides the engine's stream processor shutdownWait so
+// Stop() doesn't wait out the production 5s default. Requires:true asserts the
+// type, since a SIEMEngine always wires a *StreamProcessorImpl in NewSIEMEngine.
+func setTestShutdownWait(t testing.TB, engine *SIEMEngine, wait time.Duration) {
+	t.Helper()
+	sp, ok := engine.streamProcessor.(*StreamProcessorImpl)
+	require.True(t, ok, "SIEMEngine.streamProcessor must be a *StreamProcessorImpl")
+	sp.shutdownWait = wait
+}
+
 // Test helper functions
 func createTestLogEntry(level, message, tenantID string) interfaces.LogEntry {
 	return interfaces.LogEntry{
@@ -133,6 +143,7 @@ func TestSIEMEngine_StartStop(t *testing.T) {
 
 	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
+	setTestShutdownWait(t, engine, 50*time.Millisecond)
 
 	ctx := context.Background()
 
@@ -168,6 +179,7 @@ func TestSIEMEngine_ProcessLogEntry_RoutesToStreamProcessor(t *testing.T) {
 
 	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
+	setTestShutdownWait(t, engine, 50*time.Millisecond)
 
 	ctx := context.Background()
 	err = engine.Start(ctx)
@@ -231,6 +243,7 @@ func TestStreamProcessor_ProcessEntry(t *testing.T) {
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
 
 	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
+	sp.shutdownWait = 50 * time.Millisecond
 
 	ctx := context.Background()
 
@@ -302,6 +315,7 @@ func TestSIEMEngine_NoGoroutineLeak(t *testing.T) {
 
 	engine, err := NewSIEMEngine(config, triggerManager, workflowTrigger, nil)
 	require.NoError(t, err)
+	setTestShutdownWait(t, engine, 50*time.Millisecond)
 
 	ctx := context.Background()
 	err = engine.Start(ctx)

@@ -965,10 +965,21 @@ func TestTrendFixtureStep_UsesOriginalSpacingAwayFromMidnight(t *testing.T) {
 // trendFixtureStep for real wall-clock now.Now() values. Fixing that boundary
 // semantics question is a redesign of trend bucketing, which issue #3707
 // explicitly puts out of scope; only the string-comparison bug is fixed here.
+//
+// The offsets below are the ones that matter rather than a dense sweep: 1ms and
+// 10s are the original walk's endpoints; 999ms/1000ms/1001ms straddle the exact
+// whole-second mark where the RFC3339Nano fractional field changes shape (empty
+// vs. non-empty), which is exactly where the byte-wise string comparison broke;
+// 2500ms is the offset Issue #3707's bug report named — at that "now",
+// trendFixtureStep's 500ms step places device-a's earliest observation
+// (now-4*step) exactly 500ms after midnight, the scenario the bug report walks
+// through by hand.
 func TestTrendFixtureStep_RecordsNearMidnightAreNotDoubleCounted(t *testing.T) {
 	day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
 
-	for ms := 1; ms <= 10000; ms += 50 {
+	offsetsMs := []int{1, 999, 1000, 1001, 2500, 10000}
+
+	for _, ms := range offsetsMs {
 		now := day.Add(time.Duration(ms) * time.Millisecond)
 
 		p, query := newTrendFixtureAt(t, now)
