@@ -50,6 +50,11 @@ type StreamProcessorImpl struct {
 	// Performance monitoring
 	latencyTracker    *LatencyTracker
 	throughputTracker *ThroughputTracker
+
+	// shutdownWait bounds how long Stop waits for workers/processors to drain
+	// before forcing channel closure. Defaults to 5s in NewStreamProcessor;
+	// overridable in-package by tests that need Stop to return quickly.
+	shutdownWait time.Duration
 }
 
 // ProcessingBatch represents a batch of log entries for processing
@@ -121,6 +126,7 @@ func NewStreamProcessor(config ProcessingConfig, patternMatcher PatternMatcher,
 		},
 		latencyTracker:    NewLatencyTracker(),
 		throughputTracker: NewThroughputTracker(),
+		shutdownWait:      5 * time.Second,
 	}
 }
 
@@ -146,7 +152,7 @@ func (sp *StreamProcessorImpl) Start(ctx context.Context) error {
 	sp.processingBuffer = make(chan *ProcessingBatch, sp.config.WorkerCount*2)
 
 	// Initialize batch processor
-	sp.batchProcessor = NewBatchProcessor(sp.config, sp.processingBuffer, sp.inputBuffer)
+	sp.batchProcessor = NewBatchProcessor(sp.config, sp.processingBuffer, sp.inputBuffer, sp.stopChan)
 
 	// Initialize workers
 	sp.workers = make([]*StreamWorker, sp.config.WorkerCount)
@@ -216,17 +222,17 @@ func (sp *StreamProcessorImpl) Stop(ctx context.Context) error {
 	select {
 	case <-shutdownComplete:
 		logger.InfoCtx(ctx, "SIEM stream processor stopped gracefully")
-	case <-time.After(5 * time.Second): // Reduce timeout for tests
+	case <-time.After(sp.shutdownWait):
 		logger.WarnCtx(ctx, "SIEM stream processor shutdown timeout, forcing stop")
 	}
 
-	// Close channels
-	if sp.inputBuffer != nil {
-		close(sp.inputBuffer)
-	}
-	if sp.processingBuffer != nil {
-		close(sp.processingBuffer)
-	}
+	// inputBuffer and processingBuffer are deliberately left open. Both still
+	// have potential senders at this point — ProcessEntry/ProcessStream on
+	// inputBuffer, and the batch processor's final flush on processingBuffer —
+	// and on the shutdown-timeout path those senders are still running, so
+	// closing here would be a close-while-send panic. Every consumer already
+	// terminates on stopChan, and the buffers become unreachable once the
+	// processor is dropped, so closing them serves no purpose.
 
 	return nil
 }

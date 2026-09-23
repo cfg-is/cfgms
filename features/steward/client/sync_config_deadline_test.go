@@ -64,27 +64,19 @@ func (s *slowSetModule) Set(ctx context.Context, _ string, _ modules.ConfigState
 	}
 }
 
-// TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling is the
-// load-bearing regression test for Issue #3801. It constructs the REAL
-// commands.Handler (no mocks) via setupCommandHandler, with its production
-// 30s-unless-overridden executeCommand deadline (handler.go:475, untouched by
-// this story) intact, dispatches a real CommandSyncConfig, and drives a
-// module.Set that legitimately takes longer than 30s but well under the
-// configured ModuleCallTimeoutSec budget.
-//
-// Before the fix, the CommandSyncConfig handler passed executeCommand's ctx
-// straight into syncConfigNow, so this Set was cancelled by
-// context.DeadlineExceeded at the 30s mark and the sync failed. After the fix,
-// the handler derives its own background context (mirroring the on-connect
-// sync path), so the executor's own per-call timeout is the only budget that
-// applies and the sync succeeds.
-func TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling(t *testing.T) {
-	const stewardID = "steward-slow-sync"
-	const tenantID = "tenant-slow-sync"
-	// Comfortably past the old 30s ceiling; comfortably under production's 120s
-	// ModuleCallTimeoutSec default — this test configures its own, larger budget
-	// below so the margin isn't flaky under load.
-	const slowSetDelay = 32 * time.Second
+// runSlowSyncConfig drives one real CommandSyncConfig round trip through the real
+// commands.Handler (no mocks): it constructs a signed sync_config command whose
+// executeCommand-level deadline is `cmdTimeoutSeconds` (handler.go:475's
+// "timeout_seconds" override), configures the executor's per-call budget to
+// `moduleCallTimeoutSec` (ADR-012 §7), and drives a module.Set that legitimately
+// takes `slowSetDelay`. stewardIDSuffix keeps steward/tenant IDs unique per
+// subtest so components from one case can't leak into another.
+func runSlowSyncConfig(t *testing.T, stewardIDSuffix string, slowSetDelay time.Duration,
+	moduleCallTimeoutSec int, cmdTimeoutSeconds float64) (elapsed time.Duration, events []*cpTypes.Event) {
+	t.Helper()
+
+	stewardID := "steward-slow-sync-" + stewardIDSuffix
+	tenantID := "tenant-slow-sync-" + stewardIDSuffix
 
 	_, signer, certPEM := newSigningCA(t)
 
@@ -98,7 +90,7 @@ func TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling(t *testing.T)
 		},
 	}
 	configData := marshalSignedConfig(t, signer, protoConfig)
-	transfer := buildSignedConfigTransfer(t, signer, configData, "v-slow-1")
+	transfer := buildSignedConfigTransfer(t, signer, configData, "v-slow-"+stewardIDSuffix)
 
 	sess := &testConfigSession{
 		testDataPlaneSession: *newTestSession(),
@@ -119,7 +111,7 @@ func TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling(t *testing.T)
 		Logger:               newTestLogger(t),
 		Factory:              f,
 		ErrorHandling:        errCfg,
-		ModuleCallTimeoutSec: 90, // well above slowSetDelay, well under production's 120s
+		ModuleCallTimeoutSec: moduleCallTimeoutSec,
 	})
 	require.NoError(t, err)
 
@@ -131,12 +123,12 @@ func TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling(t *testing.T)
 	require.NoError(t, err)
 
 	cmdValue := cpTypes.Command{
-		ID:        "cmd-slow-sync-1",
+		ID:        "cmd-slow-sync-" + stewardIDSuffix,
 		Type:      cpTypes.CommandSyncConfig,
 		StewardID: stewardID,
 		TenantID:  tenantID,
 		Timestamp: time.Now(),
-		Params:    map[string]interface{}{},
+		Params:    map[string]interface{}{"timeout_seconds": cmdTimeoutSeconds},
 	}
 	rawParams := cpTypes.InterfaceParamsToStringMap(cmdValue.Params)
 	commandBytes, err := cpTypes.CommandSigningBytes(&cmdValue, rawParams)
@@ -148,30 +140,95 @@ func TestCommandSyncConfig_SlowModuleSet_SucceedsPastOld30sCeiling(t *testing.T)
 	start := time.Now()
 	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
 
-	// handler.Wait() blocks until executeCommand's goroutine finishes — this is
-	// the assertion under test: it must NOT return early at ~30s.
+	// handler.Wait() blocks until executeCommand's goroutine finishes.
 	handler.Wait()
-	elapsed := time.Since(start)
+	elapsed = time.Since(start)
 
-	require.GreaterOrEqual(t, elapsed, slowSetDelay,
-		"the sync must actually wait out the full Set delay, not be cut short by executeCommand's old 30s ceiling")
+	return elapsed, drainEvents(capture.events)
+}
 
-	events := drainEvents(capture.events)
-	var configApplied bool
-	var completedEvt *cpTypes.Event
+// configAppliedStatus returns the "status" detail from the first EventConfigApplied
+// event found, or "" if none was published.
+func configAppliedStatus(events []*cpTypes.Event) (found bool, status string) {
 	for _, evt := range events {
 		if evt.Type == cpTypes.EventConfigApplied {
-			configApplied = true
+			s, _ := evt.Details["status"].(string)
+			return true, s
 		}
+	}
+	return false, ""
+}
+
+// TestCommandSyncConfig_SlowModuleSet_SucceedsPastExecuteCommandDeadline is the
+// load-bearing regression test for Issue #3801, run at a scale that finishes in
+// ~1s instead of the original 32s. It constructs the REAL commands.Handler (no
+// mocks) via setupCommandHandler, dispatches a real signed CommandSyncConfig
+// whose "timeout_seconds" param shrinks executeCommand's own context deadline
+// (handler.go:475) to 1s — a stand-in for the production 30s-unless-overridden
+// default, shrunk so the test doesn't have to wait out 30+ real seconds — and
+// drives a module.Set that legitimately takes longer than that 1s command-level
+// deadline but well under the executor's separately configured
+// ModuleCallTimeoutSec budget.
+//
+// Before the fix, the CommandSyncConfig handler passed executeCommand's ctx
+// straight into syncConfigNow, so this Set would have been cancelled by
+// context.DeadlineExceeded at the ~1s command-level mark. After the fix, the
+// handler derives its own background context (mirroring the on-connect sync
+// path), so the executor's own per-call timeout is the only budget that
+// applies and the sync succeeds despite legitimately outliving the shrunk
+// command-level deadline.
+func TestCommandSyncConfig_SlowModuleSet_SucceedsPastExecuteCommandDeadline(t *testing.T) {
+	const slowSetDelay = 1200 * time.Millisecond
+	const cmdTimeoutSeconds = 1    // shrunk stand-in for the 30s-unless-overridden default; smaller than slowSetDelay
+	const moduleCallTimeoutSec = 3 // comfortably above slowSetDelay
+
+	elapsed, events := runSlowSyncConfig(t, "success", slowSetDelay, moduleCallTimeoutSec, cmdTimeoutSeconds)
+
+	require.GreaterOrEqual(t, elapsed, slowSetDelay,
+		"the sync must actually wait out the full Set delay, not be cut short by executeCommand's shrunk command-level deadline")
+
+	found, status := configAppliedStatus(events)
+	require.True(t, found,
+		"a config-applied event must be published once the slow Set finishes past the shrunk command-level deadline; got event types: %v",
+		eventTypes(events))
+	assert.Equal(t, "OK", status,
+		"the slow Set legitimately finished within ModuleCallTimeoutSec, so the resource must be reported applied, not errored")
+
+	var completedEvt *cpTypes.Event
+	for _, evt := range events {
 		if evt.Type == cpTypes.EventCommandCompleted {
 			completedEvt = evt
 		}
 	}
-	assert.True(t, configApplied,
-		"a config-applied event must be published once the slow Set finishes past the old 30s ceiling; got event types: %v",
-		eventTypes(events))
 	require.NotNil(t, completedEvt,
 		"executeCommand must still report EventCommandCompleted once the underlying sync finishes — its own bookkeeping is unaffected by this fix")
+}
+
+// TestCommandSyncConfig_SlowModuleSet_FailsWhenModuleTimeoutBelowDelay is the
+// flip side of the regression guard above: with the same slowSetDelay, and the
+// command-level "timeout_seconds" deliberately set large (so it cannot be the
+// bottleneck), configuring the executor's ModuleCallTimeoutSec BELOW the delay
+// must still cause the module.Set to be cut short. This proves the executor's
+// own per-call budget (ADR-012 §7) — not some other hardcoded ceiling — is the
+// real, effective bound: the outcome flips exactly at the configured value.
+func TestCommandSyncConfig_SlowModuleSet_FailsWhenModuleTimeoutBelowDelay(t *testing.T) {
+	const slowSetDelay = 1200 * time.Millisecond
+	const cmdTimeoutSeconds = 10   // large stand-in; must not be the bottleneck for this case
+	const moduleCallTimeoutSec = 1 // below slowSetDelay
+
+	elapsed, events := runSlowSyncConfig(t, "failure", slowSetDelay, moduleCallTimeoutSec, cmdTimeoutSeconds)
+
+	require.Less(t, elapsed, slowSetDelay,
+		"a module.Set budget below the delay must cut the call short instead of waiting out the full delay")
+	require.GreaterOrEqual(t, elapsed, time.Duration(moduleCallTimeoutSec)*time.Second,
+		"the call must run for the full configured ModuleCallTimeoutSec budget before being cut short")
+
+	found, status := configAppliedStatus(events)
+	require.True(t, found,
+		"a config-applied event must still be published even when a resource times out; got event types: %v",
+		eventTypes(events))
+	assert.Equal(t, "ERROR", status,
+		"a module.Set that exceeds ModuleCallTimeoutSec must be reported as an error, proving that budget — not a larger command-level deadline — was the effective bound")
 }
 
 func eventTypes(events []*cpTypes.Event) []cpTypes.EventType {
