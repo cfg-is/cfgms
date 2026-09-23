@@ -4326,7 +4326,101 @@ STUB
         return
     fi
 
-    log_pass "test-framework-api-sharded: injection payload, non-integer and zero shard counts all fail closed; valid counts still run"
+    # 5. The macOS CI-job-level shard targets reimplement the partition instead
+    #    of delegating here, so they must carry the same two properties against
+    #    their own variable pairs: no command execution, and no fail-open.
+    #    Their injection vector is awk rather than bash arithmetic — an unquoted
+    #    `awk -v s=$shard` lets a value containing whitespace word-split into a
+    #    replacement awk program, whose system() runs arbitrary commands.
+    local pair shard_var shards_var target
+    for pair in "CFGMS_MACOS_API_SHARD CFGMS_MACOS_API_SHARDS test-go-group-macos-api" \
+                "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
+        # shellcheck disable=SC2086 # deliberate word split of the fixture triple
+        set -- $pair
+        shard_var="$1"; shards_var="$2"; target="$3"
+
+        local awk_marker="${tmp_dir}/awk-injection-executed"
+        local payload_out payload_rc var_name
+        for var_name in "$shard_var" "$shards_var"; do
+            rm -f "$awk_marker"
+            payload_rc=0
+            # The payload carries no literal space of its own — word splitting
+            # would break it into separate argv entries and awk would reject the
+            # fragment as a syntax error — so the command's argument separator
+            # is awk's own FS. Verified to create the marker against an
+            # unquoted `awk -v n=$shards`, and not to against a quoted one.
+            payload_out=$(PATH="${bin_dir}:$PATH" \
+                env "${var_name}=1 BEGIN{system(\"touch\"FS\"${awk_marker}\")}" \
+                make --no-print-directory "$target" 2>&1) || payload_rc=$?
+
+            if [[ -e "$awk_marker" ]]; then
+                log_fail "${var_name} reached awk unvalidated — the injected awk program executed a command in ${target}"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            if [[ $payload_rc -eq 0 ]]; then
+                log_fail "an injection payload in ${var_name} produced a passing ${target} (exit 0) — false green behind Build Gate"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            # A plain non-integer must fail closed rather than emptying the
+            # partition and reporting a pass with zero tests run.
+            local nonint_out nonint_rc=0
+            nonint_out=$(PATH="${bin_dir}:$PATH" env "${var_name}=abc" \
+                make --no-print-directory "$target" 2>&1) || nonint_rc=$?
+
+            if [[ $nonint_rc -eq 0 ]]; then
+                log_fail "${var_name}=abc produced a passing ${target} (exit 0) — an empty partition ran zero tests and still reported success"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+
+            if ! echo "$nonint_out" | grep -q "${var_name} must be a"; then
+                log_fail "${target} failed but printed no diagnostic naming the invalid ${var_name}"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+        done
+
+        # Zero shards is not a positive integer (and is a fatal modulus for the
+        # BWK awk that macOS runners actually use).
+        local zeroshards_out zeroshards_rc=0
+        zeroshards_out=$(PATH="${bin_dir}:$PATH" env "${shards_var}=0" \
+            make --no-print-directory "$target" 2>&1) || zeroshards_rc=$?
+
+        if [[ $zeroshards_rc -eq 0 ]]; then
+            log_fail "${shards_var}=0 produced a passing ${target} (exit 0) — zero shards ran"
+            echo "$zeroshards_out" | tail -20
+            return
+        fi
+
+        # An index outside the partition assigns nothing; that must fail, not
+        # report a green leg with no tests.
+        local oob_out oob_rc=0
+        oob_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=2" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || oob_rc=$?
+
+        if [[ $oob_rc -eq 0 ]]; then
+            log_fail "${shard_var}=2 with ${shards_var}=2 produced a passing ${target} (exit 0) — an out-of-range shard index ran nothing"
+            echo "$oob_out" | tail -20
+            return
+        fi
+
+        # Valid inputs must still run: validation must not break the CI path.
+        local valid_out valid_rc=0
+        valid_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=1" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || valid_rc=$?
+
+        if [[ $valid_rc -ne 0 ]]; then
+            log_fail "valid ${shard_var}=1 ${shards_var}=2 was rejected by ${target} (exit ${valid_rc}) — validation is too strict"
+            echo "$valid_out" | tail -20
+            return
+        fi
+    done
+
+    log_pass "test-framework-api-sharded and the macOS shard groups: injection payloads, non-integer, zero and out-of-range shard values all fail closed; valid counts still run"
 }
 
 test_resource_sampler_no_placeholder() {

@@ -32,8 +32,10 @@ name: Cross-Platform Build Validation (PR)
 # features/controller/fleet/storage, features/workflow/trigger) with no small
 # Windows-specific subset that would have caught them. This file now also runs
 # the unit suite natively on windows-latest (4 legs, no -race, matching the
-# queue job) and macos-latest (2 legs, -race, matching the queue job), plus the
-# non-Docker e2e suite on ubuntu-latest — so a Windows- or macOS-only failure
+# queue job) and macos-latest (7 legs, -race, matching the queue job — split
+# finer than Windows because macos-latest's 3 vCPUs make -race much more
+# expensive per leg; see the "Native macOS unit-test legs" comment below),
+# plus the non-Docker e2e suite on ubuntu-latest — so a Windows- or macOS-only failure
 # shows up on the PR instead of only after it reaches the merge queue. Nothing
 # is removed from the queue by this story: cross-platform-build.yml still
 # independently re-validates the merge commit with its own native-build matrix
@@ -336,11 +338,17 @@ jobs:
       run: make test-go-group-windows-rest
 
   # Native macOS unit-test legs (Issue #4219). -race, matching the queue's
-  # Native Build (macOS) job. macOS accounted for only 1 of the last 15 queue
-  # Cross-Platform Build Validation failures (measured 2026-09-22), so two legs
-  # are enough to stay under the 7-minute PR budget.
-  macos-api:
-    name: macOS Unit Tests (controller/api)
+  # Native Build (macOS) job. A first attempt at 2 legs measured 10m25s and
+  # 11m44s on this story's own PR (#4225, run 35811533253) — macos-latest
+  # hosted runners have only 3 vCPUs, so test-framework-api-sharded's
+  # nproc-based internal sharding maxed out at 3 processes fighting over the
+  # SAME 3 cores, and -race's overhead compounds it. 7 legs (api and rest each
+  # split into CI-job-level shards, controller/providers/steward pulled out
+  # the way the Windows legs do) gives each leg its own dedicated 3-core
+  # runner for a smaller slice of work — see the Makefile comment above
+  # test-go-group-macos-api for the measured per-package breakdown.
+  macos-api-1:
+    name: macOS Unit Tests (controller/api, shard 1/2)
     permissions:
       contents: read
     needs: changes
@@ -361,14 +369,16 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Run features/controller/api (sharded, -race)
+    - name: Run features/controller/api shard 1/2 (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_MACOS_API_SHARD: "0"
+        CFGMS_MACOS_API_SHARDS: "2"
       run: make test-go-group-macos-api
 
-  macos-rest:
-    name: macOS Unit Tests (rest + modules)
+  macos-api-2:
+    name: macOS Unit Tests (controller/api, shard 2/2)
     permissions:
       contents: read
     needs: changes
@@ -389,10 +399,156 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Run pkg, features (minus api), cmd, including modules (-race)
+    - name: Run features/controller/api shard 2/2 (-race)
       shell: bash
       env:
         CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_MACOS_API_SHARD: "1"
+        CFGMS_MACOS_API_SHARDS: "2"
+      run: make test-go-group-macos-api
+
+  macos-providers:
+    name: macOS Unit Tests (cert, controlplane, sqlite)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run pkg/cert, pkg/controlplane, pkg/storage/sqlite (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-providers
+
+  macos-controller:
+    name: macOS Unit Tests (controller)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run features/controller minus api (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-controller
+
+  macos-steward:
+    name: macOS Unit Tests (steward, cmd)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run features/steward, cmd (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-macos-steward
+
+  macos-rest-1:
+    name: macOS Unit Tests (rest + modules, shard 1/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run remaining packages shard 1/2, including modules (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_MACOS_REST_SHARD: "0"
+        CFGMS_MACOS_REST_SHARDS: "2"
+      run: make test-go-group-macos-rest
+
+  macos-rest-2:
+    name: macOS Unit Tests (rest + modules, shard 2/2)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.code == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run remaining packages shard 2/2, including modules (-race)
+      shell: bash
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+        CFGMS_MACOS_REST_SHARD: "1"
+        CFGMS_MACOS_REST_SHARDS: "2"
       run: make test-go-group-macos-rest
 
   # Non-Docker e2e suite (Issue #4219). Mirrors production-gates.yml's
@@ -437,8 +593,13 @@ jobs:
       - windows-controller
       - windows-steward
       - windows-rest
-      - macos-api
-      - macos-rest
+      - macos-api-1
+      - macos-api-2
+      - macos-providers
+      - macos-controller
+      - macos-steward
+      - macos-rest-1
+      - macos-rest-2
       - e2e
     runs-on: ubuntu-latest
     if: always()
@@ -450,8 +611,13 @@ jobs:
         WINDOWS_CONTROLLER_RESULT: ${{ needs.windows-controller.result }}
         WINDOWS_STEWARD_RESULT: ${{ needs.windows-steward.result }}
         WINDOWS_REST_RESULT: ${{ needs.windows-rest.result }}
-        MACOS_API_RESULT: ${{ needs.macos-api.result }}
-        MACOS_REST_RESULT: ${{ needs.macos-rest.result }}
+        MACOS_API_1_RESULT: ${{ needs.macos-api-1.result }}
+        MACOS_API_2_RESULT: ${{ needs.macos-api-2.result }}
+        MACOS_PROVIDERS_RESULT: ${{ needs.macos-providers.result }}
+        MACOS_CONTROLLER_RESULT: ${{ needs.macos-controller.result }}
+        MACOS_STEWARD_RESULT: ${{ needs.macos-steward.result }}
+        MACOS_REST_1_RESULT: ${{ needs.macos-rest-1.result }}
+        MACOS_REST_2_RESULT: ${{ needs.macos-rest-2.result }}
         E2E_RESULT: ${{ needs.e2e.result }}
         CHANGES_RESULT: ${{ needs.changes.result }}
         CODE_CHANGES: ${{ needs.changes.outputs.code }}
@@ -465,8 +631,13 @@ jobs:
         echo "| Windows: controller/cert/controlplane/sqlite | $WINDOWS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: steward/cmd | $WINDOWS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Windows: rest + modules | $WINDOWS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: controller/api | $MACOS_API_RESULT |" >> $GITHUB_STEP_SUMMARY
-        echo "| macOS: rest + modules | $MACOS_REST_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: controller/api shard 1/2 | $MACOS_API_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: controller/api shard 2/2 | $MACOS_API_2_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: cert/controlplane/sqlite | $MACOS_PROVIDERS_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: controller | $MACOS_CONTROLLER_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: steward/cmd | $MACOS_STEWARD_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: rest + modules shard 1/2 | $MACOS_REST_1_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: rest + modules shard 2/2 | $MACOS_REST_2_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Docker Integration + Queue Re-validation | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
         echo "| Change detection (\`changes\`) | $CHANGES_RESULT (code=${CODE_CHANGES:-<unset>}) |" >> $GITHUB_STEP_SUMMARY
@@ -506,7 +677,7 @@ jobs:
           docs_only=no
         fi
 
-        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_API_RESULT" "$MACOS_REST_RESULT" "$E2E_RESULT"; do
+        for result in "$WINDOWS_API_RESULT" "$WINDOWS_CONTROLLER_RESULT" "$WINDOWS_STEWARD_RESULT" "$WINDOWS_REST_RESULT" "$MACOS_API_1_RESULT" "$MACOS_API_2_RESULT" "$MACOS_PROVIDERS_RESULT" "$MACOS_CONTROLLER_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT" "$E2E_RESULT"; do
           if [ "$result" = "success" ]; then
             continue
           fi

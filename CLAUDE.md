@@ -142,7 +142,7 @@ Four shapes sit behind that column:
 - **`Build Gate` runs for real on both sides (#4219).** The PR side
   (`cross-platform-build-pr.yml`) runs `Cross-Platform Compilation Check` (now
   just `linux/arm64` and `darwin/amd64` — the two targets no native runner
-  exercises) plus four native Windows legs, two native macOS legs, and the
+  exercises) plus four native Windows legs, seven native macOS legs, and the
   non-Docker e2e suite: real tests against the diff, not a stand-in for the
   queue job. The queue side (`cross-platform-build.yml`) independently
   re-validates the merge commit with its own native-build matrix and the
@@ -298,7 +298,7 @@ not start until `04:56:23Z` — a 6m23s window where the only `Build Gate` run
 for this PR was the flat docs stub.
 
 **#4219 widened `build-gate-pr-stub`'s `needs:` list, and with it this same
-window.** It now also needs the four native Windows legs, two native macOS
+window.** It now also needs the four native Windows legs, seven native macOS
 legs, and the e2e leg — real, several-minutes-long test jobs, not lookups.
 `documentation.yml`'s flat stub still has no `needs:` and still completes in
 seconds, so on a PR that triggers both workflows the flat-stub-wins-the-race
