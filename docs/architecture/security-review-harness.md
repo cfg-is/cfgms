@@ -2908,8 +2908,8 @@ by its highest-ranked occurrence `confidence` descending (`high` > `medium` > `l
 two findings tied on all three ranked fields. Severity/confidence are taken via `max()` over a
 group's `occurrences`, not the first occurrence in insertion order, so a group where only the
 second-listed lane called it `critical` still sorts as critical. This matches
-`.claude/skills/security-review/SKILL.md`'s "sorted by multi-lane agreement first, then
-severity, then confidence" sentence exactly, and `consolidate_test.py`'s
+`.claude/skills/security-review/SKILL.md`'s "sorted by verification verdict first, then
+multi-lane agreement, then severity, then confidence" sentence exactly, and `consolidate_test.py`'s
 `test_skill_md_ranking_sentence_matches_shipped_sort_order` is the **D7 drift-detection test for
 F6**: it reads that sentence from `SKILL.md` live off disk (never a copy-pasted literal) and
 separately asserts a synthetic `consolidate()` fixture's actual order matches it, so a future

@@ -1433,7 +1433,8 @@ def test_skill_md_ranking_sentence_matches_shipped_sort_order():
         Path(__file__).resolve().parent.parent.parent / "skills" / "security-review" / "SKILL.md"
     )
     skill_text = skill_path.read_text()
-    ranking_sentence = "sorted by multi-lane agreement first, then severity, then confidence"
+    ranking_sentence = ("sorted by verification verdict first, then multi-lane agreement, "
+                        "then severity, then confidence")
     check(
         ranking_sentence in skill_text,
         "SKILL.md: the F6 ranking-order sentence is present in the live file "
@@ -3642,6 +3643,59 @@ def test_verification_absent_reads_as_not_verified_never_as_clean():
     check("no verifier configured" in line, "verification: and says why", line)
     check("not reachable" not in line,
           "verification: absent is never rendered as not reachable", line)
+
+
+def test_the_verdict_ranks_findings_not_just_annotates_them():
+    """[REQUIRED TEST] Before this, the verdict was recorded on every finding
+    and changed nothing about the order a human reads them in: `_group_rank_key`
+    never looked at it, and `_finalize_findings` had already sorted the list
+    before `_attach_verification` ran. The stage was paid for and its answer
+    discarded at the point it was supposed to be used.
+
+    Reachability leads the sort because it is the question the report is read
+    to answer: a reachable medium is work you do before an unreachable
+    critical."""
+    def f(verdict, severity, agreement=1):
+        return {"verification": ({"verdict": verdict} if verdict else None),
+                "agreement": {"reported": agreement},
+                "occurrences": [{"severity": severity, "confidence": "high"}],
+                "file": "a.go", "symbol": verdict or "none", "cwe": "CWE-863",
+                "vuln_class": "x"}
+
+    # A reachable MEDIUM must outrank an unreachable CRITICAL.
+    ordered = sorted([f("not_reachable", "critical"),
+                      f("reachable_from_untrusted", "medium")],
+                     key=consolidate._group_rank_key)
+    check([x["symbol"] for x in ordered] == ["reachable_from_untrusted", "not_reachable"],
+          "rank: a reachable medium outranks an unreachable critical",
+          str([x["symbol"] for x in ordered]))
+
+    # Full verdict ordering, most actionable first.
+    verdicts = ["not_reachable", "guarded", "undetermined",
+                "reachable_internal_only", "reachable_from_untrusted"]
+    ordered = sorted([f(v, "high") for v in verdicts], key=consolidate._group_rank_key)
+    check([x["symbol"] for x in ordered] == list(reversed(verdicts)),
+          "rank: verdicts order from reachable down to not_reachable",
+          str([x["symbol"] for x in ordered]))
+
+
+def test_an_unverified_finding_outranks_one_shown_unreachable():
+    """[REQUIRED TEST] No verdict is an ABSENCE of evidence, not evidence of
+    safety. Ranking it below findings actively shown to be unreachable would
+    bury exactly the rows nobody has looked at yet -- the same class of mistake
+    as reading an empty findings array as 'clean'."""
+    def f(verdict, symbol):
+        return {"verification": ({"verdict": verdict} if verdict else None),
+                "agreement": {"reported": 1},
+                "occurrences": [{"severity": "high", "confidence": "high"}],
+                "file": "a.go", "symbol": symbol, "cwe": "CWE-863", "vuln_class": "x"}
+
+    ordered = sorted([f("guarded", "guarded"), f(None, "unverified"),
+                      f("not_reachable", "unreachable")],
+                     key=consolidate._group_rank_key)
+    check([x["symbol"] for x in ordered] == ["unverified", "guarded", "unreachable"],
+          "rank: unverified sits above guarded and not_reachable",
+          str([x["symbol"] for x in ordered]))
 
 
 def test_a_verdict_renders_beside_the_severity_with_its_citation():
