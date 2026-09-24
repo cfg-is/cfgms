@@ -772,9 +772,9 @@ jobs:
         CFGMS_MACOS_REST_SHARDS: "2"
       run: make test-go-group-macos-rest
 
-  # Non-Docker e2e suite (Issue #4219). Mirrors production-gates.yml's
-  # "Comprehensive E2E Testing" job exactly (same command, same -run filter),
-  # which is otherwise queue-only.
+  # Non-Docker e2e suite (Issue #4219). It took over production-gates.yml's
+  # queue-only "Comprehensive E2E Testing" job (same command, same -run
+  # filter), which #4220 then removed from the queue.
   e2e:
     name: E2E Scenarios (no Docker)
     permissions:

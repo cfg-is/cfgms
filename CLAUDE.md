@@ -115,8 +115,8 @@ other, so the same change is not scanned twice — read the "Real run" column.
 | Check | Real run | What it validates |
 |-------|----------|-------------------|
 | `unit-tests` | PR (queue stubbed) | Core functionality (~3-5 min) |
-| `integration-tests` | merge queue (PR stubbed) | Comprehensive + production-critical (~5-10 min) |
-| `Build Gate` | both (#4219) — PR: compile-check + native Windows/macOS/e2e legs; queue: full native builds + Docker | Cross-platform compilation + native tests + Docker integration (~10-15 min) |
+| `integration-tests` | merge queue (PR stubbed) | The `test/integration` root and `ha` packages, `-short` — the only ones no other job runs |
+| `Build Gate` | both — PR: compile-check + native Windows/macOS/e2e legs; queue: two Linux unit shards on the merge commit + Postgres-backed tests | Cross-platform compilation + native tests |
 | `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite |
 | `security-deployment-gate` | merge queue (PR stubbed) | Critical vulnerability blocking (~6-10 min) |
 | `trivy-scan` | merge queue (PR stubbed) | Filesystem vulnerabilities, secrets, misconfiguration |
@@ -140,14 +140,15 @@ Four shapes sit behind that column:
   aggregator posts a passing context without running the five legs —
   `test-suite.yml` is `unit-tests`' only PR-side poster, in every shape of PR.
 - **`Build Gate` runs for real on both sides (#4219).** The PR side
-  (`cross-platform-build-pr.yml`) runs `Cross-Platform Compilation Check` (now
-  just `linux/arm64` and `darwin/amd64` — the two targets no native runner
-  exercises) plus four native Windows legs, seven native macOS legs, and the
-  non-Docker e2e suite: real tests against the diff, not a stand-in for the
-  queue job. The queue side (`cross-platform-build.yml`) independently
-  re-validates the merge commit with its own native-build matrix and the
-  Docker integration suite — nothing was removed from the queue by #4219 (a
-  follow-up story does that). **`Build Gate` and `unit-tests` are still the
+  (`cross-platform-build-pr.yml`) runs `Cross-Platform Compilation Check`
+  (every release target except `linux/amd64`, which every Linux job builds)
+  plus four native Windows legs, seven native macOS legs, and the non-Docker
+  e2e suite: real tests against the diff, not a stand-in for the queue job.
+  The queue side (`cross-platform-build.yml`) re-runs only what a PR cannot
+  see — the Linux unit suite against the merge commit, in two shards, and the
+  Postgres-backed tests no PR job can run; `build-gate` `needs:` both — so a PR
+  that breaks only in combination with what merged ahead of it is still caught. Windows and macOS run on the PR side
+  only. **`Build Gate` and `unit-tests` are still the
   trigger-exclusive pairs:** `Build Gate`'s PR-side stub lives in a separate
   `pull_request`-only workflow, `cross-platform-build-pr.yml`, so that no
   skipped stub run can appear in the queue; `unit-tests`' queue stub lives in a
@@ -171,7 +172,8 @@ there as real work, not as optional.
 
 `golangci-lint` is **CI-level blocking** (#3442). `golangci-lint.yml` runs a
 two-leg matrix — `GOOS=linux` and `GOOS=windows`, both on a Linux runner — on
-every `pull_request` and `merge_group`. Findings (exit 1) fail the step and the
+every `pull_request` (not `merge_group`: the PR already lints the same
+source). Findings (exit 1) fail the step and the
 workflow run; a non-findings exit — config error, typechecking error, missing
 toolchain — is *not* swallowed, because "0 issues." printed alongside exit 7 is
 a false clean, not a pass. Both legs run on Linux deliberately: golangci-lint
@@ -327,7 +329,7 @@ false still posts a check run, with conclusion `skipped`, under the same context
 name as the real job — and GitHub accepts it.
 
 **Why `Build Gate` was uniquely exposed.** The real `build-gate` job is
-`needs: [native-builds, integration-tests]`, so its check run does not exist at all
+`needs: [native-builds, postgres-integration]`, so its check run does not exist at all
 while the native builds run — leaving a skipped stub as the only poster of the
 context. Contexts whose real job starts without a `needs:` barrier (e.g.
 `Controller Integration Tests (Linux)`) create a *pending* run immediately, and a
@@ -360,8 +362,8 @@ Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
   build on Windows or macOS. Native Windows/macOS *tests* now run on the PR side
   too (#4219, `cross-platform-build-pr.yml`) and are not part of
   `make test-complete` (they need `windows-latest`/`macos-latest` runners); native
-  *builds* (`make build` via each platform's own toolchain) remain CI-only, in
-  the merge queue (`cross-platform-build.yml`).
+  *builds* (`make build` via each platform's own toolchain) run nowhere; the
+  Windows and macOS release binaries are validated by cross-compilation only.
 
 ## Essential Commands
 

@@ -64,10 +64,10 @@ that never creates a check run blocks the merge queue indefinitely.
 
 **Jobs**:
 - `unit-tests` — `make check-stdlib-completeness` (ADR-016 clause 6 gate) then `make test` with `CFGMS_TEST_INTEGRATION=0`; every PR; emits the `unit-tests` required context
-- `integration-tests` — `make test-production-critical` on self-hosted Linux (hermetic container); needs `unit-tests`; emits the `integration-tests` required context
+- `integration-tests` — merge queue only (PR-side stub): `go test -race -short ./test/integration ./test/integration/ha`, the two test/integration packages no other CI job runs (Issue #4220); emits the `integration-tests` required context
 - `cross-feature-tests` / `production-readiness` / `synthetic-monitoring` — workflow_dispatch `all`/`full` level only
 
-**Runtime**: unit-tests ~5 min; integration-tests ~10–15 min (self-hosted)
+**Runtime**: unit-tests ~5 min per leg (measured 2026-09-24 from PR runs); integration-tests not yet measured after #4220.
 
 ---
 
@@ -85,12 +85,9 @@ so it can post nothing in the queue, not even a skipped run.
 **Triggers**: Merge Group, Manual dispatch — deliberately no `pull_request`.
 
 **Jobs**:
-- `native-builds` — matrix: Linux (ubuntu-latest), macOS (macos-latest), Windows (windows-latest); each runs `make build` + unit tests with `-race` on Linux/macOS; emits `Controller Integration Tests (Linux)` context via the Linux leg
-- `integration-tests` — Docker-infrastructure integration tests; Linux only
-
-**Coverage note**: the Linux `native-builds` leg (`go test -race -short ./pkg/... ./features/...`) is the only per-PR Linux race-detector sweep of the full module tree. Do not remove it.
-
-**Runtime**: ~11–15 min (measured 2026-07-13; dominated by native-builds matrix)
+- `native-builds` — Linux only, two shards (Issue #4220): the same `make` group targets as the PR's `unit-tests-*` legs, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219).
+- `postgres-integration` — the Postgres-backed suites no PR job can run (the `features/controller/server` database subtests, and the integration-tagged cert and database-provider suites); the part of the former `Integration Tests (Docker)` job no other job repeats.
+- `build-gate` — emits the queue-side `Build Gate` context; `needs: [native-builds, postgres-integration]`, so it cannot report before they finish.
 
 ---
 
