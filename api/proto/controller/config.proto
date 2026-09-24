@@ -91,7 +91,6 @@ message StewardConfig {
 // StewardSettings contains steward-specific configuration
 message StewardSettings {
   string id = 1;
-  string mode = 2;
   repeated string module_paths = 3;
   LoggingConfig logging = 4;
   ErrorHandlingConfig error_handling = 5;
@@ -109,6 +108,9 @@ message StewardSettings {
   // desired_version is the ring-resolved target steward binary version (Issue #2271).
   // When set, the steward convergence loop upgrades or downgrades to this version.
   string desired_version = 9;
+
+  reserved 2;
+  reserved "mode";
 }
 
 // ScriptSigningConfig defines the steward-level script signing policy and trust configuration.
@@ -144,7 +146,9 @@ message TrustedKeyRef {
 // LoggingConfig defines logging output settings
 message LoggingConfig {
   string level = 1;
-  string format = 2;
+
+  reserved 2;
+  reserved "format";
 }
 
 // ErrorHandlingConfig defines error handling strategies
