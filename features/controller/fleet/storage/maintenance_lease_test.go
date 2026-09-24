@@ -190,10 +190,21 @@ func TestManager_MaintenanceLease_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	assert.False(t, ranB, "node-b must not run its own cycle while node-a's is still in flight")
 
 	close(blocking.release)
-	select {
-	case ranA := <-doneA:
-		assert.True(t, ranA)
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never completed")
-	}
+
+	// The wait budget is expressed off ttl/renew, not a bare constant: the
+	// real Flush that runs after release can absorb Windows SQLITE_BUSY
+	// retries (#4189), and a completion budget the same size as the lease TTL
+	// (the original fixed 2s) leaves no room for that on a resource-constrained
+	// merge-queue runner. 10x ttl gives that headroom; polling on renew keeps
+	// the check as responsive as the lease's own renewal cadence.
+	var ranA bool
+	require.Eventually(t, func() bool {
+		select {
+		case ranA = <-doneA:
+			return true
+		default:
+			return false
+		}
+	}, ttl*10, renew, "node-a's cycle never completed")
+	assert.True(t, ranA)
 }
