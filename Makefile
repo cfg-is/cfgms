@@ -584,7 +584,7 @@ test-go-group-windows-controller:
 		go list $$pkgs; \
 	else \
 		echo "  Testing windows-controller group (features/controller minus api, pkg/cert, pkg/controlplane, pkg/storage/sqlite)..."; \
-		go test $$race_flag -short -timeout=10m -count=20 -run 'MaintenanceLease' ./features/controller/fleet/storage/; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
 	fi
 
 # -v is scoped to ./cmd/... only (matching cross-platform-build.yml's queue
