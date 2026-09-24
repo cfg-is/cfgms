@@ -554,31 +554,6 @@ jobs:
         echo ""
         echo "✅ Controller integration tests completed"
 
-    # Moved from cross-platform-build.yml's deleted "Integration Tests (Docker)"
-    # job (Issue #4220). These are the parts of that job no other queue job ran:
-    # the Postgres-backed subtests of features/controller/server (they skip
-    # under -short and without CFGMS_TEST_DB_HOST, so the unit legs never reach
-    # them), and the integration-tagged cert and database-provider suites. The
-    # rest of that job — TestRegistration and the certificate tests under
-    # ./test/integration/... — already runs in the step above. Postgres is up
-    # from `make test-integration-setup`, and .env.test carries its
-    # CFGMS_TEST_DB_* settings.
-    #
-    # -tags=integration so the database provider's //go:build integration files
-    # run (pkg/cert has none; the tag is a no-op there). -p 1 because
-    # pkg/cert/interfaces' database contract case and the database provider's
-    # setupTestDatabase both drop and recreate the same schema; concurrent
-    # packages would drop tables from under each other's tests.
-    - name: Run Postgres-backed controller, cert and database-provider tests
-      env:
-        CFGMS_TEST_INTEGRATION: "1"
-      run: |
-        set -a
-        source .env.test
-        set +a
-        go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
-        go test -v -race -p 1 -tags=integration -timeout=20m ./pkg/cert/... ./pkg/storage/providers/database/...
-
     # test/integration/ha runs here, on its own, and never in the merge queue.
     #
     # It is excluded from the step above because it cannot finish inside that

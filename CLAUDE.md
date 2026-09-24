@@ -116,8 +116,8 @@ other, so the same change is not scanned twice — read the "Real run" column.
 |-------|----------|-------------------|
 | `unit-tests` | PR (queue stubbed) | Core functionality (~3-5 min) |
 | `integration-tests` | merge queue (PR stubbed) | The `test/integration` root and `ha` packages, `-short` — the only ones no other job runs |
-| `Build Gate` | both — PR: compile-check + native Windows/macOS/e2e legs; queue: two Linux unit shards on the merge commit | Cross-platform compilation + native tests |
-| `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite, plus the Postgres-backed controller, cert and database-provider tests |
+| `Build Gate` | both — PR: compile-check + native Windows/macOS/e2e legs; queue: two Linux unit shards on the merge commit + Postgres-backed tests | Cross-platform compilation + native tests |
+| `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite |
 | `security-deployment-gate` | merge queue (PR stubbed) | Critical vulnerability blocking (~6-10 min) |
 | `trivy-scan` | merge queue (PR stubbed) | Filesystem vulnerabilities, secrets, misconfiguration |
 | `CodeQL` | both (stubbed on non-Go PRs) | Semantic analysis; reports alerts on changed lines only |
@@ -145,9 +145,9 @@ Four shapes sit behind that column:
   plus four native Windows legs, seven native macOS legs, and the non-Docker
   e2e suite: real tests against the diff, not a stand-in for the queue job.
   The queue side (`cross-platform-build.yml`) re-runs only what a PR cannot
-  see — the Linux unit suite against the merge commit, in two shards, which
-  `build-gate` `needs:` — so a PR that breaks only in combination with what
-  merged ahead of it is still caught. Windows and macOS run on the PR side
+  see — the Linux unit suite against the merge commit, in two shards, and the
+  Postgres-backed tests no PR job can run; `build-gate` `needs:` both — so a PR
+  that breaks only in combination with what merged ahead of it is still caught. Windows and macOS run on the PR side
   only. **`Build Gate` and `unit-tests` are still the
   trigger-exclusive pairs:** `Build Gate`'s PR-side stub lives in a separate
   `pull_request`-only workflow, `cross-platform-build-pr.yml`, so that no
@@ -329,7 +329,7 @@ false still posts a check run, with conclusion `skipped`, under the same context
 name as the real job — and GitHub accepts it.
 
 **Why `Build Gate` was uniquely exposed.** The real `build-gate` job is
-`needs: [native-builds]`, so its check run does not exist at all
+`needs: [native-builds, postgres-integration]`, so its check run does not exist at all
 while the native builds run — leaving a skipped stub as the only poster of the
 context. Contexts whose real job starts without a `needs:` barrier (e.g.
 `Controller Integration Tests (Linux)`) create a *pending* run immediately, and a

@@ -8,7 +8,7 @@ name: Cross-Platform Build Validation
 # The split is structural on purpose. A job gated `if: pull_request` still posts a
 # check run with conclusion `skipped` in the merge queue, and GitHub accepts a
 # `skipped` run as satisfying a required status check. With `build-gate` being
-# `needs: [native-builds]`, its check run does not exist while
+# `needs: [native-builds, postgres-integration]`, its check run does not exist while
 # the native builds run — so the queue saw only a skipped `Build Gate` and merged
 # before this gate ever reported. See cross-platform-build-pr.yml for the measured
 # evidence.
@@ -103,30 +103,94 @@ jobs:
         make test-go-group-heavy-providers
         make test-go-group-rest
 
+  # The Postgres-backed suites no PR job can run (Issue #4220), in parallel
+  # with the shards so the queue's wall time stays at its floor (Controller
+  # Integration Tests (Linux)). This is what remained unique in the removed
+  # "Integration Tests (Docker)" job:
+  #   - features/controller/server's database-provider subtests, which skip
+  #     under -short and without CFGMS_TEST_DB_HOST, so no unit leg reaches them;
+  #   - the integration-tagged cert and database-provider suites.
+  # That job's TestRegistration and certificate -run tests already run in
+  # Controller Integration Tests (Linux), so they are not repeated here.
+  #
+  # -tags=integration so the database provider's //go:build integration files
+  # run (pkg/cert has none; the tag is a no-op there). -p 1 because
+  # pkg/cert/interfaces' database contract case and the database provider's
+  # setupTestDatabase drop and recreate the same schema; concurrent packages
+  # would drop tables from under each other's tests.
+  postgres-integration:
+    name: Postgres Integration Tests (Linux)
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234), as for the shards above.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Start Docker test services
+      run: make test-integration-setup
+
+    - name: Run Postgres-backed tests
+      env:
+        CFGMS_TEST_INTEGRATION: "1"
+      run: |
+        set -a
+        source .env.test
+        set +a
+        go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+        go test -v -race -p 1 -tags=integration -timeout=20m ./pkg/cert/... ./pkg/storage/providers/database/...
+
+    - name: Cleanup Docker services
+      if: always()
+      run: make test-integration-cleanup
+
   # QUEUE-REAL (#2595): the authoritative Build Gate on the merge commit. It
-  # `needs:` the Linux unit shards above, so its check run does not exist until
-  # they finish (Issue #4220 AC4). The Docker-backed suites that used to feed
-  # this gate as "Integration Tests (Docker)" now run in production-gates.yml's
-  # Controller Integration Tests (Linux), which the queue already waits for.
+  # `needs:` the Linux unit shards and the Postgres job above, so its check run
+  # does not exist until they finish (Issue #4220 AC4).
   build-gate:
     name: Build Gate
     permissions: {}
-    needs: [native-builds]
+    needs: [native-builds, postgres-integration]
     runs-on: ubuntu-latest
     if: always() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     steps:
     - name: Check Build Results
       env:
         NATIVE_RESULT: ${{ needs.native-builds.result }}
+        POSTGRES_RESULT: ${{ needs.postgres-integration.result }}
       run: |
         echo "## Build Gate Results" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
         echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
         echo "| Native Build (Linux, 2 shards) | $NATIVE_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Postgres Integration Tests (Linux) | $POSTGRES_RESULT |" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
 
-        if [[ "$NATIVE_RESULT" == "success" ]]; then
+        if [[ "$NATIVE_RESULT" == "success" && "$POSTGRES_RESULT" == "success" ]]; then
           echo "### BUILD GATE PASSED" >> "$GITHUB_STEP_SUMMARY"
         else
           echo "### BUILD GATE FAILED" >> "$GITHUB_STEP_SUMMARY"

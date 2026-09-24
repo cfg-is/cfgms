@@ -86,9 +86,8 @@ so it can post nothing in the queue, not even a skipped run.
 
 **Jobs**:
 - `native-builds` — Linux only, two shards (Issue #4220): the same `make` group targets as the PR's `unit-tests-*` legs, run once against the merge commit to catch a PR that breaks only in combination with what merged ahead of it. Windows and macOS run on the PR side only (`cross-platform-build-pr.yml`, Issue #4219).
-- `build-gate` — emits the queue-side `Build Gate` context; `needs: [native-builds]`, so it cannot report before the shards finish.
-
-The Postgres-backed suites this workflow's former `Integration Tests (Docker)` job ran now run in `production-gates.yml`'s `Controller Integration Tests (Linux)`.
+- `postgres-integration` — the Postgres-backed suites no PR job can run (the `features/controller/server` database subtests, and the integration-tagged cert and database-provider suites); the part of the former `Integration Tests (Docker)` job no other job repeats.
+- `build-gate` — emits the queue-side `Build Gate` context; `needs: [native-builds, postgres-integration]`, so it cannot report before they finish.
 
 ---
 
