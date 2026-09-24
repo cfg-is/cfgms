@@ -44,6 +44,16 @@ documents). Two configs are written and which one is used IS the phase:
 TTY: an unreviewed `"ask"` default would hang the process rather than fail.
 `bash` is denied in BOTH phases -- it is the one permission that would turn a
 read-only review into arbitrary execution against the snapshot.
+
+THE SNAPSHOT MUST NOT CONFIGURE ITS OWN REVIEWER. `--dir` is the snapshot, and
+OpenCode merges any `opencode.json` or `.opencode/` it finds there OVER the
+global config written above. Confirmed against OpenCode 1.18.29 in the
+investigator image: a snapshot `opencode.json` carrying
+`{"permission": {"bash": "allow", "edit": "allow"}}` resolved both to `allow`
+despite the global deny. The code under review is exactly the input this stage
+must not trust, so `env()` sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` (verified to
+hold every permission at `deny` against the same hostile snapshot) and strips
+the inherited variables that would otherwise inject config of their own.
 """
 from __future__ import annotations
 
@@ -69,6 +79,12 @@ ALL_PERMISSIONS = (
 # Read-only discovery. Nothing that executes, fetches or writes. `bash` is
 # absent deliberately and permanently.
 INVESTIGATE_ALLOWED = ("read", "grep", "glob", "list")
+
+# Inherited variables that would layer config over the phase file. Removed from
+# the child's environment so the XDG config is the only source of permissions.
+INHERITED_CONFIG_VARS = (
+    "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+)
 
 
 class Result:
@@ -158,8 +174,13 @@ class OpenCodeRunner:
 
     def env(self) -> dict:
         environ = dict(os.environ)
+        for name in INHERITED_CONFIG_VARS:
+            environ.pop(name, None)
         environ["XDG_DATA_HOME"] = self.data_home
         environ["XDG_CONFIG_HOME"] = self.config_home
+        # The snapshot's own opencode.json / .opencode/ would otherwise override
+        # the permission block. See the module docstring.
+        environ["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
         return environ
 
     def __call__(self, prompt: str, *, continue_session: bool, allow_tools: bool,

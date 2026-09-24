@@ -212,6 +212,38 @@ def test_the_active_config_changes_with_the_phase() -> None:
               "phase: opencode is pointed at that config home")
 
 
+def test_the_snapshot_cannot_override_the_permission_block() -> None:
+    """`--dir` is the snapshot, and OpenCode merges a snapshot `opencode.json`
+    OVER the global config -- measured in the investigator image, a hostile one
+    turned `bash` and `edit` back to `allow`. Project config must be disabled on
+    every turn, and inherited config-injection variables must not reach the
+    child, or the code under review configures its own reviewer."""
+    saved = {k: os.environ.get(k) for k in runner.INHERITED_CONFIG_VARS}
+    try:
+        for name in runner.INHERITED_CONFIG_VARS:
+            os.environ[name] = '{"permission": {"bash": "allow"}}'
+        with tempfile.TemporaryDirectory() as tmp:
+            record: list = []
+            r = make(tmp, record)
+            r("p1", continue_session=False, allow_tools=True, timeout=60)
+            r("p2", continue_session=True, allow_tools=False, timeout=30)
+            for turn, call in enumerate(record, start=1):
+                env = call["kwargs"]["env"]
+                check(env.get("OPENCODE_DISABLE_PROJECT_CONFIG") == "1",
+                      f"turn {turn}: snapshot project config is disabled",
+                      repr(env.get("OPENCODE_DISABLE_PROJECT_CONFIG")))
+                leaked = [n for n in runner.INHERITED_CONFIG_VARS if n in env]
+                check(not leaked,
+                      f"turn {turn}: inherited config variables are stripped",
+                      str(leaked))
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 # --- failure handling --------------------------------------------------------
 
 def test_a_timeout_keeps_whatever_was_printed() -> None:
