@@ -3257,8 +3257,13 @@ the same sweep, only 46% of finder evidence connects concrete code to an untrust
 and 53% hedges (`could`/`may`/`might`). Verifying first converts the adjudicator's largest
 source of uncertainty into an input rather than a guess.
 
-**What it reads.** An 81-line window around each finding, one read per distinct
-`file:line` — the locations findings name, never whole subtrees.
+**What it reads.** The whole snapshot, read-only. The default entrypoint
+(`lanes/agentic_verifier_entrypoint.py`) gives the model each finding's coordinates, and
+the model decides what to open with read-only `read`/`grep`/`glob`/`list` tools. Every
+other tool is denied, and the snapshot's own OpenCode config is ignored. Reachability is a
+cross-file property, so a fixed window around the finding's own line cannot establish it.
+The legacy excerpt lane (`lanes/verifier.py`) runs only when
+`CFGMS_SECURITY_REVIEW_LEGACY_VERIFIER` is set.
 
 **What it emits.** A verdict from a closed vocabulary — `reachable_from_untrusted`,
 `reachable_internal_only`, `guarded`, `not_reachable`, `undetermined` — plus an entry
@@ -3269,7 +3274,7 @@ uncertain answer costs nothing while a confident wrong one buries a real defect.
 **The boundary, and how it is held.** This is the only stage after the finder lanes that
 mounts the sweep's real snapshot; the adjudicator is deliberately dispatched against an
 empty one. Source never leaves the container: every verdict's free text and citations are
-compared against the excerpts that verdict was shown (`source_leak.py`), and an answer
+compared against the files that verdict cited or read (`source_leak.py`), and an answer
 carrying a verbatim run of 60 characters or more is withheld — recorded `undetermined`
 with the reason — rather than passed on. Validated against 224 real occurrence-level
 evidence strings, of which 10 (4.5%) trip the guard, the sampled catches being genuine
@@ -3278,6 +3283,16 @@ pasted code.
 Keeping verification and adjudication as separate stages is what puts the trust boundary
 between them: this stage sees source and emits facts; that stage sees facts and never
 source. Merging them would put a hosted model on the source side of that line.
+
+**What the adjudicator is handed.** Each finding in the adjudication input carries
+`verification`: the `verdict`, `entry_point` and `guard`, or `null` when the finding has no
+verdict. A missing verdict is never filled with a default, because an absence of evidence
+must not read as evidence of safety. The prose fields (`rationale`, `attacker_input`,
+`trigger`, `falsifier`) and the citations do not cross, since they are the fields most able
+to carry a pasted line. The two names are checked against the finding's own file, like
+finder evidence, and replaced with the redaction marker on a match. The verdict is part of
+the hashed adjudication input, so re-running the verifier after adjudication makes that
+adjudication read as stale.
 
 **It annotates, never deletes.** A finding with no verdict stays in the report and says so.
 `not_reachable` and "no verdict" mean opposite things and render differently — a reader
