@@ -451,6 +451,40 @@ jobs:
         make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
+    - name: Pre-pull Dockerfile base images with retry
+      # test/integration/standalone (docker_helper.go) shells `docker compose
+      # build` for cmd/steward/Dockerfile and cmd/controller/Dockerfile inside
+      # the cfgms-test-runner container below, against this runner's own
+      # Docker daemon (shared via the mounted socket in the step further
+      # down). Pulling each pinned base-image digest here first means that
+      # build resolves everything from the local image cache and makes no
+      # network call of its own — closing the anonymous Docker Hub
+      # token-fetch dependency that evicted PR #4207 (Issue #4212).
+      # `docker pull` has no built-in retry flag, so retry by hand with
+      # backoff. Keep these digests in sync with the three Dockerfiles named
+      # in Issue #4212 (cmd/steward/Dockerfile, cmd/steward/Dockerfile.debian,
+      # cmd/controller/Dockerfile).
+      run: |
+        set -euo pipefail
+
+        pull_with_retry() {
+          local image="$1" attempt=1 max_attempts=5 delay=3
+          until docker pull "$image"; do
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::failed to pull $image after $max_attempts attempts"
+              return 1
+            fi
+            echo "pull of $image failed (attempt $attempt/$max_attempts); retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+          done
+        }
+
+        pull_with_retry golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
+        pull_with_retry alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        pull_with_retry debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 

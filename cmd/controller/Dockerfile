@@ -1,4 +1,8 @@
-# syntax=docker/dockerfile:1
+# No `# syntax=` pragma: the BuildKit frontend bundled with the Docker Engine
+# that runs this already supports RUN --mount cache mounts, and resolving
+# `docker/dockerfile:1` from Docker Hub was an anonymous-token network
+# dependency this build doesn't need (Issue #4212).
+#
 # Multi-platform index digests are pinned so a mutable registry tag cannot alter
 # a release build. Dependabot (or an explicit release change) must update both
 # the human-readable tag and digest together.

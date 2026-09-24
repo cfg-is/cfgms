@@ -48,6 +48,13 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 	}
 
 	// Step 2: Build the steward image
+	//
+	// No --pull: cmd/steward/Dockerfile's FROM images are pinned by digest, so
+	// there is never a newer version for --pull to fetch — only a repeat
+	// network call to re-verify a digest that can't have changed. That refetch
+	// is exactly the anonymous Docker Hub token dependency that evicted PR
+	// #4207 (Issue #4212); the CI workflow pre-pulls the pinned digests once,
+	// with retry, before this runs.
 	fmt.Println("Step 2/3: Building steward Docker image...")
 	// #nosec G204 -- integration-only Docker Compose invocation; executable is
 	// fixed and file/project arguments come from the local test harness.
@@ -55,7 +62,7 @@ func (h *DockerComposeHelper) StartStandalone(ctx context.Context) error {
 		"-f", h.ComposeFile,
 		"-p", h.ProjectName,
 		"--profile", "standalone",
-		"build", "--pull")
+		"build")
 
 	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
