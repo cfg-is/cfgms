@@ -129,6 +129,18 @@ func waitForHealthControllerReadyOrErr(t *testing.T, client *http.Client, base s
 // carry (Issue #4208, AC1).
 func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string, string, *http.Client) {
 	t.Helper()
+	ctrl, _, base, metricsBase, client := startHealthTestControllerWithConfig(t, nil)
+	return ctrl, base, metricsBase, client
+}
+
+// startHealthTestControllerWithConfig is startHealthTestController's full form: it also
+// returns the resolved *controllerConfig.Config, and — when beforeStart is non-nil —
+// invokes it after initialization.Run but before ctrl.Start. That gap is the only window
+// in which on-disk state can be seeded ahead of the real controller reading it at startup
+// (e.g. pre-populating the module cache directory the way a real deployment's disk would
+// already contain bundles — Issue #4270, AC4).
+func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *controllerConfig.Config)) (*cfgcontroller.Controller, *controllerConfig.Config, string, string, *http.Client) {
+	t.Helper()
 	testutil.SetupSecretsEnvForTest(t)
 	cfg := newHealthTestControllerConfig(t, freePort(t))
 
@@ -138,6 +150,10 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 	// same bootstrap a production controller does, not bypass it).
 	_, err := initialization.Run(cfg, logging.NewNoopLogger())
 	require.NoError(t, err, "initialization.Run")
+
+	if beforeStart != nil {
+		beforeStart(cfg)
+	}
 
 	ctrl, err := cfgcontroller.New(cfg, logging.NewNoopLogger())
 	require.NoError(t, err, "controller.New")
@@ -190,7 +206,7 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 		}
 	})
 
-	return ctrl, base, metricsBase, client
+	return ctrl, cfg, base, metricsBase, client
 }
 
 // TestHealthDetailRoutes_EndToEnd is the AC2 [REQUIRED TEST]: cfg controller status,
@@ -443,15 +459,14 @@ var candidateMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut,
 // scope (its "Out of Scope" section covers only the three health/metrics/trace
 // routes named in the story). Per AC3, any other unregistered path this
 // enumeration finds is fixed here or filed as a separate fix issue and noted
-// in the PR body — these two are filed as Issue #4270: cmd/cfg/cmd/module.go
-// calls "/api/v1/modules" and ".../modules/{publisher}/{name}/{version}/approve",
-// but only "/api/v1/modules/approvals/..." is registered
-// (features/controller/api/routes_module_approvals.go) — a path-shape
-// mismatch, not a one-line registration gap.
-var knownUnregisteredCLIPaths = map[string]string{
-	"/api/v1/modules": "Issue #4270",
-	"/api/v1/modules/test-placeholder/test-placeholder/test-placeholder/approve": "Issue #4270",
-}
+// in the PR body. Issue #4270 closed the two gaps this enumeration originally
+// found here: GET /api/v1/modules is now registered
+// (features/controller/api/routes_modules.go), and cmd/cfg/cmd/module.go no
+// longer builds ".../modules/{publisher}/{name}/{version}/approve" at all —
+// runModuleApprove now resolves an address via GET /api/v1/modules/approvals
+// and POSTs to the pre-existing .../modules/approvals/{address}/approve route,
+// which this same enumeration also now finds and confirms registered.
+var knownUnregisteredCLIPaths = map[string]string{}
 
 // privateListenerCLIPaths are CLI-called routes served only on the private
 // metrics listener (#3156); the scan checks them there, not on the public one.

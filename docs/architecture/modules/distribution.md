@@ -209,15 +209,18 @@ Operators can promote a queued bundle to approved:
 
 ```
 cfg module approve cfgms/hyperv@0.2.1
+cfg module approve cfgms/hyperv@0.2.1 --content-hash 9f2c4a1b
 ```
 
-This calls `ApprovalWorkflow.Approve(addr)`, which transitions the cache entry from `pending` to `approved`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error.
+The CLI resolves the ref against `GET /api/v1/modules/approvals` (the pending review queue) to find the matching entry's address, then calls `POST /api/v1/modules/approvals/{address}/approve`, which transitions the cache entry from `pending` to `approved` via `ApprovalWorkflow.Approve(addr)`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error, as does a ref with no matching pending entry.
 
-To inspect pending bundles:
+Because the cache key includes the content hash, `publisher/name@version` can match several pending bundles — and since `QueueForReview` is reached before signature verification, a bundle's claimed publisher is unverified at that point. A ref matching more than one pending entry is refused with an error listing each candidate content hash; pass `--content-hash` (full value or an unambiguous prefix) to name the bundle that was reviewed. The approved content hash is echoed on success.
+
+To inspect all cached modules (`cfg module list` calls `GET /api/v1/modules`):
 
 ```
+cfg module list
 cfg module list --status pending
-cfg module list --tenant root/msp-a --status pending
 ```
 
 ### Implementation Reference

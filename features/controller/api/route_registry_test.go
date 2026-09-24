@@ -166,6 +166,7 @@ var goldenRouteTable = []string{
 	"GET /api/v1/installer/steward-binaries/{version}/{platform}/{arch}",
 	"GET /api/v1/jobs",
 	"GET /api/v1/jobs/{id}",
+	"GET /api/v1/modules",
 	"GET /api/v1/modules/approvals",
 	"GET /api/v1/monitoring/anomalies",
 	"GET /api/v1/monitoring/components/{component}/health",
