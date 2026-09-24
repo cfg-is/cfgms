@@ -96,9 +96,10 @@ func TestHelperProcess(t *testing.T) {
 
 	case "reader":
 		var (
-			ok        int
-			notFound  int
-			tornReads int
+			ok         int
+			notFound   int
+			tornReads  int
+			sharingErr int
 		)
 		for time.Now().Before(deadline) {
 			entry, err := store.GetConfig(ctx, key)
@@ -107,10 +108,19 @@ func TestHelperProcess(t *testing.T) {
 				continue
 			}
 			if err != nil {
-				// Any error other than not-found is treated as a torn
-				// read for this test. The ONLY error path StoreConfig can
-				// surface to the reader is via readConfigFile's JSON
-				// unmarshal, which would mean the reader observed a
+				// A sharing violation is not a torn read: the reader could
+				// not OPEN the file because another handle's share mode
+				// refused it (Issue #4262). Counted and reported under its
+				// own name and exit code, so a failure points at the right
+				// defect instead of at file atomicity.
+				if isSharingViolation(err) {
+					sharingErr++
+					fmt.Fprintf(os.Stderr, "helper reader: sharing violation opening the file: %v\n", err)
+					continue
+				}
+				// Any other error is treated as a torn read: the remaining
+				// error path GetConfig can surface is readConfigFile's JSON
+				// unmarshal, which means the reader observed a
 				// partially-written file.
 				tornReads++
 				fmt.Fprintf(os.Stderr, "helper reader: torn-read candidate: %v\n", err)
@@ -127,9 +137,12 @@ func TestHelperProcess(t *testing.T) {
 			}
 			ok++
 		}
-		fmt.Fprintf(os.Stderr, "helper reader: ok=%d not_found=%d torn=%d\n", ok, notFound, tornReads)
+		fmt.Fprintf(os.Stderr, "helper reader: ok=%d not_found=%d torn=%d sharing_violation=%d\n", ok, notFound, tornReads, sharingErr)
 		if tornReads > 0 {
 			os.Exit(4)
+		}
+		if sharingErr > 0 {
+			os.Exit(5)
 		}
 		os.Exit(0)
 	default:
@@ -217,7 +230,8 @@ func TestFlatFile_CrossProcess_OneWriterManyReaders(t *testing.T) {
 
 	assert.NoError(t, writerErr, "writer subprocess failed — see helper stderr above")
 	for i, err := range readerErrs {
-		assert.NoError(t, err, "reader subprocess %d failed — exit code 4 means a torn read was observed", i)
+		assert.NoError(t, err, "reader subprocess %d failed — exit code 4 means a torn read was observed, "+
+			"exit code 5 means the reader could not open the file (Windows sharing violation)", i)
 	}
 
 	// Sanity: the parent process must be able to read the final state.
