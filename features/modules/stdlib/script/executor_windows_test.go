@@ -214,7 +214,6 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	}
 
 	coldStart := measurePowerShellColdStart(t)
-	coldStart += 60 * time.Second // TEMPORARY Issue #4254 AC2 verification hook — revert before merge
 	// 3x the measured cold-start plus a fixed floor comfortably covers
 	// run-to-run jitter (a loaded runner rarely triples its own baseline)
 	// without inflating the timeout so far that the test takes unreasonably
