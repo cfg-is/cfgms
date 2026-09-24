@@ -58,6 +58,11 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
+      # The classifier derives which doc paths code reads from the tree, so it
+      # needs the PR's files on disk (Issue #4215).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Detect non-documentation changes
         id: filter
         env:
@@ -120,33 +125,26 @@ jobs:
             exit 0
           fi
 
-          # Mirrors the file set this workflow's pull_request trigger used to
-          # paths-ignore. Any changed file outside this set means the PR is
-          # not docs-only, so the real legs must run.
-          #
-          # Written to a file rather than piped into `grep -q`: under
-          # `pipefail` the consumer exits on its first match and can SIGPIPE
-          # the producer, so the pipeline reports 141 exactly when code files
-          # WERE found — which would take the docs-only branch and skip the
-          # suite. A grep failure (exit >1) is a defect too, handled like the
-          # others.
-          grep_status=0
-          grep -vE '^(docs/|[^/]+\.md$|\.claude/.*\.md$|LICENSE$|\.gitignore$|\.editorconfig$)' \
-            changed_files.txt > non_doc_files.txt || grep_status=$?
-          if [ "$grep_status" -gt 1 ]; then
-            echo "::warning::classifying changed files failed (grep exit ${grep_status}) — assuming code changes and running the full suite"
-            echo "code=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Classification lives in a script so it can be tested (Issue #4215).
+          # Besides the documentation path set, it treats as CODE any doc path
+          # that code reads -- derived from the checkout on every run -- because
+          # PR #4201 changed only docs/security-review/methodology.md, a harness
+          # input, was skipped as docs-only, and left develop red. The script
+          # fails closed itself; a missing script or a crash without a verdict
+          # line fails closed here.
+          verdict=""
+          if [ -x .github/scripts/classify-docs-only.sh ]; then
+            .github/scripts/classify-docs-only.sh changed_files.txt . > classify.log 2>&1 || true
+            cat classify.log
+            verdict=$(tail -1 classify.log)
           fi
-
-          if [ -s non_doc_files.txt ]; then
-            echo "Non-documentation file(s) changed — running the unit-test legs:"
-            cat non_doc_files.txt
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "All ${listed} changed file(s) are documentation — legs will be skipped"
-            echo "code=false" >> "$GITHUB_OUTPUT"
-          fi
+          case "$verdict" in
+            code=true|code=false) echo "$verdict" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::classifier produced no verdict — assuming code changes and running the full suite"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
   # Fast unit tests - runs on every push/PR
   #
