@@ -1,4 +1,7 @@
-# syntax=docker/dockerfile:1
+# No `# syntax=` pragma: the BuildKit frontend bundled with the Docker Engine
+# that runs this already supports RUN --mount cache mounts, and resolving
+# `docker/dockerfile:1` from Docker Hub was an anonymous-token network
+# dependency this build doesn't need (Issue #4212).
 # Build stage
 FROM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
 
