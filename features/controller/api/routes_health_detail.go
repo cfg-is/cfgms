@@ -15,6 +15,19 @@ func init() { RegisterRoutes(registerHealthDetailRoutes) }
 // router, following the same registration and permission-gating pattern as
 // registerMonitoringRoutes. These back the `cfg controller status`,
 // `cfg controller metrics` and `cfg trace` CLI commands.
+//
+// health.Handler.HandlePrometheusMetrics is deliberately NOT registered here.
+// Issue #4208's Current Behaviour table names only /health/detailed,
+// /health/metrics and /health/trace/{request_id} as in scope (the three cfg
+// CLI callers); no cfg subcommand consumes a Prometheus-format export today.
+// Wiring it would also compound an unresolved, pre-existing concern raised in
+// PR #4266 review: /health/metrics and /metrics/history below already put
+// health.Handler's collector data on this public authenticated router,
+// alongside registerMonitoringRoutes's deliberate private-listener-only
+// placement of that same collector surface (registerPrivateMetricsRoutes,
+// s.metricsRouter) per the #3156 hardening decision. That is a human
+// decision — move the metrics-bearing routes to s.metricsRouter and retarget
+// the CLI, or explicitly reaffirm the public placement — not resolved here.
 func registerHealthDetailRoutes(s *Server, api *mux.Router) {
 	health := api.PathPrefix("/health").Subrouter()
 	health.Handle("/detailed", s.requirePermission("monitoring", "read-detailed-health")(http.HandlerFunc(s.handleHealthDetailed))).Methods("GET")
