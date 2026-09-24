@@ -18,8 +18,7 @@ import (
 func minimalValidConfig() *stewardconfig.StewardConfig {
 	return &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "steward-1",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "steward-1",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},

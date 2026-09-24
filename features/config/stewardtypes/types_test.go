@@ -20,8 +20,7 @@ func TestStewardSettings_RebootWindowYAMLRoundTrip(t *testing.T) {
 	nth := 1
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeController,
+			ID: "test-steward",
 			RebootWindow: &maintenanceschedule.Config{
 				Timezone: "America/New_York",
 				Schedules: []maintenanceschedule.Schedule{
@@ -74,7 +73,7 @@ func TestStewardSettings_RebootWindowYAMLRoundTrip(t *testing.T) {
 // is omitted from the YAML output and does not appear as a key.
 func TestStewardSettings_RebootWindowNilOmitted(t *testing.T) {
 	cfg := StewardConfig{
-		Steward: StewardSettings{ID: "test-steward", Mode: ModeStandalone},
+		Steward: StewardSettings{ID: "test-steward"},
 	}
 
 	data, err := yaml.Marshal(cfg)
@@ -90,8 +89,7 @@ func TestStewardSettings_RebootWindowNilOmitted(t *testing.T) {
 func TestValidateConfiguration_RejectsBadRebootWindow(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 			RebootWindow: &maintenanceschedule.Config{
 				Timezone:  "America/New_York",
 				Schedules: []maintenanceschedule.Schedule{}, // empty — invalid
@@ -111,7 +109,6 @@ func TestValidateConfiguration_AcceptsNilRebootWindow(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:           "test-steward",
-			Mode:         ModeStandalone,
 			RebootWindow: nil,
 		},
 	}
@@ -126,8 +123,7 @@ func TestValidateConfiguration_RejectsInvalidTimezoneInRebootWindow(t *testing.T
 	nth := 1
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 			RebootWindow: &maintenanceschedule.Config{
 				Timezone: "Not/A/Real/Zone",
 				Schedules: []maintenanceschedule.Schedule{

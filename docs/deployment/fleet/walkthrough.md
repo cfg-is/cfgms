@@ -670,9 +670,7 @@ cat /etc/myapp/config.yaml
 
 > The `drift_mode` cfg field (`stewardtypes.DriftMode`) switches a steward between
 > `apply` (converge changes) and `monitor` (report drift without correcting it). It is
-> set from controller-delivered cfg, never from the local `steward.cfg`. The separate
-> `steward.mode` field controls connectivity mode (`standalone` vs `controller`), not
-> drift behavior.
+> set from controller-delivered cfg, never from the local `steward.cfg`.
 >
 > All steward modules detect drift through the polling-based convergence loop
 > (`Get → Compare → Set`).

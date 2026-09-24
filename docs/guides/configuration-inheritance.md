@@ -153,7 +153,6 @@ CFGMS configuration files use a **resources array** format. Each resource names 
 ```yaml
 steward:
   id: my-steward
-  mode: standalone          # or "controller" when connected to a controller
 
 resources:
   - name: resource-unique-name  # used as the merge key for inheritance

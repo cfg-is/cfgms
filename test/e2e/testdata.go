@@ -115,11 +115,9 @@ func (g *TestDataGenerator) GenerateTestDNA(stewardID string) (*common.DNA, erro
 func (g *TestDataGenerator) GenerateStewardConfig(stewardID string) *config.StewardConfig {
 	baseConfig := &config.StewardConfig{
 		Steward: config.StewardSettings{
-			ID:   stewardID,
-			Mode: config.ModeController,
+			ID: stewardID,
 			Logging: config.LoggingConfig{
-				Level:  "info",
-				Format: "json", // JSON for better CI parsing
+				Level: "info",
 			},
 			ErrorHandling: config.ErrorHandlingConfig{
 				ModuleLoadFailure:  config.ActionWarn,

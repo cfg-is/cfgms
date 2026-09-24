@@ -207,8 +207,7 @@ func prSeedDeviceConfig(t *testing.T, s prStack, env ccEnv) {
 	t.Helper()
 	cfg := stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   s.stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: s.stewardID,
 		},
 		Resources: []stewardtypes.ResourceConfig{prStandaloneResource(env)},
 	}

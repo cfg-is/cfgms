@@ -202,7 +202,7 @@ The `drift_mode` field in the controller-delivered cfg selects how the steward r
 - **`apply` mode** (default — matches current behavior when `drift_mode` is absent): the steward attempts local convergence and reports the outcome. The controller sees the drift and its resolution together.
 - **`monitor` mode**: the steward detects drift but does not act. Emits a `drift.detected.monitor` event upstream with `ResourceResult.Status = StatusNonCompliant`; operator action (or a separate `apply` workflow) decides whether to correct.
 
-`drift_mode` is set exclusively from the controller-delivered cfg — a separate field from `steward.mode` (which controls connectivity: `standalone` or `controller`). A single steward operates in one drift mode at a time across all its managed resources. Per-resource override is not in scope for v1.
+`drift_mode` is set exclusively from the controller-delivered cfg. A single steward operates in one drift mode at a time across all its managed resources. Per-resource override is not in scope for v1.
 
 **Security invariant**: `drift_mode` is sourced from the authenticated controller-delivered cfg only. The local-file loading path (`loadFromPath` in `features/steward/config/config.go`) clears the field after parsing so a tampered `hostname.cfg` cannot flip a controller-connected steward into monitor mode.
 

@@ -34,8 +34,7 @@ func TestManagerStoreAndGetConfiguration(t *testing.T) {
 
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},
@@ -58,7 +57,6 @@ func TestManagerStoreAndGetConfiguration(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
-	assert.Equal(t, testConfig.Steward.Mode, retrievedConfig.Steward.Mode)
 	assert.Len(t, retrievedConfig.Resources, 1)
 	assert.Equal(t, "test-resource", retrievedConfig.Resources[0].Name)
 	assert.Equal(t, "directory", retrievedConfig.Resources[0].Module)
@@ -80,8 +78,7 @@ func TestManagerConfigurationHistory(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   "test-steward",
-				Mode: stewardconfig.ModeStandalone,
+				ID: "test-steward",
 				Logging: stewardconfig.LoggingConfig{
 					Level: "info",
 				},
@@ -113,8 +110,7 @@ func TestManagerGetConfigurationVersion(t *testing.T) {
 
 	testConfig1 := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},
@@ -141,8 +137,7 @@ func TestManagerGetConfigurationVersion(t *testing.T) {
 
 	testConfig2 := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},
@@ -179,8 +174,7 @@ func TestManagerListConfigurations(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   fmt.Sprintf("steward-%d", i),
-				Mode: stewardconfig.ModeStandalone,
+				ID: fmt.Sprintf("steward-%d", i),
 				Logging: stewardconfig.LoggingConfig{
 					Level: "info",
 				},
@@ -212,8 +206,7 @@ func TestManagerBatchStoreConfigurations(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   fmt.Sprintf("steward-%d", i),
-				Mode: stewardconfig.ModeStandalone,
+				ID: fmt.Sprintf("steward-%d", i),
 				Logging: stewardconfig.LoggingConfig{
 					Level: "info",
 				},
@@ -243,11 +236,9 @@ func TestManagerValidateConfiguration(t *testing.T) {
 
 	validConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 		Resources: []stewardconfig.ResourceConfig{
@@ -267,8 +258,7 @@ func TestManagerValidateConfiguration(t *testing.T) {
 	// Empty steward ID is rejected by stewardconfig.ValidateConfiguration.
 	invalidConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "",
 		},
 	}
 
@@ -282,8 +272,7 @@ func TestManagerDeleteConfiguration(t *testing.T) {
 
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},
@@ -310,8 +299,7 @@ func TestManagerGetConfigurationStats(t *testing.T) {
 	for i := 1; i <= 2; i++ {
 		testConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   fmt.Sprintf("steward-%d", i),
-				Mode: stewardconfig.ModeStandalone,
+				ID: fmt.Sprintf("steward-%d", i),
 				Logging: stewardconfig.LoggingConfig{
 					Level: "info",
 				},
@@ -340,30 +328,9 @@ func TestValidationManagerRejectsInvalidLogLevel(t *testing.T) {
 
 	config := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "verbose", // not a valid level
-			},
-		},
-	}
-
-	result := vm.ValidateConfiguration(ctx, "test-tenant", "test-steward", config)
-	assert.False(t, result.Valid)
-	require.NotEmpty(t, result.Errors)
-	assert.Equal(t, "BASIC_VALIDATION_FAILED", result.Errors[0].Code)
-}
-
-func TestValidationManagerRejectsInvalidMode(t *testing.T) {
-	vm := newTestValidationManager(t)
-	ctx := context.Background()
-
-	config := &stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: "unknown-mode", // not a valid mode
-			Logging: stewardconfig.LoggingConfig{
-				Level: "info",
 			},
 		},
 	}
@@ -380,8 +347,7 @@ func TestValidationManagerRejectsDuplicateResourceNames(t *testing.T) {
 
 	config := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
 				Level: "info",
 			},

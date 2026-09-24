@@ -113,11 +113,11 @@ func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
 	// Store device-level configs so GetConfiguration finds sources at each level.
 	svc := NewConfigurationServiceV2(logger, sm, controllerSvc)
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-a", winID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: winID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: winID},
 		Modules: map[string]string{"github_runner": "github_runner"},
 	}))
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-a", linuxID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: linuxID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: linuxID},
 	}))
 
 	// winID: GetConfiguration must include the role's github_runner resource.
@@ -182,7 +182,7 @@ func TestGetConfiguration_UntaggingRemovesRoleResource(t *testing.T) {
 
 	svc := NewConfigurationServiceV2(logger, sm, controllerSvc)
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-b", stewardID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: stewardID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: stewardID},
 		Modules: map[string]string{"file": "file"},
 	}))
 
@@ -284,7 +284,7 @@ func TestGetConfiguration_RolePrecedence_DeviceBeatsRoleBeatsCluster(t *testing.
 
 	// steward-dev: device-level sets shared=device → device must win over role and cluster.
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-c", devID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: devID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: devID},
 		Modules: map[string]string{"file": "file"},
 		Resources: []stewardtypes.ResourceConfig{
 			{Name: "shared", Module: "file", Config: map[string]interface{}{"value": "device"}},
@@ -292,7 +292,7 @@ func TestGetConfiguration_RolePrecedence_DeviceBeatsRoleBeatsCluster(t *testing.
 	}))
 	// steward-nodev: no device-level "shared" resource.
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-c", noDevID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: noDevID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: noDevID},
 	}))
 
 	effDev, err := svc.GetEffectiveConfiguration(ctx, "tenant-c", devID)
@@ -351,7 +351,7 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 
 	svc := NewConfigurationServiceV2(logger, sm, controllerSvc)
 	require.NoError(t, svc.SetConfiguration(ctx, "tenant-d", stewardID, &stewardtypes.StewardConfig{
-		Steward: stewardtypes.StewardSettings{ID: stewardID, Mode: stewardtypes.ModeController},
+		Steward: stewardtypes.StewardSettings{ID: stewardID},
 		Modules: map[string]string{"file": "file"},
 		Resources: []stewardtypes.ResourceConfig{
 			{Name: "device-resource", Module: "file", Config: map[string]interface{}{"path": "/tmp/x"}},

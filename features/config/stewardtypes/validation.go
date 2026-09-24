@@ -65,13 +65,6 @@ func ValidateConfiguration(config StewardConfig) error {
 		return fmt.Errorf("steward ID is required")
 	}
 
-	switch config.Steward.Mode {
-	case ModeStandalone, ModeController:
-		// valid
-	default:
-		return fmt.Errorf("invalid operation mode: %s", config.Steward.Mode)
-	}
-
 	if config.Steward.Logging.Level != "" {
 		validLogLevels := []string{"debug", "info", "warn", "error"}
 		isValidLevel := false

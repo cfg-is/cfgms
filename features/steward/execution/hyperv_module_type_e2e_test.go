@@ -33,7 +33,6 @@ func hypervFleetConfig() *stewardconfig.StewardConfig {
 	return &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
 			ID:      "m2-host",
-			Mode:    stewardconfig.ModeStandalone,
 			Logging: stewardconfig.LoggingConfig{Level: "info"},
 		},
 		Resources: []stewardconfig.ResourceConfig{

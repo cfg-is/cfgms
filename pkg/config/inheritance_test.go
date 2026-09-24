@@ -88,9 +88,9 @@ func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
 		Data: marshalStewardConfig(t, rootCfg),
 	}))
 
-	// Level 1 (msp, LevelClient): overrides Steward.Mode
+	// Level 1 (msp, LevelClient): overrides Steward.ConvergeInterval
 	mspCfg := stewardconfig.StewardConfig{
-		Steward: stewardconfig.StewardSettings{Mode: stewardconfig.ModeController},
+		Steward: stewardconfig.StewardSettings{ConvergeInterval: "45m"},
 	}
 	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
 		Key:  &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "client-policies", Name: "msp"},
@@ -114,7 +114,7 @@ func TestResolveConfiguration_3LevelHierarchy(t *testing.T) {
 
 	// All 3 levels must have contributed.
 	assert.Equal(t, "inherited-id", effective.Config.Steward.ID, "root level must contribute Steward.ID")
-	assert.Equal(t, stewardconfig.ModeController, effective.Config.Steward.Mode, "msp level must contribute Steward.Mode")
+	assert.Equal(t, "45m", effective.Config.Steward.ConvergeInterval, "msp level must contribute Steward.ConvergeInterval")
 	require.Len(t, effective.Config.Resources, 1, "client level must contribute the resource")
 	assert.Equal(t, "client-resource", effective.Config.Resources[0].Name)
 }

@@ -15,7 +15,6 @@
 
 steward:
   id: "web-01"                  # CHANGE: must match the registered steward ID
-  mode: "standalone"
   converge_interval: "30m"
 
   logging:
