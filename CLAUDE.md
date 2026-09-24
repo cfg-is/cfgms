@@ -116,7 +116,7 @@ other, so the same change is not scanned twice — read the "Real run" column.
 |-------|----------|-------------------|
 | `unit-tests` | PR (queue stubbed) | Core functionality (~3-5 min) |
 | `integration-tests` | merge queue (PR stubbed) | Comprehensive + production-critical (~5-10 min) |
-| `Build Gate` | merge queue (PR stubbed) | Cross-platform compilation + Docker integration (~10-15 min) |
+| `Build Gate` | both (#4219) — PR: compile-check + native Windows/macOS/e2e legs; queue: full native builds + Docker | Cross-platform compilation + native tests + Docker integration (~10-15 min) |
 | `Controller Integration Tests (Linux)` | merge queue (PR stubbed) | Controller integration suite |
 | `security-deployment-gate` | merge queue (PR stubbed) | Critical vulnerability blocking (~6-10 min) |
 | `trivy-scan` | merge queue (PR stubbed) | Filesystem vulnerabilities, secrets, misconfiguration |
@@ -125,25 +125,37 @@ other, so the same change is not scanned twice — read the "Real run" column.
 | `frontend-checks` | both (no stub) | `web/` typecheck, lint, and tests |
 | `CLA signature check` | both (no stub) | Contributor licence agreement |
 
-Three shapes sit behind that column:
+Four shapes sit behind that column:
 
-- **Five run for real in the queue.** Their PR-side stub is a `*-pr-stub` job in
-  the check's own workflow; on a docs-only PR, where that workflow is
-  paths-ignored entirely, `documentation.yml` posts the context instead.
+- **Four run for real in the queue only:** `integration-tests`,
+  `Controller Integration Tests (Linux)`, `security-deployment-gate`, and
+  `trivy-scan`. Their PR-side stub is a `*-pr-stub` job in the check's own
+  workflow; on a docs-only PR, where that workflow is paths-ignored entirely,
+  `documentation.yml` posts the context instead.
   `unit-tests` is the inverse — real on the PR (an aggregator over matrix legs),
   stubbed in the queue by the `merge_group`-only `unit-tests-queue-stub.yml`.
-  Unlike the five, `unit-tests`' docs-only-PR case is not covered by
+  Unlike the four, `unit-tests`' docs-only-PR case is not covered by
   `documentation.yml` either (since #4174): `test-suite.yml` has no
   paths-ignore at all, and its own `changes` job detects a docs-only PR so the
   aggregator posts a passing context without running the five legs —
   `test-suite.yml` is `unit-tests`' only PR-side poster, in every shape of PR.
-  **`Build Gate` and `unit-tests` are the trigger-exclusive pairs:** `Build Gate`'s
-  PR-side stub lives in a separate `pull_request`-only workflow,
-  `cross-platform-build-pr.yml`, so that no skipped stub run can appear in the
-  queue; `unit-tests`' queue stub lives in a separate `merge_group`-only workflow,
-  so that no skipped stub run can appear on a PR — see
-  [Stub exclusivity](#stub-exclusivity) for why both had to be structural rather
-  than an `if:`.
+- **`Build Gate` runs for real on both sides (#4219).** The PR side
+  (`cross-platform-build-pr.yml`) runs `Cross-Platform Compilation Check` (now
+  just `linux/arm64` and `darwin/amd64` — the two targets no native runner
+  exercises) plus four native Windows legs, seven native macOS legs, and the
+  non-Docker e2e suite: real tests against the diff, not a stand-in for the
+  queue job. The queue side (`cross-platform-build.yml`) independently
+  re-validates the merge commit with its own native-build matrix and the
+  Docker integration suite — nothing was removed from the queue by #4219 (a
+  follow-up story does that). **`Build Gate` and `unit-tests` are still the
+  trigger-exclusive pairs:** `Build Gate`'s PR-side stub lives in a separate
+  `pull_request`-only workflow, `cross-platform-build-pr.yml`, so that no
+  skipped stub run can appear in the queue; `unit-tests`' queue stub lives in a
+  separate `merge_group`-only workflow, so that no skipped stub run can appear
+  on a PR — see [Stub exclusivity](#stub-exclusivity) for why both had to be
+  structural rather than an `if:`. Trigger-exclusivity is about *which side can
+  post the context*, not about whether both sides do real work — `Build Gate`
+  now does real work on both sides, same as `CodeQL` below.
 - **`CodeQL` runs for real on both sides,** path-filtered on the PR side to Go
   sources, the module graph, `.github/codeql/**`, its own workflow file and
   `web/`. `codeql-stub.yml` covers PRs touching none of those, and deliberately
@@ -285,10 +297,19 @@ completed at `04:50:00Z`; `build-gate-pr-stub`'s `Build Gate` check run did
 not start until `04:56:23Z` — a 6m23s window where the only `Build Gate` run
 for this PR was the flat docs stub.
 
+**#4219 widened `build-gate-pr-stub`'s `needs:` list, and with it this same
+window.** It now also needs the four native Windows legs, seven native macOS
+legs, and the e2e leg — real, several-minutes-long test jobs, not lookups.
+`documentation.yml`'s flat stub still has no `needs:` and still completes in
+seconds, so on a PR that triggers both workflows the flat-stub-wins-the-race
+window is now bounded by the slowest of these legs rather than by
+`cross-compile-check` alone. The safety argument below is unaffected:
+`Build Gate` was already, and remains, trigger-exclusive.
+
 This is a **PR-side false green only, and it is not a merge-safety hole.**
-`Build Gate` is queue-real (see above): on `merge_group`,
-`cross-platform-build.yml`'s `build-gate` job is the only possible poster of
-the context, because neither `documentation.yml` nor
+`Build Gate`'s queue side runs unconditionally and independently (see above):
+on `merge_group`, `cross-platform-build.yml`'s `build-gate` job is the only
+possible poster of the context, because neither `documentation.yml` nor
 `cross-platform-build-pr.yml` has a `merge_group` trigger. A broken build
 cannot merge through this context — the worst case of the PR-side race is
 that the PR gets enqueued a few minutes earlier than it otherwise would, and
@@ -335,7 +356,12 @@ Docs-only PRs get instant green checks via stub jobs (<2 min merge path).
 **`make test-complete` coverage:**
 - All pre-commit validation, fast comprehensive tests, production-critical tests
 - Cross-platform compilation, Docker integration tests, E2E tests
-- **Gap:** Native Windows builds: run on self-hosted Windows runner for non-fork PRs; macOS builds: CI-only, requires runners (gap)
+- **Gap:** `build-cross-validate` cross-compiles from Linux; it does not natively
+  build on Windows or macOS. Native Windows/macOS *tests* now run on the PR side
+  too (#4219, `cross-platform-build-pr.yml`) and are not part of
+  `make test-complete` (they need `windows-latest`/`macos-latest` runners); native
+  *builds* (`make build` via each platform's own toolchain) remain CI-only, in
+  the merge queue (`cross-platform-build.yml`).
 
 ## Essential Commands
 
@@ -360,7 +386,7 @@ Consult these before implementing steward or controller behavior changes:
 ### Storage
 
 - **Pluggable design** — all components use `pkg/storage/interfaces`
-- **Default:** Git with SOPS encryption
+- **Default:** `flatfile` provider (`data/cfgms-config`); `sqlite` and `database` are the alternatives. Git is not a storage backend — the `git` provider was removed (`cfg storage migrate --from git --to flatfile` migrates an existing deployment). Secrets at rest are SOPS-encrypted.
 - **Write-through caching** pattern (memory → durable storage)
 - **No memory-only storage** — features requiring durability use durable storage everywhere
 

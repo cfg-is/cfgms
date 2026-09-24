@@ -48,7 +48,6 @@ The zero-trust implementation follows secure coding practices and implements app
 
 - All high-privilege operations require MFA verification
 - MFA status tracked in security context: `SecurityContext.MFAVerified`
-- Implementation location: `features/rbac/zerotrust/types.go:330`
 
 **Certificate-based Authentication**
 
@@ -178,7 +177,7 @@ func sanitizeContext(ctx map[string]string) map[string]string {
 
 - No passwords, tokens, or keys logged
 - PII scrubbing in audit logs
-- Implementation: `pkg/logging/secure_logger.go`
+- Implementation: `pkg/logging/sanitize.go`
 
 **Error Message Security**
 
@@ -292,7 +291,6 @@ After comprehensive analysis, no critical security vulnerabilities were identifi
 **Processing Time Limits**
 
 - Maximum evaluation time enforced (15ms for DoS protection)
-- Industry-leading performance (faster than AWS IAM, Google Cloud IAM, Auth0)
 - Timeout handling with fail-secure behavior
 - Background processing for non-blocking operations
 

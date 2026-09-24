@@ -21,6 +21,11 @@ type BatchProcessor struct {
 	outputChan chan<- *ProcessingBatch
 	inputChan  <-chan interfaces.LogEntry
 
+	// stopChan is the owning stream processor's shutdown signal. The batch
+	// processor is the only sender on outputChan, so it must observe shutdown
+	// itself and return before the owner considers the pipeline drained.
+	stopChan <-chan struct{}
+
 	// Batching state
 	currentBatch *ProcessingBatch
 	batchMutex   sync.Mutex
@@ -30,7 +35,7 @@ type BatchProcessor struct {
 
 // NewBatchProcessor creates a new batch processor
 func NewBatchProcessor(config ProcessingConfig, outputChan chan<- *ProcessingBatch,
-	inputChan <-chan interfaces.LogEntry) *BatchProcessor {
+	inputChan <-chan interfaces.LogEntry, stopChan <-chan struct{}) *BatchProcessor {
 
 	logger := logging.ForModule("siem.batch_processor").WithField("component", "batcher")
 
@@ -39,6 +44,7 @@ func NewBatchProcessor(config ProcessingConfig, outputChan chan<- *ProcessingBat
 		config:     config,
 		outputChan: outputChan,
 		inputChan:  inputChan,
+		stopChan:   stopChan,
 	}
 }
 
@@ -58,11 +64,17 @@ func (bp *BatchProcessor) Run(ctx context.Context, wg *sync.WaitGroup) {
 
 	// Start batch timeout timer
 	bp.batchTimer = time.NewTimer(bp.config.BatchTimeout)
+	defer bp.batchTimer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			logger.InfoCtx(ctx, "Batch processor stopped due to context cancellation")
+			bp.flushCurrentBatch(ctx)
+			return
+
+		case <-bp.stopChan:
+			logger.InfoCtx(ctx, "Batch processor stopped due to stop signal, flushing final batch")
 			bp.flushCurrentBatch(ctx)
 			return
 

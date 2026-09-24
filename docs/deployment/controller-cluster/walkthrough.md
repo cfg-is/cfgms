@@ -67,10 +67,10 @@ gated on `HasLeadership()`. A follower answers `503`. If you use an LB for enrol
 it **must** health-gate on `GET /api/v1/raft/status` → `is_leader`, not just liveness.
 
 **Steward's-own-node failure:** A steward has exactly one controller URL. When its own
-node goes down, it retries that node indefinitely — there is no automatic failover to a
-cluster peer. An LB/VIP in front of the cluster is the only operational lever for this
-today. Point the steward's `--controller-url` at the LB address, and use a plain liveness
-health gate (not an `is_leader` gate) for the ControlChannel path.
+node goes down, it retries that node until the node returns. To keep stewards attached
+through a node outage, place an LB/VIP in front of the cluster, point the steward's
+`--controller-url` at the LB address, and use a plain liveness health gate (not an
+`is_leader` gate) for the ControlChannel path.
 
 ### Starting and stopping the cluster
 

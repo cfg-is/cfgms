@@ -14,24 +14,22 @@ first credential on a controller that has no account yet to log in against.
 you both halves in a file — the one CFGMS credential whose private key the
 controller ever holds. It administers the controller, and it cannot approve a
 credential enrolment or renew itself: both require a fresh passkey presence
-assertion, which a bootstrap certificate can never obtain. It is *intended* also
-to be unable to authorise code execution on a managed endpoint (see
-[ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md));
-read the gap note below before relying on that. The third path, "Headless
+assertion, which a bootstrap certificate can never obtain. It also cannot
+authorise code execution on a managed endpoint (see
+[ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md)).
+The third path, "Headless
 Enrolment" below, is for a machine that cannot open a browser: it still needs
 an administrator who already holds a credential to mint it a token, so it is
 not a second bootstrap route — only `bootstrap-admin` creates the very first
 credential on a controller. Every credential after the first one should come
 from `cfg login` or headless enrolment, not another bundle.
 
-> **[GAP: the bundle's confinement against endpoint code execution is not yet
-> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
-> (`features/steward/commands/execute_script.go`) and the controller
-> (`features/controller/api/handlers_runs.go`) currently accepts any
-> admin-marked certificate and does not require the payload-signing marker, so a
-> bundle **can** today authorise code execution on a managed endpoint. Handle the
-> bundle file as a credential that can run code across your fleet — protect it
-> like a root SSH key, and revoke it if it is ever copied or exposed.]**
+> Signer verification on both the steward (`features/steward/commands/execute_script.go`)
+> and the controller (`features/controller/api/handlers_runs.go`) requires the
+> payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
+> certificate alone cannot authorise code execution on a managed endpoint
+> (Issue #3696). The bundle still administers the controller — protect it like a
+> root SSH key, and revoke it if it is ever copied or exposed.
 
 ## Prerequisites
 

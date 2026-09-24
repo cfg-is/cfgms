@@ -200,8 +200,8 @@ When using delegated permissions, operations preserve user context:
 ```yaml
 # User context is automatically tracked and preserved
 user_context:
-  user_id: "admin@contoso.com"
-  user_principal_name: "admin@contoso.com"
+  user_id: "admin@acme-corp.example"
+  user_principal_name: "admin@acme-corp.example"
   display_name: "System Administrator"
   roles:
     - "Global Administrator"

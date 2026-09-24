@@ -32,6 +32,7 @@ func TestStreamProcessor_SecurityEventAuditEmission(t *testing.T) {
 	eventCorrelator := NewEventCorrelator(5 * time.Minute)
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
 	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, auditManager)
+	sp.shutdownWait = 50 * time.Millisecond
 
 	ctx := context.Background()
 	require.NoError(t, sp.Start(ctx))
@@ -105,6 +106,7 @@ func TestStreamProcessor_SecurityEventAuditNilManager(t *testing.T) {
 	eventCorrelator := NewEventCorrelator(5 * time.Minute)
 	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
 	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
+	sp.shutdownWait = 50 * time.Millisecond
 
 	ctx := context.Background()
 	require.NoError(t, sp.Start(ctx))
@@ -185,4 +187,62 @@ func TestSanitizedFields(t *testing.T) {
 // TestSanitizedFields_Nil verifies that nil input returns nil.
 func TestSanitizedFields_Nil(t *testing.T) {
 	assert.Nil(t, sanitizedFields(nil))
+}
+
+// TestNewStreamProcessor_DefaultShutdownWait verifies that a StreamProcessorImpl
+// built via the normal NewStreamProcessor path — the constructor every non-test
+// caller uses — keeps its production shutdownWait default of 5s. The six tests
+// that override shutdownWait for speed do so only after construction, so this
+// is the one place the unmodified default is asserted.
+func TestNewStreamProcessor_DefaultShutdownWait(t *testing.T) {
+	config := createTestConfig()
+	patternMatcher := NewPatternMatcher()
+	eventCorrelator := NewEventCorrelator(5 * time.Minute)
+	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
+
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
+
+	assert.Equal(t, 5*time.Second, sp.shutdownWait)
+}
+
+// TestStreamProcessor_StopDrainsPipeline is a regression test for the
+// close-while-send shutdown race: the batch processor used to ignore stopChan,
+// so Stop always fell through to the forced-stop timeout and then closed
+// processingBuffer while the batch processor's final flush was still sending on it.
+// Stop must now drain every pipeline goroutine well inside shutdownWait and must
+// leave both buffers open, since senders may still be in flight.
+func TestStreamProcessor_StopDrainsPipeline(t *testing.T) {
+	config := createTestConfig()
+	patternMatcher := NewPatternMatcher()
+	eventCorrelator := NewEventCorrelator(5 * time.Minute)
+	ruleManager := NewRuleManager(patternMatcher, eventCorrelator)
+
+	sp := NewStreamProcessor(config, patternMatcher, eventCorrelator, ruleManager, nil)
+	// Long enough that hitting the timeout is unambiguous rather than flaky timing.
+	sp.shutdownWait = 10 * time.Second
+
+	ctx := context.Background()
+	require.NoError(t, sp.Start(ctx))
+
+	// Queue entries so the batch processor holds a partial batch to flush at shutdown.
+	for i := 0; i < 10; i++ {
+		require.NoError(t, sp.ProcessEntry(ctx, createTestLogEntry("ERROR", "shutdown drain", "test-tenant")))
+	}
+
+	start := time.Now()
+	require.NoError(t, sp.Stop(ctx))
+	elapsed := time.Since(start)
+
+	require.Less(t, elapsed, sp.shutdownWait,
+		"Stop hit the forced-stop timeout: a pipeline goroutine is not honouring stopChan")
+
+	// Both buffers must still be open — a closed channel would panic on send here.
+	select {
+	case sp.inputBuffer <- createTestLogEntry("ERROR", "post-stop", "test-tenant"):
+	default:
+	}
+	select {
+	case sp.processingBuffer <- &ProcessingBatch{ID: "post-stop", TenantID: "test-tenant"}:
+	default:
+	}
 }

@@ -9,7 +9,7 @@ is a candidate for its own follow-up story, pending founder approval.
 CI has grown one workflow at a time, each with its own trigger and its own reason. No one
 document says, for the fleet as a whole: what does a PR author wait for, what does the merge
 queue re-validate, and does each of those checks still earn its slot. This audit extends the
-method of `docs/development/ci-longpole-audit.md` (2026-07-10, which covered only
+method of `docs/archive/ci-longpole-audit.md` (2026-07-10, which covered only
 `production-gates.yml` and `fleet-e2e.yml`) to every workflow in `.github/workflows/` and to
 `make test`'s internals, and proposes a tiering toward an **8-minute PR-side verdict**.
 
@@ -173,7 +173,7 @@ n=20 job-level samples per side (of 50 run-level pulls) unless noted. PR window 
 | `golangci-lint` (windows leg, `GOOS=windows` on the same Linux runner) | both | ubuntu-latest | same as above | 236s/3.93m / 236s/3.93m | 244s/4.07m / 243s/4.05m |
 | `lint-log-injection` | both, no path filter | ubuntu-latest | not required | 24s / 25s | 26s / 27s |
 | `zizmor` | both, no path filter, no stub | ubuntu-latest | ✅ `zizmor` | 24s / 22s | 29s / 26s |
-| `frontend-checks` | both, no path filter, no stub | ubuntu-latest | ✅ `frontend-checks` | 8s / 8s **— gap: no `web/**`-touching run fell in either 20-run sample; this is the change-detection short-circuit cost, not a measured full npm cycle** | 10s / 10s |
+| `frontend-checks` | both, no path filter, no stub | ubuntu-latest | ✅ `frontend-checks` | 8s / 8s **— no `web/**`-touching run fell in either 20-run sample; this is the change-detection short-circuit cost, not a measured full npm cycle** | 10s / 10s |
 | `cla-check` | `pull_request_target` + `merge_group` | ubuntu-latest | ✅ `CLA signature check` | 7s / 4s | 8s / 4s |
 | `no-pipeline-labels` (`label-decommission-gate.yml`) | PR only | ubuntu-latest | not required | 6s | 8s |
 
@@ -402,20 +402,6 @@ Reusing #4151's own measurement (its PR #4155 is open, unmerged, as of this pull
 - **Four (soon five, with #4154) `.devcontainer/*_test.sh` suites never run in CI at all**
   (Issue #4163) — they guard the agent-container egress firewall, DNS allowlist, entrypoint,
   and credential delivery, and pass locally but gate nothing in CI today.
-- **`ALL_MODULES` (Makefile:522) is missing 9 real modules** (Issue #4164): stdlib
-  `cert_trust`, `hostname`, `service`, `time`, `user`; extended `acme`, `github_runner`,
-  `osquery`; and `hyperv` entirely. `CHANGED_MODULES` (Makefile:525-529) derives from
-  `ALL_MODULES` via `git diff --name-only HEAD~1`, so a change confined to one of these 9
-  directories produces an empty `CHANGED_MODULES` match.
-  **Independent verification for this audit** (`go list ./... | grep -v '/features/modules/' | grep 'modules/stdlib/time'`
-  → no output): `make test`'s *primary* `go test` invocation excludes `/features/modules/`
-  entirely, so those 9 modules are covered **only** via the `CORE_MODULES`/`CHANGED_MODULES`
-  smoke loop. Since none of the 9 are in `CORE_MODULES` (`stdlib/file stdlib/script`) and none
-  match a `CHANGED_MODULES` pattern, a PR whose only Go change lives in one of them gets **zero
-  test execution in the `unit-tests` CI job**, not merely a gap in "local pre-push and agent
-  validation" as #4164's own Problem statement frames it. Flagging this refinement for
-  whoever picks up #4164 — the fix already scoped there (derive from `module.yaml` presence)
-  closes this CI-level gap too, not just the local one.
 
 ---
 
@@ -575,14 +561,6 @@ own scope.
    the current comments would under-budget their PR-side cost.
    Files In Scope: `.github/workflows/docker-security.yml`, `.github/workflows/license-check.yml`,
    `.github/workflows/dependency-pin-check.yml` (comment-only correction).
-
-7. **Fold this audit's CI-level refinement into #4164** (already filed, not duplicated here):
-   `ALL_MODULES`'s 9 missing modules aren't just a "local pre-push" gap as #4164's Problem
-   statement states — `make test`'s primary `go test` invocation excludes `/features/modules/`
-   entirely, so a PR touching only one of those 9 modules gets zero test execution in CI's
-   `unit-tests` job. #4164's already-scoped fix (derive `ALL_MODULES` from `module.yaml`
-   presence) closes this too; no separate story needed, just a correction to #4164's framing
-   when it's picked up.
 
 No item above proposes removing a check without naming what still covers its risk, per this
 story's constraint — items 1-6 are cleanup/investigation/measurement, not risk removal.

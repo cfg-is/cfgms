@@ -66,7 +66,6 @@ Documented during epic #3090; status at epic close:
 | Finding | Story | Status at epic close |
 |---|---|---|
 | `TestRealClusterPartition_NoDualLeader` initially failed — partition window allowed two nodes to simultaneously report `is_leader:true` (Raft `CheckQuorum` step-down timing overlaps followers' election timers; `CheckQuorum` guarantees write-safety, not status-flag agreement) | #3095 | **Resolved** — lease-backed `HasLeadership()` separated from `IsRaftLeader()` by epic #3386; test re-run PASS on 2026-08-25/26 (§5) |
-| Steward single-controller-URL gap: when a steward's own node goes down, it retries that node indefinitely — no automatic failover to a cluster peer exists in the steward | #3096 | **Open** — per epic Non-Goals; documented in `steward-operating-model.md` |
 | RLS unscoped-read bug: `current_setting('app.current_tenant', true)` returns `NULL` (not `''`) when unset, silently filtering all rows for unscoped DB callers | #3096 | **Filed as #3478** — `coalesce(...)` fix pending |
 | Fleet view was node-local: `GET /api/v1/stewards` returned in-process map only, not cluster-wide store | #3096 | **Fixed by #3480** |
 | Refused steward reconnects at ~1 Hz forever (backoff not persisted across reconnect-loop re-entries) | #3096 | **Fixed by #3481** |
@@ -117,8 +116,6 @@ stories under this epic (none fixed here — #3124 is infra-provisioning only):
   the same mechanics as the module, `-EnableSecureBoot Off`) rather than via
   `cfg config upload` — see `C:\temp\ctrl-vm-create.ps1` /
   `C:\temp\datasvc-vm-create.ps1` on `HV-HOST-01` for the exact recipe.
-- #3170 — `tier1-bootstrap.sh`'s config template is missing
-  `transport.external_address` (controller now refuses to start without it).
 - #3171 — `certificate.ca_path`/`cert_path` is silently ignored in favor of a
   relative default — `--init` must be run with CWD `/var/lib/cfgms` (matching
   the systemd unit's `WorkingDirectory`) or the CA never lands where the
@@ -1613,7 +1610,7 @@ foreign listener.
 Live-fleet proof for the in-memory comparison logic in
 `features/steward/client/client_transport.go` (`checkTermFence` /
 `receiveCommand`) — see
-[`steward-operating-model.md`](../architecture/steward-operating-model.md#raft-term-command-fence-adr-029-decision-6)
+[`steward-operating-model.md`](../architecture/steward-operating-model.md#fencing-token-command-fence-adr-029-decision-6-substrate-updated-by-adr-031-decision-5--issue-3760)
 for the design. This story implements comparison only; persistence across a
 steward restart and the authenticated reset path are #3437.
 

@@ -99,18 +99,18 @@ modules:
     enabled: true
     config:
       # Primary domain settings
-      domain: "corp.contoso.com"
+      domain: "corp.acme-corp.local"
       auth_method: "kerberos"
       use_tls: true
       port: 636
       
       # Multi-domain and forest settings
       trusted_domains:
-        - "dev.contoso.com"
-        - "test.contoso.com"
+        - "dev.acme-corp.local"
+        - "test.acme-corp.local"
         - "external.partner.com"
-      forest_root: "contoso.com"
-      global_catalog_dc: "gc1.contoso.com"
+      forest_root: "acme-corp.local"
+      global_catalog_dc: "gc1.acme-corp.local"
       cross_domain_auth: true
       
       # Enhanced object support
@@ -225,7 +225,7 @@ Query objects across trusted domains:
 
 ```bash
 # Cross-domain user query
-GET /modules/activedirectory/query:user:john.doe:dev.contoso.com
+GET /modules/activedirectory/query:user:john.doe:dev.acme-corp.local
 
 # Cross-domain group query  
 GET /modules/activedirectory/query:group:admins:external.partner.com
@@ -237,7 +237,7 @@ GET /modules/activedirectory/forest:user:jane.smith
 GET /modules/activedirectory/forest:group:managers
 
 # Validate domain trust
-GET /modules/activedirectory/validate_trust:dev.contoso.com
+GET /modules/activedirectory/validate_trust:dev.acme-corp.local
 ```
 
 ### AD-Specific Object Queries
@@ -268,8 +268,7 @@ GET /modules/activedirectory/query:trust:external.partner.com
 - Best security for domain environments
 
 ### NTLM (`ntlm`)
-- Windows NTLM authentication (planned)
-- Fallback for environments without Kerberos
+- Accepted as a configuration value; the LDAP client has no SASL/NTLM binding, so `authenticateNTLM` returns an error directing the caller to `simple` or `kerberos`
 
 ## Deployment
 
@@ -323,7 +322,7 @@ if userResult.Success && userResult.User != nil {
 
 ```go
 // Cross-domain user lookup
-result, err := module.Get(ctx, "query:user:jane.doe:dev.contoso.com")
+result, err := module.Get(ctx, "query:user:jane.doe:dev.acme-corp.local")
 
 // Forest-wide user search
 result, err := module.Get(ctx, "forest:user:admin.user")
@@ -347,13 +346,10 @@ trusts, err := module.Get(ctx, "list:trust")
 
 ## Known limitations
 
-- **Write Operations**: Currently read-only mode; write operations planned for future release
-- **Real-time Monitoring**: DirSync change notifications require an LDAP change notification channel; the LDAP client does not expose one
+- **Read-only**: the module exposes `Get` queries against the directory
 - **Linux Limitations**: Full functionality requires Windows deployment; Linux provides LDAP-only access
 - **Forest Topology**: Complex forest topologies may require additional trust configuration
 - **Performance**: Large forests with 100k+ objects may require performance tuning
-- **Exchange Objects**: Mailbox and Exchange-specific attributes not currently supported
-- **ADFS Integration**: Active Directory Federation Services not directly supported
 
 ## Security considerations
 
@@ -471,12 +467,3 @@ logging:
 ```
 
 This provides verbose LDAP operation logging for troubleshooting.
-
-## Future Enhancements
-
-- **Write Operations**: User/group creation and modification
-- **Real-time Monitoring**: DirSync for change notifications
-- **Multi-Forest Support**: Cross-forest trust relationships
-- **Computer Management**: Full computer object lifecycle
-- **Group Policy Integration**: Read GP assignments and settings
-- **Exchange Integration**: Mailbox and distribution list management

@@ -1437,7 +1437,7 @@ func connectWithApprovedRegistration(
 
 	// Build cert.Manager and SecretStore for on-demand TLS cert loading and
 	// offline queue encryption (Issue #920).
-	certMgr, secretStore := buildCertManagerAndSecretStore(reg.ClientCert, reg.ClientKey, reg.IssuerChain, logger)
+	certMgr, secretStore := buildCertManagerAndSecretStore(certStoreDir, reg.ClientCert, reg.ClientKey, reg.IssuerChain, logger)
 
 	// Build the composite DNA collector early so we can wire the executor into it
 	// after InitializeConfigExecutor creates it (Issue #2435).
@@ -1931,7 +1931,14 @@ func refreshAndConnect(
 // transport's TLS handshake — tls.X509KeyPair (used by cert.Manager's
 // GetClientCertificate) builds Certificate.Certificate from every DER block in
 // the PEM, not just the first.
-func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
+//
+// certStoreDir is the caller's certificate store directory — the same value
+// connectWithApprovedRegistration already uses for saveIdentity/loadIdentity.
+// Every production caller passes defaultCertStoreDir() here (Issue #4233), so
+// this is not a behavior change on a real steward; it exists so tests can
+// route the on-demand cert.Manager through a t.TempDir() instead of it
+// silently falling back to a real, OS-global path outside the test's sandbox.
+func buildCertManagerAndSecretStore(certStoreDir, clientCertPEM, clientKeyPEM, issuerChainPEM string, logger logging.Logger) (*cert.Manager, secretsif.SecretStore) {
 	// ── SecretStore ──────────────────────────────────────────────────────────
 	var secretStore secretsif.SecretStore
 	secretsProvider, err := secretsif.GetSecretProvider("steward")
@@ -1950,7 +1957,7 @@ func buildCertManagerAndSecretStore(clientCertPEM, clientKeyPEM, issuerChainPEM 
 		return nil, secretStore
 	}
 
-	certMgr := buildClientCertManagerAtPath(defaultCertStoreDir(), clientCertPEM, clientKeyPEM, issuerChainPEM, logger)
+	certMgr := buildClientCertManagerAtPath(certStoreDir, clientCertPEM, clientKeyPEM, issuerChainPEM, logger)
 	return certMgr, secretStore
 }
 

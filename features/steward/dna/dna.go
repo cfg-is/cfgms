@@ -49,6 +49,39 @@ func WithOsquerySource(src OsquerySource) CollectorOption {
 	return func(c *Collector) { c.osquery = src }
 }
 
+// WithHardwareCollector returns an option that selects the HardwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformHardwareCollector would build. The intended use is test
+// injection: a snapshot-backed HardwareCollector (pkg/testing/dnasnapshot)
+// that replays data captured once from a real collector run, so tests that
+// assert on Collect's assembly, caching and partitioning logic don't pay the
+// cost of probing real hardware on every run (the Windows platform collector
+// issues nine WMI queries per run, Issue #4222).
+func WithHardwareCollector(h HardwareCollector) CollectorOption {
+	return func(c *Collector) { c.hardware = h }
+}
+
+// WithSoftwareCollector returns an option that selects the SoftwareCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSoftwareCollector would build. See WithHardwareCollector.
+func WithSoftwareCollector(s SoftwareCollector) CollectorOption {
+	return func(c *Collector) { c.software = s }
+}
+
+// WithNetworkCollector returns an option that selects the NetworkCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformNetworkCollector would build. See WithHardwareCollector.
+func WithNetworkCollector(n NetworkCollector) CollectorOption {
+	return func(c *Collector) { c.network = n }
+}
+
+// WithSecurityCollector returns an option that selects the SecurityCollector
+// implementation Collect uses, in place of the platform default
+// newPlatformSecurityCollector would build. See WithHardwareCollector.
+func WithSecurityCollector(s SecurityCollector) CollectorOption {
+	return func(c *Collector) { c.security = s }
+}
+
 // Collector collects system DNA (attributes) for identification and targeting.
 //
 // The collector gathers hardware, software, and network information to create
@@ -68,6 +101,15 @@ type Collector struct {
 	// Gatherers (collectHardwareInfo, collectNetworkInfo, etc.) and RawAttributes
 	// run unconditionally regardless of which source wins the fragment decision.
 	osquery OsquerySource
+
+	// Sub-collector overrides — nil unless set via WithHardwareCollector,
+	// WithSoftwareCollector, WithNetworkCollector, or WithSecurityCollector.
+	// When nil, collectHardwareInfo/collectSoftwareInfo/collectNetworkInfo/
+	// collectSecurityInfo build the platform-specific collector as before.
+	hardware HardwareCollector
+	software SoftwareCollector
+	network  NetworkCollector
+	security SecurityCollector
 
 	// Hardware cache — static hardware data collected once and reused.
 	hwCacheOnce sync.Once
@@ -380,7 +422,10 @@ func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[stri
 		defer cancel()
 
 		cache := make(map[string]string)
-		hwCollector := NewHardwareCollector(cacheCtx)
+		hwCollector := c.hardware
+		if hwCollector == nil {
+			hwCollector = NewHardwareCollector(cacheCtx)
+		}
 
 		if err := hwCollector.CollectCPU(cacheCtx, cache); err != nil {
 			c.logger.Error("Failed to collect CPU information", "error", err)
@@ -417,7 +462,10 @@ func (c *Collector) collectHardwareInfo(ctx context.Context, attributes map[stri
 
 // collectSoftwareInfo collects software and OS information using platform-specific collectors.
 func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[string]string) {
-	swCollector := NewSoftwareCollector(ctx)
+	swCollector := c.software
+	if swCollector == nil {
+		swCollector = NewSoftwareCollector(ctx)
+	}
 
 	// Collect OS information
 	if err := swCollector.CollectOS(ctx, attributes); err != nil {
@@ -447,7 +495,10 @@ func (c *Collector) collectSoftwareInfo(ctx context.Context, attributes map[stri
 
 // collectNetworkInfo collects network configuration information using platform-specific collectors.
 func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[string]string) {
-	netCollector := NewNetworkCollector()
+	netCollector := c.network
+	if netCollector == nil {
+		netCollector = NewNetworkCollector()
+	}
 
 	// Collect network interface information
 	if err := netCollector.CollectInterfaces(ctx, attributes); err != nil {
@@ -472,7 +523,10 @@ func (c *Collector) collectNetworkInfo(ctx context.Context, attributes map[strin
 
 // collectSecurityInfo collects security attributes using platform-specific collectors.
 func (c *Collector) collectSecurityInfo(ctx context.Context, attributes map[string]string) {
-	secCollector := NewSecurityCollector()
+	secCollector := c.security
+	if secCollector == nil {
+		secCollector = NewSecurityCollector()
+	}
 
 	// Collect user information
 	if err := secCollector.CollectUsers(ctx, attributes); err != nil {

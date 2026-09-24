@@ -38,6 +38,7 @@ func TestDNACollectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -58,6 +59,7 @@ func TestDriftDetectorInitializedInStandaloneMode(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -97,6 +99,7 @@ func TestDNASnapshotCapturedAfterConvergence(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Before Start, no DNA snapshot exists.
 	prevDNA := steward.GetPreviousDNA(s)
@@ -126,6 +129,7 @@ func TestRunConvergenceCapturesDNASnapshot(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -149,6 +153,7 @@ func TestRunConvergenceDetectsDNADriftOnSecondRun(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	ctx := context.Background()
 
@@ -203,6 +208,7 @@ func TestDetectUnmanagedDNADrift_NilDriftDetector(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
 	// Set a previous snapshot so we reach the driftDetector nil check.
 	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"test": "value"})
@@ -234,8 +240,9 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	steward.SetDNACollector(s, newSnapshotDNACollector(t, logger))
 
-	// Inject a previous DNA with a different ID than the real system DNA will produce.
+	// Inject a previous DNA with a different ID than the DNA collector will produce.
 	prevFrag, err := sdna.NewFragment("host:test", "test", sdna.MapState{"fake": "previous"})
 	require.NoError(t, err)
 	steward.SetPreviousDNA(s, &commonpb.DNA{
@@ -249,12 +256,12 @@ func TestDetectUnmanagedDNADrift_IDMismatchSkipsComparison(t *testing.T) {
 		_, _ = steward.DetectUnmanagedDNADrift(s, ctx)
 	})
 
-	// Snapshot should be updated to the current (real) DNA despite the mismatch.
+	// Snapshot should be updated to the current (freshly collected) DNA despite the mismatch.
 	updatedDNA := steward.GetPreviousDNA(s)
 
 	assert.NotNil(t, updatedDNA)
 	assert.NotEqual(t, "different-id-that-will-not-match-real-system", updatedDNA.Id,
-		"snapshot should be updated to the real system DNA after ID mismatch")
+		"snapshot should be updated to the freshly collected DNA after ID mismatch")
 
 	require.NoError(t, s.Stop(context.Background()))
 }
@@ -285,8 +292,27 @@ func TestDetectUnmanagedDNADrift_ReportsHostFactChange(t *testing.T) {
 	s, err := steward.NewStandalone(cfgPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, s)
+	collector := newSnapshotDNACollector(t, logger)
+	steward.SetDNACollector(s, collector)
 
 	ctx := context.Background()
+
+	// Warm up background collection (software/security attributes, including
+	// the "os"/"os_name"/... keys that make up most of the host:os fragment)
+	// before the baseline capture below. Collect() only merges background data
+	// that has already completed by the time it runs; with the slow platform
+	// collector, background collection never finished within a single test's
+	// Collect() calls, so every call consistently saw fast data only.
+	// The cross-platform collectors complete background collection almost
+	// instantly, so without this warm-up, whether it finishes before the first
+	// or the second DetectUnmanagedDNADrift call becomes a race — sometimes the
+	// baseline is fast-data-only (host:os carries just "hostname") and the
+	// second snapshot is fully merged, making their host:os hashes differ for a
+	// reason unrelated to what this test actually exercises. Warming up first
+	// makes every subsequent Collect() call see the same fully merged set.
+	_, err = collector.Collect(ctx)
+	require.NoError(t, err)
+	collector.WaitForBackground(ctx)
 
 	// First call captures the baseline snapshot (no previous snapshot to compare).
 	events, err := steward.DetectUnmanagedDNADrift(s, ctx)

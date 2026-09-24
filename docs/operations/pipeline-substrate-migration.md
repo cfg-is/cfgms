@@ -42,7 +42,7 @@ Work-items originate on the **private project board** and become public issues o
 
 ## Infrastructure
 
-- **Project board**: configured in `scripts/pipeline.yaml` (project_id, status_field_id, option IDs)
+- **Project board**: configured in `.claude/pipeline.yaml` (project_id, status_field_id, option IDs)
 - **Queue script**: `scripts/project-queue.sh` — all project queue operations
 - **Key operations**: `list-by-status`, `update-field`, `add-issue`, `get-item`, `create-draft`, `delete-item`
 
@@ -88,6 +88,6 @@ reintroduction of label-based queue logic.
 
 ## Rollback
 
-There is no automated rollback path — the labels are deleted and the pipeline operates
+Rollback is a manual procedure: the labels are deleted and the pipeline operates
 entirely on Projects V2 status. If the Projects V2 API becomes unavailable, the PO cycle
 will fail at the `list-by-status` step and pause until restored.

@@ -1,4 +1,4 @@
-.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-providers test-go-group-macos-controller test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -197,6 +197,17 @@ build-stdlib-modules: check-stdlib-payload-boundary
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
+# Targets build-cross-validate actually needs to cross-compile (Issue #4219).
+# linux/amd64 is natively built and tested by every ubuntu-latest job
+# (unit-tests-*, the e2e leg, the queue's Native Build (Linux)); windows/amd64
+# by the four Windows PR legs and the queue's Native Build (Windows);
+# darwin/arm64 by the two macOS PR legs and the queue's Native Build (macOS) —
+# macos-latest runners are arm64. Only linux/arm64 and darwin/amd64 have no
+# native runner anywhere in CI, so cross-compilation is the only validation
+# they get. Kept separate from PLATFORMS: build-cross-platform is the release
+# matrix and must still produce binaries for all five.
+CROSS_VALIDATE_PLATFORMS := linux/arm64 darwin/amd64
+
 # Build all binaries for all platforms (outputs to bin/platform/)
 .PHONY: build-cross-platform
 build-cross-platform:
@@ -226,7 +237,7 @@ build-cross-validate:
 	@echo "🔍 Validating Cross-Platform Compilation"
 	@echo "========================================"
 	@FAILED=0; \
-	for platform in $(PLATFORMS); do \
+	for platform in $(CROSS_VALIDATE_PLATFORMS); do \
 		export GOOS=$${platform%/*}; \
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
@@ -522,24 +533,268 @@ test-go-group-rest:
 		echo "$$pkgs"; \
 		exit 0; \
 	fi; \
-	echo "  Testing framework (remaining packages, excluding modules and long-running tests)..."; \
+	echo "  Testing framework (remaining packages, including ./test/unit/... which"; \
+	echo "  go list ./... already covers - excludes only modules and long-running tests)..."; \
 	go test -race -short -timeout=10m $$pkgs; \
-	echo "  Testing core modules (smoke test)..."; \
-	for module in $(CORE_MODULES); do \
+	echo "  Testing all modules..."; \
+	for module in $(ALL_MODULES); do \
 		echo "  Testing $$module..."; \
-		go test -race -short -timeout=30s ./features/modules/$$module/...; \
+		go test -race -short -timeout=2m ./features/modules/$$module/...; \
 	done; \
-	changed_modules="$(CHANGED_MODULES)"; \
-	if [ -n "$$changed_modules" ]; then \
-		echo "📝 Testing changed modules: $$changed_modules"; \
-		for module in $$changed_modules; do \
-			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
-				echo "  Testing changed module: $$module"; \
-				go test -race -short -timeout=2m ./features/modules/$$module/...; \
-			fi; \
-		done; \
+	echo "  Testing features/modules/adapter, features/modules/conformance..."; \
+	go test -race -short -timeout=2m ./features/modules/adapter/... ./features/modules/conformance/...
+
+# Windows/macOS PR-side native leg targets (Issue #4219).
+#
+# The queue's Native Build (Windows) job (cross-platform-build.yml) runs
+# `go test -short ./pkg/... ./features/...` plus a separate `-v ./cmd/...` on
+# one windows-latest runner, with NO -race (Windows -race is out of scope, and
+# unchanged by this story). Of the last 15 queue `Cross-Platform Build
+# Validation` failures (measured 2026-09-22), all 15 were Native Build
+# (Windows), spread across features/controller/api, pkg/storage/providers/sqlite,
+# cmd/cfgms-steward-launcher, pkg/ha, pkg/lease, features/controller/registration,
+# features/controller/fleet/storage and features/workflow/trigger — no small
+# subset would have caught them, so the PR side needs to run everything the
+# queue job runs, split across four legs to stay under a 7-minute-per-leg
+# budget. Measured serial per-package wall time on windows-latest (queue run
+# 35678629960, job 106590441360): features/... 1111s/109 pkgs (api alone 205s),
+# pkg/... 350s/80 pkgs, cmd/... 147s/6 pkgs.
+#
+# CFGMS_TEST_RACE=0 (consumed by test-framework-api-sharded and the race_flag
+# checks below) drops -race for these targets without duplicating the sharding
+# or package-list logic the Linux legs already use.
+GO_GROUP_WINDOWS_CONTROLLER_EXTRA := ./pkg/cert/... ./pkg/controlplane/... ./pkg/storage/providers/sqlite/...
+GO_GROUP_WINDOWS_STEWARD_CMD := ./features/steward/... ./cmd/...
+
+.PHONY: test-go-group-windows-api
+test-go-group-windows-api:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
 	else \
-		echo "📋 No module changes detected - skipping additional module tests"; \
+		CFGMS_TEST_RACE=0 $(MAKE) test-framework-api-sharded; \
+	fi
+
+.PHONY: test-go-group-windows-controller
+test-go-group-windows-controller:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs="$$(go list ./features/controller/... | grep -v '/features/controller/api$$') $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA)"; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $$pkgs; \
+	else \
+		echo "  Testing windows-controller group (features/controller minus api, pkg/cert, pkg/controlplane, pkg/storage/sqlite)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+# -v is scoped to ./cmd/... only (matching cross-platform-build.yml's queue
+# job, Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
+# per-test output to tell a passing test from one that skipped for lack of
+# Administrator rights — a non-verbose run only prints one "ok <package>" line
+# per package with no per-test result. features/steward stays non-verbose to
+# keep the rest of the log readable.
+.PHONY: test-go-group-windows-steward
+test-go-group-windows-steward:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	else \
+		echo "  Testing windows-steward group (features/steward)..."; \
+		go test $$race_flag -short -timeout=10m ./features/steward/...; \
+		echo "  Testing windows-steward group (cmd, verbose)..."; \
+		go test -v $$race_flag -short -timeout=10m ./cmd/...; \
+	fi
+
+# Everything the queue's Native Build (Windows) job tests (./pkg/... ./features/...
+# ./cmd/...) that isn't already claimed by the api/controller/steward legs above -
+# includes the module packages, matching the queue job's unfiltered ./features/....
+.PHONY: test-go-group-windows-rest
+test-go-group-windows-rest:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs=$$(go list ./pkg/... ./features/... ./cmd/... \
+		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/steward' \
+		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing windows-rest group (remaining pkg/features/cmd packages, including modules)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+# The queue's Native Build (macOS) job runs the same package set as Linux WITH
+# -race (`go test -race -short ./pkg/... ./features/... ./cmd/...`). A first
+# attempt at 2 legs (api sharded internally 3-way, everything else in one
+# job) measured 10m25s and 11m44s on this story's own PR (#4225, run
+# 35811533253) — `macos-latest` hosted runners have only 3 vCPUs, so
+# test-framework-api-sharded's nproc-based internal sharding maxes out at 3
+# processes on the SAME 3 cores, and -race's overhead compounds it. Splitting
+# into more CI jobs (each its own dedicated 3-core runner) buys real
+# parallelism that internal sharding on one runner cannot; splitting the
+# *content* the way the Windows legs do (controller/steward pulled off the
+# "rest" pile) tackles the heaviest single packages (pkg/cert 74s,
+# pkg/controlplane/providers/grpc 67s, features/steward/client 65s,
+# features/controller/initialization 59s — all measured serial on that same
+# run's macos-rest job).
+#
+# CFGMS_MACOS_API_SHARD/CFGMS_MACOS_API_SHARDS split features/controller/api's
+# test list into CI-job-level groups (default 1 shard = no split), each
+# running go test's own internal parallelism rather than
+# test-framework-api-sharded's process-level sharding — an outer split across
+# separate runners each with a full 3-core budget, not an inner split
+# fighting over the same 3 cores.
+#
+# Both variables are validated as decimal integers, and both `awk -v`
+# assignments are quoted, before either reaches awk. This is the same invariant
+# test-framework-api-sharded documents for CFGMS_API_TEST_SHARDS, in the awk
+# dialect instead of the bash-arithmetic one: an unquoted `-v s=$shard` lets a
+# value containing whitespace word-split into a *replacement awk program*, and
+# awk's system() then executes arbitrary commands. It is also a fail-open —
+# awk on macOS (BWK awk, like gawk) is fatal on a zero or non-numeric modulus
+# while Linux mawk passes every line through, so an unvalidated count
+# misbehaves differently on the only platform that runs this target, and an
+# empty partition used to `exit 0` with zero tests run behind the required
+# Build Gate context. Index and count are both range-checked (0 <= shard <
+# shards) and an empty enumeration or an empty shard slice fails closed. See
+# test_api_shard_count_rejects_non_integer in scripts/test-scripts.sh for the
+# regression guard covering both variable pairs.
+.PHONY: test-go-group-macos-api
+test-go-group-macos-api:
+	@shard="$${CFGMS_MACOS_API_SHARD:-0}"; \
+	shards="$${CFGMS_MACOS_API_SHARDS:-1}"; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1;; \
+	esac; \
+	case "$$shard" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_API_SHARD must be a non-negative decimal integer, got '$$shard'"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	shard=$$((10#$$shard)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1; \
+	fi; \
+	if [ "$$shard" -ge "$$shards" ]; then \
+		echo "❌ CFGMS_MACOS_API_SHARD must be less than CFGMS_MACOS_API_SHARDS ($$shards), got '$$shard'"; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
+	else \
+		list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
+		list_rc=$$?; \
+		if [ $$list_rc -ne 0 ]; then \
+			echo "$$list_out"; \
+			echo "❌ failed to enumerate features/controller/api tests"; \
+			exit 1; \
+		fi; \
+		names=$$(echo "$$list_out" | grep -E '^Test'); \
+		total=$$(echo "$$names" | grep -c .); \
+		if [ "$$total" -eq 0 ]; then \
+			echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
+			exit 1; \
+		fi; \
+		pattern=$$(echo "$$names" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s' | paste -sd'|' -); \
+		if [ -z "$$pattern" ]; then \
+			echo "❌ macos-api shard $$shard/$$shards: no tests assigned out of $$total - the shard count exceeds the test count. Refusing to report a pass."; \
+			exit 1; \
+		fi; \
+		echo "  Testing features/controller/api shard $$shard/$$shards (-race)..."; \
+		go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/...; \
+	fi
+
+# pkg/cert, pkg/controlplane, pkg/storage/sqlite — the heaviest non-controller
+# packages measured above.
+.PHONY: test-go-group-macos-providers
+test-go-group-macos-providers:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
+	else \
+		echo "  Testing macos-providers group (pkg/cert, pkg/controlplane, pkg/storage/sqlite, -race)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
+	fi
+
+.PHONY: test-go-group-macos-controller
+test-go-group-macos-controller:
+	@pkgs=$$(go list ./features/controller/... | grep -v '/features/controller/api$$'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-controller group (features/controller minus api, -race)..."; \
+		go test -race -short -timeout=10m $$pkgs; \
+	fi
+
+.PHONY: test-go-group-macos-steward
+test-go-group-macos-steward:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	else \
+		echo "  Testing macos-steward group (features/steward, cmd, -race)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	fi
+
+# Everything not claimed by the api/providers/controller/steward groups above,
+# split into CFGMS_MACOS_REST_SHARDS CI-job-level groups the same way the api
+# group is split (see above for why: more 3-core runners, not more processes
+# fighting over one runner's 3 cores), and validated the same way before either
+# value reaches awk (see test-go-group-macos-api for what an unvalidated,
+# unquoted `awk -v` assignment buys an attacker, and why an empty partition
+# must fail rather than exit 0).
+.PHONY: test-go-group-macos-rest
+test-go-group-macos-rest:
+	@shard="$${CFGMS_MACOS_REST_SHARD:-0}"; \
+	shards="$${CFGMS_MACOS_REST_SHARDS:-1}"; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_REST_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1;; \
+	esac; \
+	case "$$shard" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_REST_SHARD must be a non-negative decimal integer, got '$$shard'"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	shard=$$((10#$$shard)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ CFGMS_MACOS_REST_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1; \
+	fi; \
+	if [ "$$shard" -ge "$$shards" ]; then \
+		echo "❌ CFGMS_MACOS_REST_SHARD must be less than CFGMS_MACOS_REST_SHARDS ($$shards), got '$$shard'"; \
+		exit 1; \
+	fi; \
+	pkgs_all=$$(go list ./pkg/... ./features/... ./cmd/... \
+		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/steward' \
+		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	if [ -z "$$pkgs_all" ]; then \
+		echo "❌ macos-rest: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	pkgs=$$(echo "$$pkgs_all" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-rest shard $$shard/$$shards: no packages assigned - the shard count exceeds the package count. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-rest shard $$shard/$$shards (remaining pkg/features/cmd packages, including modules, -race)..."; \
+		go test -race -short -timeout=10m $$pkgs; \
 	fi
 
 .PHONY: test-scripts
@@ -552,8 +807,9 @@ test-scripts:
 # tests as of 2026-09-18), so there is no sub-package boundary to matrix on and
 # no per-test hotspot to fix — Go only parallelizes within a package via
 # t.Parallel(), which this suite doesn't use. Splitting by test name into N
-# separate `go test -run` invocations and running them as background shell jobs
-# gets real OS-level parallelism across CPU cores without touching test source.
+# `-test.run` invocations of one prebuilt test binary and running them as
+# background shell jobs gets real OS-level parallelism across CPU cores
+# without touching test source.
 #
 # This target is invoked as its own CI matrix leg (unit-tests-api in
 # .github/workflows/test-suite.yml) so the N shards get a dedicated runner's
@@ -580,16 +836,34 @@ test-scripts:
 # value makes `seq 0 $((shards - 1))` emit nothing, so zero shards launch and
 # the target exits 0 with the whole suite silently unrun.
 #
+# The test binary is COMPILED ONCE, before the fan-out, and each shard execs
+# that binary (Issue #4239). Shards used to run `go test -run ...` directly,
+# which made every shard responsible for producing its own build: `go test
+# -list` populates the build cache only for the non-race configuration, so the
+# race-instrumented build of this package was cold when N shards started and
+# all N invoked the compiler on the same 115k-line package at the same moment.
+# One such build peaks around 1.5GB resident here, so eight concurrent ones
+# exhaust a 30GB host and the kernel kills `compile` mid-build - observed as
+# `compile: signal: killed` / `[build failed]` on 5 of 8 shards, while the
+# shards that happened to win the race passed in ~30s. Building once bounds
+# peak memory at one compiler regardless of the shard count, and the shards
+# then do test execution only.
+#
 # Aggregation fails closed: every shard that was launched must produce a
 # readable exit status, and at least one shard must have been launched. A
 # shard subshell killed before it records one (OOM kill under N concurrent
 # -race binaries, any signal, a full or unwritable temp dir) counts as a
 # failure, because a skipped shard is a whole slice of the suite that
 # silently never ran - see test_api_shard_aggregation_fails_closed and
-# test_api_shard_count_rejects_non_integer for the regression guards.
+# test_api_shard_count_rejects_non_integer for the regression guards. The
+# build itself fails closed the same way: a build that reports success but
+# leaves no runnable binary stops the target instead of launching shards that
+# would each exit non-zero for an unrelated reason.
 .PHONY: test-framework-api-sharded
 test-framework-api-sharded:
-	@shards="$${CFGMS_API_TEST_SHARDS:-}"; \
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	shards="$${CFGMS_API_TEST_SHARDS:-}"; \
 	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
 	case "$$shards" in \
 	''|*[!0-9]*) \
@@ -615,7 +889,7 @@ test-framework-api-sharded:
 		echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
 		exit 1; \
 	fi; \
-	echo "  Sharding $$total features/controller/api tests across $$shards parallel go test processes..."; \
+	echo "  Sharding $$total features/controller/api tests across $$shards parallel test processes..."; \
 	if [ -n "$${CFGMS_API_TEST_SHARD_PLAN_ONLY:-}" ]; then \
 		for i in $$(seq 0 $$((shards - 1))); do \
 			n=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | grep -c .); \
@@ -623,18 +897,33 @@ test-framework-api-sharded:
 		done; \
 		exit 0; \
 	fi; \
+	pkg_count=$$(go list ./features/controller/api/... 2>/dev/null | grep -c .); \
+	if [ "$$pkg_count" != "1" ]; then \
+		echo "❌ ./features/controller/api/... resolves to $$pkg_count packages, but this target compiles a single test binary. Build one binary per package before adding sub-packages - do not fall back to per-shard builds."; \
+		exit 1; \
+	fi; \
 	tmpdir=$$(mktemp -d); \
 	if [ -z "$$tmpdir" ] || [ ! -d "$$tmpdir" ]; then \
 		echo "❌ could not create a temp dir for shard output - refusing to report a pass"; \
 		exit 1; \
 	fi; \
+	case "$$tmpdir" in /*) ;; *) tmpdir="$$PWD/$$tmpdir";; esac; \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
+	echo "  Compiling the features/controller/api test binary once (shards exec it; N concurrent compiles of this package exhaust memory)..."; \
+	if ! go test $$race_flag -c -o "$$tmpdir/api.test" ./features/controller/api; then \
+		echo "❌ failed to build the features/controller/api test binary - no shards were run"; \
+		exit 1; \
+	fi; \
+	if [ ! -x "$$tmpdir/api.test" ]; then \
+		echo "❌ the test build reported success but produced no runnable binary at $$tmpdir/api.test - refusing to report a pass"; \
+		exit 1; \
+	fi; \
 	pids=""; \
 	launched=""; \
 	for i in $$(seq 0 $$((shards - 1))); do \
 		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
 		if [ -n "$$pattern" ]; then \
-			( go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/... > "$$tmpdir/shard-$$i.log" 2>&1; \
+			( cd ./features/controller/api && "$$tmpdir/api.test" -test.short -test.timeout=10m -test.paniconexit0 -test.run "^($$pattern)$$" > "$$tmpdir/shard-$$i.log" 2>&1; \
 			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
 			pids="$$pids $$!"; \
 			launched="$$launched $$i"; \
@@ -650,7 +939,7 @@ test-framework-api-sharded:
 		if [ -f "$$tmpdir/shard-$$i.log" ]; then cat "$$tmpdir/shard-$$i.log"; fi; \
 		if code=$$(cat "$$tmpdir/shard-$$i.exit" 2>/dev/null) && [ -n "$$code" ]; then \
 			if [ "$$code" != "0" ]; then \
-				echo "❌ shard $$i: go test exited $$code"; \
+				echo "❌ shard $$i: the features/controller/api test binary exited $$code"; \
 				fail=1; \
 			fi; \
 		else \

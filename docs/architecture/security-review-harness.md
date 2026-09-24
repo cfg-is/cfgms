@@ -655,7 +655,7 @@ names which of the step's `hypotheses` this finding resulted from — a finding 
 `candidate_found` disposition (see [Disposition](#disposition) below) shows its work, so every
 finding traces back to the hypothesis that produced it, exactly like a disposition does.
 
-**KNOWN GAP: two findings from ONE lane at the same key still merge (Issue #4134).** Measured on
+**Two findings from ONE lane at the same key merge (Issue #4134).** Measured on
 sweep `2026-09-16T1843Z-a17e6fcc`: 107 same-lane keys held two or more findings, swallowing 116 of
 the 2,079 occurrences that reach grouping — **5.6%**. A lane reporting two findings is that lane
 asserting they are two things, and merging them overrules the only judgement in the system that
@@ -2908,8 +2908,8 @@ by its highest-ranked occurrence `confidence` descending (`high` > `medium` > `l
 two findings tied on all three ranked fields. Severity/confidence are taken via `max()` over a
 group's `occurrences`, not the first occurrence in insertion order, so a group where only the
 second-listed lane called it `critical` still sorts as critical. This matches
-`.claude/skills/security-review/SKILL.md`'s "sorted by multi-lane agreement first, then
-severity, then confidence" sentence exactly, and `consolidate_test.py`'s
+`.claude/skills/security-review/SKILL.md`'s "sorted by verification verdict first, then
+multi-lane agreement, then severity, then confidence" sentence exactly, and `consolidate_test.py`'s
 `test_skill_md_ranking_sentence_matches_shipped_sort_order` is the **D7 drift-detection test for
 F6**: it reads that sentence from `SKILL.md` live off disk (never a copy-pasted literal) and
 separately asserts a synthetic `consolidate()` fixture's actual order matches it, so a future
@@ -3019,7 +3019,7 @@ never instead of it — and write the result to `<sweep_dir>/plan/coverage.json`
 `security`, `dataaccess`, `business` and `presentational`; the exempt tiers are `vendor`,
 `generated`, `test`, `docs`, `tooling` and `config` (`planner.CODE_TIERS`, the complement of
 `metadata.CLOSED_TIER_SET`'s six non-code tiers). Demanding a review step for `README.md` or
-`.github/workflows/ci.yml` would make G-2 fail on every real sweep and turn a genuine signal into
+`.github/workflows/test-suite.yml` would make G-2 fail on every real sweep and turn a genuine signal into
 noise the harness would learn to ignore — the exempt set exists specifically so G-2 measures code
 that could carry a vulnerability, not every byte in the tree. On `origin/develop`'s tree the
 non-exempt population is 1,383 files against 576 exempt ones.

@@ -11,8 +11,6 @@ System-internal events use these sentinel values so callers are not scattered wi
 | `SystemTenantID` | `"system"` | Tenant ID for controller-internal events |
 | `SystemUserID` | `"system"` | User ID for system-originated events |
 
-> **Note:** These are a known workaround for controller identity. See TODO(#751) for the planned replacement with real tenant/user identity.
-
 ## Constructor
 
 `NewManager` returns `(*Manager, error)` — callers must handle the error:
@@ -383,7 +381,7 @@ backed by durable storage and survive process restarts.
 The four core security log methods in `features/tenant/security.TenantSecurityAuditLogger`
 forward events to `pkg/audit.Manager` for durable storage in addition to the in-memory window.
 Two methods (`LogVulnerabilityStatusChange`, `LogRemediationAction`) remain in-memory only
-and are not forwarded (deferred to a follow-up story).
+and are not forwarded.
 
 | Method | `Action` | `ResourceType` | `ResourceID` | `Result` |
 |---|---|---|---|---|
@@ -410,7 +408,7 @@ the in-memory append — the in-memory window remains observable even when durab
 ### In-Memory Cap
 
 The in-memory entry window is capped at 1000 entries with FIFO eviction. All six `Log*` methods
-share the `addEntry` path and count toward the cap, including the two deferred methods.
+share the `addEntry` path and count toward the cap, including the two in-memory-only methods.
 The cap applies only to the in-memory window; the durable store retains all forwarded entries.
 
 ### Querying Tenant Security Audit Events

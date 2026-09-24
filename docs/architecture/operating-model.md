@@ -37,7 +37,7 @@ A cfg is a YAML file (`hostname.cfg`) that declares the desired state of a devic
 
 - **Resource configurations**: each block references a module and describes the desired state for that resource (e.g., a `file` module block declares a file's path, content, and permissions)
 - **Schedule**: how often to re-check compliance
-- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) [GAP: apply/monitor mode toggle not yet implemented in steward cfg or execution engine — see issue #1524]
+- **Mode**: whether to enforce desired state (`apply`) or only monitor and report drift (`monitor`) — the `drift_mode` cfg field (`stewardtypes.DriftMode`, consumed by the steward execution engine)
 
 The cfg is the single source of truth for a steward. Whether it came from a local file or was pushed by a controller, the steward treats it the same way.
 
@@ -55,7 +55,7 @@ If a feature can use an existing primitive, that's the path. Building a parallel
 
 ## Save = Deploy
 
-Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. [GAP: storage-watch auto-trigger not yet wired; config saves currently require an explicit `POST /api/v1/config/push` call — see issue #1525]
+Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOps webhook, workflow output) triggers automatic distribution to matched stewards. There is no separate "push" action — save IS deploy. The trigger is the fanout callback invoked from `ConfigurationServiceV2.SetConfiguration` after the ConfigStore write; `POST /api/v1/config/push` remains available for an explicit re-push.
 
 ```
  ┌───────────────┐   write   ┌─────────────┐  storage-watch  ┌──────────┐
@@ -71,7 +71,7 @@ Any source that writes a cfg to the controller's ConfigStore (CLI, web UI, GitOp
 ```
 
 - **Single write path.** All sources write to ConfigStore via the same path.
-- **Debounce.** Storage-watch waits ~500ms (configurable) before triggering fanout. Absorbs burst edits invisibly. [GAP: debounce not yet implemented — see issue #1525]
+- **Write triggers fanout.** A successful ConfigStore write inside `ConfigurationServiceV2.SetConfiguration` invokes the registered fanout callback (`RegisterFanoutCallback`) synchronously. Burst edits each trigger fanout, and idempotency (below) absorbs the repeats.
 - **Durable queue.** Fanout uses the controller's durable job queue — the same primitive used for retries, deferred operations, and HA failover replay.
 - **Idempotency carries load.** A steward already at the target DNA hash treats a sync command as a no-op.
 - **Resource-bounded fanout.** Fanout is bounded by controller capacity (CPU, outbound bandwidth) to prevent thundering-herd saturation.
@@ -83,10 +83,9 @@ Stewards' own heartbeat-driven loops also notice config divergence via DNA hash 
 Safety against bad configs comes from operator-controllable primitives:
 
 - **Targeting precision** — a cfg explicitly lists which stewards / groups / tenant paths / DNA-attributes it applies to. A bad change is bounded by what it was authored to target.
-- **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists. v1 is convention; auto-progressive ring machinery is a future enhancement.
+- **Deployment rings (convention)** — steward tags (`ring=canary`, `ring=prod-early`, `ring=prod-broad`) let operators author phased rollouts as separate configs or staged target lists.
 - **Deployment visibility** — `cfg config deployments <id>` shows applied / pending / failed / halted counts and per-steward status.
-- **E-stop (planned)** — `cfg config halt <id>` cancels remaining queued sends for a config.
-- **Rollback (planned CLI; underlying infrastructure exists)** — restore a previous cfg version via `features/controller/api/rollback_handler.go`.
+- **Rollback** — `cfg config rollback <steward-id>` restores a previous cfg version via `features/controller/api/rollback_handler.go`.
 
 ## Component Roles
 
@@ -96,12 +95,12 @@ The steward is a daemon that maintains a device in the state described by its cf
 
 **Core behaviors:**
 
-1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes [GAP: monitor mode not yet implemented — see issue #1524]
+1. **Apply** — On startup and when the cfg changes, evaluate each resource's current state against desired state. In `apply` mode, converge the device (Get → Compare → Set → Verify). In `monitor` mode, detect and report drift without making changes
 2. **Maintain** — Re-check compliance on the schedule defined in the cfg. In `apply` mode, correct any drift. In `monitor` mode, report drift. Respond to module-defined event hooks (e.g., file change triggers re-check of that resource)
 3. **Know itself** — Collect DNA (hardware, software, network, security attributes). Monitor its own health and performance
 4. **Report** — Always log locally. When connected to a controller, also report events, status, and DNA upstream. When disconnected, queue reports locally and resync on reconnect
 
-**Apply mode vs Monitor mode (configurable per steward):** [GAP: apply/monitor mode toggle not yet implemented — see issue #1524]
+**Apply mode vs Monitor mode (configurable per steward via `drift_mode`):**
 
 - **`apply` mode** (default for managed devices): the steward actively converges the device to match its cfg. When drift is detected, the steward attempts local convergence and reports the outcome as a single combined message containing `{drift_detected, drift_setting, convergence_result, final_state}` — one message per drift event.
 - **`monitor` mode**: the steward detects drift but does not act. Emits a non-compliance event upstream; operator action (or a separate `apply` workflow) decides whether to correct.
@@ -126,7 +125,7 @@ When connected to a controller, the steward also supports:
 
 **Operator signature is mandatory for inline ad-hoc commands (Issue #3694).** Every inline command (`cfg steward run-command`, `cfg steward exec`) is signed by the operator before submission, and both the controller and the receiving steward verify that signature — neither side accepts an unsigned inline command, regardless of `require_signed_adhoc` configuration. The signature covers a canonical envelope (`pkg/operatorpayload`), not the command content alone: content, shell, the resolved list of authorized target steward IDs, a single-use nonce, and a bounded expiry are all bound into the signed bytes. This closes two gaps the content-only signature left open — a legitimately-signed command re-addressed to a different target set in transit, and replay of a captured signature — without requiring the steward to parse fleet selectors: it only checks whether its own ID is a member of the signed target list. The steward enforces expiry and nonce-replay independently of the outer `SignedCommand`'s own replay window, so a captured operator-signed envelope re-wrapped in a fresh outer command is still rejected.
 
-This is an interim state: the client still signs with the operator's controller-issued admin-bundle credential (the same mTLS key used for API auth), so the controller could in principle still request a command signed under an operator's identity if it held that key — the controller does not hold it today, but the credential's issuance path means the epic's zero-custody constraint (the controller never able to produce an operator signature) is not yet closed. A later story cuts the signing credential over to a controller-never-custodied WebAuthn assertion; `OperatorCredentialVerifier` in `features/steward/commands/execute_script.go` is the seam that swap lands on.
+The client signs with the operator's controller-issued admin-bundle credential, the same mTLS key used for API auth. The controller does not hold that key. `OperatorCredentialVerifier` in `features/steward/commands/execute_script.go` is the verification seam.
 
 These capabilities require an active controller connection and are not available in standalone mode. They do not replace or bypass the cfg — they are operational tools for administrators.
 
@@ -263,17 +262,6 @@ risk instead, and both are enforced, not advisory:
   attempt is itself audited as a bound violation, not silently dropped — an operator
   attempting to exceed the bound is a signal worth keeping in the trail, not a benign
   no-op.
-
-### Outpost (Future)
-
-Regional infrastructure component deployed at site level. Two roles:
-
-1. **Proxy cache** — Caches binaries, packages, and cfg artifacts used by multiple stewards at the site, reducing WAN bandwidth and speeding up deployments
-2. **Network operations** — Manages agentless endpoints that can't run a steward (switches, firewalls, APs, printers) via SSH, SNMP, and vendor APIs. Also performs network scans and topology discovery
-
-The outpost runs **outpost-kind modules** (`executors: [outpost]`) to manage remote LAN devices. Outpost modules run on the outpost host and use the outpost as a proxy agent for devices that cannot run a steward. The outpost module runtime is the same gRPC-based runtime as the steward, scoped to the outpost process.
-
-Reports to controller. Not yet implemented.
 
 ## Failure Modes
 
@@ -461,9 +449,8 @@ Single-server and blue/green deployments skip the cluster gate entirely. They us
 
 Operators interact with CFGMS through layered UX surfaces.
 
-**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows. `cfg steward logs` is available but returns 501 until a log-pull transport is wired.
-
-**Web UI (planned before v1).** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows may remain CLI-only.
+**`cfg` CLI — first-class community UI.** The canonical interaction surface for the open-source distribution. Every documented operator action works through the CLI. The CLI wraps REST endpoints so operators don't need to script against REST for documented workflows.
+**Web UI.** A separate UX layer for operators who prefer graphical workflows or shared-team views. Some power-user flows remain CLI-only.
 
 **REST API — underlying contract.** The wire format the CLI and web UI both use. Stable, versioned, and documented at `docs/api/rest-api.md`. Available to operators and integrators for scripting and third-party tools.
 

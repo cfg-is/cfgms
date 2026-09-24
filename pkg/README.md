@@ -13,10 +13,10 @@ This directory contains **Central Providers** - shared packages that provide cro
 
 ### Why Pluggable by Default?
 
-- **Real-world examples**: Even "single implementation" providers often need alternatives:
-  - `cert`: Internal CA, Let's Encrypt, HashiCorp Vault, external PKI
-  - `cache`: Memory, Redis, Memcached, Hazelcast
-  - `telemetry`: OpenTelemetry, Datadog, New Relic, Prometheus
+- **Backend categories**: Even "single implementation" providers often need alternatives:
+  - `cert`: internal CA, ACME-issued certificates, an external secrets-manager PKI, an external enterprise PKI
+  - `cache`: in-memory, a shared network cache, a distributed in-memory data grid
+  - `telemetry`: OpenTelemetry export, a hosted APM backend, a metrics scrape endpoint
 - **CFGMS characteristics favor pluggable**:
   - Multi-tenant SaaS (different backends per tenant)
   - Commercial/Open Source split (easy feature gating)
@@ -38,7 +38,7 @@ pkg/{name}/             → Direct provider (single implementation)
 
 **Pluggable Providers** (have `interfaces/` subdirectory):
 - Support multiple backends (git, database, timescale, etc.)
-- Use auto-registration pattern (Salt-style)
+- Use the auto-registration pattern (each provider registers itself with the interface registry in its `init()`; business logic selects a backend by name)
 - Business logic imports `pkg/{name}/interfaces` ONLY
 - Examples: `storage`, `logging`, `secrets`, `directory`, `controlplane`, `dataplane`
 
@@ -83,9 +83,9 @@ Ask these questions in order:
 - **Performance Critical**: Demonstrated abstraction overhead is unacceptable (rare)
 
 **Current direct providers to consider migrating**:
-- `cert` → Could support: Internal CA, Let's Encrypt, Vault, external PKI
-- `cache` → Could support: Memory, Redis, Memcached
-- `telemetry` → Could support: OpenTelemetry, Datadog, New Relic
+- `cert` → Could support: internal CA, ACME issuance, external secrets-manager PKI, external enterprise PKI
+- `cache` → Could support: in-memory, shared network cache, distributed data grid
+- `telemetry` → Could support: OpenTelemetry export, hosted APM backend, metrics scrape endpoint
 
 Migration not required immediately, but when adding second implementation or during major refactoring.
 

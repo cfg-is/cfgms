@@ -13,6 +13,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/testing/dnasnapshot"
 )
 
 func TestNewCollector(t *testing.T) {
@@ -25,7 +26,7 @@ func TestNewCollector(t *testing.T) {
 
 func TestCollect(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	collector := NewCollector(logger)
+	collector := newSnapshotCollector(t, logger)
 
 	dna, err := collector.Collect(t.Context())
 	require.NoError(t, err)
@@ -60,7 +61,7 @@ func TestCollect(t *testing.T) {
 // TestCollectAcceptsContext verifies that Collect honours a cancelled context.
 func TestCollectAcceptsContext(t *testing.T) {
 	logger := logging.NewLogger("error")
-	collector := NewCollector(logger)
+	collector := newSnapshotCollector(t, logger)
 
 	// A background context should work fine.
 	ctx := context.Background()
@@ -112,12 +113,20 @@ func TestCollectHardwareInfo(t *testing.T) {
 // and reused (not re-queried) on subsequent calls to collectHardwareInfo.
 func TestHardwareCacheReuse(t *testing.T) {
 	logger := logging.NewLogger("error")
-	collector := NewCollector(logger)
+	snap, err := dnasnapshot.Load(dnaSnapshotFixturePath)
+	require.NoError(t, err, "load DNA snapshot fixture")
+
+	// dnasnapshot.HardwareCollector counts its CollectX calls, which is the
+	// observable signal for whether collectHardwareInfo's second call re-probed
+	// the sub-collector or was served entirely from the cache.
+	hw := dnasnapshot.NewHardwareCollector(snap.Hardware)
+	collector := NewCollector(logger, WithHardwareCollector(hw))
 	ctx := t.Context()
 
-	// First call populates the cache
+	// First call populates the cache — four CollectX methods run inside hwCacheOnce.Do.
 	attrs1 := make(map[string]string)
 	collector.collectHardwareInfo(ctx, attrs1)
+	require.EqualValues(t, 4, hw.Calls(), "first call must probe all four hardware sub-collections")
 
 	// Second call should return from cache
 	attrs2 := make(map[string]string)
@@ -128,6 +137,10 @@ func TestHardwareCacheReuse(t *testing.T) {
 	// Cache hit should be very fast (under 100ms)
 	assert.Less(t, cacheHitDuration, 100*time.Millisecond,
 		"Second hardware collection should be near-instant (cache hit)")
+
+	// The second call must be served entirely from the cache, not re-queried.
+	assert.EqualValues(t, 4, hw.Calls(),
+		"hardware collector must be queried exactly once; second collectHardwareInfo call must hit the cache")
 
 	// Both calls should return the same stable values
 	assert.Equal(t, attrs1["cpu_count"], attrs2["cpu_count"],
@@ -159,7 +172,7 @@ func TestCollectSoftwareInfo(t *testing.T) {
 
 func TestCollectNetworkInfo(t *testing.T) {
 	logger := logging.NewLogger("debug")
-	collector := NewCollector(logger)
+	collector := newSnapshotCollector(t, logger)
 
 	attributes := make(map[string]string)
 	collector.collectNetworkInfo(t.Context(), attributes)
@@ -226,7 +239,7 @@ func TestGenerateSystemID(t *testing.T) {
 // channel is eventually closed.
 func TestBackgroundCollectionStartsOnFirstCollect(t *testing.T) {
 	logger := logging.NewLogger("error")
-	collector := NewCollector(logger)
+	collector := newSnapshotCollector(t, logger)
 
 	// First Collect should return fast data immediately
 	start := time.Now()
@@ -308,7 +321,7 @@ func TestSourceSelection_OsqueryActive(t *testing.T) {
 	logger := logging.NewNoopLogger()
 	src := defaultDNAOsquerySource()
 
-	collector := NewCollector(logger, WithOsquerySource(src))
+	collector := newSnapshotCollector(t, logger, WithOsquerySource(src))
 	d, err := collector.Collect(t.Context())
 	require.NoError(t, err)
 	require.NotEmpty(t, d.Fragments, "fragments must be emitted when osquery is active")
@@ -339,7 +352,7 @@ func TestSourceSelection_OsqueryActive(t *testing.T) {
 // Authority:"gatherer".
 func TestSourceSelection_OsqueryNil(t *testing.T) {
 	logger := logging.NewNoopLogger()
-	collector := NewCollector(logger) // no WithOsquerySource — uses gatherer
+	collector := newSnapshotCollector(t, logger) // no WithOsquerySource — uses gatherer
 
 	d, err := collector.Collect(t.Context())
 	require.NoError(t, err)
@@ -365,7 +378,7 @@ func TestSourceSelection_OsqueryUnhealthy(t *testing.T) {
 	src := defaultDNAOsquerySource()
 	src.healthy = false // simulate binary verification failure
 
-	collector := NewCollector(logger, WithOsquerySource(src))
+	collector := newSnapshotCollector(t, logger, WithOsquerySource(src))
 	d, err := collector.Collect(t.Context())
 	require.NoError(t, err)
 	// Gatherer fallback must emit at least one fragment (cpu_count/cpu_arch runtime fallbacks).
@@ -390,7 +403,7 @@ func TestSourceLabelPairingInvariant(t *testing.T) {
 
 	t.Run("osquery_active_labels_osquery", func(t *testing.T) {
 		src := defaultDNAOsquerySource()
-		collector := NewCollector(logger, WithOsquerySource(src))
+		collector := newSnapshotCollector(t, logger, WithOsquerySource(src))
 		d, err := collector.Collect(t.Context())
 		require.NoError(t, err)
 		require.NotEmpty(t, d.Fragments,
@@ -410,7 +423,7 @@ func TestSourceLabelPairingInvariant(t *testing.T) {
 		// Unhealthy osquery → gatherer path runs.
 		src := defaultDNAOsquerySource()
 		src.healthy = false
-		collector := NewCollector(logger, WithOsquerySource(src))
+		collector := newSnapshotCollector(t, logger, WithOsquerySource(src))
 		d, err := collector.Collect(t.Context())
 		require.NoError(t, err)
 		require.NotEmpty(t, d.Fragments,
@@ -437,12 +450,12 @@ func TestRawAttributesUnchangedByOsquerySource(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
 	// Without osquery
-	collectorNoOsquery := NewCollector(logger)
+	collectorNoOsquery := newSnapshotCollector(t, logger)
 	attrsNoOsquery := collectorNoOsquery.RawAttributes(t.Context())
 
 	// With osquery
 	src := defaultDNAOsquerySource()
-	collectorWithOsquery := NewCollector(logger, WithOsquerySource(src))
+	collectorWithOsquery := newSnapshotCollector(t, logger, WithOsquerySource(src))
 	attrsWithOsquery := collectorWithOsquery.RawAttributes(t.Context())
 
 	// Both should have the same essential gatherer-sourced attributes.

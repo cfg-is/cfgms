@@ -12,9 +12,7 @@ observe convergence and drift correction — end to end on fresh Linux VMs.
 - Drift observable via controller logs and metrics
 
 > **This walkthrough is the spec** that the docker fleet test (Epic #1501) validates
-> on every PR. Commands marked `[GAP: ...]` represent planned functionality that is
-> not yet implemented; REST API fallbacks are provided to demonstrate the underlying
-> capability today.
+> on every PR. Steps are shown as `cfg` commands or REST API calls.
 
 ## How this differs from the single-controller walkthrough
 
@@ -121,24 +119,22 @@ This bundle is the one-time bootstrap exception: a fresh controller has no
 account yet for anyone to log in against, so `--init` generates this
 certificate's keypair itself and hands you both halves — the one CFGMS
 credential whose private key the controller ever holds. It cannot approve a
-credential enrolment or renew itself, and is *intended* also to be unable to
+credential enrolment or renew itself, and is unable to
 authorise code execution on a managed endpoint
-(see [ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md));
-read the second gap note below before relying on that last part. The ordinary
+(see [ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md)). The ordinary
 way to obtain every credential after this first one is `cfg login`, a browser
 passkey assertion, not another bundle.
 
-> **[GAP: `cfg login` is not yet shipped — see Epic #3711, Story #3721. Until it
-> lands, the bundle path below is how every operator on the fleet obtains a
-> credential.]**
+> `cfg login` (`cmd/cfg/cmd/login.go`) lodges a login request with the controller,
+> opens the approval URL in a browser, and stores the minted session token in the
+> OS keychain. The bundle path below is the one-time bootstrap for the first
+> operator only.
 
-> **[GAP: the bundle's confinement against endpoint code execution is not yet
-> enforced — see Epic #3711, Story #3696. Signer verification on both the steward
-> (`features/steward/commands/execute_script.go`) and the controller
-> (`features/controller/api/handlers_runs.go`) accepts any admin-marked
-> certificate and does not require the payload-signing marker, so a bundle
-> **can** today authorise code execution across the fleet. Protect and transfer
-> every bundle file accordingly.]**
+> Signer verification on both the steward (`features/steward/commands/execute_script.go`)
+> and the controller (`features/controller/api/handlers_runs.go`) requires the
+> payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
+> certificate alone cannot authorise code execution on an endpoint (Issue #3696).
+> Protect and transfer every bundle file accordingly.
 
 Copy the bundle from the controller to your workstation:
 
@@ -335,7 +331,7 @@ The script:
 ### 4d — Install on Windows (MSI via RMM — `msiexec /qn`)
 
 Download the Windows MSI install package from the controller and deploy it silently via
-your RMM (NinjaOne, Datto, ConnectWise, etc.):
+your RMM tool:
 
 ```bash
 # Download the Windows package (contains the MSI + CA cert)
@@ -360,7 +356,7 @@ msiexec /qn /i C:\cfgms-install\cfgms-steward-amd64.msi `
 curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/darwin/amd64
 ```
 
-Distribute the `.pkg` through your MDM (Jamf, Kandji, Mosyle, etc.) or install manually:
+Distribute the `.pkg` through your MDM tool or install manually:
 
 ```bash
 sudo installer -pkg cfgms-steward-darwin-amd64.pkg -target /
@@ -573,10 +569,10 @@ Expected response (`202 Accepted`):
 }
 ```
 
-> **[GAP: save=deploy auto-distribution not yet wired to ConfigStore — see issue #1525]**
-> In the target architecture, saving a config to the controller automatically triggers
-> distribution to matched stewards. Today, an explicit `POST /api/v1/config/push` is
-> required after each config upload.
+> Saving a config to the controller triggers distribution automatically: a successful
+> ConfigStore write in `ConfigurationServiceV2.SetConfiguration` invokes the fanout
+> callback registered by the API server (Issue #1521). `POST /api/v1/config/push` remains
+> available for an explicit re-push.
 
 ---
 
@@ -615,9 +611,9 @@ cat /etc/myapp/config.yaml
 
 ### Controller-side confirmation
 
-> **[GAP: `cfg config deployments <id>` not yet implemented — see issue #1526]**
-> This command will show applied/pending/failed counts and per-steward status.
-> Until #1526 lands, observe convergence via steward logs (above) and the REST API.
+> `cfg config deployments <config-id>` shows applied / pending / failed / halted
+> aggregate counts and per-steward deployment status; `--json` emits the raw response.
+> The config-id is the `config_id` used in the push payload (`cfg config list` enumerates them).
 
 Poll steward status to confirm `last_seen` advances with each heartbeat:
 
@@ -672,18 +668,14 @@ cat /etc/myapp/config.yaml
 # Should show the desired state from the fleet config, not the manual edit
 ```
 
-> **[GAP: apply/monitor mode toggle not yet implemented — see issue #1524]**
-> The desired-state design includes a `drift_mode` field that switches a steward between
-> `apply` (converge changes) and `monitor` (report drift without correcting it). Today
-> the steward always applies changes when drift is detected regardless of any mode
-> setting. The current `steward.mode` field in the cfg controls connectivity mode
-> (`standalone` vs `controller`), not drift behavior.
+> The `drift_mode` cfg field (`stewardtypes.DriftMode`) switches a steward between
+> `apply` (converge changes) and `monitor` (report drift without correcting it). It is
+> set from controller-delivered cfg, never from the local `steward.cfg`. The separate
+> `steward.mode` field controls connectivity mode (`standalone` vs `controller`), not
+> drift behavior.
 >
-> **[GAP: modules.Monitor() not implemented by any steward module — see issue #1590]**
-> The `Monitor` interface in `features/modules/module.go` defines real-time
-> change-detection for modules that support it. As of the #1511 audit, no steward module
-> implements this interface. All modules use the polling-based convergence loop
-> (`Get → Compare → Set`). Real-time drift notification via `Monitor()` is aspirational.
+> All steward modules detect drift through the polling-based convergence loop
+> (`Get → Compare → Set`).
 
 ---
 
@@ -718,7 +710,9 @@ On the endpoint being decommissioned:
 sudo cfgms-steward uninstall --purge
 ```
 
-The steward's registration record remains in the controller. There is no `DELETE /api/v1/stewards/{id}` endpoint today — steward record deletion is not yet implemented.
+The steward's registration record remains in the controller until it is decommissioned
+with `cfg steward decommission <selector>`, which calls `DELETE /api/v1/stewards/{id}`
+(`handleDecommissionSteward`, gated at strong assurance by the `steward:decommission` policy).
 
 ### Certificate renewal
 
@@ -812,22 +806,6 @@ cfg token list --tenant-id=default
 
 ---
 
-## Known Gaps
-
-The table below collects all `[GAP: ...]` markers from this walkthrough for easy reference:
-
-| Gap | Issue | Phase affected |
-|-----|-------|----------------|
-| `cfg config deployments <id>` not implemented | [#1526](https://github.com/cfg-is/cfgms/issues/1526) | Phase 7 |
-| save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
-| apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
-| `modules.Monitor()` not implemented by any module | [#1590](https://github.com/cfg-is/cfgms/issues/1590) | Phase 8 |
-| Multi-controller / failover not supported | (backlog) | Phase 4 |
-| `cfg login` (browser passkey, the ordinary credential path) not implemented | Epic #3711, Story #3721 | Phase 2 |
-| Bundle confinement against endpoint code execution not enforced (signer verification requires only the admin marker) | Epic #3711, Story #3696 | Phase 2 |
-
----
-
 ## Next Steps
 
 - **Register a browser passkey**: `cfg webauthn register` cannot complete a browser
@@ -843,4 +821,4 @@ The table below collects all `[GAP: ...]` markers from this walkthrough for easy
 - **Docker fleet test**: Epic #1501 will validate this walkthrough against a docker-based
   fleet on every PR.
 - **Controller cluster**: When you need high availability, see
-  [Controller Cluster](../controller-cluster/walkthrough.md) *(planned)*.
+  [Controller Cluster](../controller-cluster/walkthrough.md).

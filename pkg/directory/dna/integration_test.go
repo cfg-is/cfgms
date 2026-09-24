@@ -5,6 +5,7 @@ package dna
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -309,131 +310,179 @@ func TestEndToEndDriftScenario(t *testing.T) {
 	})
 }
 
-func TestScalabilityScenario(t *testing.T) {
-	// Test system behavior with larger datasets
+// durationPercentile returns the p-th percentile (0..1) of durations. Used only
+// for AC1-style reporting (t.Logf) alongside the robust block-average
+// assertion below — see the comment on runLargeOrganizationSimulation for why
+// the assertion itself stays block-average-based rather than switching to a
+// percentile of individual write times.
+func durationPercentile(durations []time.Duration, p float64) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	sorted := make([]time.Duration, len(durations))
+	copy(sorted, durations)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	idx := int(p * float64(len(sorted)-1))
+	return sorted[idx]
+}
+
+// runLargeOrganizationSimulation exercises the scalability scenario at a given
+// multiple of the baseline organization size (scale=1 is the original
+// 1000 users / 100 groups / 50 OUs; scale=2 doubles every count). Running it
+// at two sizes lets the per-write timings reported via t.Logf show whether
+// the per-write cost bound is a property of the write path (stays flat as
+// scale changes) or an artifact of one specific dataset size.
+func runLargeOrganizationSimulation(t *testing.T, scale int) {
+	t.Helper()
+
 	provider := NewMockDirectoryProvider()
 	logger := logging.NewNoopLogger()
 	collector := NewDirectoryDNACollector(provider, logger)
-
 	storage := newDirectoryStorageAdapter(t)
-
 	ctx := context.Background()
 
-	t.Run("large organization simulation", func(t *testing.T) {
-		// Create a simulated large organization
-		const numUsers = 1000
-		const numGroups = 100
-		const numOUs = 50
+	// Create a simulated large organization
+	numUsers := 1000 * scale
+	numGroups := 100 * scale
+	numOUs := 50 * scale
 
-		// Add users
-		for i := 0; i < numUsers; i++ {
-			userID := fmt.Sprintf("user%04d", i)
-			user := createTestUser(userID, "User"+userID)
-			user.OU = fmt.Sprintf("ou%02d", i%numOUs)
-			provider.AddUser(user)
-		}
+	// Add users
+	for i := 0; i < numUsers; i++ {
+		userID := fmt.Sprintf("user%04d", i)
+		user := createTestUser(userID, "User"+userID)
+		user.OU = fmt.Sprintf("ou%02d", i%numOUs)
+		provider.AddUser(user)
+	}
 
-		// Add groups
-		for i := 0; i < numGroups; i++ {
-			groupID := fmt.Sprintf("group%03d", i)
-			group := createTestGroup(groupID, "Group"+groupID)
-			group.OU = fmt.Sprintf("ou%02d", i%numOUs)
-			provider.AddGroup(group)
-		}
+	// Add groups
+	for i := 0; i < numGroups; i++ {
+		groupID := fmt.Sprintf("group%03d", i)
+		group := createTestGroup(groupID, "Group"+groupID)
+		group.OU = fmt.Sprintf("ou%02d", i%numOUs)
+		provider.AddGroup(group)
+	}
 
-		// Add OUs
-		for i := 0; i < numOUs; i++ {
-			ouID := fmt.Sprintf("ou%02d", i)
-			ou := createTestOU(ouID, "OU"+ouID, "")
-			provider.AddOU(ou)
-		}
+	// Add OUs
+	for i := 0; i < numOUs; i++ {
+		ouID := fmt.Sprintf("ou%02d", i)
+		ou := createTestOU(ouID, "OU"+ouID, "")
+		provider.AddOU(ou)
+	}
 
-		// Test bulk collection performance
+	// Test bulk collection performance
+	start := time.Now()
+	allDNA, err := collector.CollectAll(ctx)
+	collectionDuration := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Len(t, allDNA, numUsers+numGroups+numOUs)
+
+	// Should complete within reasonable time
+	assert.Less(t, collectionDuration, 30*time.Second, "Collection took too long for large dataset")
+
+	// Test storage scaling.
+	//
+	// The property under test is that the cost of a single write does not grow
+	// as the dataset grows: a per-write cost that climbs with table size (an
+	// unindexed version lookup, a full-table dedup scan) is the scalability
+	// regression this test exists to catch. That is asserted by comparing an
+	// early cohort of writes against a late cohort of the same run.
+	//
+	// A total wall-clock ceiling cannot express it. This package runs inside
+	// `go test -race ./...`, where up to NumCPU package binaries compete for the
+	// machine: these same writes measured 6.16s for the subtest on an idle
+	// 16-core machine and 1m13s during a full-suite run, so an absolute ceiling
+	// records how much spare CPU the run had, not how the storage path behaved.
+	// Contention inflates both cohorts, so the comparison between them survives
+	// it while still failing on real per-write growth.
+	//
+	// Each cohort's assertion is based on a single block spanning its writes,
+	// not per write. A per-write measurement collapses on a coarse wall clock:
+	// CI's Windows runners have been observed with ~15.6ms timer granularity,
+	// so an individual fast write reads exactly 0s, which starved a per-write
+	// minimum (the earlier p1-based version of this comparison) down to zero
+	// and tripped the "no measurable cost" guard below. A block spanning
+	// hundreds of writes accumulates real elapsed time well past one tick
+	// regardless of any single write's resolution, so the average per-write
+	// cost derived from it stays meaningful on any clock. Individual write
+	// durations are still collected per cohort — despite that same clock-tick
+	// collapse making many of them read as 0 on a coarse-clock runner — purely
+	// to report median/p95 for human inspection (Issue #4239 AC1); the pass/
+	// fail assertion never depends on them.
+	half := len(allDNA) / 2
+	firstHalf := allDNA[:half]
+	secondHalf := allDNA[half:]
+
+	storeCohort := func(items []*DirectoryDNA) (successCount int, blockDuration time.Duration, perWrite []time.Duration) {
+		perWrite = make([]time.Duration, 0, len(items))
 		start := time.Now()
-		allDNA, err := collector.CollectAll(ctx)
-		collectionDuration := time.Since(start)
-
-		require.NoError(t, err)
-		assert.Len(t, allDNA, numUsers+numGroups+numOUs)
-
-		// Should complete within reasonable time
-		assert.Less(t, collectionDuration, 30*time.Second, "Collection took too long for large dataset")
-
-		// Test storage scaling.
-		//
-		// The property under test is that the cost of a single write does not grow
-		// as the dataset grows: a per-write cost that climbs with table size (an
-		// unindexed version lookup, a full-table dedup scan) is the scalability
-		// regression this test exists to catch. That is asserted by comparing an
-		// early cohort of writes against a late cohort of the same run.
-		//
-		// A total wall-clock ceiling cannot express it. This package runs inside
-		// `go test -race ./...`, where up to NumCPU package binaries compete for the
-		// machine: these same writes measured 6.16s for the subtest on an idle
-		// 16-core machine and 1m13s during a full-suite run, so an absolute ceiling
-		// records how much spare CPU the run had, not how the storage path behaved.
-		// Contention inflates both cohorts, so the comparison between them survives
-		// it while still failing on real per-write growth.
-		//
-		// Each cohort is timed as a single block spanning its writes, not per write.
-		// A per-write measurement collapses on a coarse wall clock: CI's Windows
-		// runners have been observed with ~15.6ms timer granularity, so an individual
-		// fast write reads exactly 0s, which starved a per-write minimum (the earlier
-		// p1-based version of this comparison) down to zero and tripped the "no
-		// measurable cost" guard below. A block spanning hundreds of writes
-		// accumulates real elapsed time well past one tick regardless of any single
-		// write's resolution, so the average per-write cost derived from it stays
-		// meaningful on any clock.
-		half := len(allDNA) / 2
-		firstHalf := allDNA[:half]
-		secondHalf := allDNA[half:]
-
-		storeCohort := func(items []*DirectoryDNA) (successCount int, blockDuration time.Duration) {
-			start := time.Now()
-			for _, dna := range items {
-				if err := storage.StoreDirectoryDNA(ctx, dna); err == nil {
-					successCount++
-				}
+		for _, dna := range items {
+			writeStart := time.Now()
+			err := storage.StoreDirectoryDNA(ctx, dna)
+			writeDuration := time.Since(writeStart)
+			if err == nil {
+				successCount++
+				perWrite = append(perWrite, writeDuration)
 			}
-			return successCount, time.Since(start)
 		}
+		return successCount, time.Since(start), perWrite
+	}
 
-		firstCount, firstDuration := storeCohort(firstHalf)
-		secondCount, secondDuration := storeCohort(secondHalf)
-		storedCount := firstCount + secondCount
+	firstCount, firstDuration, firstPerWrite := storeCohort(firstHalf)
+	secondCount, secondDuration, secondPerWrite := storeCohort(secondHalf)
+	storedCount := firstCount + secondCount
 
-		assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
-		require.GreaterOrEqual(t, firstCount, 100,
-			"need enough successful writes in the early cohort to average")
-		require.GreaterOrEqual(t, secondCount, 100,
-			"need enough successful writes in the late cohort to average")
+	assert.Greater(t, storedCount, numUsers+numGroups+numOUs-10) // Allow for some errors
+	require.GreaterOrEqual(t, firstCount, 100,
+		"need enough successful writes in the early cohort to average")
+	require.GreaterOrEqual(t, secondCount, 100,
+		"need enough successful writes in the late cohort to average")
 
-		// Compare the average per-write cost of each cohort. The bound is set at 8x:
-		// measured on this machine (16 cores, -race) with 24 CPU burners running for
-		// the whole subtest, load arriving mid-run produced an idle first half against
-		// a saturated second half at a ratio of 3.3x, so 8x leaves headroom over
-		// observed contention noise while still failing the order-of-magnitude
-		// per-write growth that a scan-per-write regression produces at this dataset
-		// size.
-		earlyPerWrite := firstDuration / time.Duration(firstCount)
-		latePerWrite := secondDuration / time.Duration(secondCount)
-		require.Positive(t, earlyPerWrite, "no measurable per-write cost to compare against")
-		assert.Less(t, latePerWrite, 8*earlyPerWrite,
-			"per-write cost grew with dataset size: first-half avg %v, second-half avg %v",
-			earlyPerWrite, latePerWrite)
+	// Compare the average per-write cost of each cohort. The bound is set at 8x:
+	// measured on this machine (16 cores, -race) with 24 CPU burners running for
+	// the whole subtest, load arriving mid-run produced an idle first half against
+	// a saturated second half at a ratio of 3.3x, so 8x leaves headroom over
+	// observed contention noise while still failing the order-of-magnitude
+	// per-write growth that a scan-per-write regression produces at this dataset
+	// size.
+	earlyPerWrite := firstDuration / time.Duration(firstCount)
+	latePerWrite := secondDuration / time.Duration(secondCount)
+	require.Positive(t, earlyPerWrite, "no measurable per-write cost to compare against")
 
-		// Test query performance
-		start = time.Now()
-		query := &DirectoryDNAQuery{
-			ObjectTypes: []interfaces.DirectoryObjectType{interfaces.DirectoryObjectTypeUser},
-			Limit:       100,
-		}
-		results, err := storage.QueryDirectoryDNA(ctx, query)
-		queryDuration := time.Since(start)
+	t.Logf("[scale=%dx, n=%d] first-half per-write:  block-avg=%v median=%v p95=%v (writes=%d)",
+		scale, len(allDNA), earlyPerWrite, durationPercentile(firstPerWrite, 0.5), durationPercentile(firstPerWrite, 0.95), firstCount)
+	t.Logf("[scale=%dx, n=%d] second-half per-write: block-avg=%v median=%v p95=%v (writes=%d)",
+		scale, len(allDNA), latePerWrite, durationPercentile(secondPerWrite, 0.5), durationPercentile(secondPerWrite, 0.95), secondCount)
 
-		require.NoError(t, err)
-		assert.LessOrEqual(t, len(results), 100)
-		assert.Less(t, queryDuration, 5*time.Second, "Query took too long")
+	assert.Less(t, latePerWrite, 8*earlyPerWrite,
+		"per-write cost grew with dataset size: first-half avg %v, second-half avg %v",
+		earlyPerWrite, latePerWrite)
+
+	// Test query performance
+	start = time.Now()
+	query := &DirectoryDNAQuery{
+		ObjectTypes: []interfaces.DirectoryObjectType{interfaces.DirectoryObjectTypeUser},
+		Limit:       100,
+	}
+	results, err := storage.QueryDirectoryDNA(ctx, query)
+	queryDuration := time.Since(start)
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(results), 100)
+	assert.Less(t, queryDuration, 5*time.Second, "Query took too long")
+}
+
+func TestScalabilityScenario(t *testing.T) {
+	// Test system behavior with larger datasets
+	t.Run("large organization simulation", func(t *testing.T) {
+		runLargeOrganizationSimulation(t, 1)
+	})
+
+	// Issue #4239 AC1: the same scenario at 2x the dataset size, to confirm
+	// the per-write cost bound holds independent of dataset size rather than
+	// being tuned to one specific n.
+	t.Run("large organization simulation 2x", func(t *testing.T) {
+		runLargeOrganizationSimulation(t, 2)
 	})
 }
 

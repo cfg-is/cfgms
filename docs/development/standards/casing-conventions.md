@@ -17,7 +17,7 @@ This is **not** about Go source naming — that follows standard Go (see
 | PowerShell transport functions + params | `PascalCase` / `-PascalCase` | `Cfgms-CopyToSeedVHD -StewardSrc` |
 | Module manifest cmdlet / behavioral-envelope references | `PascalCase` | `Get-VM`, `Add-ClusterVirtualMachineRole` |
 
-Rationale: declarative config lives next to cloud-init, Kubernetes, Ansible, and
+Rationale: declarative config lives next to cloud-init, Kubernetes, and
 GitHub Actions — all `snake_case`; matching them keeps CFGMS config unsurprising and
 lint-clean. The scripting surface is PowerShell, so it stays `PascalCase` — a
 PowerShell-native operator writes modules/scripts in `PascalCase` and pushes
@@ -36,8 +36,8 @@ PowerShell-native operator writes modules/scripts in `PascalCase` and pushes
   users. `ConvergeInterval:` in YAML is wrong; `converge_interval:` is right.
 - **Don't** ship a config struct field with a `yaml:` tag but no `json:` tag. JSON
   marshalling then falls back to the Go field name and leaks `PascalCase` to the
-  wire (this is the bug behind `cfg config show` emitting `ConvergeInterval` while
-  `cfg config upload` expects `converge_interval` — the two stop round-tripping).
+  wire, so `cfg config show` output and `cfg config upload` input stop
+  round-tripping.
 - **Don't** invent a third case (`camelCase`) for config keys.
 - **Don't** rename established keys for cosmetic consistency — casing is a wire
   contract; changing it breaks existing pushed configs.

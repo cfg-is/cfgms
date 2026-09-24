@@ -133,7 +133,7 @@ For future contributions with code or substantial documentation changes, you'll 
 If a contributor doesn't want to sign the CLA:
 
 1. Politely explain why we need it (copyright assignment enables AGPL-3.0 enforcement and license discretion)
-2. Point them to the FAQ: [docs/legal/README.md#faq](../docs/legal/README.md#faq)
+2. Point them to the FAQ: [docs/legal/README.md#frequently-asked-questions](README.md#frequently-asked-questions)
 3. If they still refuse, close the PR with thanks
 
 **Example response:**
@@ -175,17 +175,7 @@ I see you've signed the CLA (your name is in CONTRIBUTORS.md) - thank you!
 Could you please check the CLA box in the PR description? This helps us track that you're aware of the CLA requirement.
 ```
 
-### 6. Automated CLA Verification (Future)
-
-**Note:** Currently CLA verification is manual. In the future, we may implement automated checking via:
-
-- **CLA Assistant Bot** - Automatically checks CONTRIBUTORS.md and comments on PRs
-- **GitHub Actions** - Workflow that verifies CLA signature
-- **Status Check** - Required check that fails if CLA not signed
-
-When automation is implemented, this guide will be updated.
-
-### 7. CLA Verification Checklist for Reviewers
+### 6. CLA Verification Checklist for Reviewers
 
 Before approving any PR with code changes:
 
@@ -237,7 +227,7 @@ If a contributor previously signed CLA while at Company A, then contributes indi
 ## Resources for Maintainers
 
 - **Full CLA Text**: [docs/legal/CLA.md](CLA.md)
-- **CLA FAQ**: [docs/legal/README.md#faq](README.md#faq)
+- **CLA FAQ**: [docs/legal/README.md#frequently-asked-questions](README.md#frequently-asked-questions)
 - **Contributor Guide**: [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - **License Information**: [LICENSING.md](../../LICENSING.md)
 

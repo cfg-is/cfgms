@@ -70,21 +70,43 @@ func TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	syncerB, tickB, notifyB := newLeaseGatedSyncer(t, m2, "node-b")
 
 	binding := gitsync.ScopeBinding{
-		TenantPath:      "root/tenant-x",
-		Namespace:       "gitsync-lease-test",
-		OriginURL:       "http://127.0.0.1:1/nonexistent.git", // fails fast; TriggerSync's error path still fires syncNotify
-		PollingInterval: time.Hour,                            // never fires on its own; test drives ticks manually
+		TenantPath: "root/tenant-x",
+		Namespace:  "gitsync-lease-test",
+		// A guaranteed-nonexistent local filesystem path, not a network URL
+		// (Issue #4252): go-git's clone against it fails via a local fs.Stat,
+		// so TriggerSync's error path (which still fires syncNotify) completes
+		// in sub-millisecond time on every OS. The previous network origin
+		// ("http://127.0.0.1:1/nonexistent.git") let this test's timing depend
+		// on the runner's OS TCP stack instead — on windows-latest the failed
+		// connect took >2s (measured: `FAIL github.com/cfgis/cfgms/pkg/gitsync`
+		// with this subtest reporting "(2.29s)", merge-queue run 35927962385
+		// job 107407473957, 2026-09-23 22:37Z), past the fixed 2s budget this
+		// test used to wait on. No product timing was involved: that run's log
+		// shows the lease was acquired immediately (TryAcquire is a single
+		// synchronous store round trip, pkg/lease/singleton.go's RunIfLeader);
+		// the delay was entirely inside syncScope's HTTP dial attempt, which
+		// this change removes rather than papering over with a longer wait.
+		OriginURL:       filepath.Join(t.TempDir(), "nonexistent-origin"),
+		PollingInterval: time.Hour, // never fires on its own; test drives ticks manually
 	}
 
 	require.NoError(t, syncerA.AddBinding(binding))
 	require.NoError(t, syncerB.AddBinding(binding))
 
+	// nodeCycleHangBudget bounds how long this test waits for a sync cycle's
+	// completion signal. With the local-filesystem origin above it is a pure
+	// hang detector, not a correctness-relevant value — real elapsed time is
+	// sub-millisecond since no network I/O is involved.
+	const nodeCycleHangBudget = 10 * time.Second
+
 	// node-a's tick fires first and must acquire+run.
+	cycleStart := time.Now()
 	tickA <- time.Now()
 	select {
 	case <-notifyA:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-a's cycle never completed")
+		t.Logf("node-a's cycle completed in %s", time.Since(cycleStart))
+	case <-time.After(nodeCycleHangBudget):
+		t.Fatalf("node-a's cycle never completed within %s", nodeCycleHangBudget)
 	}
 
 	// node-b's tick fires immediately after, while node-a's lease is still
@@ -99,11 +121,13 @@ func TestSyncer_PerScopeLease_TwoNodes_OnlyOneRunsPerCycle(t *testing.T) {
 	// Once the lease expires, node-b's next tick must succeed — the exclusion
 	// is bounded by TTL, not permanent.
 	time.Sleep(ttl)
+	cycleStart = time.Now()
 	tickB <- time.Now()
 	select {
 	case <-notifyB:
-	case <-time.After(2 * time.Second):
-		t.Fatal("node-b never ran after node-a's lease expired")
+		t.Logf("node-b's cycle completed in %s", time.Since(cycleStart))
+	case <-time.After(nodeCycleHangBudget):
+		t.Fatalf("node-b never ran after node-a's lease expired within %s", nodeCycleHangBudget)
 	}
 
 	assert.NotNil(t, syncerA)

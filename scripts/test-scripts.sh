@@ -4151,9 +4151,11 @@ test_api_shard_aggregation_fails_closed() {
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
 
-    # Stub go: enumerates four tests for -list; for the shard whose -run
-    # pattern includes TestB it SIGKILLs the subshell that launched it, so no
-    # shard-N.exit file is ever written.
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, and for `go test -c -o <path>` writes a stub test binary in place
+    # of a real compile. That stub binary is what the shards exec: for the
+    # shard whose -test.run pattern includes TestB it SIGKILLs the subshell
+    # that launched it, so no shard-N.exit file is ever written.
     cat > "${bin_dir}/go" <<'STUB'
 #!/bin/sh
 for arg in "$@"; do
@@ -4162,9 +4164,29 @@ for arg in "$@"; do
         exit 0
     fi
 done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        cat > "$arg" <<'BIN'
+#!/bin/sh
 case "$*" in
     *TestB*) kill -9 "$PPID"; exit 0 ;;
 esac
+echo "ok  features/controller/api  0.01s"
+exit 0
+BIN
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
+done
 echo "ok  features/controller/api  0.01s"
 exit 0
 STUB
@@ -4200,7 +4222,45 @@ STUB
         return
     fi
 
-    log_pass "test-framework-api-sharded: missing shard exit status and unusable temp dir both fail closed"
+    # The shards exec one prebuilt test binary (Issue #4239), so a build that
+    # exits 0 without producing that binary must stop the target rather than
+    # launch N shards that all fail for an unrelated reason — or worse, a
+    # future edit that treats "no binary" as "nothing to run".
+    local nobin_dir="${tmp_dir}/nobin"
+    mkdir -p "$nobin_dir"
+    cat > "${nobin_dir}/go" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = "-list" ]; then
+        printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
+        exit 0
+    fi
+done
+if [ "$1" = "list" ]; then
+    echo "github.com/cfgis/cfgms/features/controller/api"
+    exit 0
+fi
+# `go test -c` succeeds but writes nothing to the -o path.
+exit 0
+STUB
+    chmod +x "${nobin_dir}/go"
+
+    local nobin_out nobin_rc=0
+    nobin_out=$(PATH="${nobin_dir}:$PATH" CFGMS_API_TEST_SHARDS=2 make test-framework-api-sharded 2>&1) || nobin_rc=$?
+
+    if [[ $nobin_rc -eq 0 ]]; then
+        log_fail "a test build that produced no binary still produced a passing target (exit 0) — zero tests ran"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    if ! echo "$nobin_out" | grep -q 'no runnable binary'; then
+        log_fail "target failed but printed no diagnostic explaining that the test build produced no binary"
+        echo "$nobin_out" | tail -20
+        return
+    fi
+
+    log_pass "test-framework-api-sharded: missing shard exit status, unusable temp dir and a binary-less build all fail closed"
 }
 
 # Regression guard for the parallel .claude pipeline-suite runner (Issue #4151):
@@ -4255,7 +4315,9 @@ test_api_shard_count_rejects_non_integer() {
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
 
-    # Stub go: enumerates four tests for -list, reports success for any run.
+    # Stub go: enumerates four tests for -list, reports one package for `go
+    # list`, writes a succeeding stub test binary for `go test -c -o <path>`,
+    # and reports success for any run.
     cat > "${bin_dir}/go" <<'STUB'
 #!/bin/sh
 for arg in "$@"; do
@@ -4263,6 +4325,22 @@ for arg in "$@"; do
         printf 'TestA\nTestB\nTestC\nTestD\nok\tfeatures/controller/api\t0.01s\n'
         exit 0
     fi
+done
+if [ "$1" = "list" ]; then
+    case "$*" in
+        *features/controller/api*) echo "github.com/cfgis/cfgms/features/controller/api" ;;
+        *) echo "github.com/cfgis/cfgms/pkg/stubpkg" ;;
+    esac
+    exit 0
+fi
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        printf '#!/bin/sh\necho "ok  features/controller/api  0.01s"\nexit 0\n' > "$arg"
+        chmod +x "$arg"
+        exit 0
+    fi
+    prev="$arg"
 done
 echo "ok  features/controller/api  0.01s"
 exit 0
@@ -4326,7 +4404,101 @@ STUB
         return
     fi
 
-    log_pass "test-framework-api-sharded: injection payload, non-integer and zero shard counts all fail closed; valid counts still run"
+    # 5. The macOS CI-job-level shard targets reimplement the partition instead
+    #    of delegating here, so they must carry the same two properties against
+    #    their own variable pairs: no command execution, and no fail-open.
+    #    Their injection vector is awk rather than bash arithmetic — an unquoted
+    #    `awk -v s=$shard` lets a value containing whitespace word-split into a
+    #    replacement awk program, whose system() runs arbitrary commands.
+    local pair shard_var shards_var target
+    for pair in "CFGMS_MACOS_API_SHARD CFGMS_MACOS_API_SHARDS test-go-group-macos-api" \
+                "CFGMS_MACOS_REST_SHARD CFGMS_MACOS_REST_SHARDS test-go-group-macos-rest"; do
+        # shellcheck disable=SC2086 # deliberate word split of the fixture triple
+        set -- $pair
+        shard_var="$1"; shards_var="$2"; target="$3"
+
+        local awk_marker="${tmp_dir}/awk-injection-executed"
+        local payload_out payload_rc var_name
+        for var_name in "$shard_var" "$shards_var"; do
+            rm -f "$awk_marker"
+            payload_rc=0
+            # The payload carries no literal space of its own — word splitting
+            # would break it into separate argv entries and awk would reject the
+            # fragment as a syntax error — so the command's argument separator
+            # is awk's own FS. Verified to create the marker against an
+            # unquoted `awk -v n=$shards`, and not to against a quoted one.
+            payload_out=$(PATH="${bin_dir}:$PATH" \
+                env "${var_name}=1 BEGIN{system(\"touch\"FS\"${awk_marker}\")}" \
+                make --no-print-directory "$target" 2>&1) || payload_rc=$?
+
+            if [[ -e "$awk_marker" ]]; then
+                log_fail "${var_name} reached awk unvalidated — the injected awk program executed a command in ${target}"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            if [[ $payload_rc -eq 0 ]]; then
+                log_fail "an injection payload in ${var_name} produced a passing ${target} (exit 0) — false green behind Build Gate"
+                echo "$payload_out" | tail -20
+                return
+            fi
+
+            # A plain non-integer must fail closed rather than emptying the
+            # partition and reporting a pass with zero tests run.
+            local nonint_out nonint_rc=0
+            nonint_out=$(PATH="${bin_dir}:$PATH" env "${var_name}=abc" \
+                make --no-print-directory "$target" 2>&1) || nonint_rc=$?
+
+            if [[ $nonint_rc -eq 0 ]]; then
+                log_fail "${var_name}=abc produced a passing ${target} (exit 0) — an empty partition ran zero tests and still reported success"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+
+            if ! echo "$nonint_out" | grep -q "${var_name} must be a"; then
+                log_fail "${target} failed but printed no diagnostic naming the invalid ${var_name}"
+                echo "$nonint_out" | tail -20
+                return
+            fi
+        done
+
+        # Zero shards is not a positive integer (and is a fatal modulus for the
+        # BWK awk that macOS runners actually use).
+        local zeroshards_out zeroshards_rc=0
+        zeroshards_out=$(PATH="${bin_dir}:$PATH" env "${shards_var}=0" \
+            make --no-print-directory "$target" 2>&1) || zeroshards_rc=$?
+
+        if [[ $zeroshards_rc -eq 0 ]]; then
+            log_fail "${shards_var}=0 produced a passing ${target} (exit 0) — zero shards ran"
+            echo "$zeroshards_out" | tail -20
+            return
+        fi
+
+        # An index outside the partition assigns nothing; that must fail, not
+        # report a green leg with no tests.
+        local oob_out oob_rc=0
+        oob_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=2" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || oob_rc=$?
+
+        if [[ $oob_rc -eq 0 ]]; then
+            log_fail "${shard_var}=2 with ${shards_var}=2 produced a passing ${target} (exit 0) — an out-of-range shard index ran nothing"
+            echo "$oob_out" | tail -20
+            return
+        fi
+
+        # Valid inputs must still run: validation must not break the CI path.
+        local valid_out valid_rc=0
+        valid_out=$(PATH="${bin_dir}:$PATH" env "${shard_var}=1" "${shards_var}=2" \
+            make --no-print-directory "$target" 2>&1) || valid_rc=$?
+
+        if [[ $valid_rc -ne 0 ]]; then
+            log_fail "valid ${shard_var}=1 ${shards_var}=2 was rejected by ${target} (exit ${valid_rc}) — validation is too strict"
+            echo "$valid_out" | tail -20
+            return
+        fi
+    done
+
+    log_pass "test-framework-api-sharded and the macOS shard groups: injection payloads, non-integer, zero and out-of-range shard values all fail closed; valid counts still run"
 }
 
 test_resource_sampler_no_placeholder() {

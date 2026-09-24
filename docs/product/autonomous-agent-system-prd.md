@@ -2,7 +2,7 @@
 
 ## Product Requirements Document — v2.1 (GitHub-Native Pipeline)
 
-**Author:** Jordan Ritz, Founder — cfg.is / Eberly Systems
+**Author:** Jordan Ritz, Founder — cfg.is
 **Date:** April 2026
 **Status:** Draft
 **Key Changes from v2.0:** BA/Tech Lead/QA agents are subagents (not containers). PO split into interactive and cron modes. QA Agent replaces `/pr-review` for agent PRs. `pipeline:fix` label added for autonomous fix cycle. Sub-issues confirmed as GA GitHub feature.
@@ -65,7 +65,6 @@ Pipeline coordination uses GitHub Issues and GitHub Projects rather than local f
 | Review queue | Directory of files | `pipeline:review` label on PR, assigned to founder. |
 | Audit trail | Git history on pipeline files | GitHub Issue / PR / comment history — richer, searchable, linked. |
 | Mobile access | None | Full — GitHub mobile, push notifications, PR assignments. |
-| Multi-person routing | Not supported | Assignee field routes blocked items to correct person automatically. |
 | Git history cleanliness | Pipeline churn pollutes code history | Pipeline state lives in GitHub — code history stays clean. |
 
 ### 3.1 What Is Lost
@@ -368,7 +367,7 @@ Each phase delivers independent value. Later phases build on earlier ones but do
 |-------|-------------|-----------------|----------|
 | 1 | `/po status` + bootstrap | Dashboard from GitHub state. Replaces 5+ manual `gh` commands at session start. | Phase 2 |
 | 2 | `/po intent` + epic creation | Intent conversation writes GitHub epic Issue. Founder stops writing epics manually. | Phase 3 |
-| 3 | BA subagent | Epic Issues decomposed into story Issues autonomously while founder is at Eberly. | Phase 4 |
+| 3 | BA subagent | Epic Issues decomposed into story Issues autonomously while the founder is away. | Phase 4 |
 | 4 | Tech Lead subagent | Draft stories validated, annotated, promoted to `agent:ready` without founder. | Phase 5 |
 | 5 | `/po` cron dispatch | PO cron calls `/dispatch` in autonomous cycle. Founder only sees PRs. | Phase 6 |
 | 6 | QA subagent + fix cycle | PRs reviewed against acceptance criteria. One autonomous fix attempt before escalation. Founder makes merge decisions only. | Phase 7 |

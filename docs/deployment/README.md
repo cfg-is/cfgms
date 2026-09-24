@@ -42,7 +42,7 @@ observe convergence and drift correction end to end.
 **Use when**: You have a working single-controller deployment and want to connect remote
 stewards, push configs, and verify the full fleet management loop.
 
-### [Controller Cluster](controller-cluster/walkthrough.md) *(planned)*
+### [Controller Cluster](controller-cluster/walkthrough.md)
 
 Geo-redundant controller deployment with failover. Starts from a working single-controller environment.
 
@@ -161,3 +161,8 @@ short-lived rolling tokens, explicit connect per session, controller-side revoca
 ## Reference
 
 - [Platform Support](platform-support.md) — supported operating systems, architectures, and platform-specific notes
+- [cfg CLI Install Guide](cfg-install.md) — installing the `cfg` binary on Linux, macOS, and Windows
+- [Fleet Upgrades](fleet-upgrades.md) — upgrading steward binaries across a fleet with the `cfg` CLI
+- [Hyper-V Host Role](hyperv-host-role.md) — targeting Hyper-V hosts by tag with the `hyperv-host` role
+- [Release Artifact Verification](release-artifact-verification.md) — verifying signed release artifacts
+- [Steward Registration-Refresh Management](steward-refresh-management.md) — re-admitting stewards whose mTLS certificate expired offline

@@ -116,7 +116,7 @@ cfg controller signing-cert rotate --bundle /etc/cfgms/admin.bundle.yaml
 **Before you start:**
 
 1. Determine the longest expected offline duration for any steward in the fleet.
-2. Set `--overlap-days` to at least that value (see [Choosing overlap-days](#choosing-overlap-days)).
+2. Set `--overlap-days` to at least that value (see [Choosing overlap-days](#choosing---overlap-days)).
 3. Verify all stewards are currently connected (`cfg controller steward list`).
 4. Confirm no other rotation is in progress (second rotate call returns HTTP 409).
 
@@ -160,12 +160,6 @@ If the signing key is suspected compromised:
 
 2. Bring offline stewards online as soon as possible so refresh-on-connect can deliver
    the new cert.
-
-3. If a steward cannot reconnect and its cert is known compromised, revoke its client
-   certificate:
-   ```bash
-   # (future: cfg controller steward revoke --id <steward-id>)
-   ```
 
 ### Offline Steward Recovery
 
@@ -211,4 +205,4 @@ Align with your heartbeat SLO if you have one.
 - The rotation endpoint is `POST /api/v1/certificates/signing/rotate` (implemented in story B2b, Issue #1816).
 - The overlap model and `RotatingSerial` cursor are implemented in the lifecycle state machine (story B1, Issue #1814).
 - Refresh-on-connect is implemented in story B2d (Issue #1817).
-- The `GetCertificatesByType` internal API will be unexported in story B3 to enforce purpose-based access.
+- The certificates-by-type lookup is unexported (`getCertificatesByType` in `pkg/cert`) to enforce purpose-based access; `TestNoGetCertificatesByTypeOutsideCertPackage` in `pkg/cert/architecture_test.go` enforces the boundary.

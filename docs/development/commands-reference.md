@@ -100,7 +100,7 @@ make test-integration
 make test-security
 
 # Performance and load testing
-make test-performance
+make test-performance-benchmarks
 
 # Docker environment management
 make test-docker
@@ -189,8 +189,8 @@ cmd := exec.Command("bash", script)
 ### Combined Commands
 
 ```bash
-# Complete validation workflow (test + security + summary)
-make test-with-security
+# Complete validation workflow (test + lint + security-scan)
+make test-commit
 
 # Traditional individual steps
 make test
@@ -413,12 +413,11 @@ Import an admin bundle and start a controller session. This is the bootstrap
 exception: an admin bundle is a credential whose private key the controller
 itself generated and held, confined accordingly (it cannot approve a credential
 enrolment or renew itself, both of which require a passkey presence assertion it
-can never obtain; it is *intended* also to be unable to authorise endpoint
-execution — [GAP: that requirement is not yet enforced, see Epic #3711, Story
-#3696. `verifyOperatorCert` in `features/steward/commands/execute_script.go` and
-the operator-signature check in `features/controller/api/handlers_runs.go` both
-accept any admin-marked certificate and never require the payload-signing
-marker, so a bundle can authorise endpoint execution today] — see
+can never obtain; and it cannot authorise endpoint execution, because
+`verifyOperatorCert` in `features/steward/commands/execute_script.go` and the
+operator-signature check in `features/controller/api/handlers_runs.go` both
+require the payload-signing marker (`cert.HasPayloadSigningMarker`, Issue #3696),
+which an admin bundle never carries — see
 [ADR-021 Amendment 5](../architecture/decisions/021-identity-assurance-levels.md)).
 The ordinary way to obtain a session is `cfg login` (Issue #3721), a browser
 passkey assertion — see below; this bundle-import route is for the very first

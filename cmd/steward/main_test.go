@@ -34,7 +34,6 @@ import (
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
-	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/registration"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -748,6 +747,24 @@ func TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey(t *testing.
 	assert.Empty(t, keyPEM, "a queued refresh must not hand back a key for a certificate that was never issued")
 }
 
+// blockCertManagerCA makes connectWithApprovedRegistration's on-demand
+// cert.Manager construction (buildCertManagerAndSecretStore, at certStoreDir —
+// Issue #4233) fail deterministically on every OS, by pre-creating a regular
+// file at the exact path cert.Manager needs as a directory for its CA store
+// (<certStoreDir>/ca). cert.NewManager tries LoadExistingCA first (fails: the
+// file is not a valid CA store) and then falls back to creating a new CA
+// there (fails: os.MkdirAll cannot create a directory where a file already
+// exists — this is portable Go stdlib behavior, true on Linux and Windows
+// alike). The resulting nil cert.Manager makes createTLSConfig fall through to
+// its "no TLS config available" branch, so the gRPC control-plane provider
+// rejects the connect with "requires 'tls_config'" before any network dial —
+// removing the dependency on whether defaultCertStoreDir() happens to be
+// writable by the test process on the host OS (see the callers' comments).
+func blockCertManagerCA(t *testing.T, certStoreDir string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(certStoreDir, "ca"), []byte("blocks cert.Manager CA store creation"), 0600))
+}
+
 // TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity verifies that when the
 // controller returns HTTP 200 for /refresh/complete, the persisted identity file
 // carries DeviceID and IdentityKeyPub from the key store — i.e. that
@@ -781,20 +798,36 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
 	//
-	// Today the connect returns in single-digit milliseconds, before any dial:
-	// the bundle carries no server trust material the client can build a TLS
-	// config from, so the gRPC control-plane provider rejects the config
-	// ("client mode requires 'tls_config'"). That is incidental to what this
-	// test asserts. Should the connect path ever get as far as dialing, it would
-	// not return at all on a context.Background() call — the initial dial retries
-	// with backoff until its context is done rather than failing after one
-	// attempt (Issue #3849), and controller.server.URL has nothing listening on
-	// the QUIC side. Bound the context so this test can never become a CI hang.
+	// The connect must fail before any dial is attempted: the gRPC control-plane
+	// provider requires a TLS config in client mode, and blockCertManagerCA (below)
+	// deterministically prevents connectWithApprovedRegistration's on-demand
+	// cert.Manager from being built, so createTLSConfig falls through to its
+	// "no TLS config available" branch. Without that block, whether this path fails
+	// fast or instead reaches transportClient.Connect's real dial depends on
+	// whether cert.Manager can create its store directory — which used to depend on
+	// defaultCertStoreDir() (a real, unsandboxed OS path: /var/lib/cfgms/... on
+	// Linux, C:\ProgramData\cfgms\... on Windows) being writable by the test
+	// process. It reliably was NOT on Linux CI (non-root) and reliably WAS on
+	// windows-latest (admin-by-default runner), so the two OSes took different
+	// branches: Linux hit this same fast "tls_config" rejection in under a
+	// millisecond, while Windows built a real cert.Manager, reached the real dial,
+	// and rode it to the full context deadline — the initial dial retries with
+	// backoff until its context is done rather than failing after one attempt
+	// (Issue #3849), and controller.server.URL has nothing listening on the QUIC
+	// side. Confirmed by reproducing the Windows branch on Linux: pointing
+	// defaultCertStoreDir() at a writable path made this call take the same
+	// 10.0s-to-the-deadline that Windows CI measured (Issue #4233). blockCertManagerCA
+	// makes the fast-fail branch deterministic on every OS, so the connect no
+	// longer depends on host path permissions. The context is still bounded as a
+	// safety net, not because the call is expected to use it.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	blockCertManagerCA(t, dir)
 	_, connectErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
 		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.Error(t, connectErr, "no real transport is listening, so the reconnect must fail")
+	assert.Contains(t, connectErr.Error(), "requires 'tls_config'",
+		"connect must fail before any dial via the tls_config-missing fast path, not by riding the context to its deadline")
 	assert.NotContains(t, connectErr.Error(), "no usable steward private key",
 		"the bundle handed to connectWithApprovedRegistration must carry the locally generated key")
 
@@ -843,16 +876,20 @@ func TestRefreshAndConnect_SubmitsCSROverFreshKeypair(t *testing.T) {
 	// listening), but the CSR submission happens before that.
 	//
 	// Bounded rather than context.Background() for the reason given in
-	// TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity: the reconnect
-	// fails fast today for a reason incidental to this test, and the initial
-	// dial it would otherwise reach retries until its context is done (Issue
-	// #3849).
+	// TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity: without
+	// blockCertManagerCA, whether the reconnect fails fast or instead rides the
+	// initial dial's retry-until-context-done behavior (Issue #3849) depends on
+	// OS path permissions, not on this test. blockCertManagerCA makes the fast
+	// path deterministic on every OS (Issue #4233).
+	blockCertManagerCA(t, dir)
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
 			controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 		cancel()
 		require.Error(t, refreshErr, "no real transport is listening, so the reconnect must fail")
+		assert.Contains(t, refreshErr.Error(), "requires 'tls_config'",
+			"connect must fail before any dial via the tls_config-missing fast path, not by riding the context to its deadline")
 	}
 
 	csrs := controller.receivedCSRs()
@@ -1349,14 +1386,17 @@ func TestRunSteward_EarlyLoggerBeforeProviderInit(t *testing.T) {
 func TestRunSteward_DNASubprocessFails_StaysRunning(t *testing.T) {
 	// Verify the DNA collector itself is non-fatal on a non-Windows host
 	// (wmic / powershell absent → subprocess errors → collector logs + returns).
+	// Issue #4222: this test asserts non-fatal behavior, not specific hardware
+	// values, so it uses a snapshot-backed collector rather than the platform
+	// default's wmic/powershell subprocesses.
 	logger := logging.NewLogger("error")
-	collector := dna.NewCollector(logger)
+	collector := newSnapshotDNACollector(t, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Collect must not panic or call os.Exit — it either succeeds (Linux
-	// generic path) or returns partial/nil data with an internal warning.
+	// Collect must not panic or call os.Exit — it either succeeds (snapshot
+	// replay) or returns partial/nil data with an internal warning.
 	result, dnaErr := collector.Collect(ctx)
 	// Reaching this line proves the call was non-fatal.
 	if dnaErr != nil {
@@ -1442,7 +1482,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 		"cluster:cfg-lab.member_nodes":          "CFG-70-02,CFG-AB-02,CFG-C3-02",
 		"cluster:cfg-lab.resource_owner.web-01": "CFG-70-02",
 	}
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), &fakeModuleDNASource{attrs: moduleAttrs})
 
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
@@ -1463,7 +1503,7 @@ func TestDNACollectorAdapter_MergesHardwareAndModuleAttributes(t *testing.T) {
 // Issue #3332: hardware-facts-only mode still returns host attrs; fragments are a
 // parallel channel, not a replacement for the flat map in this path.
 func TestDNACollectorAdapter_NilModuleSourceReturnsHostAttrs(t *testing.T) {
-	adapter := newDNACollectorAdapter(logging.NewLogger("error"), nil)
+	adapter := newSnapshotDNACollectorAdapter(t, logging.NewLogger("error"), nil)
 	attrs, err := adapter.CollectAttributes(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, attrs, "CollectAttributes must return host attrs even without a module source")

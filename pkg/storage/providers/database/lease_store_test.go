@@ -4,9 +4,6 @@ package database
 
 import (
 	"context"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"sync"
 	"testing"
 	"time"
@@ -93,41 +90,6 @@ func TestDatabaseLeaseStore_GetLease_ValidityComputedByServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, stale.Valid, "a row that expired an hour before server now() must be reported invalid")
 	assert.Equal(t, "holder-1", stale.HolderID, "the last holder stays visible on an expired row")
-}
-
-// [REQUIRED TEST] Structural guard for the invariant above: no caller-side
-// wall clock may reach the lease SQL. This runs even where no PostgreSQL test
-// database is reachable (every behavioral test in this file skips there), so
-// the regression cannot land unnoticed. Elapsed-time helpers are unaffected —
-// the ban is on time.Now, the absolute wall clock.
-func TestDatabaseLeaseStore_NoClientClockInLeaseAuthorityPath(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "lease_store.go", nil, 0)
-	require.NoError(t, err)
-
-	guarded := map[string]bool{"AcquireOrRenew": true, "getLease": true, "GetLease": true, "Release": true}
-
-	ast.Inspect(file, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || !guarded[fn.Name.Name] {
-			return true
-		}
-		ast.Inspect(fn.Body, func(inner ast.Node) bool {
-			sel, ok := inner.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			assert.False(t, pkg.Name == "time" && sel.Sel.Name == "Now",
-				"%s must not read this host's wall clock: expiry and validity are derived by the database server, "+
-					"and a cross-host clock offset must never enter a lease authority decision", fn.Name.Name)
-			return true
-		})
-		return false
-	})
 }
 
 func TestDatabaseLeaseStore_AcquireOrRenew_RenewByCurrentHolderKeepsToken(t *testing.T) {

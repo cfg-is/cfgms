@@ -83,6 +83,7 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 	}
 
 	// Update device index
+	_, deviceAlreadyIndexed := i.deviceIndex[record.DeviceID]
 	i.deviceIndex[record.DeviceID] = append(i.deviceIndex[record.DeviceID], ref)
 
 	// Sort device records by version (newest first)
@@ -97,8 +98,14 @@ func (i *MemoryIndexer) IndexRecord(ctx context.Context, record *DNARecord) erro
 	// Update version tracking
 	i.versionIndex[record.DeviceID] = record.Version
 
-	// Update statistics
-	i.updateIndexStats()
+	// Update statistics incrementally. This used to call updateIndexStats(),
+	// which recomputed TotalEntries/UniqueDevices by iterating every device's
+	// full ref slice on every single write — O(index size) per write, so total
+	// cost across a run was O(n^2) in the number of records indexed. That is
+	// the per-write growth TestScalabilityScenario/large_organization_simulation
+	// caught on windows-latest (Issue #4239): a two-vCPU runner made the growth
+	// visible where a many-core dev box's noise floor buried it.
+	i.recordIndexed(!deviceAlreadyIndexed)
 
 	hashDisplay := record.ContentHash
 	if len(hashDisplay) > 16 {
@@ -283,21 +290,24 @@ func (i *MemoryIndexer) matchesFilters(ref *RecordRef, options *QueryOptions) bo
 	return true
 }
 
-func (i *MemoryIndexer) updateIndexStats() {
+// recordIndexed applies the effect of one IndexRecord call to the running
+// statistics in O(1). isNewDevice is whether this write's device ID had no
+// prior entry in deviceIndex, i.e. whether UniqueDevices grew.
+//
+// This replaces a former updateIndexStats() that recomputed TotalEntries and
+// UniqueDevices from scratch by iterating the entire deviceIndex map on every
+// call — see the comment at the IndexRecord call site for why that mattered.
+func (i *MemoryIndexer) recordIndexed(isNewDevice bool) {
 	i.statsMutex.Lock()
 	defer i.statsMutex.Unlock()
 
-	// Count total entries across all indices
-	totalEntries := int64(0)
-	for _, refs := range i.deviceIndex {
-		totalEntries += int64(len(refs))
+	i.stats.TotalEntries++
+	if isNewDevice {
+		i.stats.UniqueDevices++
 	}
 
-	i.stats.TotalEntries = totalEntries
-	i.stats.UniqueDevices = int64(len(i.deviceIndex))
-
 	// Estimate index size (rough calculation)
-	i.stats.IndexSize = totalEntries * 100 // Approximate 100 bytes per entry
+	i.stats.IndexSize = i.stats.TotalEntries * 100 // Approximate 100 bytes per entry
 }
 
 func (i *MemoryIndexer) calculateGlobalStats() {

@@ -90,8 +90,6 @@ For each runner the controller provisions, with **no human involvement**:
    ```
 5. **Deregister on teardown** — `DELETE /repos/.../actions/runners/{runner_id}` (or `--ephemeral` self-deregisters after one job).
 
-> **Ephemeral follow-up (deferred):** replace steps 3–5 with a single `POST /repos/.../actions/runners/generate-jitconfig` call; boot the VM with `./run.sh --jitconfig <base64>`. The runner self-registers, runs exactly one job, self-deregisters, and the VM is destroyed. Same App, same installation token — no extra setup.
-
 ---
 
 ## 5. Public-repo safety (load-bearing)

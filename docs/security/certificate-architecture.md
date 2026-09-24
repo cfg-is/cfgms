@@ -161,10 +161,3 @@ the next controller restart or when the HTTP server reloads its TLS config.
 See [certificate-rotation.md](certificate-rotation.md) for the full rotation methodology,
 operator runbook, `cfg controller signing-cert rotate` CLI reference, overlap window
 guidance, and offline-steward recovery via refresh-on-connect.
-
-## Future Work
-
-- **Issue #401**: Let's Encrypt automation via certbot module (v0.9.3)
-- **Story B** (depends on Issue #1765): Signing-certificate rotation methodology + lint
-  rule that rejects non-purpose-based `GetCertificatesByType(...)[0]` in transport paths.
-- **OCSP stapling**: For externally-sourced public API certificates

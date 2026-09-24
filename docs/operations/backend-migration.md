@@ -163,19 +163,11 @@ that prevent the migration from starting (missing configuration, unreachable bac
 ## Provider-Specific Guides
 
 Per-provider operator guides document backend names, required environment variables,
-and provider-specific cutover notes. The following guides are planned as part of the
-backend migration epic (#2256); links will resolve once the corresponding stories merge.
+and provider-specific cutover notes.
 
 | Provider | Command | Guide |
 |---------|---------|-------|
-| Storage (controller data) | `cfg storage migrate` or `cfg migrate --provider storage` | [`docs/architecture/storage-architecture.md#storage-migration`](../architecture/storage-architecture.md) (S2) |
-| Secrets (CA key + secrets) | `cfg migrate --provider secrets` | `docs/operations/secrets-ca-migration.md` (S3 — file does not exist yet; created by story #2323) |
-| Blobs (installer artifacts) | `cfg migrate --provider blob` | `docs/operations/blob-migration.md` (S4 — file does not exist yet; created by story #2324) |
-
-> **Note on forward references:** The `secrets-ca-migration.md` and `blob-migration.md`
-> links above are intentional forward references to documents that will be created by
-> their respective stories (S3 and S4). A missing file at those paths is expected while
-> only S1 has merged — it is not a broken link bug.
+| Storage (controller data) | `cfg storage migrate` or `cfg migrate --provider storage` | [`docs/architecture/storage-architecture.md#storage-migration`](../architecture/storage-architecture.md) |
 
 ## Related
 
