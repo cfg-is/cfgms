@@ -105,8 +105,7 @@ func (p *processTree) track(cmd *exec.Cmd) {
 // to a job this is a single TerminateJobObject call that reaches every
 // descendant; otherwise it falls back to killing the top-level process only.
 func (p *processTree) terminate(cmd *exec.Cmd) {
-	// TEMPORARY Issue #4254 AC3 verification - neutralize tree-kill; revert before merge
-	if false && p.job != 0 {
+	if p.job != 0 {
 		if err := windows.TerminateJobObject(p.job, 1); err != nil {
 			p.logger.Warn("process-tree: TerminateJobObject failed; killing top-level process",
 				"error", err)
@@ -114,6 +113,7 @@ func (p *processTree) terminate(cmd *exec.Cmd) {
 		}
 		return
 	}
+	p.killTopLevel(cmd)
 }
 
 func (p *processTree) killTopLevel(cmd *exec.Cmd) {
