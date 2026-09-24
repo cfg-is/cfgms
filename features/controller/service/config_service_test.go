@@ -31,11 +31,9 @@ var configSvcTestSeq int64
 func createTestStewardConfig(stewardID string) *stewardtypes.StewardConfig {
 	return &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: stewardID,
 			Logging: stewardtypes.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 			ErrorHandling: stewardtypes.ErrorHandlingConfig{
 				ModuleLoadFailure:  stewardtypes.ActionContinue,
@@ -283,7 +281,6 @@ func TestValidateConfig(t *testing.T) {
 		invalidConfig := &stewardtypes.StewardConfig{
 			Steward: stewardtypes.StewardSettings{
 				// Missing ID field
-				Mode: stewardtypes.ModeController,
 			},
 			Resources: []stewardtypes.ResourceConfig{
 				{

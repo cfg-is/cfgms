@@ -14,11 +14,9 @@ import (
 func TestValidateConfiguration_ValidConfig(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 			Logging: LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 		Resources: []ResourceConfig{
@@ -35,7 +33,6 @@ func TestValidateConfiguration_ValidConfig(t *testing.T) {
 func TestValidateConfiguration_MissingID(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			Mode:    ModeStandalone,
 			Logging: LoggingConfig{Level: "info"},
 		},
 	}
@@ -48,7 +45,6 @@ func TestValidateConfiguration_InvalidLogLevel(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:      "test-steward",
-			Mode:    ModeStandalone,
 			Logging: LoggingConfig{Level: "verbose"},
 		},
 	}
@@ -57,25 +53,11 @@ func TestValidateConfiguration_InvalidLogLevel(t *testing.T) {
 	assert.Contains(t, err.Error(), "log level")
 }
 
-func TestValidateConfiguration_InvalidOperationMode(t *testing.T) {
-	cfg := StewardConfig{
-		Steward: StewardSettings{
-			ID:      "test-steward",
-			Mode:    "distributed",
-			Logging: LoggingConfig{Level: "info"},
-		},
-	}
-	err := ValidateConfiguration(cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "operation mode")
-}
-
 func TestValidateConfiguration_EmptyLogLevelValid(t *testing.T) {
 	// Empty log level is valid — applyDefaults fills in "info"
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeController,
+			ID: "test-steward",
 		},
 	}
 	assert.NoError(t, ValidateConfiguration(cfg))
@@ -84,8 +66,7 @@ func TestValidateConfiguration_EmptyLogLevelValid(t *testing.T) {
 func TestValidateConfiguration_ResourceMissingName(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Module: "mod", Config: map[string]interface{}{"k": "v"}},
@@ -99,8 +80,7 @@ func TestValidateConfiguration_ResourceMissingName(t *testing.T) {
 func TestValidateConfiguration_ResourceMissingModule(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Name: "r1", Config: map[string]interface{}{"k": "v"}},
@@ -114,8 +94,7 @@ func TestValidateConfiguration_ResourceMissingModule(t *testing.T) {
 func TestValidateConfiguration_DuplicateResourceNames(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "test-steward",
-			Mode: ModeStandalone,
+			ID: "test-steward",
 		},
 		Resources: []ResourceConfig{
 			{Name: "dup", Module: "m1", Config: map[string]interface{}{"k": "v"}},
@@ -131,7 +110,6 @@ func TestValidateConfiguration_ConvergeIntervalInvalid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:               "test-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "not-a-duration",
 		},
 	}
@@ -144,7 +122,6 @@ func TestValidateConfiguration_ConvergeIntervalZero(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:               "test-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "0s",
 		},
 	}
@@ -290,7 +267,6 @@ func TestValidateConfiguration_RejectsNegativeObserveSweepN(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:            "steward-1",
-			Mode:          ModeStandalone,
 			ObserveSweepN: intPtr(-1),
 		},
 	}
@@ -303,7 +279,6 @@ func TestValidateConfiguration_AcceptsZeroObserveSweepN(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:            "steward-1",
-			Mode:          ModeStandalone,
 			ObserveSweepN: intPtr(0),
 		},
 	}
@@ -346,7 +321,7 @@ func TestStewardConfig_RequiredModules_ParsesCorrectly(t *testing.T) {
 }
 
 func TestStewardConfig_RequiredModules_Empty(t *testing.T) {
-	cfg := StewardConfig{Steward: StewardSettings{ID: "s1", Mode: ModeStandalone}}
+	cfg := StewardConfig{Steward: StewardSettings{ID: "s1"}}
 	assert.Empty(t, cfg.RequiredModules)
 	assert.NoError(t, ValidateConfiguration(cfg))
 }
@@ -357,8 +332,7 @@ func TestStewardConfig_RequiredModules_Empty(t *testing.T) {
 func TestStewardSettings_ModuleTrust_StrictMode_ParsesCorrectly(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 			ModuleTrust: ModuleTrustConfig{
 				Mode:                 ModuleTrustModeStrict,
 				AdditionalPublishers: []string{"vendor-a"},
@@ -374,7 +348,6 @@ func TestStewardSettings_ModuleTrust_ControllerMode_Valid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:          "s1",
-			Mode:        ModeStandalone,
 			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeController},
 		},
 	}
@@ -385,7 +358,6 @@ func TestStewardSettings_ModuleTrust_BypassMode_Valid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:          "s1",
-			Mode:        ModeStandalone,
 			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeBypass},
 		},
 	}
@@ -395,8 +367,7 @@ func TestStewardSettings_ModuleTrust_BypassMode_Valid(t *testing.T) {
 func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 		},
 	}
 	assert.NoError(t, ValidateConfiguration(cfg))
@@ -406,8 +377,7 @@ func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
 func TestStewardSettings_ModuleTrust_InvalidMode_ReturnsError(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
-			ID:   "s1",
-			Mode: ModeStandalone,
+			ID: "s1",
 			ModuleTrust: ModuleTrustConfig{
 				Mode: ModuleTrustMode("invalid_value"),
 			},

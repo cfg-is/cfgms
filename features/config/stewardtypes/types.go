@@ -25,7 +25,6 @@ type StewardConfig struct {
 // StewardSettings contains steward-specific configuration options.
 type StewardSettings struct {
 	ID          string        `yaml:"id" json:"id"`
-	Mode        OperationMode `yaml:"mode" json:"mode"`
 	ModulePaths []string      `yaml:"module_paths,omitempty" json:"module_paths,omitempty"`
 	Logging     LoggingConfig `yaml:"logging" json:"logging"`
 
@@ -150,14 +149,6 @@ type ResourceConfig struct {
 	Config map[string]interface{} `yaml:"config" json:"config"`
 }
 
-// OperationMode defines how the steward operates.
-type OperationMode string
-
-const (
-	ModeStandalone OperationMode = "standalone"
-	ModeController OperationMode = "controller"
-)
-
 // DriftMode defines how the steward responds to detected configuration drift.
 // Set exclusively from controller-delivered cfg bytes — never from local steward.cfg.
 type DriftMode string
@@ -169,8 +160,7 @@ const (
 
 // LoggingConfig defines logging output settings.
 type LoggingConfig struct {
-	Level  string `yaml:"level" json:"level"`
-	Format string `yaml:"format" json:"format"`
+	Level string `yaml:"level" json:"level"`
 }
 
 // ErrorHandlingConfig defines how to handle various error conditions.

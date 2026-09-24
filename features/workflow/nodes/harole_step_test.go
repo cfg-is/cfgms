@@ -58,8 +58,7 @@ func storeInitialStewardConfig(t *testing.T, store cfgconfig.ConfigStore, tenant
 func minimalStewardCfg(stewardID string, resources []stewardtypes.ResourceConfig) stewardtypes.StewardConfig {
 	return stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: stewardID,
 		},
 		Resources: resources,
 	}

@@ -30,10 +30,8 @@
 //
 //	steward:
 //	  id: hostname
-//	  mode: standalone
 //	  logging:
 //	    level: info
-//	    format: text
 //	  error_handling:
 //	    module_load_failure: continue
 //	    resource_failure: warn
@@ -79,7 +77,6 @@ type (
 	ScriptSigningPolicy = stewardtypes.ScriptSigningPolicy
 	ScriptTrustMode     = stewardtypes.ScriptTrustMode
 	TrustedKeyRef       = stewardtypes.TrustedKeyRef
-	OperationMode       = stewardtypes.OperationMode
 	ErrorAction         = stewardtypes.ErrorAction
 	ModuleTrustConfig   = stewardtypes.ModuleTrustConfig
 	ModuleTrustMode     = stewardtypes.ModuleTrustMode
@@ -95,8 +92,6 @@ const (
 	TrustModeAnyValid             = stewardtypes.TrustModeAnyValid
 	TrustModeTrustedKeys          = stewardtypes.TrustModeTrustedKeys
 	TrustModeTrustedKeysAndPublic = stewardtypes.TrustModeTrustedKeysAndPublic
-	ModeStandalone                = stewardtypes.ModeStandalone
-	ModeController                = stewardtypes.ModeController
 	DriftModeApply                = stewardtypes.DriftModeApply
 	DriftModeMonitor              = stewardtypes.DriftModeMonitor
 	ActionContinue                = stewardtypes.ActionContinue
@@ -306,16 +301,8 @@ func getConfigSearchPaths() []string {
 // applyDefaults sets default values for configuration fields
 func applyDefaults(config *StewardConfig) {
 	// Set default steward settings
-	if config.Steward.Mode == "" {
-		config.Steward.Mode = ModeStandalone
-	}
-
 	if config.Steward.Logging.Level == "" {
 		config.Steward.Logging.Level = "info"
-	}
-
-	if config.Steward.Logging.Format == "" {
-		config.Steward.Logging.Format = "text"
 	}
 
 	// Set default error handling

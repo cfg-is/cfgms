@@ -35,11 +35,9 @@ func TestConfigurationStorageMigration(t *testing.T) {
 	// Test configuration
 	testConfig := &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardtypes.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardtypes.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 		Resources: []stewardtypes.ResourceConfig{
@@ -63,7 +61,6 @@ func TestConfigurationStorageMigration(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
-		assert.Equal(t, testConfig.Steward.Mode, retrievedConfig.Steward.Mode)
 		assert.Len(t, retrievedConfig.Resources, 1)
 		assert.Equal(t, "test-resource", retrievedConfig.Resources[0].Name)
 	})
@@ -162,8 +159,7 @@ func TestConfigurationStorageMigration(t *testing.T) {
 		// Invalid configuration should fail (empty steward ID)
 		invalidConfig := &stewardtypes.StewardConfig{
 			Steward: stewardtypes.StewardSettings{
-				ID:   "", // Invalid empty ID
-				Mode: stewardtypes.ModeStandalone,
+				ID: "", // Invalid empty ID
 			},
 		}
 
@@ -214,8 +210,7 @@ func TestEpic6ComplianceRequirements(t *testing.T) {
 
 	testConfig := &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   "compliance-test",
-			Mode: stewardtypes.ModeStandalone,
+			ID: "compliance-test",
 		},
 	}
 
@@ -278,8 +273,7 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 			Version:   "v1",
 			Config: &stewardtypes.StewardConfig{
 				Steward: stewardtypes.StewardSettings{
-					ID:   "steward1",
-					Mode: stewardtypes.ModeStandalone,
+					ID: "steward1",
 				},
 			},
 			LastUpdated: time.Now(),
@@ -291,8 +285,7 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 			Version:   "v1",
 			Config: &stewardtypes.StewardConfig{
 				Steward: stewardtypes.StewardSettings{
-					ID:   "steward2",
-					Mode: stewardtypes.ModeController,
+					ID: "steward2",
 				},
 			},
 			LastUpdated: time.Now(),
@@ -309,11 +302,9 @@ func TestInMemoryToStorageMigration(t *testing.T) {
 		config1, err := migration.GetConfiguration(ctx, "tenant1", "steward1")
 		require.NoError(t, err)
 		assert.Equal(t, "steward1", config1.Steward.ID)
-		assert.Equal(t, stewardtypes.ModeStandalone, config1.Steward.Mode)
 
 		config2, err := migration.GetConfiguration(ctx, "tenant2", "steward2")
 		require.NoError(t, err)
 		assert.Equal(t, "steward2", config2.Steward.ID)
-		assert.Equal(t, stewardtypes.ModeController, config2.Steward.Mode)
 	})
 }

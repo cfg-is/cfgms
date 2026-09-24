@@ -22,12 +22,10 @@ The Steward searches for configuration files in the following priority order:
 # hostname.cfg - Steward standalone configuration
 steward:
   id: "hostname-steward"
-  mode: "standalone"               # "standalone" or "controller"
 
   # Logging settings
   logging:
     level: "info"                  # "debug", "info", "warn", or "error"
-    format: "text"                 # "text" or "json"
 
   # Module discovery paths (searched in order, in addition to built-in paths)
   module_paths:
@@ -130,12 +128,10 @@ resources:
 **Basic Settings:**
 
 - `id`: Unique identifier for this Steward instance (defaults to the system hostname)
-- `mode`: Operation mode — `standalone` (local config files) or `controller` (connected to controller)
 
 **Logging:**
 
 - `logging.level`: Logging verbosity (`debug`, `info`, `warn`, `error`); default `info`
-- `logging.format`: Log output format (`text` or `json`); default `text`
 
 **Module Discovery:**
 

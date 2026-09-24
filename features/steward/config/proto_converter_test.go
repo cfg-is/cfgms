@@ -16,11 +16,9 @@ func TestToProtoFromProto_RoundTrip(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
 			ID:          "test-steward",
-			Mode:        ModeStandalone,
 			ModulePaths: []string{"/opt/modules", "/usr/local/modules"},
 			Logging: LoggingConfig{
-				Level:  "info",
-				Format: "json",
+				Level: "info",
 			},
 			ErrorHandling: ErrorHandlingConfig{
 				ModuleLoadFailure:  ActionContinue,
@@ -49,10 +47,8 @@ func TestToProtoFromProto_RoundTrip(t *testing.T) {
 	require.NotNil(t, restored)
 
 	assert.Equal(t, original.Steward.ID, restored.Steward.ID)
-	assert.Equal(t, original.Steward.Mode, restored.Steward.Mode)
 	assert.Equal(t, original.Steward.ModulePaths, restored.Steward.ModulePaths)
 	assert.Equal(t, original.Steward.Logging.Level, restored.Steward.Logging.Level)
-	assert.Equal(t, original.Steward.Logging.Format, restored.Steward.Logging.Format)
 	assert.Equal(t, original.Steward.ErrorHandling.ModuleLoadFailure, restored.Steward.ErrorHandling.ModuleLoadFailure)
 	assert.Equal(t, original.Steward.ErrorHandling.ResourceFailure, restored.Steward.ErrorHandling.ResourceFailure)
 	assert.Equal(t, original.Steward.ErrorHandling.ConfigurationError, restored.Steward.ErrorHandling.ConfigurationError)
@@ -66,13 +62,12 @@ func TestToProtoFromProto_RoundTrip(t *testing.T) {
 func TestToProtoFromProto_Secrets(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
-			ID:   "secrets-steward",
-			Mode: ModeStandalone,
+			ID: "secrets-steward",
 			Secrets: SecretsConfig{
 				SecretsDir: "/var/lib/cfgms/secrets",
 				Provider:   "steward",
 			},
-			Logging:       LoggingConfig{Level: "info", Format: "text"},
+			Logging:       LoggingConfig{Level: "info"},
 			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}
@@ -98,9 +93,8 @@ func TestToProtoFromProto_DesiredVersion(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
 			ID:            "upgrade-steward",
-			Mode:          ModeStandalone,
 			Upgrade:       UpgradeConfig{DesiredVersion: "v0.9.44"},
-			Logging:       LoggingConfig{Level: "info", Format: "text"},
+			Logging:       LoggingConfig{Level: "info"},
 			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}
@@ -121,9 +115,8 @@ func TestToProtoFromProto_ConvergeInterval(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
 			ID:               "interval-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "45m",
-			Logging:          LoggingConfig{Level: "info", Format: "text"},
+			Logging:          LoggingConfig{Level: "info"},
 			ErrorHandling:    ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}
@@ -148,8 +141,7 @@ func TestToProtoFromProto_ConvergeInterval(t *testing.T) {
 func TestToProtoFromProto_ScriptSigning(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
-			ID:   "signing-steward",
-			Mode: ModeStandalone,
+			ID: "signing-steward",
 			ScriptSigning: ScriptSigningConfig{
 				Policy:    ScriptSigningPolicyRequired,
 				TrustMode: TrustModeTrustedKeys,
@@ -161,7 +153,7 @@ func TestToProtoFromProto_ScriptSigning(t *testing.T) {
 					},
 				},
 			},
-			Logging:       LoggingConfig{Level: "info", Format: "text"},
+			Logging:       LoggingConfig{Level: "info"},
 			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}
@@ -192,8 +184,7 @@ func TestToProtoFromProto_ScriptSigning(t *testing.T) {
 func TestToProtoFromProto_AllThreeNewFields(t *testing.T) {
 	original := &StewardConfig{
 		Steward: StewardSettings{
-			ID:   "full-steward",
-			Mode: ModeStandalone,
+			ID: "full-steward",
 			Secrets: SecretsConfig{
 				SecretsDir: "/run/secrets",
 				Provider:   "vault",
@@ -204,7 +195,7 @@ func TestToProtoFromProto_AllThreeNewFields(t *testing.T) {
 				TrustMode:     TrustModeAnyValid,
 				AllowPublicCA: true,
 			},
-			Logging:       LoggingConfig{Level: "debug", Format: "json"},
+			Logging:       LoggingConfig{Level: "debug"},
 			ErrorHandling: ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}
@@ -254,9 +245,8 @@ func TestToProto_InvalidConvergeInterval(t *testing.T) {
 	cfg := &StewardConfig{
 		Steward: StewardSettings{
 			ID:               "bad-interval-steward",
-			Mode:             ModeStandalone,
 			ConvergeInterval: "not-a-duration",
-			Logging:          LoggingConfig{Level: "info", Format: "text"},
+			Logging:          LoggingConfig{Level: "info"},
 			ErrorHandling:    ErrorHandlingConfig{ModuleLoadFailure: ActionContinue, ResourceFailure: ActionWarn, ConfigurationError: ActionFail},
 		},
 	}

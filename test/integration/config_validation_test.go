@@ -83,10 +83,8 @@ resources:
 			name: "full config with all options",
 			content: `steward:
   id: full-config-steward
-  mode: standalone
   logging:
     level: debug
-    format: json
   error_handling:
     module_load_failure: continue
     resource_failure: warn
@@ -288,10 +286,13 @@ func (s *ConfigValidationTestSuite) TestInvalidFieldValues() {
 		expectedErrPart string
 	}{
 		{
-			name: "invalid operation mode",
+			// steward.mode was removed (Issue #4209): it was accepted, defaulted, and
+			// round-tripped but never branched on anywhere in features/steward or
+			// cmd/steward. Any value now fails to load like any other unknown key.
+			name: "removed steward.mode key",
 			content: `steward:
   id: test-steward
-  mode: invalid-mode
+  mode: standalone
 
 resources:
   - name: test
@@ -299,7 +300,7 @@ resources:
     config:
       path: /tmp/test.txt
 `,
-			expectedErrPart: "invalid operation mode",
+			expectedErrPart: "mode",
 		},
 		{
 			name: "invalid log level",
@@ -474,9 +475,7 @@ resources:
 	require.NoError(s.T(), err)
 
 	// Verify defaults are applied
-	assert.Equal(s.T(), config.ModeStandalone, cfg.Steward.Mode, "Default mode should be standalone")
 	assert.Equal(s.T(), "info", cfg.Steward.Logging.Level, "Default log level should be info")
-	assert.Equal(s.T(), "text", cfg.Steward.Logging.Format, "Default log format should be text")
 	assert.Equal(s.T(), config.ActionContinue, cfg.Steward.ErrorHandling.ModuleLoadFailure)
 	assert.Equal(s.T(), config.ActionWarn, cfg.Steward.ErrorHandling.ResourceFailure)
 	assert.Equal(s.T(), config.ActionFail, cfg.Steward.ErrorHandling.ConfigurationError)

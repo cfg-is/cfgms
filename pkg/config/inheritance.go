@@ -478,18 +478,13 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.id"] = source
 	}
 
-	if config.Steward.Mode != "" {
-		effective.Config.Steward.Mode = config.Steward.Mode
-		effective.Sources["steward.mode"] = source
-	}
-
 	if len(config.Steward.ModulePaths) > 0 {
 		effective.Config.Steward.ModulePaths = config.Steward.ModulePaths
 		effective.Sources["steward.module_paths"] = source
 	}
 
 	// ConvergeInterval and DriftMode are scalar steward settings that follow
-	// the same later-overrides-earlier rule as ID/Mode/ModulePaths. Without
+	// the same later-overrides-earlier rule as ID/ModulePaths. Without
 	// this, a cascade-enabled tenant loses the configured interval and the
 	// steward falls back to its 30-minute default — breaking drift-correction
 	// SLAs inside any tenant hierarchy.
@@ -523,11 +518,6 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 	if config.Steward.Logging.Level != "" {
 		effective.Config.Steward.Logging.Level = config.Steward.Logging.Level
 		effective.Sources["steward.logging.level"] = source
-	}
-
-	if config.Steward.Logging.Format != "" {
-		effective.Config.Steward.Logging.Format = config.Steward.Logging.Format
-		effective.Sources["steward.logging.format"] = source
 	}
 
 	// Apply error handling settings
@@ -702,10 +692,8 @@ func ResolveRebootWindowTimezone(cfg *maintenanceschedule.Config, tenantDefault 
 // getPathDescription returns a human-readable description of a configuration path
 func (ir *InheritanceResolver) getPathDescription(path string) string {
 	descriptions := map[string]string{
-		"steward.id":             "Unique identifier for this steward instance",
-		"steward.mode":           "Operation mode (standalone or controller)",
-		"steward.logging.level":  "Logging verbosity level",
-		"steward.logging.format": "Log output format",
+		"steward.id":            "Unique identifier for this steward instance",
+		"steward.logging.level": "Logging verbosity level",
 		"steward.error_handling.module_load_failure": "How to handle module loading errors",
 		"steward.error_handling.resource_failure":    "How to handle resource execution errors",
 		"steward.error_handling.configuration_error": "How to handle configuration validation errors",

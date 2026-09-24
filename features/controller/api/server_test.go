@@ -1579,8 +1579,7 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		return &stewardtypes.StewardConfig{
 			Steward: stewardtypes.StewardSettings{
 				ID:      id,
-				Mode:    stewardtypes.ModeController,
-				Logging: stewardtypes.LoggingConfig{Level: "info", Format: "text"},
+				Logging: stewardtypes.LoggingConfig{Level: "info"},
 				ErrorHandling: stewardtypes.ErrorHandlingConfig{
 					ModuleLoadFailure:  stewardtypes.ActionContinue,
 					ResourceFailure:    stewardtypes.ActionWarn,

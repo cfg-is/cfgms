@@ -19,9 +19,8 @@ func TestStewardConfig_JSONKeysAreSnakeCase(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:                          "steward-1",
-			Mode:                        ModeController,
 			ModulePaths:                 []string{"/opt/cfgms/modules"},
-			Logging:                     LoggingConfig{Level: "info", Format: "json"},
+			Logging:                     LoggingConfig{Level: "info"},
 			ErrorHandling:               ErrorHandlingConfig{ModuleLoadFailure: ActionWarn, ResourceFailure: ActionFail, ConfigurationError: ActionFail},
 			Secrets:                     SecretsConfig{SecretsDir: "/var/lib/cfgms/secrets", Provider: "sops"},
 			ConvergeInterval:            "30m",
@@ -46,7 +45,7 @@ func TestStewardConfig_JSONKeysAreSnakeCase(t *testing.T) {
 
 	// Every leaf field must serialise under its snake_case key.
 	wantKeys := []string{
-		`"id"`, `"mode"`, `"module_paths"`, `"logging"`, `"level"`, `"format"`,
+		`"id"`, `"module_paths"`, `"logging"`, `"level"`,
 		`"error_handling"`, `"module_load_failure"`, `"resource_failure"`, `"configuration_error"`,
 		`"secrets"`, `"secrets_dir"`, `"provider"`, `"converge_interval"`,
 		`"script_signing"`, `"policy"`, `"trust_mode"`, `"trusted_keys"`, `"public_key_ref"`,

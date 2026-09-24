@@ -20,7 +20,6 @@ func TestLoadConfiguration(t *testing.T) {
 		name              string
 		setupFunc         func(t *testing.T) (string, func())
 		expectedID        string
-		expectedMode      OperationMode
 		expectedResources int
 		wantErr           bool
 	}{
@@ -32,10 +31,8 @@ func TestLoadConfiguration(t *testing.T) {
 
 				configData := `steward:
   id: test-steward
-  mode: standalone
   logging:
     level: debug
-    format: json
   error_handling:
     module_load_failure: continue
     resource_failure: warn
@@ -57,7 +54,6 @@ resources:
 				return configFile, func() {}
 			},
 			expectedID:        "test-steward",
-			expectedMode:      ModeStandalone,
 			expectedResources: 2,
 			wantErr:           false,
 		},
@@ -80,7 +76,6 @@ resources:
 				return configFile, func() {}
 			},
 			expectedID:        "minimal-steward",
-			expectedMode:      ModeStandalone, // default
 			expectedResources: 1,
 			wantErr:           false,
 		},
@@ -119,7 +114,6 @@ resources:
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedID, config.Steward.ID)
-			assert.Equal(t, tt.expectedMode, config.Steward.Mode)
 			assert.Len(t, config.Resources, tt.expectedResources)
 		})
 	}
@@ -135,11 +129,9 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "valid configuration",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					ID:   "test-steward",
-					Mode: ModeStandalone,
+					ID: "test-steward",
 					Logging: LoggingConfig{
-						Level:  "info",
-						Format: "text",
+						Level: "info",
 					},
 				},
 				Resources: []ResourceConfig{
@@ -156,18 +148,6 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "missing steward ID",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					Mode:    ModeStandalone,
-					Logging: LoggingConfig{Level: "info"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid operation mode",
-			config: StewardConfig{
-				Steward: StewardSettings{
-					ID:      "test-steward",
-					Mode:    "invalid-mode",
 					Logging: LoggingConfig{Level: "info"},
 				},
 			},
@@ -178,7 +158,6 @@ func TestValidateConfiguration(t *testing.T) {
 			config: StewardConfig{
 				Steward: StewardSettings{
 					ID:      "test-steward",
-					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "invalid"},
 				},
 			},
@@ -192,8 +171,7 @@ func TestValidateConfiguration(t *testing.T) {
 			name: "empty log level is valid (default applies)",
 			config: StewardConfig{
 				Steward: StewardSettings{
-					ID:   "test-steward",
-					Mode: ModeController,
+					ID: "test-steward",
 				},
 			},
 			wantErr: false,
@@ -203,7 +181,6 @@ func TestValidateConfiguration(t *testing.T) {
 			config: StewardConfig{
 				Steward: StewardSettings{
 					ID:      "test-steward",
-					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "info"},
 				},
 				Resources: []ResourceConfig{
@@ -220,7 +197,6 @@ func TestValidateConfiguration(t *testing.T) {
 			config: StewardConfig{
 				Steward: StewardSettings{
 					ID:      "test-steward",
-					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "info"},
 				},
 				Resources: []ResourceConfig{
@@ -237,7 +213,6 @@ func TestValidateConfiguration(t *testing.T) {
 			config: StewardConfig{
 				Steward: StewardSettings{
 					ID:      "test-steward",
-					Mode:    ModeStandalone,
 					Logging: LoggingConfig{Level: "info"},
 				},
 				Resources: []ResourceConfig{
@@ -297,9 +272,7 @@ func TestApplyDefaults(t *testing.T) {
 
 	applyDefaults(&config)
 
-	assert.Equal(t, ModeStandalone, config.Steward.Mode)
 	assert.Equal(t, "info", config.Steward.Logging.Level)
-	assert.Equal(t, "text", config.Steward.Logging.Format)
 	assert.Equal(t, ActionContinue, config.Steward.ErrorHandling.ModuleLoadFailure)
 	assert.Equal(t, ActionWarn, config.Steward.ErrorHandling.ResourceFailure)
 	assert.Equal(t, ActionFail, config.Steward.ErrorHandling.ConfigurationError)
@@ -337,10 +310,8 @@ func TestEnvironmentVariableExpansion(t *testing.T) {
 			name: "expand env var with default",
 			configContent: `steward:
   id: ${TEST_STEWARD_ID:-default-steward}
-  mode: standalone
   logging:
     level: info
-    format: text
 
 resources:
   - name: test-resource
@@ -356,10 +327,8 @@ resources:
 			name: "expand env var when set",
 			configContent: `steward:
   id: ${TEST_STEWARD_ID:-default-steward}
-  mode: standalone
   logging:
     level: info
-    format: text
 
 resources:
   - name: test-resource
@@ -375,10 +344,8 @@ resources:
 			name: "fail on missing env var without default",
 			configContent: `steward:
   id: ${MISSING_VAR}
-  mode: standalone
   logging:
     level: info
-    format: text
 
 resources:
   - name: test-resource
@@ -393,10 +360,8 @@ resources:
 			name: "pass when env var without default is set",
 			configContent: `steward:
   id: ${REQUIRED_VAR}
-  mode: standalone
   logging:
     level: info
-    format: text
 
 resources:
   - name: test-resource
@@ -536,7 +501,6 @@ func TestConvergeIntervalValidation(t *testing.T) {
 			cfg := StewardConfig{
 				Steward: StewardSettings{
 					ID:               "test-steward",
-					Mode:             ModeStandalone,
 					Logging:          LoggingConfig{Level: "info"},
 					ConvergeInterval: tt.interval,
 				},
@@ -897,6 +861,65 @@ resources:
 	require.Error(t, err, "config with removed script_repo_url field must fail to load")
 }
 
+// TestLoadConfiguration_StewardModeIsRejected verifies that a config file setting
+// the removed steward.mode key is rejected with a clear error (Issue #4209). The
+// key was accepted, defaulted, and round-tripped through the proto converter but
+// never branched on anywhere in features/steward or cmd/steward — standalone vs.
+// controller-connected operation is already selected by the CLI (--config vs.
+// --regtoken), so the field never gated any behavior. Removing it makes an
+// unknown "mode" key fail to load like any other unknown key (clean break).
+func TestLoadConfiguration_StewardModeIsRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  mode: standalone
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err, "config setting the removed steward.mode key must fail to load")
+	assert.Contains(t, err.Error(), "mode")
+}
+
+// TestLoadConfiguration_LoggingFormatIsRejected verifies that a config file setting
+// the removed steward.logging.format key is rejected with a clear error (Issue
+// #4209). The key was defaulted and merged by the tenant inheritance resolver but
+// no logging setup ever read it — pkg/logging's central provider system routes
+// all steward output through its own file provider (always JSON) once
+// initialized, so a competing text/json switch on this struct field never had an
+// observable effect. Removing it makes an unknown "format" key fail to load like
+// any other unknown key (clean break).
+func TestLoadConfiguration_LoggingFormatIsRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	configFile := filepath.Join(tempDir, "test.cfg")
+
+	configData := `steward:
+  id: test-steward
+  logging:
+    level: info
+    format: json
+
+resources:
+  - name: test-resource
+    module: test-module
+    config:
+      key: value
+`
+	require.NoError(t, os.WriteFile(configFile, []byte(configData), 0644))
+
+	_, err := LoadConfiguration(configFile)
+	require.Error(t, err, "config setting the removed steward.logging.format key must fail to load")
+	assert.Contains(t, err.Error(), "format")
+}
+
 // TestLoadConfiguration_EmptyFileAppliesDefaults verifies that a completely empty
 // configuration file loads without error and falls through to default application.
 // The streaming YAML decoder returns io.EOF on an empty document; loadFromPath must
@@ -909,7 +932,6 @@ func TestLoadConfiguration_EmptyFileAppliesDefaults(t *testing.T) {
 	cfg, err := LoadConfiguration(configFile)
 	require.NoError(t, err, "empty config file must load without error")
 
-	assert.Equal(t, ModeStandalone, cfg.Steward.Mode, "empty config defaults to standalone mode")
 	assert.NotEmpty(t, cfg.Steward.ID, "empty config defaults ID to hostname")
 }
 

@@ -761,7 +761,6 @@ func (x *StewardConfig) GetModules() map[string]string {
 type StewardSettings struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`
 	ModulePaths   []string               `protobuf:"bytes,3,rep,name=module_paths,json=modulePaths,proto3" json:"module_paths,omitempty"`
 	Logging       *LoggingConfig         `protobuf:"bytes,4,opt,name=logging,proto3" json:"logging,omitempty"`
 	ErrorHandling *ErrorHandlingConfig   `protobuf:"bytes,5,opt,name=error_handling,json=errorHandling,proto3" json:"error_handling,omitempty"`
@@ -812,13 +811,6 @@ func (*StewardSettings) Descriptor() ([]byte, []int) {
 func (x *StewardSettings) GetId() string {
 	if x != nil {
 		return x.Id
-	}
-	return ""
-}
-
-func (x *StewardSettings) GetMode() string {
-	if x != nil {
-		return x.Mode
 	}
 	return ""
 }
@@ -1013,7 +1005,6 @@ func (x *TrustedKeyRef) GetPublicKeyRef() string {
 type LoggingConfig struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Level         string                 `protobuf:"bytes,1,opt,name=level,proto3" json:"level,omitempty"`
-	Format        string                 `protobuf:"bytes,2,opt,name=format,proto3" json:"format,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1051,13 +1042,6 @@ func (*LoggingConfig) Descriptor() ([]byte, []int) {
 func (x *LoggingConfig) GetLevel() string {
 	if x != nil {
 		return x.Level
-	}
-	return ""
-}
-
-func (x *LoggingConfig) GetFormat() string {
-	if x != nil {
-		return x.Format
 	}
 	return ""
 }
@@ -1379,10 +1363,9 @@ const file_controller_config_proto_rawDesc = "" +
 	"\amodules\x18\x03 \x03(\v20.cfgms.api.controller.StewardConfig.ModulesEntryR\amodules\x1a:\n" +
 	"\fModulesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb6\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xae\x04\n" +
 	"\x0fStewardSettings\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04mode\x18\x02 \x01(\tR\x04mode\x12!\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fmodule_paths\x18\x03 \x03(\tR\vmodulePaths\x12=\n" +
 	"\alogging\x18\x04 \x01(\v2#.cfgms.api.controller.LoggingConfigR\alogging\x12P\n" +
 	"\x0eerror_handling\x18\x05 \x01(\v2).cfgms.api.controller.ErrorHandlingConfigR\rerrorHandling\x12L\n" +
@@ -1392,7 +1375,7 @@ const file_controller_config_proto_rawDesc = "" +
 	"\x0fdesired_version\x18\t \x01(\tR\x0edesiredVersion\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\x02\x10\x03R\x04mode\"\xd3\x01\n" +
 	"\x13ScriptSigningConfig\x12\x16\n" +
 	"\x06policy\x18\x01 \x01(\tR\x06policy\x12\x1d\n" +
 	"\n" +
@@ -1404,10 +1387,9 @@ const file_controller_config_proto_rawDesc = "" +
 	"\n" +
 	"thumbprint\x18\x02 \x01(\tR\n" +
 	"thumbprint\x12$\n" +
-	"\x0epublic_key_ref\x18\x03 \x01(\tR\fpublicKeyRef\"=\n" +
+	"\x0epublic_key_ref\x18\x03 \x01(\tR\fpublicKeyRef\"3\n" +
 	"\rLoggingConfig\x12\x14\n" +
-	"\x05level\x18\x01 \x01(\tR\x05level\x12\x16\n" +
-	"\x06format\x18\x02 \x01(\tR\x06format\"\xa1\x01\n" +
+	"\x05level\x18\x01 \x01(\tR\x05levelJ\x04\b\x02\x10\x03R\x06format\"\xa1\x01\n" +
 	"\x13ErrorHandlingConfig\x12.\n" +
 	"\x13module_load_failure\x18\x01 \x01(\tR\x11moduleLoadFailure\x12)\n" +
 	"\x10resource_failure\x18\x02 \x01(\tR\x0fresourceFailure\x12/\n" +
