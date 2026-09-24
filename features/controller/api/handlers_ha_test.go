@@ -68,22 +68,44 @@ func newLeaseLeaderHAManager(t *testing.T) *ha.Manager {
 // is_leader=true once the S3 database lease backs HasLeadership() (ADR-031
 // Decision 5). The non-leader case is covered by
 // TestHAStatus_NonLeader_IsLeaderFalse.
+//
+// Issue #4253 (recurrence of #4160, evicted PR #4245 on a stalling
+// windows-latest merge-queue runner): #4160 confined the window between "lease
+// confirmed held" and the assertion to a single in-process ServeHTTP call, but
+// that call is still a *second* read of leadership, taken at a *later* instant
+// than newLeaseLeaderHAManager's WaitForLeadership observation — WaitForLeadership
+// unblocks the instant runLeaseAcquisition's first successful TryAcquire closes
+// the "acquired" channel, which is the same instant HasLeadership()'s
+// local-authority cache (leaseManager.HasLocalAuthority, pkg/lease.go) starts its
+// monotonic-clock deadline. handleHAStatus's isLeader := haManager.HasLeadership()
+// re-reads that same cache later, after server.mu.Lock()/Unlock() and
+// httptest.NewRequest/NewRecorder construction. Those steps are normally
+// microseconds, but on run 35932617052 (job 107422448309, 2026-09-23 23:24Z) the
+// whole features/controller/api package took 324.9s against a normal ~205s and a
+// sibling test measured a single PowerShell cold-start of 1m51s — evidence the
+// runner was stalling the whole process for seconds at a time, which stalls
+// runLeaseAcquisition's renewal goroutine right along with the test goroutine.
+// FastElectionConfig's derived numbers (setLeaseStoreLocked, ElectionTimeout =
+// 200ms): leaseTTL = 200ms, renewalInterval = maxAllowedRenewalLatency = 20ms, so
+// lease.SafetyMargin = 200ms − 20ms − 20ms = 160ms. Any stall longer than that
+// 160ms window between the WaitForLeadership instant and the handler's
+// HasLeadership() read lapses the cached authority — truthfully: the lease *was*
+// held a moment ago, but the cache backing that answer has an explicit, narrow
+// expiry, and #4160 removed the wrong side of the race (the polling goroutine's
+// own wake-up latency) rather than this one (elapsed wall-clock time between two
+// distinct reads).
+//
+// The fix here is option (a) from the issue: assert with require.Eventually
+// against the live endpoint instead of a single read. newLeaseLeaderHAManager's
+// manager is already running its background renewal loop (runLeaseAcquisition,
+// started by manager.Start()) for the lifetime of the test, re-issuing
+// TryAcquire every renewalInterval (20ms) — nothing else contends for this
+// lease, so every renewal succeeds and refreshes the cache's 160ms window. A
+// stall that lapses one cached read is invisible to Eventually: the very next
+// poll, taken after the renewal loop has had a chance to run again, observes
+// is_leader=true. Only a handler that never reports leadership (the actual bug
+// this test guards against) can still exhaust the Eventually budget.
 func TestHAStatus_Leader_IsLeaderTrue(t *testing.T) {
-	// Do the expensive, variable-latency setup (RBAC init and its SQLite writes
-	// inside setupTestServer, then ephemeral key generation) BEFORE acquiring the
-	// lease, not after. newLeaseLeaderHAManager's require.Eventually only proves
-	// the lease was held at the moment it observed HasLeadership() == true: the
-	// local-authority cache backing that check is valid for just
-	// FastElectionConfig's derived SafetyMargin (160ms — 0.8 × 200ms
-	// ElectionTimeout, see ClusterConfig.LeaseDuration / lease.SafetyMargin), a
-	// window sized for the background renewal loop's own ~20ms cadence, not for a
-	// one-time setup step sandwiched in front of the assertions. On a loaded CI
-	// runner setupTestServer alone can take longer than that margin, so a manager
-	// started first can have its cached authority lapse before the HTTP request
-	// below ever runs (Issue #3840). Acquiring the lease last confines the window
-	// between "lease confirmed held" and the assertion to one cheap in-process
-	// ServeHTTP call — the same shape every passing pkg/ha
-	// Eventually-then-immediate-assertion test already uses.
 	server := setupTestServer(t)
 	apiKey := NewEphemeralTestKey(t, server, []string{"ha:read-status"}, "test-tenant", 5*time.Minute)
 
@@ -92,15 +114,29 @@ func TestHAStatus_Leader_IsLeaderTrue(t *testing.T) {
 	server.haManager = haManager
 	server.mu.Unlock()
 
-	haReq := httptest.NewRequest("GET", "/api/v1/ha/status", nil)
-	haReq.Header.Set("X-API-Key", apiKey)
-	haW := httptest.NewRecorder()
-	server.GetRouter().ServeHTTP(haW, haReq)
-	require.Equal(t, 200, haW.Code, "/api/v1/ha/status must return 200")
-
+	// 10s budget, polled every 25ms: the poll cadence sits close to the 20ms
+	// renewal interval so a poll lands shortly after most renewals without
+	// busy-looping, and the budget is comfortably longer than any single stall —
+	// only a handler that never reports leadership (the actual bug this test
+	// guards against, AC3) can exhaust it.
 	var haStatus HAStatusResponse
-	require.NoError(t, json.NewDecoder(haW.Body).Decode(&haStatus),
-		"/api/v1/ha/status response must be valid JSON")
+	require.Eventually(t, func() bool {
+		haReq := httptest.NewRequest("GET", "/api/v1/ha/status", nil)
+		haReq.Header.Set("X-API-Key", apiKey)
+		haW := httptest.NewRecorder()
+		server.GetRouter().ServeHTTP(haW, haReq)
+		if haW.Code != 200 {
+			return false
+		}
+
+		var status HAStatusResponse
+		if err := json.NewDecoder(haW.Body).Decode(&status); err != nil {
+			return false
+		}
+		haStatus = status
+		return haStatus.IsLeader
+	}, 10*time.Second, 25*time.Millisecond,
+		"/api/v1/ha/status is_leader must become true while the database lease is held")
 
 	assert.True(t, haStatus.IsLeader,
 		"/api/v1/ha/status is_leader must be true once the database lease is held")
