@@ -32,4 +32,6 @@ func registerPrivateMetricsRoutes(s *Server, router *mux.Router) {
 	monitoring := api.PathPrefix("/monitoring").Subrouter()
 	monitoring.Handle("/metrics", s.requirePermission("monitoring", "read-metrics")(http.HandlerFunc(s.handleSystemMetrics))).Methods("GET")
 	monitoring.Handle("/components/{component}/metrics", s.requirePermission("monitoring", "read-component-metrics")(http.HandlerFunc(s.handleMonitoringComponentMetrics))).Methods("GET")
+
+	registerPrivateHealthMetricsRoutes(s, api)
 }

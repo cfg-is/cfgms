@@ -344,6 +344,56 @@ func TestRunControllerMetrics_TextOutput(t *testing.T) {
 	assert.Contains(t, output, "Transport")
 }
 
+// Metrics live on the private metrics listener (#3156, Issue #4208), so
+// CFGMS_METRICS_URL is honoured ahead of CFGMS_API_URL when --url is absent.
+func TestRunControllerMetrics_MetricsURLEnvWinsOverAPIURL(t *testing.T) {
+	server := newControllerHealthServer(t)
+	defer server.Close()
+
+	origURL := healthURL
+	origFormat := healthFormat
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		healthFormat = origFormat
+		controllerTLSInsecure = origInsecure
+	})
+
+	healthURL = ""
+	healthFormat = "text"
+	controllerTLSInsecure = true
+	t.Setenv("CFGMS_API_URL", "https://public-api.invalid:1")
+	t.Setenv("CFGMS_METRICS_URL", server.URL)
+
+	output := captureStdout(t, func() {
+		err := runControllerMetrics(controllerMetricsCmd, nil)
+		require.NoError(t, err)
+	})
+	assert.Contains(t, output, "Controller Metrics")
+}
+
+// A 404 means the command reached the public API listener, which does not
+// serve metrics: say where they are rather than echoing a router 404.
+func TestRunControllerMetrics_NotFoundPointsAtPrivateListener(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	origURL := healthURL
+	origInsecure := controllerTLSInsecure
+	t.Cleanup(func() {
+		healthURL = origURL
+		controllerTLSInsecure = origInsecure
+	})
+	healthURL = server.URL
+	controllerTLSInsecure = true
+
+	err := runControllerMetrics(controllerMetricsCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metrics_listen_addr")
+}
+
 func TestRunControllerMetrics_JSONOutput(t *testing.T) {
 	server := newControllerHealthServer(t)
 	defer server.Close()

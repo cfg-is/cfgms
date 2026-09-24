@@ -97,6 +97,8 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 		"", nil,
 		auditMgr,
 		nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

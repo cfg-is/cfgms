@@ -111,6 +111,7 @@ func newBenchControllerNode(b *testing.B, storageManager *interfaces.StorageMana
 		cfg, logger, controllerService, configService, nil, rbacService,
 		nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, nil, // Issue #4208: health alert manager, health trace manager
 	)
 	require.NoError(b, err)
 	b.Cleanup(func() {

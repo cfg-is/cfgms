@@ -180,6 +180,7 @@ type Server struct {
 	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
+	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
 	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
 	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
@@ -1418,6 +1419,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Initialize health collectors (Story #417, #517)
 	var healthCollector *health.Collector
 	var healthAlertManager *health.DefaultAlertManager
+	var healthTraceManager *health.DefaultTraceManager
 	{
 		// Transport collector reads from the gRPC control plane provider (Issue #517).
 		// Remains nil when no controlPlane is initialized (e.g., Transport config absent).
@@ -1442,6 +1444,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 		healthCollector = health.NewCollector(transportCollector, storageCollector, appCollector, systemCollector)
 		healthAlertManager = health.NewAlertManager(health.DefaultThresholds(), health.SMTPConfig{})
+		// Issue #4208: 24h retention matches the documented `cfg trace` contract
+		// ("traces are retained for 24 hours", cmd/cfg/cmd/trace.go).
+		healthTraceManager = health.NewTraceManager(24 * time.Hour)
 		logger.Info("Health collectors initialized (Story #417)")
 	}
 
@@ -1500,6 +1505,8 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		commandPublisher,              // Issue #1319: fan-out config push to active stewards
 		storageManager.GetPushStore(), // Issue #1320: durable push-state for HA failover
 		installerBlobStore,            // Issue #1702: installer artifact storage
+		healthAlertManager,            // Issue #4208: reused, not reconstructed — same alert state as srv.alertManager
+		healthTraceManager,            // Issue #4208: request trace manager for cfg trace
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize HTTP API server: %w", err)
@@ -1744,6 +1751,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		signerCertSerial:        signerCertSerial, // Story #378: For registration handler
 		healthCollector:         healthCollector,
 		alertManager:            healthAlertManager,
+		healthTraceManager:      healthTraceManager,
 		storageManager:          storageManager,
 		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
 		tagStore:                tagStoreInstance, // Issue #2542: closed in Stop() to release SQLite handle on Windows
@@ -2852,6 +2860,16 @@ func (s *Server) GetCertificateManager() *cert.Manager {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.certManager
+}
+
+// GetHealthTraceManager returns the request trace manager backing
+// GET /api/v1/health/trace/{request_id} (Issue #4208). Exposed for integration
+// tests that need to seed a trace directly; nil when health collectors were not
+// initialized (see the health collector setup block in New).
+func (s *Server) GetHealthTraceManager() *health.DefaultTraceManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.healthTraceManager
 }
 
 // GetSignerCertSerial returns the signer certificate serial (Story #378)
