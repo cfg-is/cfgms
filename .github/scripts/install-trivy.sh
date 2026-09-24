@@ -45,9 +45,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 ARCHIVE="trivy_${VERSION#v}_Linux-64bit.tar.gz"
-# SCRATCH-TEST (Issue #4212 AC3): deliberately unreachable host to prove the
-# retry path engages and fails closed. Reverted before the real commit.
-URL="https://install-trivy-scratch-test-4212.invalid/aquasecurity/trivy/releases/download/${VERSION}/${ARCHIVE}"
+URL="https://github.com/aquasecurity/trivy/releases/download/${VERSION}/${ARCHIVE}"
 
 echo "Downloading $URL"
 # --retry-all-errors covers the transient failure that evicted PR #4205

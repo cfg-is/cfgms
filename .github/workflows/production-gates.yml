@@ -481,6 +481,11 @@ jobs:
           done
         }
 
+        # SCRATCH-TEST (Issue #4212 AC3): deliberately unreachable registry host
+        # to prove the retry path engages and fails closed. Reverted before
+        # the real commit.
+        pull_with_retry docker-pull-scratch-test-4212.invalid/nonexistent:latest
+
         pull_with_retry golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125
         pull_with_retry alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
         pull_with_retry debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
