@@ -40,6 +40,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/heartbeat"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
 	"github.com/cfgis/cfgms/features/controller/push"
@@ -1812,6 +1813,17 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	if moduleCache != nil {
 		wireClusterModuleApprovalStore(moduleCache, cfg, storageManager, logger)
+		// Issue #4270: wire the human module-approval REST surface (Issue #2728)
+		// to this cache. Without this, GET/POST /api/v1/modules/approvals and
+		// GET /api/v1/modules (Issue #4270) always answer 503 in every real
+		// deployment, despite being fully implemented and handler-tested — only
+		// SetModuleResolution/SetModuleBundleReviewer were never called outside
+		// tests. Resolver/approver/store stay nil: those three gate the separate
+		// required_modules-on-cfg-push enforcement (Issue #1884), not this
+		// read/approve/reject surface, which only consults the cache lister and
+		// the reviewer set below.
+		httpServer.SetModuleResolution(moduleCache, nil, nil, nil)
+		httpServer.SetModuleBundleReviewer(approval.New(moduleCache))
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
 	workflowModuleRuntime := workflowruntime.NewModuleRuntime(workflowRuntimeDir)

@@ -1734,13 +1734,15 @@ Each bundle in the cache has one of three approval states:
 ### `cfg module` CLI
 
 ```
-cfg module list [--tenant <tenant-path>] [--status pending|approved|rejected]
-cfg module approve <publisher>/<name>@<version>
+cfg module list [--status pending|approved|rejected]
+cfg module approve <publisher>/<name>@<version> [--content-hash <hash-or-prefix>]
 ```
 
-`cfg module list` calls `GET /api/v1/modules` with optional `?tenant=...&status=...` query parameters and renders a tabular summary of publisher, name, version, approval status, and (truncated) content hash.
+`cfg module list` calls `GET /api/v1/modules` with an optional `?status=...` query parameter and renders a tabular summary of publisher, name, version, approval status, and (truncated) content hash. The module cache has no tenant dimension (modules are publisher-signed and cluster-wide, per ADR-006), so there is no `--tenant` filter.
 
-`cfg module approve` calls `POST /api/v1/modules/<publisher>/<name>/<version>/approve`, which invokes `ApprovalWorkflow.Approve()` server-side. Only bundles in `pending` state can be approved; an error is returned for bundles that are already approved or rejected.
+`cfg module approve` resolves `<publisher>/<name>@<version>` against `GET /api/v1/modules/approvals` (the pending review queue) to find the matching entry's composite address, then calls `POST /api/v1/modules/approvals/<address>/approve`, which invokes `ApprovalWorkflow.Approve()` server-side. Only bundles in `pending` state can be approved; an error is returned for bundles that are already approved or rejected, or for a ref with no matching pending entry.
+
+**The ref is not a unique key.** The cache is content-addressed — its key includes the content hash — so several distinct bundles can be pending under one `publisher/name@version`, and a `QueueForReview` bundle's publisher name is self-asserted manifest data because that decision is reached before any signature is verified. A ref matching more than one pending entry is therefore **refused** with an error listing every candidate content hash; `--content-hash` (full value, or a prefix unique within that candidate set) names the reviewed bundle. On success the command echoes the approved content hash, so the operator's confirmation binds to specific content rather than to the mutable triple.
 
 Admin mTLS authentication (via admin bundle file) is required for both commands, following the same auth pattern as `cfg registration approve`.
 
