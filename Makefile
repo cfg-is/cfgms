@@ -197,16 +197,16 @@ build-stdlib-modules: check-stdlib-payload-boundary
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 
-# Targets build-cross-validate actually needs to cross-compile (Issue #4219).
-# linux/amd64 is natively built and tested by every ubuntu-latest job
-# (unit-tests-*, the e2e leg, the queue's Native Build (Linux)); windows/amd64
-# by the four Windows PR legs and the queue's Native Build (Windows);
-# darwin/arm64 by the two macOS PR legs and the queue's Native Build (macOS) —
-# macos-latest runners are arm64. Only linux/arm64 and darwin/amd64 have no
-# native runner anywhere in CI, so cross-compilation is the only validation
-# they get. Kept separate from PLATFORMS: build-cross-platform is the release
-# matrix and must still produce binaries for all five.
-CROSS_VALIDATE_PLATFORMS := linux/arm64 darwin/amd64
+# Targets build-cross-validate cross-compiles. linux/amd64 is left out: every
+# ubuntu-latest job builds it natively, and the queue's Native Build (Linux)
+# shard 1 runs `make build`. The other four are in. linux/arm64 and
+# darwin/amd64 have no native runner anywhere in CI. windows/amd64 and
+# darwin/arm64 have PR test legs that compile their packages with `go test`,
+# but nothing links the release binaries for them since #4220 removed the
+# queue's Windows and macOS `make build` jobs. Kept separate from PLATFORMS:
+# build-cross-platform is the release matrix and must still produce binaries
+# for all five.
+CROSS_VALIDATE_PLATFORMS := linux/arm64 darwin/amd64 windows/amd64 darwin/arm64
 
 # Build all binaries for all platforms (outputs to bin/platform/)
 .PHONY: build-cross-platform
@@ -546,7 +546,8 @@ test-go-group-rest:
 
 # Windows/macOS PR-side native leg targets (Issue #4219).
 #
-# The queue's Native Build (Windows) job (cross-platform-build.yml) runs
+# The queue's former Native Build (Windows) job (cross-platform-build.yml,
+# removed in #4220 once these legs existed) ran
 # `go test -short ./pkg/... ./features/...` plus a separate `-v ./cmd/...` on
 # one windows-latest runner, with NO -race (Windows -race is out of scope, and
 # unchanged by this story). Of the last 15 queue `Cross-Platform Build
@@ -605,9 +606,10 @@ test-go-group-windows-steward:
 		go test -v $$race_flag -short -timeout=10m ./cmd/...; \
 	fi
 
-# Everything the queue's Native Build (Windows) job tests (./pkg/... ./features/...
-# ./cmd/...) that isn't already claimed by the api/controller/steward legs above -
-# includes the module packages, matching the queue job's unfiltered ./features/....
+# Everything the queue's former Native Build (Windows) job tested (./pkg/...
+# ./features/... ./cmd/...) that isn't already claimed by the api/controller/
+# steward legs above - includes the module packages, matching that job's
+# unfiltered ./features/....
 .PHONY: test-go-group-windows-rest
 test-go-group-windows-rest:
 	@race_flag="-race"; \
@@ -627,7 +629,8 @@ test-go-group-windows-rest:
 		go test $$race_flag -short -timeout=10m $$pkgs; \
 	fi
 
-# The queue's Native Build (macOS) job runs the same package set as Linux WITH
+# The queue's former Native Build (macOS) job (removed in #4220) ran the same
+# package set as Linux WITH
 # -race (`go test -race -short ./pkg/... ./features/... ./cmd/...`). A first
 # attempt at 2 legs (api sharded internally 3-way, everything else in one
 # job) measured 10m25s and 11m44s on this story's own PR (#4225, run

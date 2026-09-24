@@ -575,8 +575,18 @@ jobs:
       shell: bash
       run: .github/scripts/resource-sampler.sh start "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}"
 
-    - name: Run Production Critical Tests
-      run: make test-production-critical
+    # Only what no other job runs (Issue #4220). `make test-production-critical`
+    # ran ./test/unit/... and ./test/integration/... with -short, but:
+    #   - ./test/unit/... is in the PR's unit-tests-rest leg and the queue's
+    #     Linux native-build shard 2 (test-go-group-rest).
+    #   - ./test/integration/<sub-packages> run, without -short and against
+    #     Docker, in production-gates.yml's Controller Integration Tests (Linux).
+    # That job deliberately excludes the root ./test/integration package and
+    # ./test/integration/ha, and the unit legs exclude all of test/integration.
+    # Measured with -short on 2026-09-24: the root package runs 18 tests (2 skip)
+    # and ha runs 1 (16 skip) that execute in no other CI job — so they run here.
+    - name: Run the test/integration packages no other job runs
+      run: go test -v -race -short -timeout=15m ./test/integration ./test/integration/ha
 
     - name: Upload integration test results
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -604,7 +614,7 @@ jobs:
         retention-days: 30
 
   # PR-time stub for the `integration-tests` required context (#2595). The real
-  # run is queue-only (job above) — it validates `make test-production-critical`
+  # run is queue-only (job above) — it validates the test/integration packages no other job runs
   # against the merge commit rather than paying for it twice per PR.
   #
   # Gated on `needs.changes.outputs.code == 'true'` (Issue #4174) to preserve

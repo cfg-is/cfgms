@@ -46,6 +46,10 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    # PR-REAL (Issue #4220): the PR already runs this against the same source,
+    # and it is not a required context, so the merge queue does not repeat it.
+    # It still runs on main, release tags and workflow_dispatch.
+    if: github.event_name != 'merge_group'
     steps:
     - name: Checkout code
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -393,6 +397,7 @@ jobs:
         # the split it does not run on. Cancellation, initialization failure, and
         # an unexpected skip are failures, never implicit approvals.
         #
+        #   NOT-QUEUE source-security-contract — required everywhere but merge_group
         #   PR-REAL   nancy / gosec / staticcheck — required on pull_request
         #   QUEUE-REAL trivy — required on merge_group, main, and release tags
         #
@@ -420,7 +425,12 @@ jobs:
           esac
         }
 
-        required "source-security-contract" "$SOURCE_RESULT"
+        # source-security-contract runs everywhere except the merge queue (#4220).
+        if [ "$EVENT_NAME" = "merge_group" ]; then
+          off_split "source-security-contract" "$SOURCE_RESULT"
+        else
+          required "source-security-contract" "$SOURCE_RESULT"
+        fi
 
         if [ "$EVENT_NAME" = "pull_request" ]; then
           required "nancy-scan" "$NANCY_RESULT"

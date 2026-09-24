@@ -29,7 +29,8 @@ on:
       - '.gitignore'
       - '.editorconfig'
       - 'web/**'
-  merge_group:
+  # No merge_group trigger (Issue #4220): the PR run lints the same source,
+  # and this is not a required context, so the queue does not repeat it.
   workflow_dispatch:
 
 # Never cancel an in-flight merge_group run — only PR pushes cancel their own
