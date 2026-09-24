@@ -1274,6 +1274,19 @@ def _attach_verification(sweep_dir: str, findings: list) -> dict:
             "guard": entry.get("guard") or "",
             "citation": entry.get("citation") or [],
             "rationale": entry.get("rationale") or "",
+            # The three fields that make a verdict CHECKABLE rather than
+            # merely stated. A later fix pass is run by the same kind of model
+            # that wrote the code, so it shares the blind spot -- "reachable"
+            # plus two sentences of prose is something it can talk itself past.
+            # What the attacker controls, the concrete trigger, and what would
+            # OVERTURN the verdict are the parts a fixer can test against the
+            # code and be wrong about visibly.
+            #
+            # Dropping them here would be silent: the verifier computes them,
+            # they never reach the reader, and nothing reports a gap.
+            "attacker_input": entry.get("attacker_input") or "",
+            "trigger": entry.get("trigger") or "",
+            "falsifier": entry.get("falsifier") or "",
             "harness": envelope.get("harness"),
             "model_id": envelope.get("model_id"),
         }
@@ -2556,11 +2569,25 @@ def _verification_line(finding: dict, verification_record: dict) -> str:
         citation = verification.get("citation") or []
         if citation:
             parts.append("cited at " + ", ".join(f"`{_md_escape_inline(str(c))}`" for c in citation))
+        # What an attacker controls and how it is triggered: the difference
+        # between a reader believing the verdict and being able to check it.
+        attacker_input = verification.get("attacker_input")
+        if attacker_input:
+            parts.append(f"attacker controls {_md_escape_inline(attacker_input)}")
+        trigger = verification.get("trigger")
+        if trigger:
+            parts.append(f"triggered by {_md_escape_inline(trigger)}")
         tail = (
             f" — by `{_md_escape_inline(verification.get('harness'))}` / "
             f"`{_md_escape_inline(verification.get('model_id'))}`. "
             f"{_md_escape_inline(verification.get('rationale') or '')}"
         )
+        # The falsifier goes LAST and is called out, because it is the line a
+        # reviewer uses to disagree with the verdict. A verdict a reader cannot
+        # argue with is one they either take on faith or ignore.
+        falsifier = verification.get("falsifier")
+        if falsifier:
+            tail += f" Overturned by: {_md_escape_inline(falsifier)}"
         return "; ".join(parts) + tail
 
     status = verification_record.get("status", "missing")

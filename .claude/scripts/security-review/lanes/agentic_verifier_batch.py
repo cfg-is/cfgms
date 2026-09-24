@@ -54,6 +54,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agentic_verifier as av  # noqa: E402
+import harness_runner           # noqa: E402
+
+
+def _tail(output: str) -> str:
+    """The harness's own last words, bounded and control-character-free.
+
+    `harness_runner.sanitize_harness_output_tail` already exists for exactly
+    this (Issue #4008) and is what every finder lane records on a non-complete
+    step. Reused rather than reimplemented so one fix to the sanitising rules
+    covers both."""
+    return harness_runner.sanitize_harness_output_tail(output)
 
 # Measured, not guessed. See the concurrency table above.
 DEFAULT_WORKERS = 8
@@ -290,15 +301,30 @@ def verify_file_batch(path: str, findings: list, run, read_source=None,
                          timeout=timeout)
             output = getattr(result, "output", "") or ""
             entries = extract_verifications(output)
+            before = len(banked)
             rejections = bank_valid_entries(entries, count, banked)
-            record["phases"].append({
+            phase_record = {
                 "phase": phase,
                 "seconds": round(getattr(result, "seconds", 0.0) or 0.0, 1),
                 "tool_calls": av.count_tool_calls(output),
                 "entries_returned": len(entries),
                 "banked_total": len(banked),
                 "rejections": rejections,
-            })
+            }
+            if len(banked) == before:
+                # A phase that banked NOTHING is the one that has to explain
+                # itself. Without the harness's own words here, the stage
+                # reports "no verdict" and the cause is unrecoverable from the
+                # envelope -- the first real run of this stage failed on an
+                # `Unauthorized` from the provider and diagnosing it needed the
+                # invocation reproduced by hand.
+                #
+                # Sanitised and tail-only: this output contains the model's
+                # answer, which for a security review routinely quotes source
+                # and discusses credentials.
+                phase_record["exit_code"] = getattr(result, "exit_code", None)
+                phase_record["output_tail"] = _tail(output)
+            record["phases"].append(phase_record)
 
         attempts.append(record)
         if len(banked) == count:

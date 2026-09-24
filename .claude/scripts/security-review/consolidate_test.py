@@ -3698,6 +3698,86 @@ def test_an_unverified_finding_outranks_one_shown_unreachable():
           str([x["symbol"] for x in ordered]))
 
 
+def test_the_checkable_fields_survive_the_envelope_and_reach_the_reader():
+    """[REQUIRED TEST] `attacker_input`, `trigger` and `falsifier` are the
+    fields that make a verdict checkable instead of merely stated.
+
+    A fix pass is run by the same kind of model that wrote the code, so it
+    shares the blind spot: "reachable" plus two sentences of prose is something
+    it can talk itself past. What the attacker controls, the concrete trigger,
+    and what would OVERTURN the verdict are the parts a fixer can test and be
+    visibly wrong about.
+
+    Dropping them was silent -- the verifier computed them, `_attach_verification`
+    did not copy them, `_verification_line` did not render them, and nothing
+    anywhere reported a gap. Pinned at both hops."""
+    with tempfile.TemporaryDirectory() as tmp:
+        entry = {
+            "file": "pkg/a/b.go", "symbol": "Thing.Do", "vuln_class": "CWE-863",
+            "verdict": "reachable_from_untrusted", "entry_point": "handleThing",
+            "call_path": ["handleThing"], "guard": "", "citation": ["pkg/a/b.go:12"],
+            "rationale": "reached from the handler",
+            "attacker_input": "the :id path variable",
+            "trigger": "DELETE /api/v1/items/1 with no session",
+            "falsifier": "an auth middleware on that route group",
+        }
+        path = os.path.join(tmp, consolidate.VERIFICATION_SUBDIR, "lanes",
+                            consolidate.VERIFIER_LANE_ID)
+        os.makedirs(path)
+        with open(os.path.join(path, consolidate.VERIFICATION_OUTPUT_FILENAME), "w") as fh:
+            json.dump({"state": "complete", "harness": "opencode",
+                       "model_id": "glm-5.3-flash:cloud",
+                       "verifications": [entry], "leaked": [], "errors": []}, fh)
+
+        findings = [{"file": "pkg/a/b.go", "symbol": "Thing.Do", "cwe": "CWE-863",
+                     "vuln_class": "CWE-863"}]
+        consolidate._attach_verification(tmp, findings)
+        carried = findings[0]["verification"]
+
+        # Hop 1: the envelope onto the finding.
+        for field in ("attacker_input", "trigger", "falsifier"):
+            check(carried.get(field) == entry[field],
+                  f"verification: {field} is carried onto the finding",
+                  repr(carried.get(field)))
+
+        # Hop 2: the finding into the rendered line.
+        line = consolidate._verification_line(findings[0], {"status": "complete"})
+        check("the :id path variable" in line,
+              "verification: what the attacker controls is rendered", line)
+        check("DELETE /api/v1/items/1" in line,
+              "verification: the concrete trigger is rendered", line)
+        check("an auth middleware on that route group" in line,
+              "verification: the falsifier is rendered", line)
+        check("Overturned by:" in line,
+              "verification: the falsifier is labelled so a reviewer can use it", line)
+
+
+def test_the_envelope_attribution_reaches_the_verdict_line():
+    """[REQUIRED TEST] `harness` and `model_id` are read off the ENVELOPE, not
+    the entry. An entrypoint that omits them does not fail anything -- every
+    verdict just renders "by None / None", which looks fine and attributes the
+    review to nothing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, consolidate.VERIFICATION_SUBDIR, "lanes",
+                            consolidate.VERIFIER_LANE_ID)
+        os.makedirs(path)
+        with open(os.path.join(path, consolidate.VERIFICATION_OUTPUT_FILENAME), "w") as fh:
+            json.dump({"state": "complete", "harness": "opencode",
+                       "model_id": "glm-5.3-flash:cloud",
+                       "verifications": [{"file": "a.go", "symbol": "S",
+                                          "vuln_class": "CWE-863",
+                                          "verdict": "guarded"}],
+                       "leaked": [], "errors": []}, fh)
+        findings = [{"file": "a.go", "symbol": "S", "cwe": "CWE-863",
+                     "vuln_class": "CWE-863"}]
+        record = consolidate._attach_verification(tmp, findings)
+        check(record["harness"] == "opencode", "verification: the harness is recorded",
+              str(record["harness"]))
+        line = consolidate._verification_line(findings[0], record)
+        check("None" not in line, "verification: the line attributes a real model", line)
+        check("glm-5.3-flash:cloud" in line, "verification: naming the model id", line)
+
+
 def test_a_verdict_renders_beside_the_severity_with_its_citation():
     finding = {"verification": {
         "verdict": "reachable_from_untrusted", "entry_point": "handleThing",

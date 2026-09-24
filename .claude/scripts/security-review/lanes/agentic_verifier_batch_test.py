@@ -184,6 +184,39 @@ def test_an_invalid_entry_does_not_poison_its_neighbours() -> None:
           "invalid entry: it is re-asked and the good answer accepted")
 
 
+def test_a_phase_that_banks_nothing_records_why() -> None:
+    """[REQUIRED] The first real run of this stage failed with "2 selected
+    finding(s) got no verdict" and nothing else on disk. The cause was an
+    `Unauthorized` from the provider, and recovering it needed the whole
+    invocation reproduced by hand -- because the phase records carried counts
+    and no output.
+
+    A stage that reports a failure it cannot explain costs a debugging session
+    every time it happens."""
+    run = scripted("Error: Unauthorized: unauthorized")
+    env = ab.verify_file_batch("pkg/a.go", [finding(1, "a")], run)
+    phases = [p for a in env["attempts"] for p in a["phases"]]
+    check(all("output_tail" in p for p in phases),
+          "telemetry: every empty-handed phase carries the harness output")
+    check(any("Unauthorized" in (p.get("output_tail") or "") for p in phases),
+          "telemetry: and the cause is legible in it",
+          str([p.get("output_tail") for p in phases][:1]))
+    check(all("exit_code" in p for p in phases),
+          "telemetry: with the exit code beside it")
+
+
+def test_a_phase_that_banks_something_stays_quiet() -> None:
+    """The tail is for phases that explain a failure. A successful phase
+    carrying the model's whole answer would put source-quoting text into the
+    envelope for no reason -- this stage's output is read by a later one that
+    must not see source."""
+    run = scripted(payload(entry(1)))
+    env = ab.verify_file_batch("pkg/a.go", [finding(1, "a")], run)
+    first = env["attempts"][0]["phases"][0]
+    check("output_tail" not in first,
+          "telemetry: a productive phase records no output tail", str(sorted(first)))
+
+
 def test_no_verifications_key_is_silence_not_success() -> None:
     run = scripted("I had a look and it seems fine.")
     env = ab.verify_file_batch("pkg/a.go", [finding(1, "a")], run)

@@ -53,6 +53,12 @@ OUT_DIR = os.environ.get("CFGMS_SECURITY_REVIEW_OUT_DIR", "/workspace-out")
 INPUT_FILENAME = "verification-input.json"
 OUTPUT_FILENAME = "verification.json"
 
+# Attribution the report prints on every verdict line. The harness is fixed:
+# this entrypoint drives OpenCode specifically, because it is the only open
+# harness with a tool loop (`ollama run` has none, and claude/codex are closed).
+HARNESS = "opencode"
+MODEL_ID = avr.DEFAULT_MODEL
+
 # Operator overrides. Defaults are the measured ones; see
 # agentic_verifier_batch.py for the concurrency table behind DEFAULT_WORKERS.
 WORKERS = int(os.environ.get("CFGMS_AGENTIC_VERIFIER_WORKERS",
@@ -98,10 +104,23 @@ def write_envelope(out_dir: str, envelope: dict) -> str:
 
 
 def build_envelope(state: str, verifications: list, summary: dict,
-                   errors: list, started: float, **extra) -> dict:
+                   errors: list, started: float, leaked: "list | None" = None,
+                   **extra) -> dict:
+    """The envelope `consolidate._attach_verification` reads.
+
+    `harness`, `model_id` and `leaked` are top-level because that is where the
+    consolidator looks for them -- it renders "by <harness> / <model_id>" on
+    every verdict line and counts `leaked` for the report. Omitting them does
+    not fail anything; it silently renders every verdict as "by None / None"
+    with a leak count of zero, which is worse than failing because it looks
+    fine. The per-entry leak marks stay on their entries as well; this list is
+    the aggregate the report counts."""
     envelope = {
         "state": state,
+        "harness": HARNESS,
+        "model_id": MODEL_ID,
         "verifications": verifications,
+        "leaked": leaked or [],
         "summary": summary,
         "errors": errors,
         "wall_seconds": round(time.time() - started, 1),
@@ -165,9 +184,28 @@ def main(argv: list) -> int:
     envelopes = ab.run_pool(batches, make_runner, read_source=read_source,
                             workers=WORKERS, on_done=on_done)
 
+    # Per-batch telemetry, kept for every batch and not just the failures.
+    # The first real run of this stage failed with "2 selected finding(s) got
+    # no verdict" and NOTHING ELSE on disk: the phase records, tool counts and
+    # rejection reasons all lived on the batch envelopes and were dropped here,
+    # so diagnosing it needed the invocation reproduced by hand. A stage that
+    # reports a failure it cannot explain costs a debugging session every time.
+    diagnostics: list = []
     verifications: list = []
+    leaked: list = []
     for envelope in envelopes:
+        diagnostics.append({
+            "file": envelope.get("file"),
+            "state": envelope.get("state"),
+            "findings_in_batch": envelope.get("findings_in_batch"),
+            "answered": envelope.get("answered"),
+            "attempts": envelope.get("attempts") or [],
+        })
         for entry in envelope.get("verifications") or []:
+            if entry.get("leak"):
+                # Aggregated for the report's leak count; the withheld verdict
+                # itself is already `undetermined` by the time it gets here.
+                leaked.append({**entry["finding"], **entry["leak"]})
             if entry.get("state") == av.COMPLETE and entry.get("answer"):
                 answer = dict(entry["answer"])
                 answer.pop("n", None)  # a batch-local index, meaningless outside it
@@ -183,11 +221,12 @@ def main(argv: list) -> int:
         errors.append(f"{summary['unanswered']} selected finding(s) got no verdict")
 
     write_envelope(OUT_DIR, build_envelope(
-        state, verifications, summary, errors, started,
+        state, verifications, summary, errors, started, leaked=leaked,
         findings_total=len(all_findings),
         findings_selected=len(selected),
         batches=len(batches),
-        workers=WORKERS))
+        workers=WORKERS,
+        diagnostics=diagnostics))
 
     schema.log_event("agentic_verifier_done", lane=lane_id, **summary)
     return 0

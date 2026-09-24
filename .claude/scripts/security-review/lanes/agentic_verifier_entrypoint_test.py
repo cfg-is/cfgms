@@ -132,6 +132,97 @@ def test_each_verification_carries_its_coordinates_and_no_batch_index() -> None:
         check("n" not in entry, "lane: the batch-local index is stripped", str(entry))
 
 
+def test_the_envelope_carries_what_the_consolidator_reads() -> None:
+    """[REQUIRED] `consolidate._attach_verification` reads `harness`,
+    `model_id` and `leaked` off the TOP LEVEL of this envelope. Omitting them
+    fails nothing: every verdict renders "by None / None" with a leak count of
+    zero, which looks fine and attributes the whole review to nothing.
+
+    Pinned against the consolidator's real field names, so a rename on either
+    side breaks here rather than silently degrading the report."""
+    with Sandbox() as box:
+        box.write_input([finding("A", "critical")])
+        saved, ab.run_pool = ab.run_pool, stub_pool(True)
+        try:
+            lane.main(["lane", "verifier"])
+        finally:
+            ab.run_pool = saved
+        env = box.envelope()
+        for field in ("harness", "model_id", "verifications", "leaked", "state"):
+            check(field in env, f"envelope: carries `{field}`", str(sorted(env)))
+        check(env["harness"] == "opencode", "envelope: names the harness", env["harness"])
+        check(env["model_id"], "envelope: names the model id", str(env["model_id"]))
+        check(isinstance(env["leaked"], list), "envelope: `leaked` is a list",
+              type(env["leaked"]).__name__)
+
+
+def test_a_withheld_answer_is_aggregated_into_leaked() -> None:
+    """The report counts `leaked` off the top level; the per-entry mark alone
+    would leave that count at zero while answers were being withheld."""
+    with Sandbox() as box:
+        box.write_input([finding("A", "critical")])
+
+        def leaking_pool(batches, make_runner, read_source=None, workers=8, on_done=None):
+            path, findings = batches[0]
+            return [{"file": path, "findings_in_batch": 1, "answered": 1,
+                     "state": av.COMPLETE,
+                     "verifications": [{
+                         "finding": {k: findings[0].get(k) for k in
+                                     ("file", "line", "symbol", "vuln_class")},
+                         "state": av.COMPLETE,
+                         "answer": {"verdict": "undetermined", "citation": []},
+                         "leak": {"span_chars": 120},
+                     }], "attempts": []}]
+
+        saved, ab.run_pool = ab.run_pool, leaking_pool
+        try:
+            lane.main(["lane", "verifier"])
+        finally:
+            ab.run_pool = saved
+        env = box.envelope()
+        check(len(env["leaked"]) == 1, "envelope: a withheld answer is counted",
+              str(env["leaked"]))
+        check(env["leaked"][0].get("symbol") == "A",
+              "envelope: the leak names its finding", str(env["leaked"][0]))
+
+
+def test_the_envelope_keeps_per_batch_diagnostics() -> None:
+    """[REQUIRED] The batch envelopes carry the phase records, tool counts and
+    rejection reasons; this entrypoint used to drop all of them when flattening
+    into one envelope. The first real run then reported a failure whose cause
+    existed nowhere on disk."""
+    with Sandbox() as box:
+        box.write_input([finding("A", "critical")])
+
+        def failing_pool(batches, make_runner, read_source=None, workers=8, on_done=None):
+            path, findings = batches[0]
+            return [{"file": path, "findings_in_batch": 1, "answered": 0,
+                     "state": av.FAILED,
+                     "verifications": [{
+                         "finding": {k: findings[0].get(k) for k in
+                                     ("file", "line", "symbol", "vuln_class")},
+                         "state": av.FAILED, "answer": None, "reason": "none"}],
+                     "attempts": [{"attempt": 1, "phases": [
+                         {"phase": "investigate", "seconds": 2.4, "tool_calls": 0,
+                          "entries_returned": 0, "banked_total": 0, "rejections": [],
+                          "exit_code": 1,
+                          "output_tail": "Error: Unauthorized: unauthorized"}]}]}]
+
+        saved, ab.run_pool = ab.run_pool, failing_pool
+        try:
+            lane.main(["lane", "verifier"])
+        finally:
+            ab.run_pool = saved
+        env = box.envelope()
+        check("diagnostics" in env, "envelope: carries per-batch diagnostics",
+              str(sorted(env)))
+        tails = [p.get("output_tail")
+                 for d in env["diagnostics"] for a in d["attempts"]
+                 for p in a["phases"]]
+        check(any("Unauthorized" in (t or "") for t in tails),
+              "envelope: a failure's cause survives into the envelope", str(tails))
+
+
 def test_the_claim_carries_every_lane_s_evidence() -> None:
     """Where two lanes describe the same defect differently, that disagreement
     is information the verifier should see rather than a detail to collapse."""
