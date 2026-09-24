@@ -89,6 +89,7 @@ type Server struct {
 	rbacManager                     *rbac.Manager
 	systemMonitor                   *monitoring.SystemMonitor
 	healthCollector                 *health.Collector
+	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
 	haManager                       *ha.Manager
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
@@ -287,9 +288,21 @@ func New(
 	commandPublisher *commands.Publisher, // Issue #1319: fan-out config push to active stewards
 	pushStore business.PushStore, // Issue #1320: durable push-state persistence for HA failover
 	blobStore blob.BlobStore, // Issue #1702: installer artifact storage
+	healthAlertManager health.AlertManager, // Issue #4208: reused from server.go's health.NewAlertManager instance
+	healthTraceManager health.TraceManager, // Issue #4208: reused from server.go's health.NewTraceManager instance
 ) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Issue #4208: health.NewHandler's methods (detailed health, metrics, alerts,
+	// traces) existed and were unit-tested but had no caller outside their own
+	// package. Constructed only when all three dependencies are present — some
+	// lightweight test servers intentionally omit them, in which case the
+	// /api/v1/health/... detail routes are simply not registered (registerHealthDetailRoutes).
+	var healthDetailHandler *health.Handler
+	if healthCollector != nil && healthAlertManager != nil && healthTraceManager != nil {
+		healthDetailHandler = health.NewHandler(healthCollector, healthAlertManager, healthTraceManager)
 	}
 
 	// M-AUTH-1: Initialize central secrets provider for API key storage
@@ -338,6 +351,7 @@ func New(
 		rbacManager:             rbacManager,
 		systemMonitor:           systemMonitor,
 		healthCollector:         healthCollector,
+		healthDetailHandler:     healthDetailHandler, // Issue #4208
 		haManager:               haManager,
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler

@@ -159,6 +159,8 @@ func setupTestServer(t *testing.T) *Server {
 		nil,      // No command publisher for basic tests
 		nil,      // No push store for basic tests
 		nil,      // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -240,6 +242,8 @@ func setupRouteTestServer(t *testing.T) *Server {
 		nil, // No command publisher
 		nil, // No push store
 		nil, // No blob store
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1007,6 +1011,8 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
 		nil, // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1560,6 +1566,8 @@ func setupServerWithPublisher(t *testing.T, fx *controlPlaneFixture) (*Server, *
 	server, err := New(
 		cfg, logger, controllerSvc, configSvc, nil, rbacSvc,
 		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

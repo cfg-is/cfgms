@@ -849,6 +849,8 @@ func setupTestServerWithCertMgr(t *testing.T, certManager *cert.Manager) *Server
 		controllerService, configService,
 		nil, rbacService, certManager, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1009,6 +1011,8 @@ func setupTestServerWithIsolationEngine(t *testing.T) *Server {
 		controllerService, configService,
 		nil, rbacService, nil, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

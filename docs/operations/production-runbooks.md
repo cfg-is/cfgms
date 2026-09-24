@@ -95,6 +95,33 @@ curl -H "Authorization: Bearer $CFGMS_SESSION_TOKEN" \
   https://<controller>:8080/api/v1/monitoring/health
 ```
 
+#### Detailed Health, Metrics and Request Tracing
+
+`GET /api/v1/health/detailed`, `GET /api/v1/health/metrics` and
+`GET /api/v1/health/trace/{request_id}` are authenticated (mTLS admin bundle
+or session), served on the REST API listener, and gated by the same
+permission pattern as `/api/v1/monitoring/*`
+(`monitoring:read-detailed-health`, `monitoring:read-metrics`,
+`monitoring:read-trace` respectively). They back the `cfg` CLI's operational
+commands:
+
+```bash
+# Component-by-component health status, active alerts, and uptime
+cfg controller status --url https://<controller>:8080
+
+# Transport, storage, application and system metrics
+cfg controller metrics --url https://<controller>:8080
+
+# A specific request's trace (spans, timing, status) by request ID
+cfg trace <request-id> --url https://<controller>:8080
+```
+
+Traces are retained for 24 hours. `GET /api/v1/health/metrics/history`,
+`GET /api/v1/health/alerts`, `GET /api/v1/health/alerts/history` and
+`GET /api/v1/health/traces` are registered on the same listener under the
+matching `monitoring:read-*` permissions but have no dedicated `cfg`
+subcommand yet.
+
 #### Metrics
 
 CFGMS does not expose a Prometheus scrape endpoint. Metrics are JSON, served

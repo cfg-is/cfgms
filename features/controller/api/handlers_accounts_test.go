@@ -2307,6 +2307,8 @@ func setupTwoNodeSharedStoreServers(t *testing.T) (*Server, *Server) {
 			cfg, logger, controllerSvc, configSvc,
 			nil, rbacSvc, nil, tenantManager, rbacManager,
 			nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+			nil, // Issue #4208: health alert manager
+			nil, // Issue #4208: health trace manager
 		)
 		require.NoError(t, err)
 		t.Cleanup(func() {

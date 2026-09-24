@@ -113,6 +113,8 @@ func setupPushServer(t *testing.T) (*Server, *audit.Manager) {
 		nil, // No command publisher: fanout is out of scope for push handler unit tests
 		nil, // No push store for audit-only push tests
 		nil, // No blob store needed
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -559,6 +561,8 @@ func TestHandleConfigPush_PersistenceRecord(t *testing.T) {
 		nil,       // No command publisher: goroutine never runs, record stays in_progress
 		pushStore, // Wire real push store
 		nil,       // No blob store needed
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -700,6 +704,8 @@ func makePushServerWithStore(t *testing.T, cp controlplaneInterfaces.ControlPlan
 		pub,       // real command publisher
 		pushStore, // synced push store (wraps the real store, signals on status update)
 		nil,       // No blob store needed
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -844,6 +850,8 @@ func makePushServerWithCommandStore(t *testing.T, cp controlplaneInterfaces.Cont
 		pub,                           // real command publisher
 		storageManager.GetPushStore(), // real push store
 		nil,                           // No blob store needed
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	server.SetCommandStore(commandStore)

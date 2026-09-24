@@ -8,6 +8,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/directory"
+	"github.com/cfgis/cfgms/features/controller/health"
 	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -294,6 +295,18 @@ func (c *Controller) GetCertificateManager() *cert.Manager {
 		return nil
 	}
 	return c.server.GetCertificateManager()
+}
+
+// GetHealthTraceManager returns the request trace manager backing
+// GET /api/v1/health/trace/{request_id} (Issue #4208). Used by integration
+// tests that need to seed a trace directly against a real, running controller.
+func (c *Controller) GetHealthTraceManager() *health.DefaultTraceManager {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.server == nil {
+		return nil
+	}
+	return c.server.GetHealthTraceManager()
 }
 
 // GetRegistrationTokenStore returns the registration token store instance

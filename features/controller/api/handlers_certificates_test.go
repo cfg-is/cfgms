@@ -80,6 +80,8 @@ func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
 		nil, // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	server.SetStewardStore(storageManager.GetStewardStore())
@@ -354,6 +356,8 @@ func setupCertTestServerWithStewardStoreRoot(t *testing.T) (*Server, *cert.Manag
 		nil, // No command publisher
 		nil, // No push store
 		nil, // No blob store
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 
@@ -907,6 +911,8 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 		cfg, logger, controllerService, configService,
 		nil, rbacService, certMgr, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	server.SetSigningRotationService(rotationSvc)
@@ -961,6 +967,8 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 			cfg, logger, controllerService, configService,
 			nil, nil /* rbacService == nil */, nil, nil, nil,
 			nil, nil, nil, "", nil, auditMgr2, nil, nil, nil,
+			nil, // Issue #4208: health alert manager
+			nil, // Issue #4208: health trace manager
 		)
 		require.NoError(t, err)
 		nilRBACServer.SetSigningRotationService(service.NewSigningRotationService(nil, logger))
@@ -1176,6 +1184,8 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 		cfg, logger, controllerService, configService,
 		provisioningSvc, rbacService, certMgr, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

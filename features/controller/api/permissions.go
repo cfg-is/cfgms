@@ -77,6 +77,13 @@ var knownPermissions = map[string]bool{
 	"monitoring:read-anomalies":         true,
 	"monitoring:read-component-health":  true,
 	"monitoring:read-component-metrics": true,
+	// Detailed health / metrics-history / alerts / traces (Issue #4208)
+	"monitoring:read-detailed-health": true,
+	"monitoring:read-metrics-history": true,
+	"monitoring:read-alerts":          true,
+	"monitoring:read-alert-history":   true,
+	"monitoring:read-trace":           true,
+	"monitoring:read-traces":          true,
 	// HA management
 	"ha:read-status":  true,
 	"ha:read-cluster": true,
