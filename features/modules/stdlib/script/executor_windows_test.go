@@ -219,18 +219,31 @@ func TestExecute_Windows_TimeoutKillsProcessTree(t *testing.T) {
 	// without inflating the timeout so far that the test takes unreasonably
 	// long on a fast host — coldStart is typically well under a second there.
 	timeout := coldStart*3 + 2*time.Second
-	t.Logf("measured PowerShell cold-start=%s, derived Execute timeout=%s", coldStart, timeout)
+
+	// The grandchild must outlive timeout+reapGracePeriod (the whole window
+	// Execute can take to notice the timeout and tear down the process tree)
+	// by a wide margin, or it exits on its own before the kill lands and the
+	// test never observes a timeout at all. A fixed sleep (the prior
+	// approach) broke whenever coldStart pushed the derived timeout above the
+	// constant (Issue #4254: a 1m51s cold-start on a loaded runner derived a
+	// 5m37s timeout, past the old fixed 120s sleep). Deriving the sleep from
+	// the same timeout keeps the invariant "grandchild outlives timeout+reap"
+	// true for any measured cold-start; the 30s margin on top comfortably
+	// covers the guard windows below (timeout+reapGracePeriod+10s and
+	// +20s) with room to spare.
+	grandchildSleepDuration := timeout + reapGracePeriod + 30*time.Second
+	grandchildSleep := int(grandchildSleepDuration.Round(time.Second) / time.Second)
+	t.Logf("measured PowerShell cold-start=%s, derived Execute timeout=%s, derived grandchild sleep=%ds",
+		coldStart, timeout, grandchildSleep)
 
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
 
 	// The grandchild records its own PID, then holds the inherited stdout/stderr
 	// open by sleeping far past the timeout. `start /b` runs it in the same
 	// console (inheriting the redirected pipe) and backgrounds it, so cmd.exe
-	// returns immediately, leaving only the grandchild holding the pipe.
-	// Fixed at a generous 120s rather than derived from timeout: it only needs
-	// to outlast timeout+reapGracePeriod+guard by a wide margin, and the
-	// process tree is killed long before it would ever complete regardless.
-	const grandchildSleep = 120 // seconds
+	// returns immediately, leaving only the grandchild holding the pipe. The
+	// process tree is killed long before the sleep would ever complete
+	// regardless of how large it is derived to be.
 	script := "@echo off\r\n" +
 		"start /b \"\" powershell.exe -NoProfile -NonInteractive -Command " +
 		"\"Set-Content -LiteralPath '" + pidFile + "' -Value $PID; Start-Sleep -Seconds " +
