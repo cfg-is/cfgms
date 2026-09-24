@@ -159,8 +159,8 @@ func setupTestServer(t *testing.T) *Server {
 		nil,      // No command publisher for basic tests
 		nil,      // No push store for basic tests
 		nil,      // No blob store for basic tests
-		nil, // Issue #4208: health alert manager
-		nil, // Issue #4208: health trace manager
+		nil,      // Issue #4208: health alert manager
+		nil,      // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

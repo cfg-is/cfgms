@@ -104,8 +104,8 @@ func setupDeploymentServerWithPushStore(t *testing.T, wrap func(business.PushSto
 		nil,             // No command publisher needed
 		serverPushStore, // Real push store (optionally error-injecting wrapper)
 		nil,             // No blob store needed
-		nil, // Issue #4208: health alert manager
-		nil, // Issue #4208: health trace manager
+		nil,             // Issue #4208: health alert manager
+		nil,             // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {

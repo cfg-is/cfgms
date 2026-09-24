@@ -180,7 +180,7 @@ type Server struct {
 	signerCertSerial        string                                // Serial number of server cert used for config signing (Story #378)
 	healthCollector         *health.Collector
 	alertManager            *health.DefaultAlertManager
-	healthTraceManager      *health.DefaultTraceManager // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
+	healthTraceManager      *health.DefaultTraceManager              // Issue #4208: request trace manager backing GET /api/v1/health/trace/{request_id}
 	dnaStorageManager       *dnaStorage.Manager                      // Reports engine DNA storage (must be closed on Stop)
 	triggerManager          *workflowtrigger.TriggerManagerImpl      // Issue #414: Workflow trigger manager
 	gitSyncer               *gitsync.Syncer                          // Issue #666: git-sync write-through component
