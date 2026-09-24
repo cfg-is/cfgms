@@ -97,30 +97,34 @@ curl -H "Authorization: Bearer $CFGMS_SESSION_TOKEN" \
 
 #### Detailed Health, Metrics and Request Tracing
 
-`GET /api/v1/health/detailed`, `GET /api/v1/health/metrics` and
-`GET /api/v1/health/trace/{request_id}` are authenticated (mTLS admin bundle
-or session), served on the REST API listener, and gated by the same
-permission pattern as `/api/v1/monitoring/*`
-(`monitoring:read-detailed-health`, `monitoring:read-metrics`,
-`monitoring:read-trace` respectively). They back the `cfg` CLI's operational
-commands:
+`GET /api/v1/health/detailed` and `GET /api/v1/health/trace/{request_id}` are
+authenticated (mTLS admin bundle or session), served on the REST API listener,
+and gated by the same permission pattern as `/api/v1/monitoring/*`
+(`monitoring:read-detailed-health` and `monitoring:read-trace`).
+
+`GET /api/v1/health/metrics` and `GET /api/v1/health/metrics/history` carry the
+controller's collected metrics, so like `/api/v1/monitoring/metrics` they are
+served **only on the private metrics listener** (`metrics_listen_addr`), never on
+the REST API listener. They use the same authentication, under
+`monitoring:read-metrics` and `monitoring:read-metrics-history`. Run
+`cfg controller metrics` from the controller host or its private network.
 
 ```bash
-# Component-by-component health status, active alerts, and uptime
+# Component-by-component health status, active alerts, and uptime (REST API listener)
 cfg controller status --url https://<controller>:8080
 
-# Transport, storage, application and system metrics
-cfg controller metrics --url https://<controller>:8080
+# Transport, storage, application and system metrics (private metrics listener)
+cfg controller metrics --url https://<metrics_listen_addr>
+# or: CFGMS_METRICS_URL=https://<metrics_listen_addr> cfg controller metrics
 
-# A specific request's trace (spans, timing, status) by request ID
+# A specific request's trace (spans, timing, status) by request ID (REST API listener)
 cfg trace <request-id> --url https://<controller>:8080
 ```
 
-Traces are retained for 24 hours. `GET /api/v1/health/metrics/history`,
-`GET /api/v1/health/alerts`, `GET /api/v1/health/alerts/history` and
-`GET /api/v1/health/traces` are registered on the same listener under the
-matching `monitoring:read-*` permissions but have no dedicated `cfg`
-subcommand yet.
+Traces are retained for 24 hours. `GET /api/v1/health/alerts`,
+`GET /api/v1/health/alerts/history` and `GET /api/v1/health/traces` are
+registered on the REST API listener under the matching `monitoring:read-*`
+permissions but have no dedicated `cfg` subcommand yet.
 
 #### Metrics
 

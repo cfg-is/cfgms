@@ -174,7 +174,10 @@ func TestEveryHTTPRouteHasSecurityClassification(t *testing.T) {
 	metricsEntries := walkRoutes(t, s.metricsRouter)
 	wantMetricsEntries := []string{
 		"* /api/v1",
+		"* /api/v1/health",
 		"* /api/v1/monitoring",
+		"GET /api/v1/health/metrics",
+		"GET /api/v1/health/metrics/history",
 		"GET /api/v1/monitoring/components/{component}/metrics",
 		"GET /api/v1/monitoring/metrics",
 	}

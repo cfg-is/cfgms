@@ -156,8 +156,6 @@ var goldenRouteTable = []string{
 	"GET /api/v1/health/alerts",
 	"GET /api/v1/health/alerts/history",
 	"GET /api/v1/health/detailed",
-	"GET /api/v1/health/metrics",
-	"GET /api/v1/health/metrics/history",
 	"GET /api/v1/health/trace/{request_id}",
 	"GET /api/v1/health/traces",
 	"GET /api/v1/hyperv/profiles",

@@ -82,14 +82,19 @@ var controllerMetricsCmd = &cobra.Command{
 - Application: workflow/script queue depths, active executions
 - System: CPU, memory, goroutines
 
+Metrics are served only on the controller's private metrics listener
+(metrics_listen_addr in the controller config), never on the public API
+listener. Point --url, or CFGMS_METRICS_URL, at that listener's address. It
+is reachable only from the controller host or its private network.
+
 Output formats: text (default), json
 
 Examples:
-  # View metrics in human-readable format
-  cfg controller metrics --url=https://controller.example.com
+  # View metrics in human-readable format (run where the private listener is reachable)
+  cfg controller metrics --url=https://10.0.0.5:9443
 
   # Export metrics as JSON
-  cfg controller metrics --url=https://controller.example.com --format=json`,
+  CFGMS_METRICS_URL=https://10.0.0.5:9443 cfg controller metrics --format=json`,
 	RunE: runControllerMetrics,
 }
 
@@ -316,6 +321,14 @@ func runControllerStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runControllerMetrics(cmd *cobra.Command, args []string) error {
+	// Metrics live on the private metrics listener, not the public API
+	// listener, so CFGMS_METRICS_URL takes precedence over CFGMS_API_URL here;
+	// an explicit --url still wins over both.
+	if strings.TrimSpace(healthURL) == "" {
+		if metricsURL := os.Getenv("CFGMS_METRICS_URL"); metricsURL != "" {
+			healthURL = metricsURL
+		}
+	}
 	client, err := getControllerClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
@@ -331,6 +344,9 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("metrics are not served at this address (404): point --url or CFGMS_METRICS_URL at the controller's private metrics listener (metrics_listen_addr), not the public API")
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))

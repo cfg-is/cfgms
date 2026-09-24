@@ -127,7 +127,7 @@ func waitForHealthControllerReadyOrErr(t *testing.T, client *http.Client, base s
 // (ImplicitAdmin, per features/controller/api/middleware.go) authorized for every
 // permission — including the monitoring:read-* gates the new health-detail routes
 // carry (Issue #4208, AC1).
-func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string, *http.Client) {
+func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string, string, *http.Client) {
 	t.Helper()
 	testutil.SetupSecretsEnvForTest(t)
 	cfg := newHealthTestControllerConfig(t, freePort(t))
@@ -179,6 +179,7 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 	}
 
 	base := fmt.Sprintf("https://%s", cfg.ListenAddr)
+	metricsBase := fmt.Sprintf("https://%s", cfg.MetricsListenAddr)
 	waitForHealthControllerReadyOrErr(t, client, base, 30*time.Second, errCh)
 
 	t.Cleanup(func() {
@@ -189,7 +190,7 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 		}
 	})
 
-	return ctrl, base, client
+	return ctrl, base, metricsBase, client
 }
 
 // TestHealthDetailRoutes_EndToEnd is the AC2 [REQUIRED TEST]: cfg controller status,
@@ -201,7 +202,7 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 // module boundary from this integration package, so this test issues the identical
 // GET requests those commands issue and decodes into the same field shape.
 func TestHealthDetailRoutes_EndToEnd(t *testing.T) {
-	ctrl, base, client := startHealthTestController(t)
+	ctrl, base, metricsBase, client := startHealthTestController(t)
 
 	t.Run("controller status (GET /api/v1/health/detailed)", func(t *testing.T) {
 		resp, err := client.Get(base + "/api/v1/health/detailed")
@@ -230,8 +231,16 @@ func TestHealthDetailRoutes_EndToEnd(t *testing.T) {
 		assert.False(t, status.Timestamp.IsZero())
 	})
 
-	t.Run("controller metrics (GET /api/v1/health/metrics)", func(t *testing.T) {
-		resp, err := client.Get(base + "/api/v1/health/metrics")
+	t.Run("controller metrics (GET /api/v1/health/metrics) on the private metrics listener", func(t *testing.T) {
+		// health.Collector metrics stay off the public listener (#3156): the
+		// route is served only on metrics_listen_addr, which is what
+		// `cfg controller metrics --url` must point at.
+		public, err := client.Get(base + "/api/v1/health/metrics")
+		require.NoError(t, err)
+		_ = public.Body.Close()
+		require.Equal(t, http.StatusNotFound, public.StatusCode, "metrics must not be served on the public listener")
+
+		resp, err := client.Get(metricsBase + "/api/v1/health/metrics")
 		require.NoError(t, err)
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -444,9 +453,15 @@ var knownUnregisteredCLIPaths = map[string]string{
 	"/api/v1/modules/test-placeholder/test-placeholder/test-placeholder/approve": "Issue #4270",
 }
 
+// privateListenerCLIPaths are CLI-called routes served only on the private
+// metrics listener (#3156); the scan checks them there, not on the public one.
+var privateListenerCLIPaths = map[string]string{
+	"/api/v1/health/metrics": "health.Collector metrics (Issue #4208)",
+}
+
 func TestCLIAPIV1RoutesAreRegistered(t *testing.T) {
 	paths := cliAPIV1Paths(t)
-	_, base, client := startHealthTestController(t)
+	_, base, metricsBase, client := startHealthTestController(t)
 
 	for _, p := range paths {
 		p := p
@@ -454,9 +469,13 @@ func TestCLIAPIV1RoutesAreRegistered(t *testing.T) {
 			if issue, known := knownUnregisteredCLIPaths[p]; known {
 				t.Skipf("known gap, tracked separately (%s)", issue)
 			}
+			target := base
+			if _, private := privateListenerCLIPaths[p]; private {
+				target = metricsBase
+			}
 			matched := false
 			for _, method := range candidateMethods {
-				req, err := http.NewRequest(method, base+p, nil)
+				req, err := http.NewRequest(method, target+p, nil)
 				require.NoError(t, err)
 				resp, err := client.Do(req)
 				require.NoError(t, err)

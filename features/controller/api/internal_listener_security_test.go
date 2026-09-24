@@ -29,6 +29,7 @@ func TestProductMetricsAreOnlyOnPrivateRouter(t *testing.T) {
 	key := NewEphemeralTestKey(t, s, []string{
 		"monitoring:read-metrics",
 		"monitoring:read-component-metrics",
+		"monitoring:read-metrics-history",
 	}, "test-tenant", 5*time.Minute)
 
 	tests := []struct {
@@ -41,6 +42,17 @@ func TestProductMetricsAreOnlyOnPrivateRouter(t *testing.T) {
 		},
 		{
 			path:              "/api/v1/monitoring/components/controller/metrics",
+			privateStatusCode: http.StatusServiceUnavailable,
+		},
+		// Issue #4208: health.Collector metrics follow the #3156 rule. The test
+		// server has no health detail handler, so the private route answers 503
+		// (registered and authorised, nothing to serve) and the public one 404.
+		{
+			path:              "/api/v1/health/metrics",
+			privateStatusCode: http.StatusServiceUnavailable,
+		},
+		{
+			path:              "/api/v1/health/metrics/history",
 			privateStatusCode: http.StatusServiceUnavailable,
 		},
 	}
