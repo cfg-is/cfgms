@@ -152,8 +152,11 @@ policy) — `resume.py` only reports "still needs work".
 
 A `failed` step is returned as missing **only when its `stop_reason_raw` names a transient cause**
 (Issue #4177); otherwise it is surfaced to a human and never auto-retried, as before.
-`schema.is_transient_stop_reason()` is the single place that decides, and credential failures are
-its only member today.
+`resume.is_transient_failure()` is the single place that decides, and it admits two causes: a
+credential failure (`schema.is_transient_stop_reason()`), and a provider failure the lane already
+retried in place, which the lane records with the harness-written prefix
+`transient_provider_error:` (Issue #4261, see [The Ollama harness lane](#the-ollama-harness-lane)).
+Both share the cap below.
 
 **Why the exception exists.** A host token rotation revokes the old credential instantly, so a
 container mid-call dies with a 401 — measured: two containers died 5 s after a rotation, while two
@@ -1896,6 +1899,38 @@ on a plain CLI host, the systemd service account's home on a service-managed one
 `agent-dispatch.sh` before any docker call, failing the launch closed with
 `LAUNCH_FAILED:...:credential_unavailable:ollama key not signed in ...` on a host that has never
 run `ollama signin` as that account.
+
+**Concurrent steps (Issue #4261).** This lane runs eight steps at once; every other lane runs
+one. `LaneSpec(workers=...)` declares the count, and `harness_runner.run_lane` hands steps to that
+many worker threads from one shared cursor, writing envelopes exactly as the serial loop does.
+`CFGMS_SECURITY_REVIEW_LANE_WORKERS` (forwarded by `launch-investigator`, validated as a positive
+integer before any container starts) overrides the count, clamped to `LANE_WORKERS_MAX` (32). A lane
+that declares one worker ignores the override: one worker means its calls share state — a CLI
+session store that `--continue` resumes, for instance — and two workers sharing one answer each
+other's questions. This lane qualifies because each call is one self-contained `/api/generate`
+request: no `context` field is sent, so there is no conversation state to share, and each step
+writes only its own `.<step>.ollama-raw.json`. A lane-fatal result (`ollama_key_not_signed_in`)
+stops new steps from starting; steps already in flight finish and write their envelopes.
+
+Measured on an eight-step sample of sweep `2026-09-20T0056Z-ae5474eb`, `glm-5.3-flash:cloud`: two
+serial runs took 4311 s and 5927 s; eight workers took 1661 s, which is the time of the slowest single
+step. Each call is slower under load (median step 371 s serial against 661 s with eight workers), and
+no call was rate limited. Findings were 62 and 66 serial, 59 with eight workers. The two serial runs
+share 29% of their distinct `(file, CWE)` pairs, and the eight-worker run shares 17% and 22% with
+them, so on this sample the change in what the lane finds is inside the run-to-run noise of the
+model itself.
+
+**Transient provider failures are retried, then resumed (Issue #4261).** An HTTP 500, 502, 503 or
+504, a reset or refused connection, or a truncated response is retried in place three times, waiting
+10, 30 and 90 s; each retry is recorded in the call's meta as `transient_retries`. A timeout is
+never retried in place, because it has already used the whole per-call budget. When the retries run
+out, the lane appends its own marker line to the output tail and `LaneSpec.transient_stop_reason`
+turns that into `stop_reason_raw: transient_provider_error:<cause>`. `resume.missing_steps`
+re-attempts a step with that prefix under the same `MAX_TRANSIENT_RETRIES` cap as a revoked
+credential. Before this, such a step was a bare `harness_exit_1` and was never attempted again. The
+marker is written by the harness only: on a 200 response the same text is defanged inside the
+model's answer, so the reviewed code cannot make a deterministic failure look like a provider
+outage.
 
 **Import isolation, testing.** Identical bootstrap pattern to the other three lanes (the
 `/workspace`-relative two-layout fallback via `CFGMS_SECURITY_REVIEW_REPO_ROOT`, never a
