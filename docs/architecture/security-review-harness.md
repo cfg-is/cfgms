@@ -1519,6 +1519,37 @@ own argv and everything it reads from stdin, and a 200000-byte prompt is asserte
 byte for byte while never appearing in argv at all. `investigator-entrypoint_test.sh` proves the
 same property for both plan-mode branches with a real 200000-byte prompt file.
 
+## The OpenCode agentic finder lane
+
+`lanes/opencode_agent_lane.py` (roster harness `opencode_agent`) is the one finder lane that explores
+instead of reading a bundle. It plugs into the same shared loop (`harness_runner.run_lane`) as every
+other lane and replaces only the two parts a lane owns:
+
+- **The prompt** is the shared preamble, the step's scope and hypotheses, and the step's file LIST as
+  starting points. It carries no file bodies: the model opens what it needs.
+- **The call** runs OpenCode through `lanes/agentic_verifier_runner.OpenCodeRunner` against the
+  snapshot at `/workspace`. It gets read-only `read`/`grep`/`glob`/`list` and nothing else, and
+  `OPENCODE_DISABLE_PROJECT_CONFIG` stops the snapshot re-enabling tools. If the investigate turn
+  (wall-clock bounded, 900 s by default) prints no answer, the same session is continued with every
+  tool denied and an answer demanded. The call extracts the last `{"findings", "dispositions"}` object
+  from the output and writes it to the loop's raw path; with no answer it returns non-zero, and the
+  loop records the step failed, never complete.
+
+Extraction, schema validation, repair rounds, dispositions, envelopes, terminal states, the refusal
+policy and resume are the shared loop's, unchanged. So the lane's output is judged by exactly the checks
+every other lane's is. Each call's wall clock and tool-call count per turn is appended to
+`diagnostics/opencode-agent-calls.jsonl` for comparisons.
+
+It drives the in-container ollama daemon, so `--harness opencode_agent` gets what `--harness ollama`
+gets: the `ollama signin` keypair mount (`agent-dispatch.sh`), `ollama serve` at start
+(`investigator-entrypoint.sh`), and the Ollama Cloud DNS fragment (`dnsmasq-allowlist.d/opencode_agent.conf`,
+which deliberately omits `opencode.ai`). The lane imports from the trusted harness mount only, never
+from `/workspace`.
+
+**Prompt size.** `OpenCodeRunner` passes the prompt as one argv element, unlike the stdin rule above.
+That holds here only because this lane's prompts carry no file bodies. An oversized prompt (Linux caps
+one argument at 128 KiB) fails to launch, and the step is recorded failed rather than truncated.
+
 ## The Claude harness lane
 
 `.claude/scripts/security-review/lanes/claude_lane.py` (Issue #3933, epic #3927's switchover
