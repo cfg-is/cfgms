@@ -21,6 +21,19 @@ Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker-compose*.yml text eol=lf
 
+# Everything under .devcontainer/ is consumed inside Linux containers:
+# COPY'd into images (dnsmasq allowlist confs, scanner pins and rule
+# sources) or bind-mounted into them. A CRLF checkout puts a trailing \r into
+# every allowlisted domain and pinned requirement. text=auto keeps binaries
+# untouched.
+.devcontainer/** text=auto eol=lf
+
+# Read by .devcontainer/Dockerfile (`cut -d. -f1 < /tmp/nvmrc`) to pick the
+# Node major: a CRLF checkout makes it "22\r", and the nodesource setup URL
+# built from it is malformed (curl exit 3), failing every image build on a
+# Windows host.
+web/.nvmrc text eol=lf
+
 # Go source — gofmt is LF-only by convention; protect against churn
 *.go        text eol=lf
 
