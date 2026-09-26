@@ -77,8 +77,13 @@ type APIClient struct {
 	httpClient       *http.Client
 	onTokenRenewed   func(newToken string) error
 	onUnauthorized   func() (*APIClient, error)
-	onStepUpRequired func(wwwAuthenticate string) (presenceToken string, err error)
+	onStepUpRequired func(wwwAuthenticate, method, path string, bodyBytes []byte) (presenceToken string, err error)
 }
+
+// BaseURL returns the controller URL this client is configured against, so a
+// step-up handler (the CLI presence relay, Issue #4287) can build the confirmation
+// page URL without threading the controller URL through separately.
+func (c *APIClient) BaseURL() string { return c.baseURL }
 
 // APIClientConfig contains configuration for creating an API client
 type APIClientConfig struct {
@@ -110,14 +115,17 @@ type APIClientConfig struct {
 	// is insufficient for the requested action. This is distinct from a plain
 	// session-expired 401 (no CFGMS-StepUp header), which routes to OnUnauthorized.
 	//
-	// The callback receives the full WWW-Authenticate header value. It should:
+	// The callback receives the full WWW-Authenticate header value, plus the method,
+	// path and (already-buffered) body of the request that triggered the challenge —
+	// the CLI presence relay (Issue #4287) needs all three to lodge a presence
+	// request bound to the exact pending action. It should:
 	//   - Return a non-empty presence token on success (causes the original request
 	//     to be retried with X-Presence-Token).
 	//   - Return an error when the step-up cannot be completed (e.g., non-interactive
 	//     environment, unsupported assurance elevation).
 	//
 	// Nil = 401 with CFGMS-StepUp header is returned to the caller unchanged.
-	OnStepUpRequired func(wwwAuthenticate string) (presenceToken string, err error)
+	OnStepUpRequired func(wwwAuthenticate, method, path string, bodyBytes []byte) (presenceToken string, err error)
 }
 
 // APITokenCreateRequest represents the request body for creating a registration token
@@ -616,7 +624,7 @@ func (c *APIClient) execRequest(ctx context.Context, method, path string, bodyBy
 			// (session expired/revoked) route to onUnauthorized below.
 			if c.onStepUpRequired != nil {
 				_ = resp.Body.Close()
-				token, stepUpErr := c.onStepUpRequired(wwwAuth)
+				token, stepUpErr := c.onStepUpRequired(wwwAuth, method, path, bodyBytes)
 				if stepUpErr != nil {
 					return nil, stepUpErr
 				}
@@ -1548,6 +1556,100 @@ func (c *APIClient) CollectCliLogin(ctx context.Context, requestID string) (*Col
 			Token:          envelope.Data.Token,
 			SessionID:      envelope.Data.SessionID,
 			AbsoluteExpiry: envelope.Data.AbsoluteExpiry,
+		}, nil
+	default:
+		return nil, c.parseError(resp)
+	}
+}
+
+// --- CLI presence relay (Issue #4287) ---
+
+// LodgeCliPresenceRequestBody mirrors api.LodgeCliPresenceRequestBody on the
+// controller. BodyHash is the SHA-256 hex digest of the guarded request's body (an
+// empty body hashes to a fixed, well-known value).
+//
+// These four bound values are the whole body: the relay's confirmation page renders the
+// action from them and from nothing else, so there is no display-text field for a
+// caller to describe one action while binding another (handlers_cli_presence.go).
+type LodgeCliPresenceRequestBody struct {
+	Method     string `json:"method"`
+	Path       string `json:"path"`
+	BodyHash   string `json:"body_sha256"`
+	Permission string `json:"permission"`
+}
+
+// LodgeCliPresenceResponse mirrors api.LodgeCliPresenceResponse.
+type LodgeCliPresenceResponse struct {
+	RequestID string `json:"request_id"`
+	UserCode  string `json:"user_code"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// LodgeCliPresence calls POST /api/v1/cli-presence/lodge, authenticated by this
+// client's existing bearer/mTLS credential — the same credential that received the
+// presence step-up challenge in the first place.
+func (c *APIClient) LodgeCliPresence(ctx context.Context, body LodgeCliPresenceRequestBody) (*LodgeCliPresenceResponse, error) {
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/cli-presence/lodge", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, c.parseError(resp)
+	}
+
+	var envelope struct {
+		Data LodgeCliPresenceResponse `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &envelope.Data, nil
+}
+
+// CollectCliPresenceResult is the outcome of one poll against the cli-presence collect
+// endpoint. Exactly one of PresenceToken (on success), AlreadyGone, or a non-empty
+// Status is meaningful.
+type CollectCliPresenceResult struct {
+	Status        string
+	PresenceToken string
+	AlreadyGone   bool
+}
+
+// CollectCliPresence calls POST /api/v1/cli-presence/{id}/collect, authenticated by
+// this client's existing bearer/mTLS credential — the same one that lodged the
+// request. A collect by any other credential is rejected server-side
+// (REQUEST_ACCOUNT_MISMATCH). Performs exactly one poll; the caller decides whether
+// and how often to call it again.
+func (c *APIClient) CollectCliPresence(ctx context.Context, requestID string) (*CollectCliPresenceResult, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/cli-presence/"+url.PathEscape(requestID)+"/collect", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusGone:
+		return &CollectCliPresenceResult{AlreadyGone: true}, nil
+	case http.StatusOK:
+		var envelope struct {
+			Data struct {
+				Status        string `json:"status"`
+				PresenceToken string `json:"presence_token,omitempty"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+			return nil, fmt.Errorf("failed to decode response: %w", err)
+		}
+		return &CollectCliPresenceResult{
+			Status:        envelope.Data.Status,
+			PresenceToken: envelope.Data.PresenceToken,
 		}, nil
 	default:
 		return nil, c.parseError(resp)

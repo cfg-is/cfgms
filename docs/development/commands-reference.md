@@ -2095,13 +2095,40 @@ response, it distinguishes two cases:
 
 When running interactively (stdin is a TTY):
 
-- **Presence required** (`presence="required"` in the header): CLI-driven presence
-  assertion is not currently supported — a ceremony served from a CLI-local loopback
-  listener can never satisfy a configured relying party, in any controller
-  configuration (see [ADR-021 Amendment
-  4](../architecture/decisions/021-identity-assurance-levels.md#amendment-4-2026-08-28-relying-party-is-configuration-has-no-default-and-wiring-it-exposed-a-cli-relay-regression)).
-  `cfg` fails fast with an actionable error directing the operator to complete the
-  action from the controller web UI.
+- **Presence required** (`presence="required"` in the header): `cfg` runs the CLI
+  presence relay (Issue #4287, [ADR-021 Amendment
+  6](../architecture/decisions/021-identity-assurance-levels.md#amendment-6-2026-09-26-the-cli-presence-relay-resolves-amendment-4s-accepted-regression)) —
+  the resolution of Amendment 4's regression below. `cfg` does not run the WebAuthn
+  ceremony itself and does not serve a page (a ceremony served from a CLI-local
+  loopback listener can never satisfy a relying party configured for the controller's
+  own origin). Instead:
+
+  1. `cfg` lodges a presence request (`POST /api/v1/cli-presence/lodge`) bound to the
+     exact pending action — HTTP method, path, a SHA-256 of the request body, and the
+     permission the challenge named — using the same credential that received the
+     `401`.
+  2. It prints the pending action (`<permission> — <method> <path>`) and a short
+     confirmation code, and opens
+     `https://<controller>/cli/presence?request_id=<id>` — the controller's own web
+     UI, under its configured `rp_origins`, never a CLI-local address. If a browser
+     cannot be opened automatically, `cfg` prints the URL for the operator to open
+     manually (on this machine or another).
+  3. The operator confirms that the code, and the action the page displays, match what
+     the terminal printed, then completes the WebAuthn presence ceremony on that page.
+     The page renders the bound permission, method, path and request-body digest — the
+     relay carries no free-form description field, so the two sides are independent
+     renderings of one binding rather than prose either side has to trust. The
+     resulting presence token is bound to the same method/path/body-hash/permission the
+     CLI lodged, and requires the same account that lodged the request.
+  4. `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the token and retries the
+     original request with `X-Presence-Token` attached.
+
+  An expired or unknown request, a ceremony failure, an unconfigured relying party
+  (`503 WEBAUTHN_NOT_CONFIGURED`), or a principal that cannot reach `AssuranceStrong`
+  each fail the command closed with a distinct, actionable error — the guarded request
+  is never sent without a valid token. API-key (`AssuranceMachine`) principals cannot
+  lodge a presence request at all (ADR-021 Amendment 7 Decision 2); automation stays out of this
+  relay entirely.
 
 - **Assurance too low** (no `presence="required"`): `cfg` fails with an actionable
   message directing the operator to use an mTLS-authenticated session or log in via

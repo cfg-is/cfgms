@@ -206,6 +206,11 @@ type Server struct {
 	stopCliLoginSweep               chan struct{}                            // Issue #3721: signals the cli-login expiry sweep to exit
 	cliLoginSweepDone               chan struct{}                            // Issue #3721: closed when the cli-login sweep goroutine exits
 	cliLoginSweepLease              lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-login expiry sweep
+	cliPresenceLodgeLimiter         *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence lodge
+	cliPresenceCollectLimiter       *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence collect
+	stopCliPresenceSweep            chan struct{}                            // Issue #4287: signals the cli-presence expiry sweep to exit
+	cliPresenceSweepDone            chan struct{}                            // Issue #4287: closed when the cli-presence sweep goroutine exits
+	cliPresenceSweepLease           lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-presence expiry sweep
 
 	// Listeners retained so Close can shut them regardless of whether their serve
 	// goroutine has reached Serve yet: http.Server.Shutdown closes only listeners
@@ -323,6 +328,10 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("failed to construct cli-login expiry lease job: %w", err)
 	}
+	cliPresenceSweepLease, err := haManager.NewBackgroundLoopLease("controller-cli-presence-request-expiry", logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct cli-presence expiry lease job: %w", err)
+	}
 
 	// Issue #1695: Parse TrustedProxies CIDRs once at startup so per-request
 	// extractSourceIP calls never parse strings.
@@ -387,6 +396,15 @@ func New(
 		stopCliLoginSweep:      make(chan struct{}),
 		cliLoginSweepDone:      make(chan struct{}),
 		cliLoginSweepLease:     cliLoginSweepLease,
+		// Issue #4287: per-source rate limits on cli-presence lodge and collect,
+		// mirroring the cli-login lodge/collect budgets — both routes are
+		// authenticated here, but a compromised low-privilege credential is still
+		// bounded from hammering either one.
+		cliPresenceLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
+		cliPresenceCollectLimiter: newSourceRateLimiter(30, time.Minute),
+		stopCliPresenceSweep:      make(chan struct{}),
+		cliPresenceSweepDone:      make(chan struct{}),
+		cliPresenceSweepLease:     cliPresenceSweepLease,
 		// Issue #3761: default poll interval for runRollout to notice a halt persisted
 		// by a peer node during a ring soak; tests shrink this for determinism.
 		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
@@ -560,6 +578,10 @@ func New(
 	// timer, not only lazily on read, so an "expiry" audit event fires even when
 	// nobody is actively polling collect.
 	server.startCliLoginRequestSweep()
+
+	// Issue #4287: background sweep for expired cli-presence requests, mirroring the
+	// cli-login sweep above.
+	server.startCliPresenceRequestSweep()
 
 	return server, nil
 }
@@ -1171,6 +1193,20 @@ func (s *Server) Close(ctx context.Context) error {
 			}
 		}
 
+		// Issue #4287: signal the cli-presence expiry sweep to exit alongside the
+		// cli-login sweep. Guarded by a nil check for the same reason — several tests
+		// build a *Server literal directly without going through New().
+		if s.stopCliPresenceSweep != nil {
+			close(s.stopCliPresenceSweep)
+			select {
+			case <-s.cliPresenceSweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for cli-presence sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
 		// Stop audit manager before closing the HTTP server so that any
 		// in-flight audit writes can still reach storage.
 		if s.auditManager != nil {
@@ -1774,6 +1810,8 @@ func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
 		"credential-request-collect": s.credentialRequestCollectLimiter,
 		"cli-login-lodge":            s.cliLoginLodgeLimiter,
 		"cli-login-collect":          s.cliLoginCollectLimiter,
+		"cli-presence-lodge":         s.cliPresenceLodgeLimiter,
+		"cli-presence-collect":       s.cliPresenceCollectLimiter,
 	} {
 		if limiter != nil {
 			limiter.useSharedCounter(routeName, store, s.logger)

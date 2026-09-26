@@ -68,6 +68,17 @@ func setupWebAuthnServer(t *testing.T, rpID string, rpOrigins []string) (*Server
 	return server, username
 }
 
+// principalForAccount builds a Principal whose ID is username's real account ID
+// (uuid.New(), not the username string) — the identifier handlePresenceBegin and
+// handlePresenceFinish actually resolve via getAccountByID (Issue #4287 fix).
+func principalForAccount(t *testing.T, server *Server, username string) *Principal {
+	t.Helper()
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct, "account %q must exist", username)
+	return &Principal{ID: acct.ID, Name: username}
+}
+
 // tvSession builds a minimal webauthn.SessionData keyed to the test-vector challenge.
 func tvSession(userID []byte, rpID string) webauthn.SessionData {
 	return webauthn.SessionData{
@@ -799,8 +810,9 @@ func TestWebAuthnPresenceBegin(t *testing.T) {
 		credID := []byte("presence-begin-cred-id")
 		injectCredential(t, server, username, credID)
 
-		// Principal ID must match the web-account username so getAccount resolves it.
-		principal := &Principal{ID: username, Name: username}
+		// Principal ID must be the account's real ID — handlePresenceBegin resolves
+		// it via getAccountByID (Issue #4287 fix).
+		principal := principalForAccount(t, server, username)
 		rec := doPresenceBegin(t, server, principal)
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -852,9 +864,8 @@ func TestWebAuthnPresenceBegin(t *testing.T) {
 
 	t.Run("NoCredentials_409", func(t *testing.T) {
 		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-		// A freshly-created account has zero credentials. The principal ID must equal
-		// the web-account username so getAccount(ctx, principal.ID) finds it.
-		principal := &Principal{ID: username, Name: username}
+		// A freshly-created account has zero credentials.
+		principal := principalForAccount(t, server, username)
 		rec := doPresenceBegin(t, server, principal)
 		assert.Equal(t, http.StatusConflict, rec.Code)
 		assert.Equal(t, "NO_CREDENTIALS", errCode(t, rec.Body.Bytes()))
@@ -890,7 +901,7 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 	t.Run("NoActiveSession_400", func(t *testing.T) {
 		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
 		// Account exists but begin was never called — no presence session stored.
-		principal := &Principal{ID: username, Name: username}
+		principal := principalForAccount(t, server, username)
 		rec := doPresenceFinish(t, server, principal)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "NO_ACTIVE_PRESENCE_SESSION", errCode(t, rec.Body.Bytes()))
@@ -898,19 +909,140 @@ func TestWebAuthnPresenceFinish(t *testing.T) {
 
 	t.Run("SessionExpired_400", func(t *testing.T) {
 		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
-		principal := &Principal{ID: username, Name: username}
+		principal := principalForAccount(t, server, username)
 
-		acct, err := server.getAccount(context.Background(), username)
-		require.NoError(t, err)
-		require.NotNil(t, acct)
-
-		// Inject a presence session whose TTL has already elapsed.
-		injectPresenceSession(server, username, tvSession([]byte(acct.ID), tvRPID), -1*time.Second)
+		// Inject a presence session whose TTL has already elapsed, keyed by the same
+		// real account ID handlePresenceFinish looks up.
+		injectPresenceSession(server, principal.ID, tvSession([]byte(principal.ID), tvRPID), -1*time.Second)
 
 		rec := doPresenceFinish(t, server, principal)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		assert.Equal(t, "SESSION_EXPIRED", errCode(t, rec.Body.Bytes()))
 	})
+}
+
+// --- Issue #4287: CLI presence-relay action binding on handlePresenceFinish ---
+
+// doPresenceFinishWithCliRequest calls handlePresenceFinish with cliPresenceRequestIDParam
+// set, optionally with a request body (nil = empty body, matching doPresenceFinish).
+func doPresenceFinishWithCliRequest(t *testing.T, server *Server, principal *Principal, cliRequestID string, body *bytes.Reader) *httptest.ResponseRecorder {
+	t.Helper()
+	if body == nil {
+		body = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/webauthn/presence/finish?"+cliPresenceRequestIDParam+"="+cliRequestID, body)
+	if principal != nil {
+		req = withPrincipal(req, principal)
+	}
+	rec := httptest.NewRecorder()
+	server.handlePresenceFinish(rec, req)
+	return rec
+}
+
+// TestWebAuthnPresenceFinish_CliRelay_UnknownRequest_404 verifies that an unknown or
+// expired cli-presence request is rejected before any WebAuthn session is touched.
+func TestWebAuthnPresenceFinish_CliRelay_UnknownRequest_404(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	principal := principalForAccount(t, server, username)
+
+	rec := doPresenceFinishWithCliRequest(t, server, principal, "cli-presence-does-not-exist", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "REQUEST_NOT_FOUND", errCode(t, rec.Body.Bytes()))
+}
+
+// TestWebAuthnPresenceFinish_CliRelay_AccountMismatch_403 is the [REQUIRED TEST] for
+// Desired State 3: the browser session running the ceremony must resolve to the same
+// account that lodged the cli-presence request. Checked before the WebAuthn session is
+// consumed — no begin/assertion is set up here, proving the fail-fast ordering.
+func TestWebAuthnPresenceFinish_CliRelay_AccountMismatch_403(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	lodger := principalForAccount(t, server, username)
+	lodger.Assurance = session.AssuranceStrong
+
+	lodged := lodgeAndDecode(t, server, lodger, LodgeCliPresenceRequestBody{
+		Method:     http.MethodPost,
+		Path:       "/api/v1/modules/approvals/test-address/approve",
+		BodyHash:   emptyBodyHashHex,
+		Permission: "module:approve",
+	})
+
+	// A second, real account — otherwise the earlier ACCOUNT_NOT_FOUND check would
+	// fire first and this test would not actually exercise the account-match check.
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "webauthn-test-user-2"})
+	require.Equal(t, http.StatusCreated, rec.Code, "create second account: %s", rec.Body.String())
+	otherApprover := principalForAccount(t, server, "webauthn-test-user-2")
+	otherApprover.Assurance = session.AssuranceStrong
+
+	finishRec := doPresenceFinishWithCliRequest(t, server, otherApprover, lodged.RequestID, nil)
+	assert.Equal(t, http.StatusForbidden, finishRec.Code)
+	assert.Equal(t, "REQUEST_ACCOUNT_MISMATCH", errCode(t, finishRec.Body.Bytes()))
+}
+
+// TestWebAuthnPresenceFinish_CliRelay_Success is the real end-to-end success path
+// (Issue #4287, Desired State 2): a real ECDSA P-256 assertion, verified by
+// wa.FinishLogin exactly as production does, mints an action-bound presence token and
+// hands it to the durable cli-presence request record for the CLI's collect poll.
+func TestWebAuthnPresenceFinish_CliRelay_Success(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	priv, pubKey := generateSyntheticCredential(t)
+	credID := []byte("cli-presence-cred-1")
+	injectSignCredential(t, server, username, credID, pubKey, 0)
+
+	principal := principalForAccount(t, server, username)
+	principal.Assurance = session.AssuranceStrong
+
+	lodged := lodgeAndDecode(t, server, principal, LodgeCliPresenceRequestBody{
+		Method:     http.MethodPost,
+		Path:       "/api/v1/modules/approvals/test-address/approve",
+		BodyHash:   emptyBodyHashHex,
+		Permission: "module:approve",
+	})
+
+	beginRec := doPresenceBegin(t, server, principal)
+	require.Equal(t, http.StatusOK, beginRec.Code, "body: %s", beginRec.Body.String())
+	var beginResp APIResponse
+	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &beginResp))
+	optsMap, ok := beginResp.Data.(map[string]interface{})
+	require.True(t, ok)
+	pk, ok := optsMap["publicKey"].(map[string]interface{})
+	require.True(t, ok)
+	challengeB64, _ := pk["challenge"].(string)
+	require.NotEmpty(t, challengeB64)
+
+	assertionBody := buildSignAssertionBody(t, priv, credID, tvRPID, tvOrigin, challengeB64, 1)
+
+	rec := doPresenceFinishWithCliRequest(t, server, principal, lodged.RequestID, assertionBody)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var finishResp APIResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &finishResp))
+	data, err := json.Marshal(finishResp.Data)
+	require.NoError(t, err)
+	var out WebAuthnPresenceFinishResponse
+	require.NoError(t, json.Unmarshal(data, &out))
+	require.NotEmpty(t, out.PresenceToken)
+
+	// The minted token must carry the action binding read verbatim from the lodged
+	// request — never from anything this "browser" request itself supplied.
+	tokenHash := hashPresenceToken(out.PresenceToken)
+	raw, found := server.presenceTokens.Load(tokenHash)
+	require.True(t, found, "the minted token must still be present (not yet consumed by requirePermission)")
+	record, ok := raw.(*presenceTokenRecord)
+	require.True(t, ok)
+	assert.Equal(t, http.MethodPost, record.boundMethod)
+	assert.Equal(t, "/api/v1/modules/approvals/test-address/approve", record.boundPath)
+	assert.Equal(t, emptyBodyHashHex, record.boundBodyHash)
+	assert.Equal(t, "module:approve", record.boundPermissionID)
+
+	// The durable cli-presence request must now be "approved" and carry the same
+	// token, ready for the CLI's collect poll.
+	stored, err := server.getCliPresenceRequestByID(context.Background(), lodged.RequestID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, cliPresenceRequestStatusApproved, stored.Status)
+	assert.Equal(t, out.PresenceToken, stored.PresenceToken)
+	assert.Equal(t, principal.ID, stored.ApprovedBy)
 }
 
 // --- Issue #2966: first-passkey enrollment via magic link ---

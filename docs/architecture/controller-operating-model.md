@@ -1746,6 +1746,14 @@ cfg module approve <publisher>/<name>@<version> [--content-hash <hash-or-prefix>
 
 Admin mTLS authentication (via admin bundle file) is required for both commands, following the same auth pattern as `cfg registration approve`.
 
+**Presence ceremony (Issue #4287, ADR-021 Amendment 7).** `module:approve` carries `RequireUserPresence: true` — an authenticated, `AssuranceStrong` admin credential is not enough; the request also needs a fresh, single-use presence token proving a human touched their security key for this specific approval. `cfg module approve` cannot run that WebAuthn ceremony itself (no browser, and a CLI-local loopback listener can never satisfy a relying party configured for the controller's own origin — the rejected shape from ADR-021 Amendment 4). Instead it drives a controller-served relay:
+
+1. Lodge — `POST /api/v1/cli-presence/lodge`, bound to the exact pending action: HTTP method, path, a SHA-256 of the request body, and the `module:approve` permission. Authenticated by the same credential that received the `401` step-up challenge; API-key (`AssuranceMachine`) principals cannot lodge one at all (ADR-021 Amendment 7 Decision 2).
+2. Relay page — `cfg` prints a short confirmation code and opens `https://<controller>/cli/presence?request_id=<id>`, served by the controller's own web UI under its configured `rp_origins`. The admin confirms the code and completes the presence ceremony there (`POST /api/v1/webauthn/presence/begin|finish`, `userVerification: "required"`). The page's consent text is the binding itself — permission, method, path and request-body digest, read from the lodged record; the relay has no caller-supplied description field at any layer, so the action displayed is the action the token is bound to. The minted presence token is bound to the same method/path/body-hash/permission the CLI lodged — never to anything the browser page itself supplies — and requires the same account that lodged the request.
+3. Collect — `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the single-use token, then retries `POST /api/v1/modules/approvals/<address>/approve` with `X-Presence-Token` attached.
+
+An expired or unknown request, a code mismatch, a ceremony failure, an unconfigured relying party, or an assurance level that cannot reach `AssuranceStrong` each fail the command closed with a distinct error — the guarded approval is never sent without a valid, action-bound token.
+
 ## Observe-Resolution: DNA-driven Module Activation
 
 `ResolveObserveModules` (`features/controller/modules/resolution/observe.go`) computes the set of modules a steward should observe based on its baseline DNA attributes and the registered module manifests.

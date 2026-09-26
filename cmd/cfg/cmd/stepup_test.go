@@ -4,10 +4,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,16 +19,18 @@ import (
 
 func TestParseStepUpHeader(t *testing.T) {
 	tests := []struct {
-		name         string
-		header       string
-		wantRequired string
-		wantPresence bool
+		name           string
+		header         string
+		wantRequired   string
+		wantPresence   bool
+		wantPermission string
 	}{
 		{
-			name:         "full header with presence",
-			header:       `CFGMS-StepUp realm="cfgms", required="strong", presence="required"`,
-			wantRequired: "strong",
-			wantPresence: true,
+			name:           "full header with presence and permission",
+			header:         `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`,
+			wantRequired:   "strong",
+			wantPresence:   true,
+			wantPermission: "module:approve",
 		},
 		{
 			name:         "assurance only no presence",
@@ -55,19 +59,15 @@ func TestParseStepUpHeader(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, gotPresence := parseStepUpHeader(tt.header)
+			got, gotPresence, gotPermission := parseStepUpHeader(tt.header)
 			assert.Equal(t, tt.wantRequired, got)
 			assert.Equal(t, tt.wantPresence, gotPresence)
+			assert.Equal(t, tt.wantPermission, gotPermission)
 		})
 	}
 }
 
 // --- Required test: non-interactive + CFGMS-StepUp → actionable error, no infinite retry ---
-//
-// AC: "Non-interactive (no TTY): fails immediately with an actionable error naming the
-// required assurance level — never hangs waiting for input."
-// AC: "[REQUIRED TEST] a mocked 401 + CFGMS-StepUp response with a mocked non-interactive
-// environment produces the expected error text and does not retry indefinitely or block."
 
 func TestStepUp_NonInteractive_ProducesActionableError(t *testing.T) {
 	origTerm := isTerminalFn
@@ -77,7 +77,7 @@ func TestStepUp_NonInteractive_ProducesActionableError(t *testing.T) {
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required"`)
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
@@ -86,8 +86,8 @@ func TestStepUp_NonInteractive_ProducesActionableError(t *testing.T) {
 	cfg := &APIClientConfig{
 		BaseURL:     server.URL,
 		TLSInsecure: true,
-		OnStepUpRequired: func(wwwAuth string) (string, error) {
-			return defaultStepUpHandler(client)(wwwAuth)
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
 		},
 	}
 	var err error
@@ -104,10 +104,6 @@ func TestStepUp_NonInteractive_ProducesActionableError(t *testing.T) {
 }
 
 // --- Required test: plain 401 (no CFGMS-StepUp) falls through to onUnauthorized ---
-//
-// AC: "[REQUIRED TEST] a mocked 401 without the CFGMS-StepUp header still falls through
-// to the existing onUnauthorized bundle-auth path unchanged (regression test for the
-// untouched case)."
 
 func TestStepUp_Plain401_FallsToOnUnauthorized(t *testing.T) {
 	fallbackCalled := false
@@ -137,7 +133,7 @@ func TestStepUp_Plain401_FallsToOnUnauthorized(t *testing.T) {
 		OnUnauthorized: func() (*APIClient, error) {
 			return fallbackClient, nil
 		},
-		OnStepUpRequired: func(wwwAuth string) (string, error) {
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
 			stepUpCalled = true
 			return "", nil
 		},
@@ -160,7 +156,7 @@ func TestStepUp_Interactive_PresenceRequired_RetrigesWithToken(t *testing.T) {
 
 	const testToken = "test-presence-token-xyz"
 	origFlow := presenceBrowserFlowFn
-	presenceBrowserFlowFn = func(_ *APIClient) (string, error) {
+	presenceBrowserFlowFn = func(_ *APIClient, _, _ string, _ []byte, _ string) (string, error) {
 		return testToken, nil
 	}
 	defer func() { presenceBrowserFlowFn = origFlow }()
@@ -173,7 +169,7 @@ func TestStepUp_Interactive_PresenceRequired_RetrigesWithToken(t *testing.T) {
 			_, _ = w.Write([]byte(`{"tokens":[],"total":0}`))
 			return
 		}
-		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required"`)
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="module:approve"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer server.Close()
@@ -182,8 +178,8 @@ func TestStepUp_Interactive_PresenceRequired_RetrigesWithToken(t *testing.T) {
 	cfg := &APIClientConfig{
 		BaseURL:     server.URL,
 		TLSInsecure: true,
-		OnStepUpRequired: func(wwwAuth string) (string, error) {
-			return defaultStepUpHandler(client)(wwwAuth)
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
 		},
 	}
 	var err error
@@ -193,38 +189,6 @@ func TestStepUp_Interactive_PresenceRequired_RetrigesWithToken(t *testing.T) {
 	_, err = client.ListTokens(context.Background(), "")
 	require.NoError(t, err)
 	assert.Equal(t, 2, requestCount, "must retry original request once with presence token")
-}
-
-// --- Required test: runPresenceBrowserFlow fails fast, without a controller round-trip ---
-//
-// AC: "cfg stepup's presence path fails fast: the real runPresenceBrowserFlow (rename
-// acceptable) returns the actionable error naming the web UI path, without starting a
-// listener or opening a browser. The test in cmd/cfg/cmd/stepup_test.go must call the
-// real function — not override presenceBrowserFlowFn to skip it."
-
-func TestRunPresenceBrowserFlow_FailsFastWithoutContactingController(t *testing.T) {
-	presenceBeginCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/presence/begin") {
-			presenceBeginCalled = true
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer server.Close()
-
-	client, err := NewAPIClient(&APIClientConfig{
-		BaseURL:     server.URL,
-		TLSInsecure: true,
-	})
-	require.NoError(t, err)
-
-	token, err := runPresenceBrowserFlow(client)
-	require.Error(t, err, "CLI-driven presence assertion must fail fast")
-	assert.Empty(t, token)
-	assert.False(t, presenceBeginCalled, "must not contact the presence-begin endpoint")
-	assert.Contains(t, err.Error(), "web UI", "error must name the web UI as the alternative")
-	assert.NotContains(t, strings.ToLower(err.Error()), "unsupported configuration",
-		"error must name the alternative explicitly, not say \"unsupported configuration\"")
 }
 
 // --- Interactive + no presence: assurance-level step-up fails with actionable error ---
@@ -245,8 +209,8 @@ func TestStepUp_Interactive_NoPresence_FailsWithActionableError(t *testing.T) {
 	cfg := &APIClientConfig{
 		BaseURL:     server.URL,
 		TLSInsecure: true,
-		OnStepUpRequired: func(wwwAuth string) (string, error) {
-			return defaultStepUpHandler(client)(wwwAuth)
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
 		},
 	}
 	var err error
@@ -257,4 +221,165 @@ func TestStepUp_Interactive_NoPresence_FailsWithActionableError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "step-up required")
 	assert.Contains(t, err.Error(), "strong")
+	assert.Contains(t, err.Error(), "web UI")
+}
+
+// --- Interactive + presence required, but the challenge names no permission ---
+
+func TestStepUp_Interactive_PresenceRequired_NoPermission_FailsWithActionableError(t *testing.T) {
+	origTerm := isTerminalFn
+	isTerminalFn = func() bool { return true }
+	defer func() { isTerminalFn = origTerm }()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// presence="required" but no permission= — an older controller, or a malformed
+		// challenge. The relay cannot be lodged without knowing what it is lodging for.
+		w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="strong", presence="required"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	var client *APIClient
+	cfg := &APIClientConfig{
+		BaseURL:     server.URL,
+		TLSInsecure: true,
+		OnStepUpRequired: func(wwwAuth, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuth, method, path, bodyBytes)
+		},
+	}
+	var err error
+	client, err = NewAPIClient(cfg)
+	require.NoError(t, err)
+
+	_, err = client.doRequest(context.Background(), "GET", "/api/v1/anything", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not name a permission")
+}
+
+// --- runPresenceBrowserFlow: the real CLI presence relay, exercised end to end ---
+
+// presenceRelayTestServer wires the lodge/collect endpoints the relay drives, plus a
+// hook for the caller to inspect what was lodged and to control the collect response
+// sequence.
+type presenceRelayTestServer struct {
+	server     *httptest.Server
+	lodgedBody LodgeCliPresenceRequestBody
+	// lodgedRaw is the exact JSON the CLI put on the wire, so a test can assert on
+	// fields the typed body does not declare.
+	lodgedRaw    []byte
+	collectCalls int
+	// collectResponses is served in order, one per collect call; the last entry
+	// repeats for any call beyond len(collectResponses).
+	collectResponses []func(w http.ResponseWriter)
+}
+
+func newPresenceRelayTestServer(t *testing.T, requestID, userCode string, collectResponses ...func(w http.ResponseWriter)) *presenceRelayTestServer {
+	t.Helper()
+	rts := &presenceRelayTestServer{collectResponses: collectResponses}
+	rts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/cli-presence/lodge":
+			raw, readErr := io.ReadAll(r.Body)
+			require.NoError(t, readErr)
+			rts.lodgedRaw = raw
+			require.NoError(t, json.Unmarshal(raw, &rts.lodgedBody))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			resp := map[string]interface{}{
+				"data": LodgeCliPresenceResponse{
+					RequestID: requestID,
+					UserCode:  userCode,
+					ExpiresAt: time.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339),
+				},
+			}
+			require.NoError(t, json.NewEncoder(w).Encode(resp))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/cli-presence/"+requestID+"/collect":
+			idx := rts.collectCalls
+			if idx >= len(rts.collectResponses) {
+				idx = len(rts.collectResponses) - 1
+			}
+			rts.collectCalls++
+			rts.collectResponses[idx](w)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(rts.server.Close)
+	return rts
+}
+
+func jsonCollectResponse(status, token string) func(w http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]string{"status": status, "presence_token": token},
+		})
+	}
+}
+
+func TestRunPresenceBrowserFlow_Success(t *testing.T) {
+	origBrowser := presenceOpenBrowserFn
+	var openedURL string
+	presenceOpenBrowserFn = func(u string) error { openedURL = u; return nil }
+	defer func() { presenceOpenBrowserFn = origBrowser }()
+
+	rts := newPresenceRelayTestServer(t, "cli-presence-abc", "WXYZ-1234",
+		jsonCollectResponse("pending", ""),
+		jsonCollectResponse("collected", "the-real-presence-token"),
+	)
+
+	client, err := NewAPIClient(&APIClientConfig{BaseURL: rts.server.URL, TLSInsecure: true})
+	require.NoError(t, err)
+
+	origInterval := presencePollInterval
+	presencePollInterval = 5 * time.Millisecond
+	defer func() { presencePollInterval = origInterval }()
+
+	token, err := runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", []byte(`{}`), "module:approve")
+	require.NoError(t, err)
+	assert.Equal(t, "the-real-presence-token", token)
+
+	assert.Equal(t, "POST", rts.lodgedBody.Method)
+	assert.Equal(t, "/api/v1/modules/approvals/test/approve", rts.lodgedBody.Path)
+	assert.Equal(t, "module:approve", rts.lodgedBody.Permission)
+	assert.Equal(t, sha256Hex([]byte(`{}`)), rts.lodgedBody.BodyHash)
+
+	// The lodge body carries the four bound values and no display text: the
+	// confirmation page renders the action from the binding the controller persisted,
+	// so the CLI never gets to describe one action while binding another.
+	assert.NotContains(t, string(rts.lodgedRaw), "description",
+		"lodge must not send caller-authored consent text")
+
+	assert.Contains(t, openedURL, "cli-presence-abc", "the opened URL must reference the lodged request ID")
+	assert.Contains(t, openedURL, "/cli/presence", "the opened URL must be the controller's own relay page")
+}
+
+func TestRunPresenceBrowserFlow_Gone(t *testing.T) {
+	rts := newPresenceRelayTestServer(t, "cli-presence-gone", "WXYZ-1234", func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusGone)
+	})
+	client, err := NewAPIClient(&APIClientConfig{BaseURL: rts.server.URL, TLSInsecure: true})
+	require.NoError(t, err)
+
+	origBrowser := presenceOpenBrowserFn
+	presenceOpenBrowserFn = func(string) error { return nil }
+	defer func() { presenceOpenBrowserFn = origBrowser }()
+
+	_, err = runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", nil, "module:approve")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already collected")
+}
+
+func TestRunPresenceBrowserFlow_Expired(t *testing.T) {
+	rts := newPresenceRelayTestServer(t, "cli-presence-expired", "WXYZ-1234", jsonCollectResponse("expired", ""))
+	client, err := NewAPIClient(&APIClientConfig{BaseURL: rts.server.URL, TLSInsecure: true})
+	require.NoError(t, err)
+
+	origBrowser := presenceOpenBrowserFn
+	presenceOpenBrowserFn = func(string) error { return nil }
+	defer func() { presenceOpenBrowserFn = origBrowser }()
+
+	_, err = runPresenceBrowserFlow(client, "POST", "/api/v1/modules/approvals/test/approve", nil, "module:approve")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out waiting")
 }

@@ -2036,9 +2036,9 @@ func TestRequirePermission_UserPresence_PrincipalMismatchRejected(t *testing.T) 
 
 // TestRequirePermission_UserPresence_MachinePrincipalGets403 verifies that an API-key
 // principal (AssuranceMachine) against a RequireUserPresence permission receives a plain 403,
-// not a step-up challenge. Automation cannot self-elevate (ADR-021 Decision 8).
+// not a step-up challenge. Automation cannot self-elevate (ADR-021 Amendment 7 Decision 2).
 //
-// [REQUIRED TEST] ADR-021 Decision 8: machine principals are permanently excluded from
+// [REQUIRED TEST] ADR-021 Amendment 7 Decision 2: machine principals are permanently excluded from
 // presence-gated routes; the response must be 403 INSUFFICIENT_PERMISSIONS, never 401.
 func TestRequirePermission_UserPresence_MachinePrincipalGets403(t *testing.T) {
 	withPresencePermission(t)
@@ -2102,6 +2102,160 @@ func TestRequirePermission_UserPresence_ExpiredToken(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`)
 	assert.Contains(t, rec.Body.String(), "presence_token_expired",
 		"response body must carry presence_token_expired error code")
+}
+
+// --- Action-binding enforcement tests (Issue #4287, ADR-021 Amendment 7) ---
+
+// mintBoundPresenceToken injects a presence token bound to a specific action, mirroring
+// mintPresenceToken but for the CLI-relay-minted shape (handlePresenceFinish's
+// cli_presence_request_id path). bodyHash is the hex-encoded SHA-256 digest of the
+// (possibly empty) request body the token is bound to.
+func mintBoundPresenceToken(t *testing.T, s *Server, principalID, method, path, bodyHash, permissionID string) string {
+	t.Helper()
+	tokenBytes := make([]byte, 32)
+	_, err := rand.Read(tokenBytes)
+	require.NoError(t, err)
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	tokenHash := hashPresenceToken(token)
+	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+		principalID:       principalID,
+		expires:           time.Now().Add(presenceTokenTTL),
+		boundMethod:       method,
+		boundPath:         path,
+		boundBodyHash:     bodyHash,
+		boundPermissionID: permissionID,
+	})
+	t.Cleanup(func() { s.presenceTokens.Delete(tokenHash) })
+	return token
+}
+
+// emptyBodyHash is the SHA-256 hex digest of an empty byte string — what every test
+// request in this section hashes to, since requestWithTLSCert sends a nil/empty body.
+const emptyBodyHashHex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+func TestRequirePermission_UserPresence_ActionBinding_MatchAdmitted(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	token := mintBoundPresenceToken(t, server, "test-admin",
+		http.MethodPost, "/api/v1/test/presence-action", emptyBodyHashHex, "test:presence-required")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "a token bound to exactly this method/path/body/permission must be admitted")
+}
+
+func TestRequirePermission_UserPresence_ActionBinding_MethodMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Bound to PUT, but the retried request below is a POST — every other field matches.
+	token := mintBoundPresenceToken(t, server, "test-admin",
+		http.MethodPut, "/api/v1/test/presence-action", emptyBodyHashHex, "test:presence-required")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "a method mismatch must be rejected")
+	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `presence="required"`)
+}
+
+func TestRequirePermission_UserPresence_ActionBinding_PathMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Bound to a different path than the one actually retried.
+	token := mintBoundPresenceToken(t, server, "test-admin",
+		http.MethodPost, "/api/v1/test/some-other-action", emptyBodyHashHex, "test:presence-required")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "a path mismatch must be rejected")
+	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+}
+
+func TestRequirePermission_UserPresence_ActionBinding_BodyMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Bound to a body hash that does not match the (empty) body of the retried request.
+	token := mintBoundPresenceToken(t, server, "test-admin",
+		http.MethodPost, "/api/v1/test/presence-action", "not-the-real-body-hash", "test:presence-required")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "a body-hash mismatch must be rejected")
+	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+}
+
+func TestRequirePermission_UserPresence_ActionBinding_PermissionMismatchRejected(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	// Bound to a different permission ID than the route this token is presented to.
+	token := mintBoundPresenceToken(t, server, "test-admin",
+		http.MethodPost, "/api/v1/test/presence-action", emptyBodyHashHex, "module:approve")
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "a permission mismatch must be rejected")
+	assert.Contains(t, rec.Body.String(), "presence_token_action_mismatch")
+}
+
+// TestRequirePermission_UserPresence_UnboundTokenStillAdmitted verifies that a token
+// with no binding (today's ordinary browser step-up flow shape) is unaffected by the
+// new binding check — it is admitted purely on the existing principal-match contract.
+func TestRequirePermission_UserPresence_UnboundTokenStillAdmitted(t *testing.T) {
+	withPresencePermission(t)
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	handler := wrapWithAuth(server, "test", "presence-required",
+		func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	token := mintPresenceToken(t, server, "test-admin") // no binding fields set
+
+	req := requestWithTLSCert(http.MethodPost, "/api/v1/test/presence-action", adminCert)
+	req.Header.Set(presenceTokenHeader, token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code, "an unbound token must be admitted unchanged")
 }
 
 // TestWebSessionCookie_AssurancePropagatedToPrincipal verifies that the cookie auth path

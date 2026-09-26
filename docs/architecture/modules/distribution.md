@@ -214,6 +214,15 @@ cfg module approve cfgms/hyperv@0.2.1 --content-hash 9f2c4a1b
 
 The CLI resolves the ref against `GET /api/v1/modules/approvals` (the pending review queue) to find the matching entry's address, then calls `POST /api/v1/modules/approvals/{address}/approve`, which transitions the cache entry from `pending` to `approved` via `ApprovalWorkflow.Approve(addr)`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error, as does a ref with no matching pending entry.
 
+`module:approve` carries `RequireUserPresence: true` (ADR-021 Decision 4): approval authorizes a signed binary to execute on every targeted endpoint, so the POST above needs a fresh `X-Presence-Token` — a proof the admin actually touched their security key for this specific approval, not just an already-authenticated session. `cfg module approve` obtains one automatically via the CLI presence relay (Issue #4287, ADR-021 Amendment 7):
+
+1. The controller answers the first `POST .../approve` attempt with `401` and `WWW-Authenticate: CFGMS-StepUp ..., presence="required", permission="module:approve"`.
+2. `cfg` lodges a presence request (`POST /api/v1/cli-presence/lodge`) bound to that exact method, path, request-body hash and permission, and prints a short confirmation code and a URL at the controller's own web UI origin (`https://<controller>/cli/presence?request_id=<id>`) — never a CLI-local address.
+3. The admin opens that URL, confirms the code and the displayed action match the terminal, and completes the WebAuthn presence ceremony there. The page displays the bound permission, method, path and request-body digest — the relay accepts no caller-supplied description, so the approval shown is the approval being authorized. The controller mints the presence token bound to the same method/path/body-hash/permission the CLI lodged, and hands it to the durable request record.
+4. `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the token, then retries the original `POST .../approve` with `X-Presence-Token` attached. The approval now succeeds.
+
+Automation (API-key/`AssuranceMachine` principals) cannot lodge a presence request at all (ADR-021 Amendment 7 Decision 2) — `module:approve` stays an admin-only, presence-proven action.
+
 Because the cache key includes the content hash, `publisher/name@version` can match several pending bundles — and since `QueueForReview` is reached before signature verification, a bundle's claimed publisher is unverified at that point. A ref matching more than one pending entry is refused with an error listing each candidate content hash; pass `--content-hash` (full value or an unambiguous prefix) to name the bundle that was reviewed. The approved content hash is echoed on success.
 
 To inspect all cached modules (`cfg module list` calls `GET /api/v1/modules`):

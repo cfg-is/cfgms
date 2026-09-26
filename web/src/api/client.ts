@@ -519,6 +519,71 @@ export async function approveCliLoginRequest(
   return { ok: true, status: response.status, requestStatus }
 }
 
+// ── CLI presence relay (Issue #4287) ─────────────────────────────────────────────
+
+export type CliPresenceRequestStatus = 'pending' | 'approved' | 'collected' | 'expired'
+
+/**
+ * A lodged CLI presence-relay request as read from GET /api/v1/cli-presence/{id}.
+ *
+ * permission/method/path/bodySha256 are the pending action's binding — the exact four
+ * values the controller enforces against the retried request when the presence token is
+ * presented (requirePermission's action-binding check). They are the consent text this
+ * page renders: the response carries no caller-authored description, because a caller
+ * that can bind one action and describe another can substitute a different action into
+ * the admin's gesture (handlers_cli_presence.go). None of them is used to build the
+ * WebAuthn ceremony calls, which name only the request id (see runCeremony).
+ */
+export interface CliPresenceRequestState {
+  requestId: string
+  status: CliPresenceRequestStatus
+  userCode: string
+  expiresAt: string
+  permission: string
+  method: string
+  path: string
+  bodySha256: string
+}
+
+export interface CliPresenceReadResult {
+  ok: boolean
+  status: number
+  request?: CliPresenceRequestState
+}
+
+/**
+ * Reads a lodged CLI presence-relay request's status, user code and bound action
+ * (Issue #4287) — this page's only way to learn what it is about to approve. Scoped
+ * server-side to the account that lodged the request; a mismatched account and an
+ * unknown ID are both 404 (existence-oracle safe).
+ */
+export async function getCliPresenceRequest(id: string): Promise<CliPresenceReadResult> {
+  const response = await apiFetch(`/api/v1/cli-presence/${encodeURIComponent(id)}`)
+  if (!response.ok) {
+    return { ok: false, status: response.status }
+  }
+  let request: CliPresenceRequestState | undefined
+  try {
+    const body = (await response.json()) as Record<string, unknown>
+    const data = body.data as Record<string, unknown> | undefined
+    if (data !== undefined && data !== null) {
+      request = {
+        requestId: typeof data.request_id === 'string' ? data.request_id : '',
+        status: (typeof data.status === 'string' ? data.status : 'pending') as CliPresenceRequestStatus,
+        userCode: typeof data.user_code === 'string' ? data.user_code : '',
+        expiresAt: typeof data.expires_at === 'string' ? data.expires_at : '',
+        permission: typeof data.permission === 'string' ? data.permission : '',
+        method: typeof data.method === 'string' ? data.method : '',
+        path: typeof data.path === 'string' ? data.path : '',
+        bodySha256: typeof data.body_sha256 === 'string' ? data.body_sha256 : '',
+      }
+    }
+  } catch {
+    // Body parse is best-effort; the caller treats a missing request as an error.
+  }
+  return { ok: true, status: response.status, request }
+}
+
 // ── Credential requests (Issue #3723 / Epic #3711) ──────────────────────────────
 
 /**

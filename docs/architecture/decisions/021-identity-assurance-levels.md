@@ -1102,3 +1102,157 @@ a direct read of the raw certificate skips entirely.
 `resolveGrantedMarkers`. A structural test
 (`TestCertSerial_OnlySetByExtractAdminPrincipal`) asserts no other code path in the package
 sets `CertSerial` on a `Principal`, so the root-scope gate's assumption cannot rot silently.
+
+---
+
+## Amendment 7 (2026-09-26): The CLI presence relay resolves Amendment 4's accepted regression
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Resolves:** Amendment 4's
+accepted regression · **Extends:** Decision 4
+
+### Context
+
+Amendment 4 accepted, as a known regression, that `cfg`'s presence and registration
+relays (`cmd/cfg/cmd/stepup.go`, `cmd/cfg/cmd/webauthn.go`) stop completing their
+browser ceremony the moment a deployment configures a production `rp_id`: a ceremony
+served from a CLI-local loopback origin (`http://127.0.0.1:<port>`) can never satisfy a
+relying party configured for the controller's own domain, and no configuration change
+closes that gap — the browser itself refuses the ceremony. Issue #3728 turned the
+resulting stuck prompt into an immediate, actionable `errPresenceCeremonyUnsupported`
+failure, but left `cfg module approve` — and every other `RequireUserPresence`-gated
+command — with **no working CLI path at all** against a controller that enforces
+presence. Amendment 4 named the correct fix without building it: "the CLI opens a
+controller-served relay page ... rather than serving the ceremony page from the CLI
+itself." Issue #4287 builds it, for the presence surface (`cfg module approve` is the
+first command it unblocks); the identical regression in `cfg webauthn register`'s own
+loopback relay is out of scope here and may reuse this mechanism later.
+
+### Decision
+
+`cfg` never runs a WebAuthn ceremony itself and never serves a page. Instead it lodges
+a presence request, opens a page the controller serves at its own configured
+`rp_origins`, and collects the resulting token over its own already-authenticated
+connection — the identical lodge/collect shape `cfg login` (#3722, Epic #3711) already
+shipped for browser-authenticated CLI login, reused rather than re-invented:
+
+1. **Lodge** — `POST /api/v1/cli-presence/lodge`
+   (`features/controller/api/handlers_cli_presence.go`), authenticated by the same
+   credential that received the `401` step-up challenge. The body names the exact
+   pending action, and nothing else: HTTP method, path, a SHA-256 of the request body,
+   and the permission the challenge carried (added to the `CFGMS-StepUp`
+   `WWW-Authenticate` header alongside `required`/`presence`, so the CLI's generic
+   step-up handler learns it without any command-specific plumbing). Method and path
+   are validated at lodge time — a closed HTTP-method set, and a bounded
+   printable-ASCII absolute path — because both are persisted and both are rendered as
+   consent text.
+2. **Relay page** — the controller serves `/cli/presence?request_id=<id>`
+   (`web/src/pages/CliPresence.tsx`) under its own `rp_origins`. The page reads the
+   lodged request's bound action and user code (`GET /api/v1/cli-presence/{id}`) and
+   renders the binding itself — permission, method, path, body digest — as the consent
+   text, requires an explicit "codes match" confirmation before it will run anything, then
+   drives the existing presence ceremony
+   (`POST /api/v1/webauthn/presence/begin|finish`, `userVerification: "required"`)
+   with `cli_presence_request_id` attached to the `finish` call.
+3. **Collect** — `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the
+   single-use token and retries the original request with `X-Presence-Token`.
+
+**Decision 1 — action binding.** `handlePresenceFinish`, when given
+`cli_presence_request_id`, copies that lodged request's method/path/body-hash/
+permission verbatim onto the minted `presenceTokenRecord` — never from anything the
+browser page itself supplies. `requirePermission` then rejects the token outright if
+the method, path, body hash, or permission of the request actually being retried
+doesn't match all four. This closes the gap Decision 4's principal-only binding left
+open: malware on the admin's own machine — the same threat model Decision 4 exists to
+defeat — could otherwise swap a different pending action into the same gesture,
+because a presence token proved only *who*, never *what for*. The binding's
+trustworthiness rests on where the four values come from: the CLI's own authenticated
+lodge call, a channel the browser never touches and cannot rewrite, not a value the
+relay page passes to `finish` on its own authority.
+
+The binding is only as good as what the admin is shown, so **the consent display is the
+binding and nothing else.** The lodge API accepts no human-readable description field,
+and `GET /api/v1/cli-presence/{id}` returns no such field to render. The reason is the
+same adversary: malware holding the CLI credential authors every byte of the lodge body,
+so free-form display text would let it bind `POST
+/api/v1/modules/approvals/<evil>/approve` while describing a benign approval. The
+controller's own trusted origin would then render the lie, the user code would genuinely
+match the terminal (it is the same request), and the gesture would authorize the evil
+action — reopening, before the gesture, exactly the substitution this binding closes
+after it. `CliPresence.tsx` therefore renders permission, method, path and body digest —
+the four values `requirePermission` compares — and there is no other description of the
+action anywhere in the flow. The CLI prints the same permission/method/path rendering to
+the terminal from its own local values, so the admin compares two independent renderings
+of one binding rather than trusting either side's prose.
+
+Today's tokens minted through the *ordinary* browser step-up flow
+(`StepUpModal.tsx`, Story #2786) stay principal-only — that flow doesn't yet supply a
+binding, so `requirePermission` treats an empty `boundPermissionID` as unbound rather
+than rejecting it, preserving that flow unchanged. **Whether that flow should gain the
+identical binding is a real question this amendment answers: yes, by default** — the
+same malware-swap gap applies to it equally, since it also authorizes a
+`RequireUserPresence` action with only a principal-bound token. Implementing it is
+future work (`StepUpModal.tsx` already knows the exact method/path/body of the
+mutation it's retrying, so the same mechanism applies directly); this amendment
+records the answer so a future change doesn't have to re-litigate it.
+
+**Decision 2 — automation stays out.** `handleLodgeCliPresenceRequest` rejects an
+`AssuranceMachine` (API-key) principal outright (`403 MACHINE_PRINCIPAL_CANNOT_LODGE`).
+This is not a new floor: Decision 4's presence gate already excludes machine
+principals structurally — `requirePermission`'s assurance check sends `AssuranceMachine`
+straight to a plain `403` before the presence branch is ever reached (no step-up
+challenge is issued for it to act on). The lodge-time check makes the same exclusion
+explicit and immediate at the one new entry point this relay adds, rather than relying
+solely on the pre-existing downstream gate.
+
+**Decision 3 — same account on both sides.** The record identifies the account that
+lodged the request (`LodgedByPrincipalID`). `handlePresenceFinish` rejects a
+`cli_presence_request_id` whose lodging account differs from the browser session
+completing the ceremony (`403 REQUEST_ACCOUNT_MISMATCH`), and collect applies the
+identical check in the other direction (a collect attempt by an account that didn't
+lodge the request). Neither the CLI's own authenticated channel nor the browser's
+passkey-authenticated session is sufficient alone; the relay requires both ends to
+resolve to the same principal.
+
+### Decision 4's permission set has grown past what its own text names
+
+Decision 4 above enumerates four permissions by name:
+`module:approve`/`module:reject`/`publisher-trust:add`/`registration:approve-by-cidr`.
+`permissionAssurance` (`features/controller/api/assurance.go`) now carries
+`RequireUserPresence: true` on **ten**: those four, plus `tenant:approve-delete`
+(#3182), `osquery:execute` (#3569), `signing-credential:request` (#3693),
+`credential-request:approve` (#3718), and `hyperv-profile:create`/`:delete` (#3785).
+Each addition individually cited Decision 4's own founder-decision framing
+("growing this set is a founder decision, not a reviewer's judgement call") in its own
+story, but Decision 4's text was never updated to match. This relay is generic over
+every one of the ten — the lodge handler validates the named permission against the
+live registry, not a hardcoded list — so all ten gain a working CLI path from this
+story, not just `module:approve`. Recorded here as the authoritative count; Decision
+4's own text is not amended further by this story.
+
+**Why a loopback listener remains rejected, restated.** Amendment 4 already rejected
+adding a loopback or non-HTTPS origin to `rp_origins`; this amendment does not revisit
+that. No code in `cmd/cfg` opens a listener of any kind for this relay — the browser
+navigates directly to the controller's own origin, and the CLI only ever polls an
+already-established HTTPS connection it initiated itself.
+
+**Implementation reference (Issue #4287):**
+`features/controller/api/handlers_cli_presence.go` (lodge/read/collect),
+`features/controller/api/routes_cli_presence.go`, the action-binding fields on
+`presenceTokenRecord` (`features/controller/api/webauthn_types.go`) and their mint site
+in `handlePresenceFinish` (`features/controller/api/handlers_webauthn.go`), the binding
+check in `requirePermission` (`features/controller/api/middleware.go`),
+`cmd/cfg/cmd/stepup.go` (`runPresenceBrowserFlow` replaces
+`errPresenceCeremonyUnsupported`), and `web/src/pages/CliPresence.tsx`.
+
+**Incidental fix carried by this story:** `handlePresenceBegin`/`handlePresenceFinish`
+resolved the acting account via `getAccount(ctx, principal.ID)` — a username-keyed
+lookup — while `principal.ID` is the account's internal ID for every bound principal
+(mTLS cert binding, cfg-CLI session, web-session cookie). This 404'd every real
+presence ceremony run by a bound account in production; it went unnoticed because
+existing unit tests fabricated `Principal{ID: username}` directly rather than routing
+through a real bound account. Both handlers now resolve via `getAccountByID`, the same
+lookup the session/cookie authentication branches already use
+(`features/controller/api/middleware.go`). Discovered by this story's own end-to-end
+integration test (`test/integration/controller/module_routes_test.go`), which is the
+first test in the repository to drive a real WebAuthn presence ceremony against a real,
+certificate-bound account over real HTTP.

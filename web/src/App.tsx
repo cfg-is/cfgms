@@ -9,6 +9,8 @@
  *   /enroll/:token   → Enroll (unauthenticated — magic-link redemption)
  *   /login/confirm   → CliLogin (unauthenticated top-level route — the passkey
  *                      ceremony renders inline for a session-less visitor; Issue #3722)
+ *   /cli/presence    → CliPresence (unauthenticated top-level route — the CLI
+ *                      presence relay confirmation screen; Issue #4287)
  *   /                → AppShell layout → FleetOverview
  *   /stewards/:id    → AppShell layout → StewardAssetPage
  *   /audit           → AppShell layout → AuditView
@@ -46,6 +48,10 @@
  * RequireAuth's own guard condition) rather than being wrapped by the shared
  * guard, since the guard's fallback is the plain login screen with no
  * confirmation-specific content either side of it.
+ *
+ * /cli/presence is the same shape again (Issue #4287): the CLI presence-relay
+ * confirmation screen re-derives RequireAuth's own guard condition locally rather
+ * than being wrapped by it, for the identical reason /login/confirm does.
  */
 import { Routes, Route } from 'react-router'
 import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
@@ -64,6 +70,7 @@ import RefreshQueuePage from './refresh/RefreshQueuePage.tsx'
 import PasskeysView from './passkeys/PasskeysView.tsx'
 import Enroll from './pages/Enroll.tsx'
 import CliLogin from './pages/CliLogin.tsx'
+import CliPresence from './pages/CliPresence.tsx'
 import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
 import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
 import MonitoringView from './monitoring/MonitoringView.tsx'
@@ -81,6 +88,9 @@ function App() {
 
         {/* Unauthenticated top-level route: CLI login confirmation (Issue #3722) */}
         <Route path="/login/confirm" element={<CliLogin />} />
+
+        {/* Unauthenticated top-level route: CLI presence relay (Issue #4287) */}
+        <Route path="/cli/presence" element={<CliPresence />} />
 
         {/* All other routes require an authenticated session */}
         <Route
