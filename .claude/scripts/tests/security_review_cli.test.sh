@@ -2219,8 +2219,13 @@ check_contains "both planner containers were dispatched (claude-model-b)" "$(cat
 # claude-model-b (launched second) is free to exit immediately; give it a
 # moment, then confirm it really has while claude-model-a (launched first)
 # is still held open by this test.
+#
+# The existence test must go through compgen -G: `[[ -f dir/exited-* ]]`
+# performs no pathname expansion, so it tests for a file literally named
+# "exited-cid-claude-model-b-*", never finds one, and the loop always spun the
+# full 20s deadline even when model-b had exited long before (Issue #4198).
 mp_deadline=$((SECONDS + 20))
-while [[ ! -f "${MP_SANDBOX}"/exited-cid-claude-model-b-* ]] && [[ $SECONDS -lt $mp_deadline ]]; do
+while [[ -z "$(compgen -G "${MP_SANDBOX}/exited-cid-claude-model-b-*")" ]] && [[ $SECONDS -lt $mp_deadline ]]; do
   sleep 0.05
 done
 mp_model_b_exited=0; [[ -n "$(compgen -G "${MP_SANDBOX}/exited-cid-claude-model-b-*")" ]] && mp_model_b_exited=1
