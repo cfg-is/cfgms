@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/cfgis/cfgms/features/controller/api"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/directory"
 	"github.com/cfgis/cfgms/features/controller/health"
@@ -307,6 +308,20 @@ func (c *Controller) GetHealthTraceManager() *health.DefaultTraceManager {
 		return nil
 	}
 	return c.server.GetHealthTraceManager()
+}
+
+// GetAPIServer returns the underlying REST API server instance. Used by integration
+// tests (Issue #4287) that need to wire a WebAuthn relying party against a real,
+// already-constructed controller — cmd/controller/main.go does the equivalent wiring
+// (srv.GetAPIServer().SetWebAuthn(wa)) through features/controller/server.Server
+// directly, one layer below this wrapper.
+func (c *Controller) GetAPIServer() *api.Server {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.server == nil {
+		return nil
+	}
+	return c.server.GetAPIServer()
 }
 
 // GetRegistrationTokenStore returns the registration token store instance

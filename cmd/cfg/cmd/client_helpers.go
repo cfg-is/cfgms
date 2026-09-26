@@ -180,8 +180,8 @@ func resolveSessionOrBundleClient(apiURL string, tlsInsecure bool, serverName st
 			// another confirmation prompt — confirmation was already obtained above.
 			return resolveBundleClient("", tlsInsecure, serverName)
 		},
-		OnStepUpRequired: func(wwwAuthenticate string) (string, error) {
-			return defaultStepUpHandler(client)(wwwAuthenticate)
+		OnStepUpRequired: func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuthenticate, method, path, bodyBytes)
 		},
 	}
 	client, err = NewAPIClient(cfg)

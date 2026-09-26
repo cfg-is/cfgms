@@ -432,6 +432,10 @@ func TestSourceRateLimiter_ClusterModeUsesSharedCounter(t *testing.T) {
 		haManager:                     newNonAuthoritativeHAManager(t),
 		enrolmentTokenMintLimiter:     newSourceRateLimiter(10, time.Minute),
 		credentialRequestLodgeLimiter: newSourceRateLimiter(20, time.Minute),
+		// Issue #4287: the CLI presence-relay lodge/collect routes share this same
+		// per-source rate limiter mechanism, mirroring cli-login's lodge/collect.
+		cliPresenceLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
+		cliPresenceCollectLimiter: newSourceRateLimiter(30, time.Minute),
 	}
 	store := pkgtesting.SetupTestRateCounterStore()
 	s.SetRateCounterStore(store)
@@ -442,11 +446,20 @@ func TestSourceRateLimiter_ClusterModeUsesSharedCounter(t *testing.T) {
 	if s.credentialRequestLodgeLimiter.sharedCounter == nil {
 		t.Fatal("expected credentialRequestLodgeLimiter to be wired to the shared counter store in ClusterMode")
 	}
+	if s.cliPresenceLodgeLimiter.sharedCounter == nil {
+		t.Fatal("expected cliPresenceLodgeLimiter to be wired to the shared counter store in ClusterMode")
+	}
+	if s.cliPresenceCollectLimiter.sharedCounter == nil {
+		t.Fatal("expected cliPresenceCollectLimiter to be wired to the shared counter store in ClusterMode")
+	}
 	if s.enrolmentTokenMintLimiter.routeName == "" {
 		t.Fatal("expected the shared-counter route name to be set, so distinct limiters never collide in the shared table")
 	}
 	if s.enrolmentTokenMintLimiter.routeName == s.credentialRequestLodgeLimiter.routeName {
 		t.Fatal("expected distinct limiters to receive distinct route names")
+	}
+	if s.cliPresenceLodgeLimiter.routeName == s.cliPresenceCollectLimiter.routeName {
+		t.Fatal("expected the cli-presence lodge and collect limiters to receive distinct route names")
 	}
 }
 

@@ -431,6 +431,17 @@ func NewWebAuthnFromConfig(rpID, rpDisplayName string, rpOrigins []string) (*web
 // because presence is not a session-minting ceremony — it produces a short-lived
 // single-use token rather than a session token, and its session key space is
 // separate (webAuthnPresenceSessions, keyed by principalID, not username).
+//
+// Account lookup fix (Issue #4287): resolves the account via getAccountByID, not
+// getAccount. principal.ID is the account's internal ID (uuid.New(), set by
+// extractAdminPrincipal/the session and cookie auth branches in middleware.go for
+// every BOUND principal — mTLS cert binding, cfg-CLI session, web-session cookie) —
+// never the username getAccount expects. Calling getAccount(ctx, principal.ID) here
+// 404'd every real presence ceremony run by a bound account; only the unbound
+// bootstrap-fallback admin (whose principal.ID happens to be the certificate's
+// CommonName, coincidentally username-shaped) could ever reach past it, which is why
+// this went unnoticed by principal-scoped unit tests that set Principal.ID directly to
+// a fabricated username. handlePresenceFinish carries the identical fix.
 func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	wa := s.getWebAuthn()
 	if wa == nil {
@@ -447,7 +458,7 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Presence ceremonies are only meaningful for principals with registered credentials.
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Failed to look up account for presence begin",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -494,6 +505,16 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusOK, assertion)
 }
 
+// cliPresenceRequestIDParam is the query parameter carrying the CLI presence-relay
+// request ID (Issue #4287) that a browser-side ceremony is completing. When present,
+// handlePresenceFinish copies that request's action binding (method, path, body hash,
+// permission) onto the minted presenceTokenRecord verbatim — never from anything the
+// browser itself supplies — and hands the token to the durable request record for the
+// waiting CLI to collect. See handlers_cli_presence.go's package doc comment for why
+// the binding is trustworthy: it was written by the CLI's own authenticated lodge
+// call, not by this browser request.
+const cliPresenceRequestIDParam = "cli_presence_request_id"
+
 // handlePresenceFinish handles POST /api/v1/webauthn/presence/finish.
 //
 // Verifies the authenticator assertion response and, on success, mints a short-lived
@@ -511,6 +532,12 @@ func (s *Server) handlePresenceBegin(w http.ResponseWriter, r *http.Request) {
 //     rejects the token with a step-up 401 if the acting principal differs from
 //     record.principalID (ADR-021 Decision 4) — presence proved by principal A can never
 //     satisfy the gate for principal B's action. The gate is single-use + TTL + principal binding.
+//   - Action binding (Issue #4287, ADR-021 Amendment 7): when the caller names a CLI
+//     presence-relay request via cliPresenceRequestIDParam, the minted token additionally
+//     carries that request's method/path/body-hash/permission, and requirePermission
+//     rejects it outright for any other request. A token minted without that query
+//     parameter (the ordinary browser step-up flow, StepUpModal.tsx) stays principal-bound
+//     only, matching today's behavior.
 //
 // Cross-reference: #2728/#2732 implementers consume permissionAssurance["module:approve"]
 // and ["module:reject"] — the presence mechanism built here is what gates those routes.
@@ -529,7 +556,7 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	acct, err := s.getAccount(r.Context(), principal.ID)
+	acct, err := s.getAccountByID(r.Context(), principal.ID)
 	if err != nil {
 		s.logger.Error("Failed to look up account for presence finish",
 			"principal_id", logging.SanitizeLogValue(principal.ID),
@@ -542,6 +569,36 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusNotFound,
 			"Account not found", "ACCOUNT_NOT_FOUND")
 		return
+	}
+
+	// Issue #4287: resolve the CLI presence-relay request (if any) before consuming
+	// the single-use WebAuthn session below — an unknown/expired/mismatched-account
+	// request must fail before the ceremony is spent, not after.
+	var cliPresenceReq *pendingCliPresenceRequest
+	if reqID := r.URL.Query().Get(cliPresenceRequestIDParam); reqID != "" {
+		var cpErr error
+		cliPresenceReq, cpErr = s.getCliPresenceRequestByID(r.Context(), reqID)
+		if cpErr != nil {
+			s.logger.Error("Failed to look up cli-presence request for presence finish",
+				"error", logging.SanitizeLogValue(cpErr.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Failed to look up presence request", "STORE_ERROR")
+			return
+		}
+		if cliPresenceReq == nil || cliPresenceReq.Status != cliPresenceRequestStatusPending ||
+			time.Now().UTC().After(cliPresenceReq.ExpiresAt) {
+			s.writeErrorResponse(w, http.StatusNotFound,
+				"Presence request not found or expired", "REQUEST_NOT_FOUND")
+			return
+		}
+		// Desired State 3 [REQUIRED TEST]: the browser session running this ceremony
+		// must resolve to the same account that lodged the request — never a
+		// different one, even if that other account also holds AssuranceStrong.
+		if cliPresenceReq.LodgedByPrincipalID != principal.ID {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Presence request was lodged by a different account", "REQUEST_ACCOUNT_MISMATCH")
+			return
+		}
 	}
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
@@ -590,10 +647,46 @@ func (s *Server) handlePresenceFinish(w http.ResponseWriter, r *http.Request) {
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
 	tokenHash := hashPresenceToken(token)
 
-	s.presenceTokens.Store(tokenHash, &presenceTokenRecord{
+	record := &presenceTokenRecord{
 		principalID: principal.ID,
 		expires:     time.Now().Add(presenceTokenTTL),
-	})
+	}
+	if cliPresenceReq != nil {
+		// Issue #4287, ADR-021 Amendment 7: bind the token to the exact action the CLI
+		// lodged — copied verbatim from the durable request record, never from
+		// anything this browser request supplied directly.
+		record.boundMethod = cliPresenceReq.Method
+		record.boundPath = cliPresenceReq.Path
+		record.boundBodyHash = cliPresenceReq.BodyHash
+		record.boundPermissionID = cliPresenceReq.PermissionID
+	}
+	s.presenceTokens.Store(tokenHash, record)
+
+	if cliPresenceReq != nil {
+		// Hand the minted token to the durable request record for the waiting CLI's
+		// collect poll (mirrors handleApproveCliLoginRequest minting a session onto
+		// pendingCliLoginRequest). Best-effort revert of the just-minted token if this
+		// fails, so a persist failure never strands an unreachable-but-live token.
+		now := time.Now().UTC()
+		cliPresenceReq.Status = cliPresenceRequestStatusApproved
+		cliPresenceReq.ApprovedAt = &now
+		cliPresenceReq.ApprovedBy = principal.ID
+		cliPresenceReq.PresenceToken = token
+		if err := s.persistCliPresenceRequest(r.Context(), cliPresenceReq); err != nil {
+			s.logger.Error("Failed to persist cli-presence approval",
+				"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.presenceTokens.Delete(tokenHash)
+			s.writeErrorResponse(w, http.StatusInternalServerError,
+				"Failed to complete presence request", "STORE_ERROR")
+			return
+		}
+		s.logger.Info("Cli-presence request approved",
+			"request_id", logging.SanitizeLogValue(cliPresenceReq.ID),
+			"principal_id", logging.SanitizeLogValue(principal.ID))
+		s.emitCliPresenceAudit(r.Context(), "cli_presence.approved", principal.ID, business.AuditUserTypeHuman,
+			cliPresenceReq.ID, business.AuditResultSuccess, business.AuditSeverityHigh)
+	}
 
 	s.logger.Info("Presence token minted",
 		"principal_id", logging.SanitizeLogValue(principal.ID),

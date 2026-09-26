@@ -4,6 +4,7 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -61,6 +63,25 @@ const (
 func hashPresenceToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// hashRequestBodyForPresenceBinding returns the hex-encoded SHA-256 digest of r's
+// body, and restores r.Body so the downstream handler can still read it in full
+// (Issue #4287). A nil body hashes as the empty byte string, matching what the CLI
+// hashes for a bodyless request at lodge time.
+func hashRequestBodyForPresenceBinding(r *http.Request) (string, error) {
+	if r.Body == nil {
+		sum := sha256.Sum256(nil)
+		return hex.EncodeToString(sum[:]), nil
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", err
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Principal represents an authenticated entity — either an mTLS admin cert, an API key,
@@ -1317,7 +1338,9 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				presenceToken := r.Header.Get(presenceTokenHeader)
 				if presenceToken == "" {
 					// No presence token: step-up challenge including presence="required" (ADR-021 Decision 6).
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					// permission names the gated permission (Issue #4287) so a CLI-side step-up
+					// handler can lodge a CLI presence-relay request bound to it.
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
 					s.encodeJSONBody(w, struct {
@@ -1337,7 +1360,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				raw, tokenFound := s.presenceTokens.LoadAndDelete(tokenHash)
 				if !tokenFound {
 					// Token not found (already used, never issued, or tampered).
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
 					s.encodeJSONBody(w, struct {
@@ -1352,7 +1375,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				record, _ := raw.(*presenceTokenRecord)
 				if record == nil || time.Now().After(record.expires) {
 					// Expired token (already removed from map above).
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
 					s.encodeJSONBody(w, struct {
@@ -1375,7 +1398,7 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 						"request_principal_id", logging.SanitizeLogValue(principal.ID),
 						"permission_id", permissionID,
 					)
-					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required"`, levelName))
+					w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusUnauthorized)
 					s.encodeJSONBody(w, struct {
@@ -1387,6 +1410,44 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					}, "presence_token_principal_mismatch")
 					return
 				}
+
+				// Action binding (Issue #4287, ADR-021 Amendment 7): a token minted through
+				// the CLI presence relay (handlePresenceFinish's cli_presence_request_id
+				// path) carries the exact method/path/body-hash/permission it was lodged
+				// for. An empty boundPermissionID means the token was minted through the
+				// ordinary browser step-up flow (StepUpModal.tsx), which does not yet
+				// supply a binding — treated as "unbound", today's principal-only
+				// behavior, not rejected. See the ADR-021 amendment for why extending the
+				// binding to that flow too is the recorded default.
+				if record.boundPermissionID != "" {
+					bodyHash, hashErr := hashRequestBodyForPresenceBinding(r)
+					if hashErr != nil {
+						s.logger.Error("Failed to read request body for presence binding check",
+							"error", logging.SanitizeLogValue(hashErr.Error()))
+						s.writeErrorResponse(w, http.StatusInternalServerError,
+							"Failed to verify presence token", "PRESENCE_TOKEN_BINDING_ERROR")
+						return
+					}
+					if record.boundMethod != r.Method || record.boundPath != r.URL.Path ||
+						record.boundBodyHash != bodyHash || record.boundPermissionID != permissionID {
+						s.logger.Warn("Presence token action-binding mismatch",
+							"token_permission_id", logging.SanitizeLogValue(record.boundPermissionID),
+							"permission_id", permissionID,
+						)
+						w.Header().Set("WWW-Authenticate", fmt.Sprintf(`CFGMS-StepUp realm="cfgms", required="%s", presence="required", permission="%s"`, levelName, permissionID))
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						s.encodeJSONBody(w, struct {
+							Error            string `json:"error"`
+							PresenceRequired bool   `json:"presence_required"`
+						}{
+							Error:            "presence_token_action_mismatch",
+							PresenceRequired: true,
+						}, "presence_token_action_mismatch")
+						return
+					}
+				}
+
 				s.logger.Debug("Presence token accepted",
 					"principal_id", logging.SanitizeLogValue(principal.ID),
 					"permission_id", permissionID,
