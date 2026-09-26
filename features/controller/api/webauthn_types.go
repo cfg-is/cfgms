@@ -75,9 +75,26 @@ const presenceTokenTTL = 30 * time.Second
 // Single-use contract: the entry is deleted via LoadAndDelete at first use. Expiry is
 // enforced independently so that unconsumed tokens are refused after presenceTokenTTL
 // even if they were not loaded (client may never send the request).
+//
+// boundMethod/boundPath/boundBodyHash/boundPermissionID bind the token to one action
+// (Issue #4287, Desired State 2, ADR-021 Amendment 7): a token minted through the CLI
+// presence relay (handlePresenceFinish's cli_presence_request_id path) carries the
+// exact HTTP method, path, request-body hash and permission ID it was lodged for, and
+// requirePermission rejects the token outright for any other request — closing the gap
+// where malware on the admin's machine swaps a different approval into the same
+// gesture. A token minted through the ordinary browser step-up flow (StepUpModal.tsx)
+// does not yet supply a binding, so these fields are empty for it; requirePermission
+// treats an empty binding as "unbound" (today's principal-only behavior) rather than
+// rejecting it. See the ADR-021 amendment for why extending the binding to that flow
+// too is the recorded default, not yet implemented.
 type presenceTokenRecord struct {
 	principalID string
 	expires     time.Time
+
+	boundMethod       string
+	boundPath         string
+	boundBodyHash     string
+	boundPermissionID string
 }
 
 // WebAuthnPresenceFinishResponse is returned by POST /api/v1/webauthn/presence/finish
