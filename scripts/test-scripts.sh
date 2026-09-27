@@ -1208,6 +1208,115 @@ test_security_review_cli() {
     rm -f "$out_file"
 }
 
+# Coverage suite for the pipeline segment benchmark harness (.claude/bench/bench.py):
+# scoring, fixture overlay, checkout-worktree lifecycle, and the shipped
+# cases/*/case.yaml + expect.yaml fixtures. Hand-rolled to the
+# discover_pins_test.py convention above (stdlib only, exit 0 on all-pass).
+# A gap here is silent the same way: a scorer that can't fail, or a fixture
+# that fails to load, looks identical to "everything passed" until this suite
+# actually runs it (Issue #4300).
+test_bench_suite() {
+    log_test "Testing pipeline segment benchmark harness (test_bench.py)..."
+
+    local test_script=".claude/bench/tests/test_bench.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_bench.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_bench.py: All benchmark harness tests passed"
+    else
+        log_fail "test_bench.py: Benchmark harness tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the token usage report harness (.claude/metrics/token_report.py):
+# transcript parsing, pricing lookups, and cost aggregation. Same convention
+# and same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_token_report_suite() {
+    log_test "Testing token usage report harness (test_token_report.py)..."
+
+    local test_script=".claude/metrics/tests/test_token_report.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_token_report.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_token_report.py: All token report tests passed"
+    else
+        log_fail "test_token_report.py: Token report tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the usage database (.claude/metrics/usage_db.py): schema,
+# writes, and query paths backing the usage-report skill. Same convention and
+# same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_usage_db_suite() {
+    log_test "Testing usage database harness (test_usage_db.py)..."
+
+    local test_script=".claude/metrics/tests/test_usage_db.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "test_usage_db.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "test_usage_db.py: All usage database tests passed"
+    else
+        log_fail "test_usage_db.py: Usage database tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Coverage suite for the refresh-pins clean-check script
+# (.claude/skills/refresh-pins/scripts/verify_pin_clean.py): PROSE vs
+# EXECUTING classification of surviving pin-string hits. Same convention and
+# same silent-gap rationale as test_bench_suite above (Issue #4300).
+test_verify_pin_clean_suite() {
+    log_test "Testing refresh-pins verify_pin_clean.py coverage..."
+
+    local test_script=".claude/skills/refresh-pins/scripts/verify_pin_clean_test.py"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "verify_pin_clean_test.py: Not found"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    python3 "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "verify_pin_clean_test.py: All pin-classification coverage tests passed"
+    else
+        log_fail "verify_pin_clean_test.py: Coverage tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
 
 test_security_trivy_init_error() {
@@ -4942,6 +5051,14 @@ echo ""
 test_security_review_harness
 echo ""
 test_security_review_cli
+echo ""
+test_bench_suite
+echo ""
+test_token_report_suite
+echo ""
+test_usage_db_suite
+echo ""
+test_verify_pin_clean_suite
 echo ""
 test_security_trivy_init_error
 echo ""
