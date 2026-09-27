@@ -163,6 +163,26 @@ A `CFGMS_TEST_SCRIPTS_GROUPS` already set by the caller wins over detection.
 `scripts/make-test-groups_test.sh` checks both halves by dry-running each
 target in a throwaway repository and counting the `test-scripts.sh` calls.
 
+**CI gating (Issue #4304, Epic #4296):** `unit-tests-scripts` always runs as a
+job — the `core` group's Go-structure-dependent and `scripts/`-tree suites
+must exercise on every code PR — but it sets `CFGMS_TEST_SCRIPTS_GROUPS` from
+the `changes` job's `groups` output, so only the groups the diff actually
+touches run inside it. `.github/scripts/classify-tooling-changed.sh` is the
+thin CI wrapper: it reuses the `changes` job's already-fetched
+`changed_files.txt` (no second `gh api` call) and delegates the actual
+git-diff classification to `scripts/lib/detect-tooling-changed.sh` via the
+PR's base ref, so CI and local `make test` share one classification
+algorithm. On `push`/`workflow_dispatch`, where the `changes` job doesn't run,
+`needs.changes.outputs.groups` is empty and the Makefile's `--group`-omitted
+default ("run everything") applies — no extra guard needed. Both this
+classifier and `.github/scripts/classify-docs-only.sh` fail closed to running
+more, never less: any defect in either resolves to running every suite group
+(or every unit-test leg, respectively), because a needlessly run suite costs
+runner minutes while a wrongly skipped one ships untested code. The
+no-Python-in-core check (Issue #4303) is unaffected by this gating —
+it runs in the `changes` job itself, outside any suite group, so it always
+executes regardless of which groups `unit-tests-scripts` requests.
+
 ## Security Scanning
 
 ### Security Commands

@@ -58,12 +58,19 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       no_python_ok: ${{ steps.no-python.outputs.ok }}
+      groups: ${{ steps.tooling-groups.outputs.groups }}
     steps:
       # The classifier derives which doc paths code reads from the tree, so it
-      # needs the PR's files on disk (Issue #4215).
+      # needs the PR's files on disk (Issue #4215). fetch-depth: 0 (rather than
+      # the default shallow depth-1 checkout) is needed below too: the tooling
+      # suite-group classifier (Issue #4304) delegates to
+      # scripts/lib/detect-tooling-changed.sh, which diffs the PR's base ref
+      # with git -- a shallow checkout would leave that base commit
+      # unreachable.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       # Issue #4303: fails the build if a .py file is tracked under the core
       # product / shipped path set (cmd/, pkg/, features/, api/, web/,
       # test/). Runs here — unconditionally, on every pull_request, outside
@@ -163,6 +170,41 @@ jobs:
             *)
               echo "::warning::classifier produced no verdict — assuming code changes and running the full suite"
               echo "code=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # Decides which of unit-tests-scripts's four suite groups (core,
+      # security-review, claude-tooling, devinfra) this PR's diff needs
+      # (Issue #4304, Epic #4296). `core` always runs regardless of this
+      # output -- unit-tests-scripts's own `if:` above (needs.changes.outputs.
+      # code) is untouched by this story and still gates whether the job runs
+      # at all. This step only narrows what runs *inside* it. Reuses
+      # changed_files.txt from the step above instead of a second `gh api`
+      # call; delegates the actual git-diff classification to
+      # scripts/lib/detect-tooling-changed.sh via the base ref GitHub already
+      # gives this job, so the algorithm has one implementation shared with
+      # local `make test` (Issue #4302).
+      - name: Classify tooling suite groups
+        id: tooling-groups
+        run: |
+          set -euo pipefail
+
+          # THIS GATE MUST FAIL CLOSED, the same direction as the docs-only
+          # classifier above: every defect resolves to every suite group, so
+          # unit-tests-scripts running an unneeded suite costs runner
+          # minutes, never ships untested tooling.
+          verdict=""
+          if [ -x .github/scripts/classify-tooling-changed.sh ]; then
+            .github/scripts/classify-tooling-changed.sh changed_files.txt \
+              "${{ github.event.pull_request.base.sha }}" . > tooling.log 2>&1 || true
+            cat tooling.log
+            verdict=$(tail -1 tooling.log)
+          fi
+          case "$verdict" in
+            groups=*) echo "$verdict" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::tooling classifier produced no verdict — assuming every suite group is affected"
+              echo "groups=core,security-review,claude-tooling,devinfra" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
@@ -458,6 +500,15 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dnsmasq
 
     - name: Run shell-script test suite
+      # Narrows test-scripts.sh to the suite groups the `changes` job's
+      # tooling classifier said this diff touches (Issue #4304, Epic #4296):
+      # `core` always runs; security-review/claude-tooling/devinfra only run
+      # when their tree changed. On push/workflow_dispatch, `changes` doesn't
+      # run and this is empty -- test-scripts.sh's own --group-omitted default
+      # is "run everything," so an empty value here degrades safely to the
+      # pre-#4304 behavior with no extra guard needed.
+      env:
+        CFGMS_TEST_SCRIPTS_GROUPS: ${{ needs.changes.outputs.groups }}
       run: make test-scripts
 
   # Aggregator: re-creates the single `unit-tests` required-context name so
