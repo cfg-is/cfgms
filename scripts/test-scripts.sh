@@ -1368,6 +1368,35 @@ test_install_git_hooks() {
     rm -f "$out_file"
 }
 
+# Fixture suite for the Makefile's local suite-group gating (Issue #4305). `make
+# test` runs only the script-suite groups scripts/lib/detect-tooling-changed.sh
+# says the diff touches; test-commit / test-complete(-full) / test-agent-complete
+# run every group exactly once. Delegates to scripts/make-test-groups_test.sh,
+# which dry-runs each target in a throwaway repo holding the real Makefile and
+# counts the test-scripts.sh invocations a real run would make.
+test_make_test_groups() {
+    log_test "Testing Makefile suite-group gating..."
+
+    local test_script="scripts/make-test-groups_test.sh"
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "make-test-groups_test.sh: Not found or not executable"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "make-test-groups_test.sh: make test gates groups by diff; full targets run every group once"
+    else
+        log_fail "make-test-groups_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Fixture suite for scripts/verify-nancy-ignore-scope.sh — the gate that proves
 # .nancy-ignore can only ever suppress the exact CVE/OSS-Index IDs it lists
 # (Issue #3366). Delegates to scripts/verify-nancy-ignore-scope_test.sh, which
@@ -5360,6 +5389,7 @@ DISPATCH_TABLE=(
     "test_detect_tooling_changed:core"
     "test_classify_tooling_changed:devinfra"
     "test_install_git_hooks:core"
+    "test_make_test_groups:core"
     "test_verify_nancy_ignore_scope:core"
     "test_refresh_pins_discovery:claude-tooling"
     "test_security_review_harness:security-review"

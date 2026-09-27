@@ -445,6 +445,16 @@ test-install-cfg: build-cli
 # second sequential step just reorders the same CPU-bound work rather than
 # reducing it. Separate runners are separate CPU pools, which is the only thing
 # that helps a CPU-bound `-race` suite on a 4-vCPU GitHub-hosted runner.
+#
+# The script suite is gated by what changed (Issue #4305): unless the caller has
+# already set CFGMS_TEST_SCRIPTS_GROUPS, `make test` asks
+# scripts/lib/detect-tooling-changed.sh which suite groups the diff against the
+# develop merge base touches, and runs only those. No resolvable merge base
+# (fresh clone, no origin/develop) fails closed to every group, as test-frontend
+# does. test-commit, test-complete-full and test-agent-complete pin every group
+# via a target-specific export, which this target inherits as a prerequisite, so
+# they run test-scripts exactly once, in full, whatever the diff.
+TEST_SCRIPTS_ALL_GROUPS := core,security-review,claude-tooling,devinfra
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
@@ -456,7 +466,26 @@ test: fix-git-bare
 	@$(MAKE) test-framework-api-sharded
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@$(MAKE) test-scripts
+	@if [ -n "$(CFGMS_TEST_SCRIPTS_GROUPS)" ]; then \
+		echo "📋 test-scripts groups: $(CFGMS_TEST_SCRIPTS_GROUPS) (CFGMS_TEST_SCRIPTS_GROUPS set by the caller — auto-detection skipped)"; \
+		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$(CFGMS_TEST_SCRIPTS_GROUPS)"; \
+	else \
+		MERGE_BASE=$$(git merge-base HEAD origin/develop 2>/dev/null || true); \
+		if [ -z "$$MERGE_BASE" ]; then \
+			SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
+			REASON="no origin/develop merge base resolvable — fail closed to every group"; \
+		else \
+			DETECT_OUT=$$(./scripts/lib/detect-tooling-changed.sh "$$MERGE_BASE" 2>&1); \
+			SEL_GROUPS=$$(printf '%s\n' "$$DETECT_OUT" | sed -n 's/^groups=//p' | tail -n 1); \
+			REASON="vs develop merge base $$(printf '%.8s' "$$MERGE_BASE"): $$(printf '%s\n' "$$DETECT_OUT" | grep -v '^groups=' | tail -n 1)"; \
+			if [ -z "$$SEL_GROUPS" ]; then \
+				SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
+				REASON="detect-tooling-changed.sh printed no groups= line — fail closed to every group"; \
+			fi; \
+		fi; \
+		echo "📋 test-scripts groups: $$SEL_GROUPS ($$REASON)"; \
+		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$$SEL_GROUPS"; \
+	fi
 	@echo ""
 	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
 
@@ -1305,6 +1334,7 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
+test-commit: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
@@ -2773,6 +2803,7 @@ test-frontend:
 		echo "✅ test-frontend: frontend checks passed"; \
 	fi
 
+test-complete-full: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-frontend test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
@@ -2801,6 +2832,7 @@ test-complete: test-complete-full
 # Used by headless agent containers that don't have access to Docker daemon
 # Story #435: Provides ~95% of validation coverage without Docker-in-Docker
 .PHONY: test-agent-complete
+test-agent-complete: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
 test-agent-complete: test-commit test-fast test-production-critical build-cross-validate test-frontend
 	@echo ""
 	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"
