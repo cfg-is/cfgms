@@ -163,3 +163,4 @@ identify which feature broke and which provider must be fixed or replaced.
   under correct deployments, not redundant.
 - **Validation runs at startup, not at request time**: the check happens once,
   immediately after construction, before any subsystem is initialised.
+// scratch verification comment for issue #4304 tooling-gate AC (pkg-only diff)
