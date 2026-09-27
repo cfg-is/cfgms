@@ -136,9 +136,32 @@ make test-scripts CFGMS_TEST_SCRIPTS_GROUPS=core,devinfra
 ./scripts/test-scripts.sh --group core,devinfra
 ```
 
-`CFGMS_TEST_SCRIPTS_GROUPS` is unset by default, so every existing caller (CI,
-`make test-complete`, developers) is unaffected. An unrecognized group name is
-a usage error — `test-scripts.sh` exits non-zero before running anything.
+`CFGMS_TEST_SCRIPTS_GROUPS` is unset by default, so `make test-scripts` on its
+own always runs every group. An unrecognized group name is a usage error —
+`test-scripts.sh` exits non-zero before running anything.
+
+**`make test` runs only the groups your change touches** (Issue #4305). It
+diffs against the merge base with `origin/develop` using
+`scripts/lib/detect-tooling-changed.sh` — the same decision CI uses — and
+prints one line naming the groups and why, e.g.
+`📋 test-scripts groups: core (vs develop merge base 685a6437: Matched suite groups: core)`.
+A Go-only change runs `core` alone; a change under
+`.claude/skills/security-review/` adds `security-review`; a change to the
+gating machinery itself (`Makefile`, `scripts/test-scripts.sh`,
+`.github/workflows/test-suite.yml`) runs every group. The pre-push hook runs
+`make test`, so it gets the same selection. Two cases fail closed to every
+group: no resolvable `origin/develop` merge base (a fresh clone without the
+remote ref, a shallow clone whose history stops short of it), or a detector run that
+prints no `groups=` line. With commits ahead of the merge base, the detector
+classifies the committed range only; with none, it classifies uncommitted
+edits to tracked files. Untracked files are not seen until they are committed.
+
+A `CFGMS_TEST_SCRIPTS_GROUPS` already set by the caller wins over detection.
+`make test-commit`, `make test-complete` / `test-complete-full` and
+`make test-agent-complete` use this to pin every group, so they run
+`test-scripts` exactly once, in full, whatever the diff.
+`scripts/make-test-groups_test.sh` checks both halves by dry-running each
+target in a throwaway repository and counting the `test-scripts.sh` calls.
 
 ## Security Scanning
 
