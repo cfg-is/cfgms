@@ -112,6 +112,34 @@ make test-docker
 - **`test-commit`**: Skips M365 tests if credentials unavailable (developer-friendly)
 - **`test-ci`**: Requires M365 credentials or fails (CI enforcement)
 
+#### Shell Script Test Groups
+
+`make test-scripts` (`scripts/test-scripts.sh`) partitions its ~100 `test_*`
+suites into four named groups (Issue #4301):
+
+| Group | Composition |
+|-------|-------------|
+| `core` | Everything not explicitly classified below — the fail-closed default bucket a Go-only PR must always exercise |
+| `security-review` | The `.claude/skills/security-review/` harness and CLI wrapper suites |
+| `claude-tooling` | `.claude/scripts/` and `.claude/skills/` pipeline-dispatch suites |
+| `devinfra` | `.devcontainer/` and `.github/scripts/resource-sampler.*` suites |
+
+```bash
+# Run every group (default — identical to omitting the variable)
+make test-scripts
+
+# Narrow to one or more groups
+make test-scripts CFGMS_TEST_SCRIPTS_GROUPS=security-review
+make test-scripts CFGMS_TEST_SCRIPTS_GROUPS=core,devinfra
+
+# Equivalent direct invocation
+./scripts/test-scripts.sh --group core,devinfra
+```
+
+`CFGMS_TEST_SCRIPTS_GROUPS` is unset by default, so every existing caller (CI,
+`make test-complete`, developers) is unaffected. An unrecognized group name is
+a usage error — `test-scripts.sh` exits non-zero before running anything.
+
 ## Security Scanning
 
 ### Security Commands

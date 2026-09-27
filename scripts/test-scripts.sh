@@ -39,6 +39,58 @@ log_skip() {
     echo -e "${YELLOW}⊘${NC} $1"
 }
 
+# --group <name>[,<name>...] narrows the run to one or more of the four named
+# suite groups (Issue #4301). No flag at all ⇒ run everything, unchanged from
+# before this flag existed — the only calling convention any caller uses today.
+VALID_GROUPS=(core security-review claude-tooling devinfra)
+GROUP_FLAG_GIVEN=false
+declare -A SELECTED_GROUPS=()
+
+usage() {
+    echo "Usage: $0 [--group <name>[,<name>...]]" >&2
+    echo "  Valid groups: ${VALID_GROUPS[*]}" >&2
+}
+
+is_valid_group() {
+    local candidate="$1" vg
+    for vg in "${VALID_GROUPS[@]}"; do
+        [[ "$candidate" == "$vg" ]] && return 0
+    done
+    return 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --group)
+            if [[ $# -lt 2 ]]; then
+                echo "❌ --group requires a value" >&2
+                usage
+                exit 1
+            fi
+            GROUP_FLAG_GIVEN=true
+            IFS=',' read -ra _requested_groups <<< "$2"
+            for _g in "${_requested_groups[@]}"; do
+                if ! is_valid_group "$_g"; then
+                    echo "❌ Unknown --group value: '${_g}'" >&2
+                    usage
+                    exit 1
+                fi
+                SELECTED_GROUPS["$_g"]=1
+            done
+            shift 2
+            ;;
+        *)
+            echo "❌ Unknown argument: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+group_selected() {
+    [[ -n "${SELECTED_GROUPS[$1]:-}" ]]
+}
+
 # Test 1: Validate syntax of all shell scripts
 test_syntax() {
     log_test "Testing shell script syntax..."
@@ -1854,6 +1906,7 @@ test_project_queue_integration() {
             bash "$script" delete-item "$cid" >/dev/null 2>&1 || true
         done
         rm -rf "$tmp_dir"
+        trap - RETURN
     }
     trap cleanup_items RETURN
 
@@ -2171,6 +2224,7 @@ test_project_queue_set_pr() {
             bash "$script" delete-item "$created_item_id" >/dev/null 2>&1 || true
         fi
         rm -rf "$tmp_dir"
+        trap - RETURN
     }
     trap cleanup_set_pr RETURN
 
@@ -2259,7 +2313,7 @@ test_check_cla_signed() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Build a temp repo layout: $tmp_dir/CONTRIBUTORS.md + $tmp_dir/scripts/check-cla-signed.sh
     # The script derives repo root as $(dirname "$0")/.. — so placing it under scripts/ makes
@@ -2395,7 +2449,7 @@ test_no_pipeline_label_refs() {
     # the grep pattern fires, so a broken grep doesn't silently always pass.
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
     printf '# prohibited: pipeline:story label reference\n' > "$tmp_dir/probe.sh"
     local probe_matches
     probe_matches=$(grep -rn \
@@ -2443,7 +2497,7 @@ test_preflight_item_dispatch() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Mock project-queue.sh: responds to list-by-status Ready with a pure draft item,
     # all other subcommands return empty array.
@@ -2499,7 +2553,7 @@ test_done_on_merge() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local calls_file="${tmp_dir}/calls.txt"
     touch "$calls_file"
@@ -2685,7 +2739,7 @@ test_preflight_gh_call_budget() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Mock project-queue.sh: returns one Ready issue (#9001) referencing dep #9002.
     local mock_pq="${tmp_dir}/project-queue.sh"
@@ -2799,7 +2853,7 @@ test_preflight_forged_acceptance_review() {
 
     local tmp_py
     tmp_py=$(mktemp)
-    trap 'rm -f "$tmp_py"' RETURN
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
@@ -3219,7 +3273,7 @@ test_entrypoint_set_pr_call() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local calls_file="${tmp_dir}/pq-calls.txt"
     touch "$calls_file"
@@ -3460,7 +3514,7 @@ test_preflight_acceptance_review_comment_match() {
 
     local tmp_py
     tmp_py=$(mktemp)
-    trap 'rm -f "$tmp_py"' RETURN
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
@@ -3593,7 +3647,7 @@ test_preflight_review_verdict_routing() {
 
     local tmp_py
     tmp_py=$(mktemp)
-    trap 'rm -f "$tmp_py"' RETURN
+    trap 'rm -f "$tmp_py"; trap - RETURN' RETURN
 
     cat > "$tmp_py" << 'PYEOF'
 import sys, importlib.util, os
@@ -3778,7 +3832,7 @@ test_resource_sampler_loop_guard() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Write a mini-script that mirrors resource-sampler.sh's guarded loop body
     # and runs it under set -euo pipefail.  Iteration 1 injects failures on all
@@ -4142,7 +4196,7 @@ test_devcontainer_suite_discovery() {
     fixture_dir=$(mktemp -d)
     local empty_dir
     empty_dir=$(mktemp -d)
-    trap 'rm -rf "$fixture_dir" "$empty_dir"' RETURN
+    trap 'rm -rf "$fixture_dir" "$empty_dir"; trap - RETURN' RETURN
 
     cat > "$fixture_dir/always-fails_test.sh" <<'FIXTURE'
 #!/usr/bin/env bash
@@ -4362,7 +4416,7 @@ test_api_shard_aggregation_fails_closed() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
@@ -4526,7 +4580,7 @@ test_api_shard_count_rejects_non_integer() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     local bin_dir="${tmp_dir}/bin"
     mkdir -p "$bin_dir"
@@ -4730,7 +4784,7 @@ test_resource_sampler_no_placeholder() {
 
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
 
     # Fixture: state dir with a known samples file and a dead-PID file.
     local state_dir="${tmp_dir}/state"
@@ -5003,151 +5057,181 @@ test_no_tracked_file_mutation() {
 # after the last one, right before the pass/fail summary below.
 GIT_STATUS_BEFORE_TESTS=$(git status --porcelain)
 
+# --- Suite group composition (Issue #4301) ----------------------------------
+# Ordered (function:group) pairs, in the exact historical dispatch order. The
+# default (no --group) path below replays this table unfiltered, so it stays
+# byte-identical to the pre-#4301 dispatch; `--group <csv>` replays it filtered
+# to the requested group(s). Do not resort this table by group — its order,
+# not just its membership, is what the default path's output depends on.
+DISPATCH_TABLE=(
+    "test_syntax:core"
+    "test_license_checker:core"
+    "test_check_mockups_index:core"
+    "test_mockups_index_generator:core"
+    "test_log_injection_linter:core"
+    "test_invalid_cert_generation:core"
+    "test_credential_generation:core"
+    "test_wait_for_services:core"
+    "test_executable_permissions:core"
+    "test_create_clone_stale_branch_deletion:claude-tooling"
+    "test_create_clone_refuses_branch_with_work:claude-tooling"
+    "test_create_clone_keep_remote:claude-tooling"
+    "test_create_clone_deletion_failure:claude-tooling"
+    "test_create_clone_duplicate_pr_gate:claude-tooling"
+    "test_check_providers:core"
+    "test_check_binary_artifacts:core"
+    "test_check_docs_boundary:core"
+    "test_install_git_hooks:core"
+    "test_verify_nancy_ignore_scope:core"
+    "test_refresh_pins_discovery:claude-tooling"
+    "test_security_review_harness:security-review"
+    "test_security_review_cli:security-review"
+    "test_bench_suite:claude-tooling"
+    "test_token_report_suite:claude-tooling"
+    "test_usage_db_suite:claude-tooling"
+    "test_verify_pin_clean_suite:claude-tooling"
+    "test_security_trivy_init_error:core"
+    "test_security_trivy_findings:core"
+    "test_security_trivy_clean_scan:core"
+    "test_pr_security_findings:core"
+    "test_project_queue_no_gh_issue_calls:core"
+    "test_project_queue_invalid_args:core"
+    "test_project_queue_integration:core"
+    "test_project_queue_set_pr:core"
+    "test_create_clone_item:claude-tooling"
+    "test_agent_dispatch_create_clone_item:claude-tooling"
+    "test_cleanup_issue_item_mode:claude-tooling"
+    "test_review_pr_item_branch:claude-tooling"
+    "test_create_clone_pr_external_author:claude-tooling"
+    "test_dispatch_fix_external_author:claude-tooling"
+    "test_enqueue_external_author_toctou:claude-tooling"
+    "test_entrypoint_set_pr_call:devinfra"
+    "test_preflight_item_dispatch:claude-tooling"
+    "test_done_on_merge:claude-tooling"
+    "test_preflight_forged_acceptance_review:claude-tooling"
+    "test_preflight_gh_call_budget:claude-tooling"
+    "test_dispatch_creds_gate:claude-tooling"
+    "test_preflight_acceptance_review_comment_match:claude-tooling"
+    "test_preflight_review_verdict_routing:claude-tooling"
+    "test_check_cla_signed:core"
+    "test_trust_boundary:core"
+    "test_no_pipeline_label_refs:core"
+    "test_tier1_smoke_test:core"
+    "test_tier1_bootstrap:core"
+    "test_ha_cluster_bootstrap:core"
+    "test_datasvc_bootstrap:core"
+    "test_resource_sampler_ps1_no_pwsh:devinfra"
+    "test_resource_sampler_loop_guard:devinfra"
+    "test_resource_sampler_no_placeholder:devinfra"
+    "test_api_shard_partition_covers_all_tests:core"
+    "test_go_group_split_partition_covers_all_packages:core"
+    "test_all_modules_covers_module_yaml_tree:core"
+    "test_api_shard_aggregation_fails_closed:core"
+    "test_api_shard_count_rejects_non_integer:core"
+    "test_pipeline_suite_result_fails_closed:core"
+    "test_claude_pipeline_suites:claude-tooling"
+    "test_devcontainer_suite_discovery:devinfra"
+    "test_devcontainer_suites:devinfra"
+    "test_no_tracked_file_mutation:core"
+)
+
+# The one call pair in the historical dispatch with no blank-line separator
+# between them — preserved here so the flag-omitted default run's output
+# stays byte-identical to before this story.
+NO_TRAILING_BLANK="test_create_clone_stale_branch_deletion"
+
+# Runs every DISPATCH_TABLE entry whose group matches $1, in table order,
+# reproducing the historical blank-line spacing between calls. An empty $1
+# runs the whole table (used by the flag-omitted default path).
+run_dispatch_entries() {
+    local filter_group="$1"
+    local entry fn grp
+    for entry in "${DISPATCH_TABLE[@]}"; do
+        fn="${entry%%:*}"
+        grp="${entry##*:}"
+        if [[ -n "$filter_group" && "$grp" != "$filter_group" ]]; then
+            continue
+        fi
+        "$fn"
+        if [[ "$fn" != "$NO_TRAILING_BLANK" ]]; then
+            echo ""
+        fi
+    done
+}
+
+run_core_suites() { run_dispatch_entries "core"; }
+run_security_review_suites() { run_dispatch_entries "security-review"; }
+run_claude_tooling_suites() { run_dispatch_entries "claude-tooling"; }
+run_devinfra_suites() { run_dispatch_entries "devinfra"; }
+
+# Validates DISPATCH_TABLE's own consistency (Issue #4301): every test_*
+# function defined in this file must appear in it exactly once, tagged with
+# one of the four valid groups. Runs silently and unconditionally at startup
+# (regardless of --group) so a suite added or renamed without updating the
+# table fails loud immediately, before any test runs, rather than silently
+# vanishing from every --group invocation (including the flag-omitted
+# default) while `make test-scripts` still reports green.
+validate_dispatch_table() {
+    local self_script="${BASH_SOURCE[0]}"
+
+    local -a defined_fns=()
+    while IFS= read -r fn; do
+        defined_fns+=("$fn")
+    done < <(grep -oE '^test_[a-zA-Z0-9_]+\(\) \{' "$self_script" | sed -E 's/\(\) \{$//')
+
+    local -a table_fns=() table_groups=()
+    while IFS=: read -r fn grp; do
+        table_fns+=("$fn")
+        table_groups+=("$grp")
+    done < <(grep -oE '^[[:space:]]+"test_[a-zA-Z0-9_]+:[a-zA-Z-]+"' "$self_script" | tr -d ' "')
+
+    local fn grp count
+    local -a missing=() dup=() extra=() bad_groups=()
+    for fn in "${defined_fns[@]}"; do
+        count=$(printf '%s\n' "${table_fns[@]}" | grep -Fxc "$fn")
+        [[ "$count" -eq 0 ]] && missing+=("$fn")
+        [[ "$count" -gt 1 ]] && dup+=("$fn")
+    done
+    for fn in "${table_fns[@]}"; do
+        printf '%s\n' "${defined_fns[@]}" | grep -Fxq "$fn" || extra+=("$fn")
+    done
+    for grp in "${table_groups[@]}"; do
+        case "$grp" in
+            core | security-review | claude-tooling | devinfra) ;;
+            *) bad_groups+=("$grp") ;;
+        esac
+    done
+
+    if [[ ${#missing[@]} -gt 0 || ${#dup[@]} -gt 0 || ${#extra[@]} -gt 0 || ${#bad_groups[@]} -gt 0 ]]; then
+        echo "❌ DISPATCH_TABLE is inconsistent with this file's test_* functions:" >&2
+        [[ ${#missing[@]} -gt 0 ]] && echo "  missing from DISPATCH_TABLE: ${missing[*]}" >&2
+        [[ ${#dup[@]} -gt 0 ]] && echo "  duplicated in DISPATCH_TABLE: ${dup[*]}" >&2
+        [[ ${#extra[@]} -gt 0 ]] && echo "  in DISPATCH_TABLE but not a defined function: ${extra[*]}" >&2
+        [[ ${#bad_groups[@]} -gt 0 ]] && echo "  unrecognized group values: ${bad_groups[*]}" >&2
+        exit 1
+    fi
+}
+validate_dispatch_table
+
 # Main execution
 echo "🔍 Script Validation Test Suite"
 echo "================================"
 echo ""
 
-test_syntax
-echo ""
-test_license_checker
-echo ""
-test_check_mockups_index
-echo ""
-test_mockups_index_generator
-echo ""
-test_log_injection_linter
-echo ""
-test_invalid_cert_generation
-echo ""
-test_credential_generation
-echo ""
-test_wait_for_services
-echo ""
-test_executable_permissions
+if [[ "$GROUP_FLAG_GIVEN" != true ]]; then
+    # No --group flag: run every suite, in the historical order (unchanged) —
+    # byte-identical to the pre-#4301 dispatch.
+    run_dispatch_entries ""
+else
+    # core runs last (regardless of CSV order) so test_no_tracked_file_mutation,
+    # its final suite, still observes the working tree after every other
+    # selected group has run, not just after core's own suites.
+    group_selected security-review && run_security_review_suites
+    group_selected claude-tooling && run_claude_tooling_suites
+    group_selected devinfra && run_devinfra_suites
+    group_selected core && run_core_suites
+fi
 
-echo ""
-test_create_clone_stale_branch_deletion
-test_create_clone_refuses_branch_with_work
-echo ""
-test_create_clone_keep_remote
-echo ""
-test_create_clone_deletion_failure
-echo ""
-test_create_clone_duplicate_pr_gate
-echo ""
-test_check_providers
-echo ""
-test_check_binary_artifacts
-echo ""
-test_check_docs_boundary
-echo ""
-test_install_git_hooks
-echo ""
-test_verify_nancy_ignore_scope
-echo ""
-test_refresh_pins_discovery
-echo ""
-test_security_review_harness
-echo ""
-test_security_review_cli
-echo ""
-test_bench_suite
-echo ""
-test_token_report_suite
-echo ""
-test_usage_db_suite
-echo ""
-test_verify_pin_clean_suite
-echo ""
-test_security_trivy_init_error
-echo ""
-test_security_trivy_findings
-echo ""
-test_security_trivy_clean_scan
-echo ""
-test_pr_security_findings
-echo ""
-test_project_queue_no_gh_issue_calls
-echo ""
-test_project_queue_invalid_args
-echo ""
-test_project_queue_integration
-echo ""
-test_project_queue_set_pr
-echo ""
-test_create_clone_item
-echo ""
-test_agent_dispatch_create_clone_item
-echo ""
-test_cleanup_issue_item_mode
-echo ""
-test_review_pr_item_branch
-echo ""
-test_create_clone_pr_external_author
-echo ""
-test_dispatch_fix_external_author
-echo ""
-test_enqueue_external_author_toctou
-echo ""
-test_entrypoint_set_pr_call
-echo ""
-test_preflight_item_dispatch
-echo ""
-test_done_on_merge
-echo ""
-test_preflight_forged_acceptance_review
-echo ""
-test_preflight_gh_call_budget
-echo ""
-test_dispatch_creds_gate
-echo ""
-test_preflight_acceptance_review_comment_match
-echo ""
-test_preflight_review_verdict_routing
-echo ""
-test_check_cla_signed
-echo ""
-test_trust_boundary
-echo ""
-test_no_pipeline_label_refs
-echo ""
-test_tier1_smoke_test
-echo ""
-test_tier1_bootstrap
-echo ""
-test_ha_cluster_bootstrap
-echo ""
-test_datasvc_bootstrap
-echo ""
-test_resource_sampler_ps1_no_pwsh
-echo ""
-test_resource_sampler_loop_guard
-echo ""
-test_resource_sampler_no_placeholder
-echo ""
-test_api_shard_partition_covers_all_tests
-echo ""
-test_go_group_split_partition_covers_all_packages
-echo ""
-test_all_modules_covers_module_yaml_tree
-echo ""
-test_api_shard_aggregation_fails_closed
-echo ""
-test_api_shard_count_rejects_non_integer
-echo ""
-test_pipeline_suite_result_fails_closed
-echo ""
-test_claude_pipeline_suites
-echo ""
-test_devcontainer_suite_discovery
-echo ""
-test_devcontainer_suites
-echo ""
-
-test_no_tracked_file_mutation
-
-echo ""
 echo "📊 Test Summary"
 echo "==============="
 echo "  ✓ Passed: $PASS_COUNT"

@@ -801,9 +801,13 @@ test-go-group-macos-rest:
 	fi
 
 .PHONY: test-scripts
+# CFGMS_TEST_SCRIPTS_GROUPS narrows the run to one or more of test-scripts.sh's
+# named suite groups (core, security-review, claude-tooling, devinfra) — see
+# scripts/test-scripts.sh --group. Unset (the default) runs all four, unchanged
+# from before this variable existed.
 test-scripts:
 	@echo "🔧 Testing Shell Scripts..."
-	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
+	@./scripts/test-scripts.sh $(if $(CFGMS_TEST_SCRIPTS_GROUPS),--group $(CFGMS_TEST_SCRIPTS_GROUPS),) || { echo "❌ Script tests failed"; exit 1; }
 
 # Runs features/controller/api's tests as N parallel `go test` processes instead
 # of one (Issue #4151). The package is a single flat directory (2,006 top-level
