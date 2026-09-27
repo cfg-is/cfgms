@@ -1278,6 +1278,67 @@ test_detect_tooling_changed() {
     rm -f "$out_file"
 }
 
+# Test: CI wrapper around the shared suite-group gate (Issue #4304, Epic
+# #4296). .github/scripts/classify-tooling-changed.sh adapts
+# detect-tooling-changed.sh to the `changes` job's reused changed_files.txt
+# and derived base ref. Its own fixture suite covers the wrapper's
+# fail-closed input handling and delegation; this smoke test proves the
+# wrapper and its tests exist, are executable, and pass -- the same shape as
+# test_detect_tooling_changed.
+test_classify_tooling_changed() {
+    log_test "Testing classify-tooling-changed.sh..."
+
+    local gate_script=".github/scripts/classify-tooling-changed.sh"
+    local test_script=".github/scripts/classify-tooling-changed_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "classify-tooling-changed.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "classify-tooling-changed.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "classify-tooling-changed_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "classify-tooling-changed_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "classify-tooling-changed_test.sh: All fixture tests passed"
+    else
+        log_fail "classify-tooling-changed_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    local changed_files
+    changed_files=$(mktemp)
+    echo "pkg/placeholder" > "$changed_files"
+    bash "$gate_script" "$changed_files" "HEAD" "." >"$out_file" 2>&1 || rc=$?
+    rm -f "$changed_files"
+    if [[ $rc -eq 0 ]] && grep -qE '^groups=' "$out_file"; then
+        log_pass "classify-tooling-changed.sh: Runs against the real repo and prints a groups= line"
+    else
+        log_fail "classify-tooling-changed.sh: Real repo run failed or did not print groups= (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Fixture suite for scripts/install-git-hooks.sh (Issue #4150). A pre-push hook run
 # from a linked worktree inherits GIT_DIR; running make test with it set let one
 # `git init` in a scratch directory flip the MAIN repository to core.bare=true.
@@ -5297,6 +5358,7 @@ DISPATCH_TABLE=(
     "test_check_no_python_in_core:core"
     "test_unit_tests_aggregator_no_python_gate:core"
     "test_detect_tooling_changed:core"
+    "test_classify_tooling_changed:devinfra"
     "test_install_git_hooks:core"
     "test_verify_nancy_ignore_scope:core"
     "test_refresh_pins_discovery:claude-tooling"
