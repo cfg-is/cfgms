@@ -57,12 +57,32 @@ jobs:
     if: github.event_name == 'pull_request'
     outputs:
       code: ${{ steps.filter.outputs.code }}
+      no_python_ok: ${{ steps.no-python.outputs.ok }}
     steps:
       # The classifier derives which doc paths code reads from the tree, so it
       # needs the PR's files on disk (Issue #4215).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Issue #4303: fails the build if a .py file is tracked under the core
+      # product / shipped path set (cmd/, pkg/, features/, api/, web/,
+      # test/). Runs here — unconditionally, on every pull_request, outside
+      # any suite group — so no tooling-tree gating elsewhere in this repo
+      # can ever cause it to be skipped, and it needs no Go toolchain in a
+      # job that doesn't otherwise use one. Fails closed: any non-zero exit
+      # (including exit 2, "could not scan") resolves to ok=false.
+      - name: Check no Python under core product paths
+        id: no-python
+        run: |
+          set +e
+          bash ./scripts/check-no-python-in-core.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Detect non-documentation changes
         id: filter
         env:
@@ -477,11 +497,22 @@ jobs:
       - name: Aggregate group results
         run: |
           echo "changes.code:     ${{ needs.changes.outputs.code }}"
+          echo "changes.no_python_ok: ${{ needs.changes.outputs.no_python_ok }}"
           echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
           echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
           echo "rest:             ${{ needs.unit-tests-rest.result }}"
           echo "api-sharded:      ${{ needs.unit-tests-api.result }}"
           echo "scripts:          ${{ needs.unit-tests-scripts.result }}"
+
+          # Issue #4303: `changes` only runs on pull_request, so on a
+          # push-to-main or workflow_dispatch run (where it never executes)
+          # `no_python_ok` is empty and would otherwise read as `!= 'true'`
+          # below — nested inside the pull_request check so those runs are
+          # unaffected.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.no_python_ok }}" != "true" ]; then
+            echo "❌ core product (cmd/, pkg/, features/, api/, web/, test/) contains a tracked .py file"
+            exit 1
+          fi
 
           if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.code }}" = "false" ]; then
             echo "✅ docs-only PR — no code changes, legs intentionally skipped"
