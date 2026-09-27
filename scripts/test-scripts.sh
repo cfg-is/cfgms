@@ -1065,6 +1065,61 @@ test_check_docs_boundary() {
     rm -f "$out_file"
 }
 
+# Test: shared suite-group gate (Issue #4302, Epic #4296)
+# scripts/lib/detect-tooling-changed.sh decides which of the four suite
+# groups a diff must run. Its own fixture suite covers the classification
+# behavior; this smoke test just proves the gate and its tests exist,
+# are executable, and pass -- the same shape as test_check_docs_boundary.
+test_detect_tooling_changed() {
+    log_test "Testing detect-tooling-changed.sh..."
+
+    local gate_script="scripts/lib/detect-tooling-changed.sh"
+    local test_script="scripts/lib/detect-tooling-changed_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "detect-tooling-changed.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "detect-tooling-changed.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "detect-tooling-changed_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "detect-tooling-changed_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "detect-tooling-changed_test.sh: All fixture tests passed"
+    else
+        log_fail "detect-tooling-changed_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" "HEAD" "." >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]] && grep -qE '^groups=' "$out_file"; then
+        log_pass "detect-tooling-changed.sh: Runs against the real repo and prints a groups= line"
+    else
+        log_fail "detect-tooling-changed.sh: Real repo run failed or did not print groups= (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Fixture suite for scripts/install-git-hooks.sh (Issue #4150). A pre-push hook run
 # from a linked worktree inherits GIT_DIR; running make test with it set let one
 # `git init` in a scratch directory flip the MAIN repository to core.bare=true.
@@ -5081,6 +5136,7 @@ DISPATCH_TABLE=(
     "test_check_providers:core"
     "test_check_binary_artifacts:core"
     "test_check_docs_boundary:core"
+    "test_detect_tooling_changed:core"
     "test_install_git_hooks:core"
     "test_verify_nancy_ignore_scope:core"
     "test_refresh_pins_discovery:claude-tooling"
