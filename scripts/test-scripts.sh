@@ -1065,6 +1065,164 @@ test_check_docs_boundary() {
     rm -f "$out_file"
 }
 
+# Fixture suite for scripts/check-no-python-in-core.sh — the core-product
+# Python gate (Issue #4303, Epic #4296). Delegates to
+# scripts/check-no-python-in-core_test.sh, which builds throwaway git
+# repositories and asserts both execution paths: exit 0 on a clean tree and
+# exit 1 (naming the offending file) for a planted .py under each of the six
+# declared paths, plus the fail-closed path.
+#
+# Also runs the gate against the real repo, so a .py file reintroduced under
+# cmd/, pkg/, features/, api/, web/, or test/ fails `make test` rather than
+# merging green.
+test_check_no_python_in_core() {
+    log_test "Testing check-no-python-in-core.sh..."
+
+    local gate_script="scripts/check-no-python-in-core.sh"
+    local test_script="scripts/check-no-python-in-core_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-no-python-in-core.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-no-python-in-core.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-no-python-in-core_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-no-python-in-core_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-python-in-core_test.sh: All fixture tests passed"
+    else
+        log_fail "check-no-python-in-core_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-python-in-core.sh: Real repo tree is clean"
+    else
+        log_fail "check-no-python-in-core.sh: Real repo tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
+# Regression guard for the `unit-tests` aggregator's no-Python gate (Issue
+# #4303). Extracts the "Aggregate group results" step's actual `run:` block
+# from .github/workflows/test-suite.yml -- rather than reimplementing the
+# logic by hand, which could drift from what CI really runs or paper over a
+# bug in the nested `if:` -- substitutes the `${{ }}` expressions GitHub
+# Actions would normally interpolate with test values, and executes it under
+# bash to check its exit code and messaging for all three trigger shapes:
+#   A. pull_request with a planted .py under pkg/ (no_python_ok=false) -> fail
+#   B. a clean pull_request (no_python_ok=true)                        -> pass
+#   C. push-to-main / workflow_dispatch, where the `changes` job never runs
+#      and no_python_ok is empty                                       -> pass
+# Case C is the specific bug this gate must not reintroduce: an unguarded
+# `!= 'true'` comparison against an empty output would fail every such run.
+test_unit_tests_aggregator_no_python_gate() {
+    log_test "Testing unit-tests aggregator's no-Python gate (Issue #4303)..."
+
+    local workflow="${1:-.github/workflows/test-suite.yml}"
+    if [[ ! -f "$workflow" ]]; then
+        log_fail "unit-tests aggregator no-Python gate: $workflow not found"
+        return
+    fi
+
+    local block
+    block="$(awk '
+        /^      - name: Aggregate group results$/ { infound=1; next }
+        infound && /^        run: \|$/ { inrun=1; next }
+        inrun {
+          if ($0 ~ /^          /) { print substr($0, 11) }
+          else if ($0 == "") { print "" }
+          else { exit }
+        }
+        ' "$workflow")"
+
+    if [[ -z "$block" ]]; then
+        log_fail "unit-tests aggregator no-Python gate: could not extract the 'Aggregate group results' run block from $workflow"
+        return
+    fi
+
+    # run_case <event_name> <no_python_ok> <code> — substitutes the extracted
+    # block's GitHub Actions expressions with the given test values (the five
+    # unit-tests-*.result expressions are always "success": this gate only
+    # cares about the no_python_ok/code short-circuits ahead of that check),
+    # executes it, and sets AGG_RC / AGG_OUT.
+    run_case() {
+        local event_name="$1" no_python_ok="$2" code="$3"
+        local substituted="$block"
+        substituted="${substituted//\$\{\{ github.event_name \}\}/$event_name}"
+        substituted="${substituted//\$\{\{ needs.changes.outputs.no_python_ok \}\}/$no_python_ok}"
+        substituted="${substituted//\$\{\{ needs.changes.outputs.code \}\}/$code}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-controller-core.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-heavy-providers.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-rest.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-api.result \}\}/success}"
+        substituted="${substituted//\$\{\{ needs.unit-tests-scripts.result \}\}/success}"
+        # `|| AGG_RC=$?` is load-bearing: this file runs under `set -e`, and
+        # case A below deliberately expects exit 1 — without the `||` guard
+        # the bare non-zero exit from this command substitution would abort
+        # the whole test-scripts.sh run right here (see the identical fix
+        # documented on test_log_injection_linter above).
+        AGG_RC=0
+        AGG_OUT=$(bash -c "$substituted" 2>&1) || AGG_RC=$?
+    }
+
+    # A. PR with a planted .py file under pkg/ — must fail with the named message.
+    run_case "pull_request" "false" "true"
+    if [[ "$AGG_RC" -eq 1 ]] && [[ "$AGG_OUT" == *"contains a tracked .py file"* ]]; then
+        log_pass "aggregator fails a PR with no_python_ok=false, naming the reason"
+    else
+        log_fail "aggregator should fail (exit 1, naming the reason) when no_python_ok=false on a PR (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    # B. A clean PR — must pass.
+    run_case "pull_request" "true" "true"
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator passes a clean PR (no_python_ok=true)"
+    else
+        log_fail "aggregator should pass a clean PR (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    # C. push-to-main / workflow_dispatch: `changes` never runs, so
+    # no_python_ok is empty. The bug this guard fixes: without the nested
+    # `github.event_name == 'pull_request'` check, an empty output reads as
+    # `!= 'true'` and fails every such run.
+    run_case "push" "" ""
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator does not fail a push/workflow_dispatch run when no_python_ok is empty"
+    else
+        log_fail "aggregator must not fail when changes never ran and no_python_ok is empty (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+
+    run_case "workflow_dispatch" "" ""
+    if [[ "$AGG_RC" -eq 0 ]]; then
+        log_pass "aggregator does not fail a workflow_dispatch run when no_python_ok is empty"
+    else
+        log_fail "aggregator must not fail a workflow_dispatch run when no_python_ok is empty (rc=$AGG_RC, out: $AGG_OUT)"
+    fi
+}
+
 # Test: shared suite-group gate (Issue #4302, Epic #4296)
 # scripts/lib/detect-tooling-changed.sh decides which of the four suite
 # groups a diff must run. Its own fixture suite covers the classification
@@ -5136,6 +5294,8 @@ DISPATCH_TABLE=(
     "test_check_providers:core"
     "test_check_binary_artifacts:core"
     "test_check_docs_boundary:core"
+    "test_check_no_python_in_core:core"
+    "test_unit_tests_aggregator_no_python_gate:core"
     "test_detect_tooling_changed:core"
     "test_install_git_hooks:core"
     "test_verify_nancy_ignore_scope:core"

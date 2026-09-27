@@ -1263,6 +1263,9 @@ check-architecture:
 	@echo ""
 	@echo "📦 Checking raw Raft leader primitive usage outside pkg/ha..."
 	@go test ./pkg/ha/... -run TestNoRawLeaderPrimitiveOutsidePkgHA -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking for tracked .py files under core product paths..."
+	@bash ./scripts/check-no-python-in-core.sh
 
 # License Header Verification
 # Ensures all source files have SPDX license headers

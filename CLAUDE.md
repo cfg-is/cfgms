@@ -447,6 +447,16 @@ raftIsLeader := haManager.IsRaftLeader() //architecture:allow-raw-leader -- <rea
 
 **Known evasion limits:** the rule matches method calls by name. It does not detect the primitive accessed through a local wrapper function that re-exposes `IsRaftLeader` under a different name. Wrappers that smuggle the primitive should be treated as the same violation.
 
+### Architecture Checker: No Python Under Core Product Paths (Issue #4303 / Epic #4296)
+
+`make check-architecture` runs `scripts/check-no-python-in-core.sh`, which fails if any tracked `.py` file exists under `cmd/`, `pkg/`, `features/`, `api/`, `web/`, or `test/` — the core-product/shipped path set (`api/` is the proto contract, `web/` the shipped frontend, `test/` the product test tree).
+
+**The rule:** a `.py` file may not be tracked under any of those six trees. There is no annotation escape hatch — unlike the raw-leader rule above, there is no legitimate reason for Python in a shipped or product-test surface. Tracked Python belongs under `.claude/` (agent tooling) or `scripts/` (dev tooling) instead.
+
+**Why:** CFGMS's core product and shipped surfaces are Go (and, for `web/`, TypeScript). A stray `.py` file under one of these trees signals tooling that leaked into product code rather than staying in the dev-tooling trees where it belongs.
+
+**Where enforced:** locally via `make check-architecture`; in CI via `.github/workflows/test-suite.yml`'s `changes` job, which runs the check unconditionally on every `pull_request` and publishes a `no_python_ok` output that the `unit-tests` aggregator gates on — independent of any suite-group tooling-tree gating, so it can't be skipped by that classification ever mis-bucketing something.
+
 ### Modules
 
 The unit of resource management. Three kinds, one runtime per module:
