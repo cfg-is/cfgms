@@ -13,7 +13,7 @@
 # suite costs runner minutes; a wrongly skipped one ships untested code.
 #
 # "Documentation" is decided by path, but some documentation paths are read
-# by code under test. `docs/security-review/methodology.md` is loaded by
+# by code under test. `.claude/skills/security-review/docs/methodology.md` is loaded by
 # harness_runner.py at import time and has a size ceiling. PR #4201 changed
 # only that file, was classified docs-only, skipped the legs, and left
 # develop red for `unit-tests-scripts` until the next code PR ran them. So a
@@ -49,7 +49,7 @@ refs="$(mktemp)"
 trap 'rm -f "$consumed" "$refs"' EXIT
 ref_re='(docs/[A-Za-z0-9_./-]+|\.claude/[A-Za-z0-9_./-]+\.md)'
 : > "$refs"
-for tree in .claude/scripts scripts .github/scripts; do
+for tree in .claude/scripts .claude/skills scripts .github/scripts; do
   [[ -d "$root/$tree" ]] || continue
   grep_status=0
   grep -rhoE "$ref_re" "$root/$tree" >> "$refs" 2>/dev/null || grep_status=$?

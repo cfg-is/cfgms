@@ -98,7 +98,7 @@ If you don't need M365 integration:
 - [Test Credential Security](./test-credential-security.md) - Security practices for test credentials
 - [PGP Email Guide](./pgp-email-guide.md) - Using PGP-encrypted email for vulnerability reports
 - [Sensitive Data Scan Results](./sensitive-data-scan-results.md) - Repository security scan (Story #224)
-- [Security Review Harness](../security-review/README.md) - Methodology, threat scenarios, and regression corpus for the LLM security review
+- Security Review Harness — `.claude/skills/security-review/docs/README.md` - Methodology, threat scenarios, and regression corpus for the LLM security review (moved out of docs/ to live beside the rest of the skill)
 - [Security Audits 2025 (archived)](../archive/security-audits-2025/README.md) - Frozen 2025 audit cycle, superseded by the security review harness
 
 ### Platform Support

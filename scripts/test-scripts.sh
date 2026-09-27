@@ -1146,7 +1146,7 @@ test_refresh_pins_discovery() {
 test_security_review_harness() {
     log_test "Testing security-review harness core (schema/atomic_write/resume/basedir, lanes/...)..."
 
-    local harness_dir=".claude/scripts/security-review"
+    local harness_dir=".claude/skills/security-review"
     if [[ ! -d "$harness_dir" ]]; then
         log_fail "security-review harness: ${harness_dir} not found"
         return
@@ -1174,6 +1174,38 @@ test_security_review_harness() {
     if [[ $found -eq 0 ]]; then
         log_fail "security-review harness: no *_test.py suites found under ${harness_dir}"
     fi
+}
+
+# Tests for the security-review CLI wrapper's own shell test (Issue #4299). This
+# suite lives beside security-review.sh under .claude/skills/security-review/,
+# deliberately outside .claude/scripts/tests/, so test_claude_pipeline_suites'
+# glob never picks it up -- it must be run directly by its own dispatch entry.
+test_security_review_cli() {
+    log_test "Testing security-review.sh CLI wrapper (security_review_cli.test.sh)..."
+
+    local test_script=".claude/skills/security-review/security_review_cli.test.sh"
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "security_review_cli.test.sh: Not found at ${test_script}"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "security_review_cli.test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    timeout 180 bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "security_review_cli.test.sh: All checks passed"
+    else
+        log_fail "security_review_cli.test.sh: Checks failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
 }
 
 # Tests for scripts/security-trivy.sh — trivy init-error vs real-findings distinction
@@ -4908,6 +4940,8 @@ echo ""
 test_refresh_pins_discovery
 echo ""
 test_security_review_harness
+echo ""
+test_security_review_cli
 echo ""
 test_security_trivy_init_error
 echo ""
