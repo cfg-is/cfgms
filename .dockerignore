@@ -38,6 +38,16 @@ coverage.html
 # Compiled/debug artifacts and local credentials must never enter a build
 # context, even when they are untracked.
 cmd/controller/controller
+# Local build and release output. A CI checkout never has it, so no build can
+# depend on it -- but a long-lived developer host accumulates it: one Windows
+# host's bin/ alone reached 3.3GB, which made every image build stream that
+# much context into the daemon and die of memory pressure before its first
+# instruction ran.
+bin/
+*.exe
+*.bin
+features/steward/dex/rust/target/
+features/steward/dex/rust/link/
 *.key
 *.pem
 *.p12
