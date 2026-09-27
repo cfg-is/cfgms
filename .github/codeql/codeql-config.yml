@@ -17,4 +17,4 @@ packs:
 # (Issue #3982): deliberately weak code the profiles must detect. Excluded so
 # CodeQL does not report the plants as findings against the repository.
 paths-ignore:
-  - .claude/scripts/security-review/fixtures/scan
+  - .claude/skills/security-review/fixtures/scan

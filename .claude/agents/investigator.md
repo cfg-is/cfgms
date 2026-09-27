@@ -74,6 +74,6 @@ the container — currently the planner only.
 
 Write your output — a plan file (planner mode) or a findings file (finder mode) — to your
 mounted output directory, following the schema in
-`docs/architecture/security-review-harness.md`. Do not attempt to notify anyone directly; the
+`.claude/skills/security-review/docs/harness-architecture.md`. Do not attempt to notify anyone directly; the
 consolidator and the PO read your output file after your container exits. Report-first, always
 — you never block anything and you never act on what you find beyond writing it down.
