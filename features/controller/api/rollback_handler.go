@@ -341,7 +341,11 @@ func (h *RollbackHandler) GetRollbackStatus(w http.ResponseWriter, r *http.Reque
 	// Get rollback status
 	operation, err := h.rollbackManager.GetRollbackStatus(ctx, rollbackID)
 	if err != nil {
-		if errors.Is(err, rollback.ErrRollbackNotFound) {
+		if errors.Is(err, rollback.ErrRollbackNotFound) || errors.Is(err, rollback.ErrRollbackOutsideTenantScope) {
+			// A tenant-scope refusal from the manager must read exactly like an
+			// unknown ID (Issue #4335/#4340) — reusing the manager's own message
+			// here would let a scoped caller distinguish "wrong tenant" from
+			// "no such rollback".
 			h.sendError(w, http.StatusNotFound, "Rollback operation not found")
 			return
 		}
@@ -385,7 +389,9 @@ func (h *RollbackHandler) CancelRollback(w http.ResponseWriter, r *http.Request)
 	// letting a tenant-scoped caller cancel another tenant's in-progress rollback.
 	operation, err := h.rollbackManager.GetRollbackStatus(ctx, rollbackID)
 	if err != nil {
-		if err == rollback.ErrRollbackNotFound {
+		if errors.Is(err, rollback.ErrRollbackNotFound) || errors.Is(err, rollback.ErrRollbackOutsideTenantScope) {
+			// Same indistinguishable-from-unknown-ID treatment as GetRollbackStatus
+			// above (Issue #4335/#4340).
 			h.sendError(w, http.StatusNotFound, "Rollback operation not found")
 			return
 		}

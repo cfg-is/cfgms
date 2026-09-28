@@ -1193,7 +1193,9 @@ func TestConfigRollback_StatusCancelAndHistory_TenantBoundary(t *testing.T) {
 		rec := httptest.NewRecorder()
 		handler.GetRollbackStatus(rec, req)
 
-		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		// Indistinguishable from an unknown rollback ID (Issue #4335/#4340), matching
+		// TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound.
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "ops@example.com",
 			"the initiating operator of another tenant's rollback must not be disclosed")
 	})
@@ -1204,7 +1206,9 @@ func TestConfigRollback_StatusCancelAndHistory_TenantBoundary(t *testing.T) {
 		rec := httptest.NewRecorder()
 		handler.CancelRollback(rec, req)
 
-		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		// Indistinguishable from an unknown rollback ID (Issue #4335/#4340), matching
+		// TestConfigRollback_CancelRollback_CrossTenant_NotFound.
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 
 		operation, err := stack.store.GetOperation(context.Background(), id)
 		require.NoError(t, err)
