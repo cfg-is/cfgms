@@ -61,11 +61,15 @@ The zero-trust implementation follows secure coding practices and implements app
 - Permission inheritance follows principle of least privilege
 - RBAC decisions integrate with zero-trust policies
 
-**Just-in-Time (JIT) Access**
+**Bounded Elevation (Tenant-Crossing Grants)**
 
 - Time-bounded access with automatic expiration
-- Approval workflow enforced for sensitive operations
-- Implementation: `features/rbac/jit/access_manager.go`
+- Break-glass path with a durable audit record
+- Implementation: `features/controller/api/handlers_tenant_crossing.go`,
+  `pkg/storage/interfaces/business/tenant_crossing_store.go`. (A separate,
+  unwired `features/rbac/jit` package existed alongside this path with zero
+  production callers; it was deleted by Issue #4328 after recording a
+  capability map on Issue #4330 for any follow-on work.)
 
 #### ✅ Security Validations
 
