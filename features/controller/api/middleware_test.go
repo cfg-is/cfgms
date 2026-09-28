@@ -973,6 +973,57 @@ func TestAuthMiddleware_SetsUserIDKey_CertAuth(t *testing.T) {
 	assert.Equal(t, "test-admin", capturedUserID, "UserIDKey must equal the cert CN (sanitized)")
 }
 
+// TestAuthMiddleware_SetsRootScope_CertAuth verifies that a verified mTLS admin
+// certificate with no bound tenant (the bootstrap-fallback path) is the one place
+// that produces ctxkeys.NewRootScope() (Issue #4316) — the restricted-caller
+// architecture test (pkg/ctxkeys' TestNewRootScope_RestrictedCaller) proves no other
+// file calls it; this proves the one allowed call site actually fires for a
+// genuine verified cert.
+func TestAuthMiddleware_SetsRootScope_CertAuth(t *testing.T) {
+	server := setupTestServer(t)
+	adminCert := makeSelfSignedAdminCert(t)
+
+	var capturedScope ctxkeys.TenantScope
+	handler := server.authenticationMiddleware(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedScope, _ = r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := requestWithTLSCert(http.MethodGet, "/api/v1/stewards", adminCert)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, capturedScope.IsRoot(),
+		"an unscoped mTLS admin cert (bootstrap fallback) must produce root scope")
+}
+
+// TestAuthMiddleware_APIKeyNeverRootScoped verifies that an API-key principal never
+// receives root scope (Issue #4316) — NewRootScope is reserved for a verified mTLS
+// admin certificate, which an API key is not, even for a key with no tenant set.
+func TestAuthMiddleware_APIKeyNeverRootScoped(t *testing.T) {
+	server := setupTestServer(t)
+	apiKeyStr := NewTestKey(t, server, []string{"steward:read"})
+
+	var capturedScope ctxkeys.TenantScope
+	handler := server.authenticationMiddleware(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedScope, _ = r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+			w.WriteHeader(http.StatusOK)
+		}),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKeyStr)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, capturedScope.IsRoot(), "an API-key principal must never be root-scoped")
+}
+
 // setupTestServerWithIsolationEngine builds a test server wired with a real
 // TenantIsolationEngine. Uses real CFGMS components — no mocks.
 func setupTestServerWithIsolationEngine(t *testing.T) *Server {
@@ -3236,6 +3287,49 @@ func TestIsWithinTenantScope(t *testing.T) {
 				"isWithinTenantScope(%q, %q)", tc.callerTenant, tc.resourceTenant)
 		})
 	}
+}
+
+// TestIsAuthorizedForTenant verifies the fail-closed ctxkeys.TenantScope helper
+// introduced by Issue #4316: unset denies, root allows unconditionally, a tenant
+// scope allows its own subtree, and a tenant scope is refused a sibling subtree —
+// the four required states from the story's acceptance criteria.
+func TestIsAuthorizedForTenant(t *testing.T) {
+	srv := &Server{logger: logging.NewNoopLogger()}
+
+	t.Run("unset_scope_denies", func(t *testing.T) {
+		var unset ctxkeys.TenantScope
+		assert.False(t, srv.isAuthorizedForTenant(unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
+	})
+
+	t.Run("root_scope_allows", func(t *testing.T) {
+		root := ctxkeys.NewRootScope()
+		assert.True(t, srv.isAuthorizedForTenant(root, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(root, "", "GET /api/v1/stewards/{id}"))
+	})
+
+	t.Run("tenant_scope_allows_own_subtree", func(t *testing.T) {
+		scope := ctxkeys.NewTenantScope("root/msp-a")
+		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
+	})
+
+	t.Run("tenant_scope_refused_sibling_subtree", func(t *testing.T) {
+		scope := ctxkeys.NewTenantScope("root/msp-a")
+		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
+			"trailing-separator guard: msp-a must not match msp-ab")
+	})
+
+	t.Run("tenant_scope_with_empty_path_denies_rather_than_acting_as_root", func(t *testing.T) {
+		// NewTenantScope("") must never behave like NewRootScope() — see
+		// NewTenantScope's doc comment. This is the exact ambiguity the type
+		// exists to remove: an empty tenant string historically meant "root,
+		// allow everything" (isWithinTenantScope's own semantics, kept
+		// unchanged for its existing callers), but a TenantScope must fail
+		// closed instead of reintroducing that ambiguity through Path().
+		degenerate := ctxkeys.NewTenantScope("")
+		assert.False(t, srv.isAuthorizedForTenant(degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
+	})
 }
 
 // TestExtractAdminPrincipal_DeprovisioningCannotWidenBoundCert verifies that deleting the

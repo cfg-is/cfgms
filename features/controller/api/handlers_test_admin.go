@@ -29,6 +29,13 @@ type testSetStewardStatusRequest struct {
 // handleTestSetStewardStatus handles PUT /api/v1/test/stewards/{id}/status.
 // Requires CFGMS_ENABLE_TEST_ENDPOINTS=true (enforced by authenticationMiddleware).
 // Accepts the steward's UUID as {id} and updates its lifecycle status.
+//
+// Test-only endpoint compiled solely behind the cfgms_test_endpoints build tag and
+// refused at runtime unless CFGMS_ENABLE_TEST_ENDPOINTS=true
+// (test_endpoints_enabled.go); never present in a production binary, used only by
+// fleet E2E tests in place of the sqlite3 CLI.
+//
+//architecture:allow-unscoped-tenant-read -- test-only, build-tag- and env-var-gated, never shipped in a production binary
 func (s *Server) handleTestSetStewardStatus(w http.ResponseWriter, r *http.Request) {
 	if os.Getenv("CFGMS_ENABLE_TEST_ENDPOINTS") != "true" {
 		http.Error(w, "test endpoints disabled", http.StatusForbidden)
