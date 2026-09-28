@@ -466,6 +466,15 @@ type GetCliLoginResponse struct {
 // Status mirrors handleCollectCliLoginRequest's own precedence: an expired request
 // reports "expired" regardless of its stored status, computed here rather than
 // persisted — the stored value is left untouched for the sweep to find and reap.
+//
+// Issue #4334: authenticated (requirePermission "cli-login"/"approve",
+// AssuranceStrong) but the resource is deliberately tenant-less —
+// pendingCliLoginRequest carries no tenant or scope field of any kind (see this
+// file's package comment). Any principal holding cli-login:approve may read any
+// pending login request's user code; the session later minted at approval inherits
+// the approving principal's own scope, not anything read here.
+//
+//architecture:allow-unscoped-tenant-read -- authenticated but tenant-less resource; see Issue #4334 comment above
 func (s *Server) handleGetCliLoginRequest(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Cli login service not available", "SERVICE_UNAVAILABLE")
@@ -524,6 +533,15 @@ type ApproveCliLoginResponse struct {
 // session through the same Issue/IssueRootScoped branch handleSessionCreate uses, so
 // the resulting session inherits the approving principal's scope exactly, including
 // the root-scope marker for a root-scoped principal (ADR-025 Amendment 4).
+//
+// Issue #4334: authenticated (requirePermission "cli-login"/"approve",
+// AssuranceStrong) but the resource is deliberately tenant-less —
+// pendingCliLoginRequest carries no tenant or scope field of any kind (see this
+// file's package comment). Any principal holding cli-login:approve may approve any
+// pending request; the minted session inherits the approving principal's own scope,
+// read fresh from Principal below, never from this record.
+//
+//architecture:allow-unscoped-tenant-read -- authenticated but tenant-less resource; see Issue #4334 comment above
 func (s *Server) handleApproveCliLoginRequest(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
@@ -692,6 +710,14 @@ func (s *Server) claimCliLoginRequestForCollection(ctx context.Context, id strin
 // generated locally and presents as a bearer credential exactly once, mirroring
 // handleCollectCredentialRequest. Registered on the base router, not the authenticated
 // api subrouter.
+//
+// Issue #4334: pre-authentication — the caller has no Principal or TenantScope at
+// all (auth is proving possession of the verifier for the named id, checked above —
+// a wrong verifier and an unknown id are indistinguishable). The minted session's
+// scope was already fixed at approval time from the approving principal, never from
+// anything this caller supplies.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication; see Issue #4334 comment above
 func (s *Server) handleCollectCliLoginRequest(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if id == "" {

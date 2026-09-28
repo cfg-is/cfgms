@@ -158,10 +158,26 @@ func TestHandleListAPIKeys_RouterPath_FiltersByAuthenticatedTenant(t *testing.T)
 
 // callHandleCreateAPIKey posts body to handleCreateAPIKey with the given context tenant.
 func callHandleCreateAPIKey(server *Server, body []byte, contextTenantID string) *httptest.ResponseRecorder {
+	return callHandleCreateAPIKeyAsPrincipal(server, body, contextTenantID, &Principal{
+		ID:            "test-caller",
+		ImplicitAdmin: true,
+		TenantID:      contextTenantID,
+	})
+}
+
+// callHandleCreateAPIKeyAsPrincipal calls handleCreateAPIKey with the given caller
+// principal and a matching TenantScope injected into the context, exactly as
+// authenticationMiddleware would (Issue #4334). Passing a non-ImplicitAdmin
+// principal with a limited Permissions set exercises the permission-escalation and
+// tenant-containment checks the plain callHandleCreateAPIKey helper otherwise masks.
+func callHandleCreateAPIKeyAsPrincipal(server *Server, body []byte, contextTenantID string, principal *Principal) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if contextTenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, contextTenantID))
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantID, contextTenantID)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(contextTenantID))
+		ctx = context.WithValue(ctx, principalContextKey, principal)
+		req = req.WithContext(ctx)
 	}
 	rec := httptest.NewRecorder()
 	server.handleCreateAPIKey(rec, req)
@@ -289,6 +305,10 @@ func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/memory-only-key-id", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "memory-only-key-id"})
+	// Issue #4334: the handler now enforces tenant containment before deleting —
+	// an unscoped (root) caller here exercises the pre-existing secret-store-failure
+	// path this test targets, independent of that new check.
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 	rec := httptest.NewRecorder()
 	server.handleDeleteAPIKey(rec, req)
 
@@ -302,4 +322,181 @@ func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
 	for _, k := range server.apiKeys {
 		assert.NotEqual(t, "memory-only-key-id", k.ID, "key must be removed from memory even when secret store deletion fails")
 	}
+}
+
+// TestHandleCreateAPIKey_CannotGrantPermissionCallerDoesNotHold is a [REQUIRED TEST]
+// for Issue #4334: a caller holding only api-key:create cannot mint an API key
+// carrying certificate:rotate — a permission it does not itself hold.
+func TestHandleCreateAPIKey_CannotGrantPermissionCallerDoesNotHold(t *testing.T) {
+	server := setupTestServer(t)
+
+	limitedCaller := &Principal{
+		ID:          "limited-caller",
+		TenantID:    "tenant-a",
+		Permissions: []string{"api-key:create"},
+	}
+	body := []byte(`{"name":"escalation-key","tenant_id":"tenant-a","permissions":["certificate:rotate"]}`)
+	rec := callHandleCreateAPIKeyAsPrincipal(server, body, "tenant-a", limitedCaller)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PERMISSION_ESCALATION")
+
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	for _, k := range server.apiKeys {
+		assert.NotEqual(t, "escalation-key", k.Name, "no key may be persisted when the caller lacks a requested permission")
+	}
+}
+
+// TestHandleCreateAPIKey_CanGrantHeldPermission verifies the positive case: a caller
+// holding the requested permission itself may grant it to a new key.
+func TestHandleCreateAPIKey_CanGrantHeldPermission(t *testing.T) {
+	server := setupTestServer(t)
+
+	caller := &Principal{
+		ID:          "holder-caller",
+		TenantID:    "tenant-a",
+		Permissions: []string{"api-key:create", "steward:read"},
+	}
+	body := []byte(`{"name":"held-perm-key","tenant_id":"tenant-a","permissions":["steward:read"]}`)
+	rec := callHandleCreateAPIKeyAsPrincipal(server, body, "tenant-a", caller)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleCreateAPIKey_TenantScope_SiblingTenant_Returns403 is the [REQUIRED TEST]
+// for Issue #4334: a caller scoped to tenant-a cannot mint an API key for sibling
+// tenant tenant-b.
+func TestHandleCreateAPIKey_TenantScope_SiblingTenant_Returns403(t *testing.T) {
+	server := setupTestServer(t)
+
+	caller := &Principal{ID: "scoped-caller", TenantID: "tenant-a", ImplicitAdmin: true}
+	body := []byte(`{"name":"cross-tenant-key","tenant_id":"tenant-b","permissions":["steward:read"]}`)
+	rec := callHandleCreateAPIKeyAsPrincipal(server, body, "tenant-a", caller)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	for _, k := range server.apiKeys {
+		assert.NotEqual(t, "cross-tenant-key", k.Name, "no key may be persisted for a tenant outside the caller's own subtree")
+	}
+}
+
+// TestHandleCreateAPIKey_TenantScope_CannotDefaultOutsideOwnSubtree is the
+// [REQUIRED TEST] for Issue #4334 covering AC3: a tenant-scoped caller cannot mint a
+// key that resolves to the catch-all "default" tenant outside its own subtree by
+// simply omitting tenant_id — the equivalent, for API keys, of a tenant-scoped caller
+// being unable to create a root-scoped account.
+func TestHandleCreateAPIKey_TenantScope_CannotDefaultOutsideOwnSubtree(t *testing.T) {
+	server := setupTestServer(t)
+
+	caller := &Principal{ID: "scoped-caller", TenantID: "tenant-a", ImplicitAdmin: true}
+	body := []byte(`{"name":"default-tenant-key","permissions":["steward:read"]}`)
+	rec := callHandleCreateAPIKeyAsPrincipal(server, body, "tenant-a", caller)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleCreateAPIKey_UnsetScope_Returns403 verifies the fail-closed contract
+// (Issue #4316): a request reaching the handler with no TenantScope ever established
+// is refused, never treated as unrestricted root access.
+func TestHandleCreateAPIKey_UnsetScope_Returns403(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys",
+		bytes.NewReader([]byte(`{"name":"unset-scope-key","permissions":["steward:read"]}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.handleCreateAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetAPIKey_TenantScope_SiblingTenant_Returns404 is the [REQUIRED TEST] for
+// Issue #4334: a caller scoped to tenant-a is refused (as not-found, not forbidden —
+// existence must not be disclosed across tenants) when reading a key belonging to
+// sibling tenant tenant-b.
+func TestHandleGetAPIKey_TenantScope_SiblingTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	injectAPIKey(server, &APIKey{
+		ID:       "cross-tenant-get-id",
+		Key:      "cross-tenant-get-secret",
+		Name:     "Tenant B Key",
+		TenantID: "tenant-b",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/api-keys/cross-tenant-get-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "cross-tenant-get-id"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleGetAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetAPIKey_TenantScope_OwnTenant_Succeeds verifies a caller scoped to
+// tenant-a CAN read a key belonging to its own tenant.
+func TestHandleGetAPIKey_TenantScope_OwnTenant_Succeeds(t *testing.T) {
+	server := setupTestServer(t)
+	injectAPIKey(server, &APIKey{
+		ID:       "own-tenant-get-id",
+		Key:      "own-tenant-get-secret",
+		Name:     "Tenant A Key",
+		TenantID: "tenant-a",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/api-keys/own-tenant-get-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "own-tenant-get-id"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleGetAPIKey(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetAPIKey_UnsetScope_Returns404 verifies the fail-closed contract (Issue
+// #4316): a request reaching the handler with no TenantScope ever established is
+// refused, never treated as unrestricted root access.
+func TestHandleGetAPIKey_UnsetScope_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	injectAPIKey(server, &APIKey{
+		ID:       "unset-scope-get-id",
+		Key:      "unset-scope-get-secret",
+		Name:     "Some Key",
+		TenantID: "tenant-a",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/api-keys/unset-scope-get-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "unset-scope-get-id"})
+	rec := httptest.NewRecorder()
+	server.handleGetAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleDeleteAPIKey_TenantScope_SiblingTenant_Returns404 is the [REQUIRED TEST]
+// for Issue #4334: a caller scoped to tenant-a is refused (as not-found) when
+// deleting a key belonging to sibling tenant tenant-b, and the key must survive.
+func TestHandleDeleteAPIKey_TenantScope_SiblingTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	injectAPIKey(server, &APIKey{
+		ID:       "cross-tenant-delete-id",
+		Key:      "cross-tenant-delete-secret",
+		Name:     "Tenant B Key",
+		TenantID: "tenant-b",
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/cross-tenant-delete-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "cross-tenant-delete-id"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleDeleteAPIKey(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+	_, stillExists := server.apiKeys["cross-tenant-delete-secret"]
+	assert.True(t, stillExists, "a cross-tenant delete attempt must not remove the key")
 }

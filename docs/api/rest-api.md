@@ -700,6 +700,22 @@ Provision a new certificate for a steward.
 **Authentication:** Required  
 **Required permission:** `certificate:provision`
 
+**Tenant scope:** a tenant-scoped caller may provision only for a `steward_id` with a
+durable steward record inside its own subtree. A `steward_id` registered under another
+tenant, and a `steward_id` with no record at all, are both refused with `403 FORBIDDEN`
+— without a record the target cannot be attributed to the caller's subtree, and this
+endpoint returns a signed certificate together with its private key. New-device
+onboarding is therefore a root/unscoped operation, or follows the steward's
+registration to a tenant. Root/unscoped callers may provision for any steward.
+
+**Certificate subject:** for a tenant-scoped caller, `common_name` is always the
+resolved steward's own ID and `organization` is always the steward certificate
+organization; an explicit value for either is accepted only when it already matches,
+and refused with `403 FORBIDDEN` otherwise. The subject — not `steward_id` — is what
+peers authenticate on, so a request-supplied subject would let a caller pass the
+containment check with one steward and receive a certificate naming another.
+Root/unscoped callers may set both fields freely.
+
 **Request Body:**
 
 ```json
@@ -723,6 +739,124 @@ Provision a new certificate for a steward.
     "expires_at": "2026-01-12T10:30:00Z"
   },
   "timestamp": "2025-01-12T10:30:00Z"
+}
+```
+
+#### POST /api/v1/certificates/signing/rotate
+
+Rotate the controller's payload/client signing CA certificate, issuing a new one and
+retiring the old one after an overlap window.
+
+**Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
+**Required permission:** `certificate:rotate`
+
+**Tenant scope:** the signing CA is a single fleet-wide resource, not owned by any
+one tenant — rotating it replaces the chain every tenant's certificates verify
+against. Available to unscoped (root) administrators only; a tenant-scoped caller
+receives `403 FORBIDDEN` regardless of the permission grant.
+
+**Request Body (optional):**
+
+```json
+{
+  "overlap_days": 7,
+  "force": false
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "old_serial": "123456789",
+    "new_serial": "987654321",
+    "overlap_days": 7,
+    "stewards_notified": 42,
+    "overlap_expires_at": "2026-01-19T10:30:00Z"
+  },
+  "timestamp": "2025-01-12T10:30:00Z"
+}
+```
+
+### Signing Credentials
+
+#### POST /api/v1/signing-credential/request
+
+Issue a CSR-based payload-signing certificate (Issue #3693): the caller generates an
+ECDSA P-256 keypair locally and submits only the public key here. The CA never sees
+a private key for this credential.
+
+**Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
+**Required permission:** `signing-credential:request`
+
+**Tenant scope:** the issued credential is bound exclusively to the caller's own
+identity (`CommonName`/`ClientID` are always the authenticated principal's own, never
+request-supplied) — there is no separate target resource to contain. An unset
+caller scope is refused with `403 FORBIDDEN` (Issue #4316 fail-closed contract).
+
+**Request Body:**
+
+```json
+{
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\n...ECDSA P-256 SubjectPublicKeyInfo...\n-----END PUBLIC KEY-----"
+}
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "data": {
+    "certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "serial_number": "123456789",
+    "expires_at": "2027-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
+}
+```
+
+### Credential Renewal
+
+#### POST /api/v1/credential-renewal
+
+Renew an enrolment-issued credential before it expires: the renewing host presents
+its expiring certificate over mutual TLS to prove identity and submits a CSR for a
+freshly generated keypair. The controller signs, binds, and revokes-and-unbinds the
+old certificate in one operation.
+
+**Authentication:** the expiring certificate itself, presented over mutual TLS — no
+API key or session credential can substitute for it.  
+**Required permission:** none (gated entirely by certificate possession); no route
+permission is registered for this endpoint.
+
+**Tenant scope:** renewal is scoped exclusively to the account resolved from the
+presented certificate's own serial — there is no separate caller-supplied target.
+An unset caller scope, or one that disagrees with the resolved account's own tenant,
+is refused with `403 NO_ACCOUNT_BINDING` (Issue #4316 fail-closed contract).
+
+**Request Body:**
+
+```json
+{
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----"
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "ca_certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
+    "serial_number": "987654321",
+    "account_id": "550e8400-e29b-41d4-a716-446655440000",
+    "granted_markers": ["admin"],
+    "expires_at": "2027-01-12T10:30:00Z"
+  },
+  "timestamp": "2026-01-12T10:30:00Z"
 }
 ```
 
@@ -922,6 +1056,14 @@ Create a new API key.
 **Authentication:** Required  
 **Required permission:** `api-key:create`
 
+**Tenant scope:** the created key's `tenant_id` (explicit, or the `"default"`
+fallback when omitted) must equal or descend from the caller's own tenant subtree —
+a tenant-scoped caller cannot mint a key for a sibling tenant, nor reach the
+catch-all `"default"` tenant outside its own subtree, by an out-of-scope
+`tenant_id`. Root/unscoped callers may target any tenant. A caller may also only
+grant a `permissions` entry it itself holds — a caller cannot mint a key with a
+permission it does not have, independent of the tenant check.
+
 **Request Body:**
 
 ```json
@@ -959,6 +1101,10 @@ Get a specific API key (metadata only — the key value is not returned after cr
 **Authentication:** Required  
 **Required permission:** `api-key:read`
 
+**Tenant scope:** a key owned by another tenant returns `404 KEY_NOT_FOUND` (not
+`403`) — the same response as an unknown ID, so this endpoint cannot be used to
+probe for a key's existence across tenants. Root/unscoped callers may read any key.
+
 **Parameters:**
 
 - `id` (path): API key ID
@@ -969,6 +1115,10 @@ Delete an API key. The key is immediately invalidated.
 
 **Authentication:** Required  
 **Required permission:** `api-key:delete`
+
+**Tenant scope:** a key owned by another tenant returns `404 KEY_NOT_FOUND` (not
+`403`) and is not deleted — the same response as an unknown ID. Root/unscoped
+callers may delete any key.
 
 **Parameters:**
 
@@ -2596,6 +2746,18 @@ a new link.
 **Required permission:** `account:create`  
 **Assurance:** Strong session (passkey or elevated mTLS) required
 
+**Tenant scope:** both the account being replaced (on reset) and the requested
+destination scope must be within the caller's own tenant subtree — a tenant-scoped
+caller receives `403 FORBIDDEN` targeting a username outside its subtree, or
+requesting `root_scope: true` (root scope is inside no tenant-scoped caller's
+subtree). Root/unscoped callers may create or reset any account.
+
+**Permission ceiling:** the caller must itself hold every permission in the account's
+*resulting* permission set, or the request is refused with `403 PERMISSION_ESCALATION`.
+Because this endpoint is an upsert, that set is the retained one when `permissions` is
+omitted on a reset — so a caller cannot reset an account more privileged than itself
+and collect the enrollment link for it. Checked independently of the tenant check.
+
 **Request body:**
 
 ```json
@@ -2710,6 +2872,35 @@ List all web admin accounts. No credential material (registered passkey public k
   "timestamp": "2026-01-12T10:30:00Z"
 }
 ```
+
+#### PUT /api/v1/accounts/{username}
+
+Update an existing web admin account. All request fields are optional — omitted
+fields retain their existing values, allowing independent update of permissions,
+disabled state, and credentials.
+
+**Authentication:** Required  
+**Required permission:** `account:update`  
+**Assurance:** Strong session required
+
+**Tenant scope:** an account owned by another tenant returns `404 ACCOUNT_NOT_FOUND`
+(not `403`) — the same response as an unknown username, so this endpoint cannot be
+used to probe for account existence across tenants. Root/unscoped callers may update
+any account. A caller may also only grant a `permissions` entry it itself holds —
+independent of the tenant check.
+
+**Request body:**
+
+```json
+{
+  "permissions": ["steward:list", "steward:read"],
+  "disabled": false,
+  "reset_credentials": false
+}
+```
+
+**Response (200 OK):** the updated `AccountInfo`, plus `enrollment_magic_link` when
+`reset_credentials: true` minted a fresh one.
 
 #### POST /api/v1/accounts/{username}/certs/bind
 
@@ -2880,6 +3071,11 @@ Delete a web admin account. Removes both the in-memory cache entry and the durab
 **Authentication:** Required  
 **Required permission:** `account:delete`  
 **Assurance:** Strong session required
+
+**Tenant scope:** an account owned by another tenant returns `404 ACCOUNT_NOT_FOUND`
+(not `403`) — the same response as an unknown username, so this endpoint cannot be
+used to probe for account existence across tenants. Root/unscoped callers may
+delete any account.
 
 **Parameters:**
 

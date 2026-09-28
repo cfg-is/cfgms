@@ -505,6 +505,80 @@ func TestWebAuthnListCredentials(t *testing.T) {
 	})
 }
 
+// TestWebAuthnAdminPath_TenantScope_CrossTenantReturns404 is the [REQUIRED TEST] for
+// Issue #4334: resolveAccountForCredentials' admin (mTLS/API-key) path resolved the
+// target account by path username with no tenant check at all — a caller scoped to
+// tenant-a must be refused (404, to avoid disclosing existence) when listing WebAuthn
+// credentials for an account in sibling tenant tenant-b. This must succeed (list the
+// credentials) before the fix and be refused after.
+func TestWebAuthnAdminPath_TenantScope_CrossTenantReturns404(t *testing.T) {
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "tenant-b-webauthn-user",
+		TenantID: "tenant-b",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in tenant-b")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/accounts/tenant-b-webauthn-user/webauthn/credentials", nil)
+	req = withVars(req, map[string]string{"username": "tenant-b-webauthn-user"})
+	req = withPrincipal(req, &Principal{
+		ID: "tenant-a-admin", TenantID: "tenant-a", Assurance: session.AssuranceStrong, ImplicitAdmin: true,
+	})
+	rec = httptest.NewRecorder()
+	server.handleWebAuthnListCredentials(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestWebAuthnAdminPath_TenantScope_OwnTenantSucceeds verifies a caller scoped to
+// tenant-a CAN list WebAuthn credentials for an account in its own tenant.
+func TestWebAuthnAdminPath_TenantScope_OwnTenantSucceeds(t *testing.T) {
+	server := setupTestServer(t)
+	wa, err := NewWebAuthnFromConfig(tvRPID, tvRPID, []string{tvOrigin})
+	require.NoError(t, err)
+	server.SetWebAuthn(wa)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "tenant-a-webauthn-user",
+		TenantID: "tenant-a",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in tenant-a")
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/accounts/tenant-a-webauthn-user/webauthn/credentials", nil)
+	req = withVars(req, map[string]string{"username": "tenant-a-webauthn-user"})
+	req = withPrincipal(req, &Principal{
+		ID: "tenant-a-admin", TenantID: "tenant-a", Assurance: session.AssuranceStrong, ImplicitAdmin: true,
+	})
+	rec = httptest.NewRecorder()
+	server.handleWebAuthnListCredentials(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestWebAuthnAdminPath_UnsetScope_Returns404 verifies the fail-closed contract
+// (Issue #4316): a request reaching resolveAccountForCredentials' admin path with no
+// TenantScope ever established is refused, never treated as unrestricted root access.
+func TestWebAuthnAdminPath_UnsetScope_Returns404(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials", username), nil)
+	req = withVars(req, map[string]string{"username": username})
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, &Principal{
+		ID: "unset-scope-admin", Assurance: session.AssuranceStrong,
+	}))
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnListCredentials(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
 // TestWebAuthnRevokeCredential verifies handleWebAuthnRevokeCredential (Issue #2783).
 func TestWebAuthnRevokeCredential(t *testing.T) {
 	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})

@@ -15,6 +15,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -69,6 +70,22 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 
 	if s.signingRotationService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Signing rotation service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	// Issue #4334: the signing CA is a single fleet-wide resource, not owned by any
+	// one tenant — rotating it replaces the chain every tenant's certificates verify
+	// against. Only an unscoped (root) caller may perform it, mirroring
+	// handleGetRevocationManifest's unscoped-only rule for the other fleet-wide
+	// certificate surface. An unset scope is refused by the same IsRoot() check
+	// (Issue #4316 fail-closed contract) — the AssuranceStrong gate above proves the
+	// credential, never the caller's tenant scope.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() {
+		s.logger.Warn("Denied tenant-scoped signing certificate rotation",
+			"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Signing certificate rotation is available to unscoped administrators only", "FORBIDDEN")
 		return
 	}
 
@@ -471,6 +488,90 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	if provisionReq.StewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 		return
+	}
+
+	// Issue #4334: tenant containment. A tenant-scoped caller may provision a
+	// certificate only for a steward with a durable record inside its own subtree.
+	// An unset scope is refused outright regardless of the target (Issue #4316
+	// fail-closed contract): the certificate:provision permission grant does not by
+	// itself prove a valid caller scope was established.
+	//
+	// Fails closed on an absent record, exactly like the revoke path above: with no
+	// durable record the requested steward_id cannot be attributed to this caller's
+	// subtree, and this endpoint returns a CA-signed client certificate *and its
+	// private key*, so "not yet attributable" must not mean "allowed". Otherwise any
+	// unused steward_id is a free pass through the containment check. New-device
+	// onboarding therefore runs as a root/unscoped operation (or after the steward is
+	// registered to a tenant), not as an unattributable tenant-scoped provision.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsUnset() {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		return
+	}
+	if !scope.IsRoot() {
+		if s.stewardStore == nil {
+			s.logger.Error("certificate provision failed: steward store not configured")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+		record, err := s.stewardStore.GetSteward(r.Context(), provisionReq.StewardID)
+		if err != nil && !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Error("Failed to resolve steward for provisioning tenant scope",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+			return
+		}
+		// errors.Is(err, ErrStewardNotFound), or a store that reports success with no
+		// record: unattributable either way. Denied with the same message and status as
+		// an out-of-subtree steward so the endpoint is not a fleet-existence oracle.
+		if err != nil || record == nil || record.ID == "" {
+			s.logger.Warn("Denied tenant-scoped provision for steward with no durable record",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID))
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			return
+		}
+		if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/certificates/provision") {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			return
+		}
+
+		// The containment check above resolves the steward by steward_id, but the
+		// identity that consumers actually authenticate on is the certificate Subject,
+		// which the service copies from the request body
+		// (certificate_provisioning_service.go → cert.ClientCertConfig): PeerStewardID
+		// (pkg/transport/quic/tls.go) derives control-plane steward identity from
+		// CommonName alone, and the internal-delivery peer authorizer
+		// (pkg/controlplane/internaldelivery/peer_auth.go) refuses steward leaves on the
+		// Subject Organization marker while accepting a CommonName that matches a cluster
+		// node ID. A caller-supplied CommonName/Organization would therefore let a
+		// tenant-scoped caller pass containment with its own steward_id and still receive
+		// a certificate impersonating another tenant's steward — or a cluster node. So for
+		// a non-root caller the Subject is taken from the resolved record, and an explicit
+		// request value is honoured only when it already matches. Root/unscoped callers,
+		// who hold fleet-wide authority by definition, keep the free-form Subject.
+		if provisionReq.CommonName != "" && provisionReq.CommonName != record.ID {
+			s.logger.Warn("Denied tenant-scoped provision with a common_name that is not the steward's identity",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"common_name", logging.SanitizeLogValue(provisionReq.CommonName))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"common_name must match the steward's identity", "FORBIDDEN")
+			return
+		}
+		if provisionReq.Organization != "" && provisionReq.Organization != internaldelivery.StewardCertOrganization {
+			s.logger.Warn("Denied tenant-scoped provision with a non-steward organization",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"organization", logging.SanitizeLogValue(provisionReq.Organization))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"organization must be the steward certificate organization", "FORBIDDEN")
+			return
+		}
+		provisionReq.StewardID = record.ID
+		provisionReq.CommonName = record.ID
+		// Set explicitly rather than left empty: the service's default organization is
+		// deployment-configurable (SetCertificateDefaults), and the steward marker is what
+		// keeps this leaf out of the internal-delivery cluster-node path.
+		provisionReq.Organization = internaldelivery.StewardCertOrganization
 	}
 
 	if provisionReq.CommonName == "" {
