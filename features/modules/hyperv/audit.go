@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -51,9 +52,9 @@ func recordHypervOp(ctx context.Context, mgr *audit.Manager, tenantID, stewardID
 
 	if err := mgr.RecordEvent(ctx, builder); err != nil {
 		slog.Warn("hyperv: failed to record audit event",
-			"verb", verb,
-			"resource_id", cfgResourceID,
-			"error", err,
+			"verb", logging.SanitizeLogValue(verb),
+			"resource_id", logging.SanitizeLogValue(cfgResourceID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 }

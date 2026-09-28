@@ -1099,7 +1099,7 @@ func (m *hypervModule) getVMLocal(ctx context.Context, vmName string) (*VMConfig
 			if logger, ok := m.GetLogger(); ok {
 				logger.Warn("hyperv: checkpoint compliance probe failed; reporting as drift this cycle",
 					"vm_name", logging.SanitizeLogValue(vmName),
-					"error", cErr.Error())
+					"error", logging.SanitizeLogValue(cErr.Error()))
 			}
 		} else if comply {
 			cfg.checkpointsEcho = desiredCheckpoints
@@ -1265,7 +1265,7 @@ func (m *hypervModule) probeClusterRoleMembership(ctx context.Context, vmName st
 			logger.Warn("hyperv: cluster-role membership probe failed; reporting no HA role this cycle",
 				"vm_name", logging.SanitizeLogValue(vmName),
 				"cluster", logging.SanitizeLogValue(m.clusterName),
-				"error", roErr.Error())
+				"error", logging.SanitizeLogValue(roErr.Error()))
 		}
 		return nil
 	}
@@ -1948,7 +1948,7 @@ func (m *hypervModule) renameProvisionRecord(ctx context.Context, cfg *VMConfig,
 			logger.Warn("hyperv: rename provisioning record failed",
 				"old_name", logging.SanitizeLogValue(oldName),
 				"new_name", logging.SanitizeLogValue(newName),
-				"error", err.Error())
+				"error", logging.SanitizeLogValue(err.Error()))
 		}
 		return
 	}
@@ -2119,7 +2119,7 @@ func (m *hypervModule) applyVMState(ctx context.Context, vmName, hostName string
 				logger.Warn("hyperv: ha_role owner probe failed; skipping lifecycle convergence this cycle",
 					"vm_name", logging.SanitizeLogValue(vmName),
 					"cluster", logging.SanitizeLogValue(clusterName),
-					"error", roErr.Error())
+					"error", logging.SanitizeLogValue(roErr.Error()))
 			}
 			return nil
 		}

@@ -141,9 +141,9 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 	startTime := time.Now()
 
 	s.logger.Debug("Storing directory DNA",
-		"object_id", dna.ObjectID,
+		"object_id", logging.SanitizeLogValue(dna.ObjectID),
 		"object_type", dna.ObjectType,
-		"dna_id", dna.ID)
+		"dna_id", logging.SanitizeLogValue(dna.ID))
 
 	// Encode DirectoryDNA into a Fragment-based commonpb.DNA envelope.
 	dnaProto, err := marshalToProto(dna)
@@ -183,7 +183,7 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 			}
 
 			s.logger.Debug("Directory DNA deduplicated",
-				"object_id", dna.ObjectID,
+				"object_id", logging.SanitizeLogValue(dna.ObjectID),
 				"content_hash", record.ContentHash[:16])
 		} else {
 			// Compress and store new content
@@ -201,8 +201,8 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 	// Index the record for fast retrieval
 	if err := s.indexer.IndexRecord(ctx, record); err != nil {
 		s.logger.Warn("Failed to index directory DNA record",
-			"object_id", dna.ObjectID,
-			"error", err)
+			"object_id", logging.SanitizeLogValue(dna.ObjectID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		// Don't fail the storage operation for indexing issues
 	}
 
@@ -210,7 +210,7 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 	s.trackObjectType(dna)
 
 	s.logger.Debug("Directory DNA stored successfully",
-		"object_id", dna.ObjectID,
+		"object_id", logging.SanitizeLogValue(dna.ObjectID),
 		"content_hash", record.ContentHash[:16],
 		"shard_id", record.ShardID,
 		"storage_time", time.Since(startTime))
@@ -220,7 +220,7 @@ func (s *DirectoryDNAStorageAdapter) StoreDirectoryDNA(ctx context.Context, dna 
 
 // GetDirectoryDNA retrieves a DirectoryDNA record by object ID and type.
 func (s *DirectoryDNAStorageAdapter) GetDirectoryDNA(ctx context.Context, objectID string, objectType interfaces.DirectoryObjectType) (*DirectoryDNA, error) {
-	s.logger.Debug("Retrieving directory DNA", "object_id", objectID, "object_type", objectType)
+	s.logger.Debug("Retrieving directory DNA", "object_id", logging.SanitizeLogValue(objectID), "object_type", objectType)
 
 	// Query for the most recent record for this object
 	options := &storage.QueryOptions{
@@ -258,7 +258,7 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryDNA(ctx context.Context, object
 	directoryDNA.ObjectType = objectType
 
 	s.logger.Debug("Directory DNA retrieved successfully",
-		"object_id", objectID,
+		"object_id", logging.SanitizeLogValue(objectID),
 		"content_hash", ref.ContentHash[:16])
 
 	return directoryDNA, nil
@@ -288,7 +288,7 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 
 		refs, _, err := s.indexer.QueryRecords(ctx, objectID, options)
 		if err != nil {
-			s.logger.Warn("Query failed for object", "object_id", objectID, "error", err)
+			s.logger.Warn("Query failed for object", "object_id", logging.SanitizeLogValue(objectID), "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -296,7 +296,7 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 		for _, ref := range refs {
 			record, err := s.backend.GetRecord(ctx, ref.ContentHash, ref.ShardID)
 			if err != nil {
-				s.logger.Warn("Failed to retrieve record", "content_hash", ref.ContentHash, "error", err)
+				s.logger.Warn("Failed to retrieve record", "content_hash", ref.ContentHash, "error", logging.SanitizeLogValue(err.Error()))
 				continue
 			}
 
@@ -307,7 +307,7 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 
 			directoryDNA, err := unmarshalFromProto(record.DNA)
 			if err != nil {
-				s.logger.Warn("Failed to decode directory DNA", "content_hash", ref.ContentHash, "error", err)
+				s.logger.Warn("Failed to decode directory DNA", "content_hash", ref.ContentHash, "error", logging.SanitizeLogValue(err.Error()))
 				continue
 			}
 
@@ -345,7 +345,7 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 
 // GetDirectoryHistory retrieves historical DNA records for a specific object.
 func (s *DirectoryDNAStorageAdapter) GetDirectoryHistory(ctx context.Context, objectID string, timeRange *TimeRange) ([]*DirectoryDNA, error) {
-	s.logger.Debug("Retrieving directory history", "object_id", objectID)
+	s.logger.Debug("Retrieving directory history", "object_id", logging.SanitizeLogValue(objectID))
 
 	options := &storage.QueryOptions{
 		Limit:       1000, // Reasonable limit for history
@@ -370,7 +370,7 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryHistory(ctx context.Context, ob
 	for _, ref := range refs {
 		record, err := s.backend.GetRecord(ctx, ref.ContentHash, ref.ShardID)
 		if err != nil {
-			s.logger.Warn("Failed to retrieve historical record", "content_hash", ref.ContentHash, "error", err)
+			s.logger.Warn("Failed to retrieve historical record", "content_hash", ref.ContentHash, "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -381,20 +381,20 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryHistory(ctx context.Context, ob
 
 		directoryDNA, err := unmarshalFromProto(record.DNA)
 		if err != nil {
-			s.logger.Warn("Failed to decode historical DNA record", "content_hash", ref.ContentHash, "error", err)
+			s.logger.Warn("Failed to decode historical DNA record", "content_hash", ref.ContentHash, "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
 		history = append(history, directoryDNA)
 	}
 
-	s.logger.Debug("Directory history retrieved", "object_id", objectID, "records", len(history))
+	s.logger.Debug("Directory history retrieved", "object_id", logging.SanitizeLogValue(objectID), "records", len(history))
 	return history, nil
 }
 
 // StoreRelationships stores directory relationships.
 func (s *DirectoryDNAStorageAdapter) StoreRelationships(ctx context.Context, relationships *DirectoryRelationships) error {
-	s.logger.Debug("Storing directory relationships", "object_id", relationships.ObjectID)
+	s.logger.Debug("Storing directory relationships", "object_id", logging.SanitizeLogValue(relationships.ObjectID))
 
 	// Encode relationships into a Fragment-based commonpb.DNA envelope.
 	relProto, err := marshalRelToProto(relationships)
@@ -424,16 +424,16 @@ func (s *DirectoryDNAStorageAdapter) StoreRelationships(ctx context.Context, rel
 
 	// Index the relationships record
 	if err := s.indexer.IndexRecord(ctx, record); err != nil {
-		s.logger.Warn("Failed to index relationships record", "object_id", relationships.ObjectID, "error", err)
+		s.logger.Warn("Failed to index relationships record", "object_id", logging.SanitizeLogValue(relationships.ObjectID), "error", logging.SanitizeLogValue(err.Error()))
 	}
 
-	s.logger.Debug("Directory relationships stored successfully", "object_id", relationships.ObjectID)
+	s.logger.Debug("Directory relationships stored successfully", "object_id", logging.SanitizeLogValue(relationships.ObjectID))
 	return nil
 }
 
 // GetRelationships retrieves directory relationships.
 func (s *DirectoryDNAStorageAdapter) GetRelationships(ctx context.Context, objectID string) (*DirectoryRelationships, error) {
-	s.logger.Debug("Retrieving directory relationships", "object_id", objectID)
+	s.logger.Debug("Retrieving directory relationships", "object_id", logging.SanitizeLogValue(objectID))
 
 	options := &storage.QueryOptions{
 		Limit:       1,
@@ -465,7 +465,7 @@ func (s *DirectoryDNAStorageAdapter) GetRelationships(ctx context.Context, objec
 		return nil, fmt.Errorf("failed to decode relationships: %w", err)
 	}
 
-	s.logger.Debug("Directory relationships retrieved successfully", "object_id", objectID)
+	s.logger.Debug("Directory relationships retrieved successfully", "object_id", logging.SanitizeLogValue(objectID))
 	return relationships, nil
 }
 

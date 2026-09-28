@@ -140,7 +140,13 @@ func (w *ApprovalWorkflow) EvaluateAndStore(b *bundle.Bundle, store trust.TrustS
 		return decision, err
 	}
 
-	// Put seeds pending only if the bundle has no status yet.
+	// Put seeds pending only if the bundle has no status yet. It also enforces
+	// the content-hash/identity binding (cache.ErrContentHashIdentityConflict):
+	// a manifest claiming a different (publisher, name, version) for a content
+	// hash already on record under another identity is refused here, before
+	// any approval status is recorded — decision above is therefore never
+	// reported as AutoApprove for a bundle whose identity disagrees with what
+	// was actually verified (Issue #4341).
 	if putErr := w.cache.Put(b); putErr != nil {
 		return decision, fmt.Errorf("cache Put: %w", putErr)
 	}

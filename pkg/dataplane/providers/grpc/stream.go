@@ -12,6 +12,7 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/dataplane/types"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // isEOF reports whether err signals end-of-stream from a gRPC Recv call.
@@ -328,7 +329,11 @@ func chunksToBulkTransfer(chunks []*transportpb.BulkChunk) (*types.BulkTransfer,
 		sum := sha256.Sum256(data)
 		expected := fmt.Sprintf("sha256:%x", sum)
 		if checksum != expected {
-			return nil, fmt.Errorf("want %s, got %s: %w", expected, checksum, ErrChecksumMismatch)
+			// checksum comes from chunks[0].Metadata["checksum"], a peer-supplied
+			// wire field (BulkChunk.Metadata) — sanitize before it rides out in
+			// this error's message text, since %s does not escape control
+			// characters the way %q does for the TenantId mismatch error below.
+			return nil, fmt.Errorf("want %s, got %s: %w", expected, logging.SanitizeLogValue(checksum), ErrChecksumMismatch)
 		}
 	}
 

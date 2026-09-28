@@ -94,7 +94,7 @@ func (r *ProvisionCompletionReconciler) OnConnect(ctx context.Context, stewardID
 			rec.UpdatedAt = now
 			if setErr := r.store.SetProvision(ctx, rec); setErr != nil && r.logger != nil {
 				r.logger.Warn("hyperv completion: failed to mark timed-out record",
-					"vm_name", logging.SanitizeLogValue(rec.VMName), "error", setErr)
+					"vm_name", logging.SanitizeLogValue(rec.VMName), "error", logging.SanitizeLogValue(setErr.Error()))
 			}
 			continue
 		}
@@ -108,7 +108,7 @@ func (r *ProvisionCompletionReconciler) OnConnect(ctx context.Context, stewardID
 			if setErr := r.store.SetProvision(ctx, rec); setErr != nil {
 				if r.logger != nil {
 					r.logger.Warn("hyperv completion: failed to advance record to ready",
-						"vm_name", logging.SanitizeLogValue(rec.VMName), "error", setErr)
+						"vm_name", logging.SanitizeLogValue(rec.VMName), "error", logging.SanitizeLogValue(setErr.Error()))
 				}
 				return setErr
 			}

@@ -59,7 +59,7 @@ func New(logger logging.Logger) modules.Module {
 
 // Get retrieves the current state of Active Directory objects
 func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (modules.ConfigState, error) {
-	m.logger.Debug("Getting AD object", "resource_id", resourceID)
+	m.logger.Debug("Getting AD object", "resource_id", logging.SanitizeLogValue(resourceID))
 
 	// Parse resourceID to determine operation type
 	// Format: "query:user:john.doe" or "query:group:Administrators" or "status"
@@ -109,7 +109,7 @@ func (m *activeDirectoryModule) Get(ctx context.Context, resourceID string) (mod
 
 // Set configures the Active Directory module connection and settings
 func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
-	m.logger.Debug("Setting AD module configuration", "resource_id", resourceID)
+	m.logger.Debug("Setting AD module configuration", "resource_id", logging.SanitizeLogValue(resourceID))
 
 	// Convert ConfigState to ADModuleConfig
 	configMap := config.AsMap()
@@ -186,7 +186,7 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	// Close existing connection if any
 	if m.conn != nil {
 		if err := m.conn.Close(); err != nil {
-			m.logger.Warn("Failed to close LDAP connection", "error", err)
+			m.logger.Warn("Failed to close LDAP connection", "error", logging.SanitizeLogValue(err.Error()))
 		}
 		m.conn = nil
 	}
@@ -202,8 +202,8 @@ func (m *activeDirectoryModule) Set(ctx context.Context, resourceID string, conf
 	}
 
 	m.logger.Info("AD module configured successfully",
-		"domain", adConfig.Domain,
-		"domain_controller", adConfig.DomainController,
+		"domain", logging.SanitizeLogValue(adConfig.Domain),
+		"domain_controller", logging.SanitizeLogValue(adConfig.DomainController),
 		"auth_method", adConfig.AuthMethod)
 
 	return nil
@@ -223,7 +223,7 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to discover domain controller: %w", err)
 		}
-		m.logger.Info("Discovered domain controller", "dc", dcAddress)
+		m.logger.Info("Discovered domain controller", "dc", logging.SanitizeLogValue(dcAddress))
 	}
 
 	// Build connection URL
@@ -233,7 +233,7 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 	}
 
 	url := fmt.Sprintf("%s://%s:%d", scheme, dcAddress, m.config.Port)
-	m.logger.Debug("Connecting to AD", "url", url)
+	m.logger.Debug("Connecting to AD", "url", logging.SanitizeLogValue(url))
 
 	// Create LDAP connection
 	conn, err := ldap.DialURL(url)
@@ -244,7 +244,7 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 	// Authenticate using authentication manager
 	if err := m.authManager.Authenticate(ctx, conn); err != nil {
 		if err := conn.Close(); err != nil {
-			m.logger.Warn("Failed to close LDAP connection", "error", err)
+			m.logger.Warn("Failed to close LDAP connection", "error", logging.SanitizeLogValue(err.Error()))
 		}
 		return fmt.Errorf("authentication failed: %w", err)
 	}
@@ -255,8 +255,8 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 	m.stats.Unlock()
 
 	m.logger.Info("Connected to Active Directory",
-		"domain", m.config.Domain,
-		"dc", dcAddress,
+		"domain", logging.SanitizeLogValue(m.config.Domain),
+		"dc", logging.SanitizeLogValue(dcAddress),
 		"auth_method", m.config.AuthMethod)
 
 	return nil
@@ -264,18 +264,24 @@ func (m *activeDirectoryModule) connect(ctx context.Context) error {
 
 // discoverDomainController discovers a domain controller for the specified domain
 func (m *activeDirectoryModule) discoverDomainController(ctx context.Context, domain string) (string, error) {
-	m.logger.Debug("Discovering domain controller", "domain", domain)
+	m.logger.Debug("Discovering domain controller", "domain", logging.SanitizeLogValue(domain))
 
 	// Try DNS SRV record lookup for domain controllers
 	_, addrs, err := net.LookupSRV("ldap", "tcp", domain)
 	if err == nil && len(addrs) > 0 {
 		// Use the first available DC
 		dcAddress := strings.TrimSuffix(addrs[0].Target, ".")
-		m.logger.Debug("Found DC via SRV record", "dc", dcAddress)
+		m.logger.Debug("Found DC via SRV record", "dc", logging.SanitizeLogValue(dcAddress))
 		return dcAddress, nil
 	}
 
-	m.logger.Debug("SRV lookup failed, trying A record", "domain", domain, "srv_error", err)
+	srvErr := ""
+	if err != nil {
+		srvErr = err.Error()
+	}
+	m.logger.Debug("SRV lookup failed, trying A record",
+		"domain", logging.SanitizeLogValue(domain),
+		"srv_error", logging.SanitizeLogValue(srvErr))
 
 	// Fallback: try direct domain lookup
 	ips, err := net.LookupIP(domain)
@@ -289,7 +295,7 @@ func (m *activeDirectoryModule) discoverDomainController(ctx context.Context, do
 
 	// Use the first IP
 	dcAddress := ips[0].String()
-	m.logger.Debug("Using domain IP as DC", "dc", dcAddress)
+	m.logger.Debug("Using domain IP as DC", "dc", logging.SanitizeLogValue(dcAddress))
 
 	return dcAddress, nil
 }
@@ -336,7 +342,7 @@ func (m *activeDirectoryModule) getConnectionStatus(ctx context.Context) (module
 
 		if err != nil {
 			status.HealthStatus = "unhealthy"
-			m.logger.Warn("AD health check failed", "error", err)
+			m.logger.Warn("AD health check failed", "error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			status.HealthStatus = "healthy"
 		}
@@ -516,7 +522,7 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 
 	m.logger.Debug("AD query completed successfully",
 		"object_type", objectType,
-		"object_id", objectID,
+		"object_id", logging.SanitizeLogValue(objectID),
 		"response_time", result.ResponseTime)
 
 	return result, nil
@@ -734,7 +740,7 @@ func (m *activeDirectoryModule) Close(ctx context.Context) error {
 
 	if m.conn != nil {
 		if err := m.conn.Close(); err != nil {
-			m.logger.Warn("Failed to close LDAP connection", "error", err)
+			m.logger.Warn("Failed to close LDAP connection", "error", logging.SanitizeLogValue(err.Error()))
 		}
 		m.conn = nil
 		m.logger.Info("Closed Active Directory connection")
@@ -819,8 +825,8 @@ func (m *activeDirectoryModule) validateDomainTrust(ctx context.Context, targetD
 	}
 
 	m.logger.Debug("Domain trust validated",
-		"target_domain", targetDomain,
-		"trust_direction", trustDirection)
+		"target_domain", logging.SanitizeLogValue(targetDomain),
+		"trust_direction", logging.SanitizeLogValue(trustDirection))
 
 	return nil
 }
@@ -855,7 +861,7 @@ func (m *activeDirectoryModule) queryTrustedDomain(ctx context.Context, targetDo
 	}
 	defer func() {
 		if err := targetConn.Close(); err != nil {
-			m.logger.Warn("Failed to close cross-domain LDAP connection", "error", err)
+			m.logger.Warn("Failed to close cross-domain LDAP connection", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}()
 
@@ -868,9 +874,9 @@ func (m *activeDirectoryModule) queryTrustedDomain(ctx context.Context, targetDo
 	result := m.executeCrossDomainQuery(ctx, targetConn, targetDomain, objectType, objectID)
 
 	m.logger.Debug("Cross-domain query completed",
-		"target_domain", targetDomain,
-		"object_type", objectType,
-		"object_id", objectID)
+		"target_domain", logging.SanitizeLogValue(targetDomain),
+		"object_type", logging.SanitizeLogValue(objectType),
+		"object_id", logging.SanitizeLogValue(objectID))
 
 	return result, nil
 }
@@ -996,7 +1002,7 @@ func (m *activeDirectoryModule) queryGlobalCatalog(ctx context.Context, objectTy
 	}
 	defer func() {
 		if err := gcConn.Close(); err != nil {
-			m.logger.Warn("Failed to close global catalog LDAP connection", "error", err)
+			m.logger.Warn("Failed to close global catalog LDAP connection", "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}()
 
@@ -1087,7 +1093,7 @@ func (m *activeDirectoryModule) queryGlobalCatalog(ctx context.Context, objectTy
 
 	m.logger.Debug("Forest search completed",
 		"object_type", objectType,
-		"object_id", objectID,
+		"object_id", logging.SanitizeLogValue(objectID),
 		"results_found", result.TotalCount,
 		"response_time", result.ResponseTime)
 
