@@ -212,6 +212,17 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
+	// Additional ctxkeys.TenantScope check (Issue #4335), layered on top of
+	// loadCallerCase's existing caseInCallerSubtree check for the same reason
+	// documented on authorizeCaseTenantScope (handlers_cases.go): the shared
+	// caseInCallerSubtree/callerTenantSubtree primitives still treat an empty
+	// caller tenant as unrestricted, and migrating them would ripple into
+	// handlers_entities.go and handlers_cases_intake.go, outside this story's
+	// file list. Must run before the WebSocket upgrade below, since no ordinary
+	// HTTP error can be written afterward.
+	if !s.authorizeCaseTenantScope(w, r, c, "GET /api/v1/cases/{id}/watch") {
+		return
+	}
 
 	// Extract EIDs from the case's pins for the subscription filter.
 	eids := pinnedEIDsForWatch(c.Pins)

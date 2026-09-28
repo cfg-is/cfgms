@@ -116,11 +116,14 @@ func TestHandleListStewardTags_Unauthenticated(t *testing.T) {
 func TestHandleListStewardTags_CrossTenant(t *testing.T) {
 	server := setupTagServer(t)
 	// API key scoped to "other-tenant" tries to access a steward in "test-tenant".
+	// 404 (not 403), matching the not-found response, so a cross-tenant caller
+	// cannot use the response code as an existence oracle for steward IDs
+	// (Issue #4335 migrated resolveStewardForTags, shared by all three tag handlers).
 	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:read"}, "other-tenant", 5*time.Minute)
 	addTagTestSteward(t, server, "s-cross-read", "test-tenant")
 
 	rec := doTagRequest(server, http.MethodGet, "/api/v1/stewards/s-cross-read/tags", apiKey, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // ---- handleAddStewardTags ----
@@ -184,6 +187,8 @@ func TestHandleAddStewardTags_UnknownSteward(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// [REQUIRED TEST] Issue #4335: a caller authenticated to one tenant is refused (404,
+// same as not-found) when adding tags to a steward owned by a different tenant.
 func TestHandleAddStewardTags_CrossTenant(t *testing.T) {
 	server := setupTagServer(t)
 	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write"}, "other-tenant", 5*time.Minute)
@@ -191,7 +196,7 @@ func TestHandleAddStewardTags_CrossTenant(t *testing.T) {
 
 	rec := doTagRequest(server, http.MethodPost, "/api/v1/stewards/s-cross-add/tags", apiKey,
 		map[string]interface{}{"tags": []string{"prod"}})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestHandleAddStewardTags_Unauthenticated(t *testing.T) {
@@ -272,6 +277,8 @@ func TestHandleDeleteStewardTags_UnknownSteward(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// [REQUIRED TEST] Issue #4335: a caller authenticated to one tenant is refused (404,
+// same as not-found) when deleting tags on a steward owned by a different tenant.
 func TestHandleDeleteStewardTags_CrossTenant(t *testing.T) {
 	server := setupTagServer(t)
 	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write"}, "other-tenant", 5*time.Minute)
@@ -279,7 +286,7 @@ func TestHandleDeleteStewardTags_CrossTenant(t *testing.T) {
 
 	rec := doTagRequest(server, http.MethodDelete, "/api/v1/stewards/s-cross-del/tags", apiKey,
 		map[string]interface{}{"tags": []string{"prod"}})
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 // ---- round-trip ----

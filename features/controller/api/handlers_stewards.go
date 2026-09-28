@@ -179,10 +179,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				Version:  res.DNAAttributes["steward.version"],
 			}
 			if len(res.DNAAttributes) > 0 {
-				attrs := make(map[string]string, len(res.DNAAttributes)+1)
-				for k, v := range res.DNAAttributes {
-					attrs[k] = v
-				}
+				attrs := filteredDNAAttrs(res.DNAAttributes)
 				if res.TenantID != "" {
 					attrs["tenant"] = res.TenantID
 				}
@@ -245,10 +242,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 				Version:  res.DNAAttributes["steward.version"],
 			}
 			if len(res.DNAAttributes) > 0 {
-				attrs := make(map[string]string, len(res.DNAAttributes)+1)
-				for k, v := range res.DNAAttributes {
-					attrs[k] = v
-				}
+				attrs := filteredDNAAttrs(res.DNAAttributes)
 				if res.TenantID != "" {
 					attrs["tenant"] = res.TenantID
 				}
@@ -317,7 +311,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if steward.DNA != nil {
-			attrs := service.FlattenDNAFragments(steward.DNA.Fragments)
+			attrs := filteredDNAAttrs(service.FlattenDNAFragments(steward.DNA.Fragments))
 			if steward.TenantID != "" {
 				merged := make(map[string]string, len(attrs)+1)
 				for k, v := range attrs {
@@ -492,12 +486,11 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// Include DNA information if available
 	if stewardInfo.DNA != nil {
 		apiStewardInfo.DNA = DNAFromProto(stewardInfo.DNA)
-		if apiStewardInfo.DNA != nil && stewardInfo.TenantID != "" {
-			attrs := make(map[string]string, len(apiStewardInfo.DNA.Attributes)+1)
-			for k, v := range apiStewardInfo.DNA.Attributes {
-				attrs[k] = v
+		if apiStewardInfo.DNA != nil {
+			attrs := filteredDNAAttrs(apiStewardInfo.DNA.Attributes)
+			if stewardInfo.TenantID != "" {
+				attrs["tenant"] = stewardInfo.TenantID
 			}
-			attrs["tenant"] = stewardInfo.TenantID
 			apiStewardInfo.DNA.Attributes = attrs
 		}
 	}
@@ -523,6 +516,21 @@ func isDNAAttributeDenylisted(key string) string {
 		}
 	}
 	return ""
+}
+
+// filteredDNAAttrs copies src, dropping any key that matches dnaAttributeDenylist.
+// Issue #4335: the denylist was previously applied only on the single ?attribute=<key>
+// lookup path (handleGetStewardDNA); the list and get responses below copied every DNA
+// attribute unfiltered, including sensitive ones like tokens and credentials.
+func filteredDNAAttrs(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		if isDNAAttributeDenylisted(k) != "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // handleGetStewardDNA handles GET /api/v1/stewards/{id}/dna
@@ -602,7 +610,74 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The bulk dump must honour the same denylist as the single-key lookup above,
+	// otherwise omitting ?attribute= returns every sensitive value the narrow path
+	// refuses (Issue #4335).
+	dnaInfo.Attributes = filteredDNAAttrs(dnaInfo.Attributes)
+
 	s.writeSuccessResponse(w, dnaInfo)
+}
+
+// authorizeStewardScope resolves stewardID's owning tenant (durable-store fallback,
+// matching handleGetSteward) and authorizes it against the caller's ctxkeys.TenantScope
+// (Issue #4335). On any failure — steward not found, or found but outside the caller's
+// scope — it writes the same 404 STEWARD_NOT_FOUND response and returns false, so a
+// caller cannot use response shape to distinguish "does not exist" from "exists in
+// another tenant".
+func (s *Server) authorizeStewardScope(w http.ResponseWriter, r *http.Request, stewardID, route string) bool {
+	stewardTenant, exists := "", false
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
+		stewardTenant, exists = info.TenantID, true
+	} else if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil {
+		stewardTenant, exists = rec.TenantID, true
+	}
+	if !exists {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return false
+	}
+
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, stewardTenant, route) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return false
+	}
+	return true
+}
+
+// authorizeStewardScopeLenient resolves stewardID's owning tenant the same way
+// handleUpdateStewardConfig does — falling back to the caller's own tenant (never
+// denying outright) when the steward is not known anywhere, since config and
+// script-history endpoints keyed by steward ID can legitimately be queried before a
+// steward first connects — and authorizes it against the caller's ctxkeys.TenantScope
+// (Issue #4335). Unlike authorizeStewardScope, this never 404s solely because the
+// steward is unknown: an unknown steward resolves to the caller's own tenant, which
+// is always self-authorized, leaving the downstream lookup to decide not-found on
+// its own terms.
+//
+// Ownership is resolved from the live registry first and from the durable store
+// second, exactly as authorizeStewardScope does. The durable fallback is what keeps
+// the gate a gate: the connection registry is per-node (Issue #3480), so a steward
+// owned by another tenant that is merely offline or attached to a peer controller is
+// absent from GetStewardInfo, and without the fallback it would resolve to the
+// caller's own tenant and self-authorize. The durable store answers nothing for a
+// genuinely unregistered steward, so the intended leniency is preserved.
+func (s *Server) authorizeStewardScopeLenient(w http.ResponseWriter, r *http.Request, stewardID, route string) bool {
+	tenantID := "default"
+	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+		tenantID = tid
+	}
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+		tenantID = info.TenantID
+	} else if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil && rec.TenantID != "" {
+		tenantID = rec.TenantID
+	}
+
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, route) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		return false
+	}
+	return true
 }
 
 // handleGetStewardConfig handles GET /api/v1/stewards/{id}/config
@@ -614,6 +689,10 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 
 	if stewardID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
+		return
+	}
+
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/config") {
 		return
 	}
 
@@ -911,6 +990,10 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "POST /api/v1/stewards/{id}/config/validate") {
+		return
+	}
+
 	// Parse request body
 	var validationReq ConfigValidationRequest
 	if err := json.NewDecoder(r.Body).Decode(&validationReq); err != nil {
@@ -969,10 +1052,7 @@ func (s *Server) handleStewardAuthRefresh(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	_, exists := s.controllerService.GetStewardInfo(id)
-	if !exists {
-		s.logger.Info("Auth refresh requested for unknown steward", "steward_id", idForLog)
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	if !s.authorizeStewardScope(w, r, id, "POST /api/v1/stewards/{id}/auth/refresh") {
 		return
 	}
 

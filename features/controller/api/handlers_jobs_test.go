@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/gorilla/mux"
@@ -732,6 +733,30 @@ func listJobsAs(server *Server, principal *Principal, query string) *httptest.Re
 	rec := httptest.NewRecorder()
 	server.handleListJobs(rec, req)
 	return rec
+}
+
+// TestHandleListJobs_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue #4335:
+// a request whose ctxkeys.TenantScope was never established (the plumbing-bug
+// signature — a dropped context, or a wrong context key) must be refused rather than
+// silently treated as unrestricted, even though a non-machine principal with an empty
+// ctxkeys.TenantID would otherwise be allowed through authRunAccess. This proves
+// handleListJobs derives its store filter from TenantScope, not the raw tenantID
+// authRunAccess returns.
+func TestHandleListJobs_UnsetTenantScope_Refused(t *testing.T) {
+	server := setupTestServer(t)
+	server.batchJobStore = newTestBatchJobStoreForAPI()
+
+	p := &Principal{ID: "session-acct", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	ctx := context.WithValue(req.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	// Deliberately no ctxkeys.TenantScopeKey — simulates the plumbing bug.
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	server.handleListJobs(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"an unset tenant scope must be refused, not treated as unrestricted: %s", rec.Body.String())
 }
 
 // TestHandleListJobs_NilStore_Returns503 verifies the service-unavailable guard.

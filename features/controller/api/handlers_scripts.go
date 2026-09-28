@@ -82,6 +82,15 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetScriptLibraryItem handles GET /api/v1/scripts/{id}.
+//
+// Script library items are shared, non-tenant-scoped reference data:
+// VersionedScript/ScriptMetadata carry no TenantID, there is no Create route
+// through this API (scripts are provisioned via the git-backed repository), and
+// handleListScripts (same file) already returns the full library to every
+// authenticated caller. There is no owning tenant to check the caller against —
+// same trust boundary as handleListScripts.
+//
+//architecture:allow-unscoped-tenant-read -- shared reference data, no owning tenant (Issue #4335)
 func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -271,6 +280,10 @@ func (s *Server) handleGetScriptExecutions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/executions") {
+		return
+	}
+
 	sanitizedID := logging.SanitizeLogValue(stewardID)
 
 	// Parse query filters
@@ -382,6 +395,10 @@ func (s *Server) handleGetScriptExecution(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/executions/{execution_id}") {
+		return
+	}
+
 	sanitizedStewardID := logging.SanitizeLogValue(stewardID)
 	sanitizedExecutionID := logging.SanitizeLogValue(executionID)
 
@@ -416,6 +433,10 @@ func (s *Server) handleGetScriptMetrics(w http.ResponseWriter, r *http.Request) 
 
 	if s.scriptAuditLogger == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Script module not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/metrics") {
 		return
 	}
 
@@ -472,6 +493,10 @@ func (s *Server) handleGetScriptStatus(w http.ResponseWriter, r *http.Request) {
 
 	if s.scriptTracker == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Script module not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/status") {
 		return
 	}
 
@@ -539,6 +564,10 @@ func (s *Server) handlePostScriptRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	if executionID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Execution ID is required", "MISSING_EXECUTION_ID")
+		return
+	}
+
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry") {
 		return
 	}
 

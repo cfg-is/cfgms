@@ -406,6 +406,21 @@ func TestHandlePostScriptRetry_NotImplemented(t *testing.T) {
 	assert.Equal(t, "NOT_IMPLEMENTED", errResp.Error.Code)
 }
 
+// TestHandlePostScriptRetry_CrossTenant_NotFound is the [REQUIRED TEST] for Issue
+// #4335: a tenant-a caller cannot retry a script execution against a steward
+// registered to tenant-b.
+func TestHandlePostScriptRetry_CrossTenant_NotFound(t *testing.T) {
+	server, _ := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "tenant-b",
+		map[string]string{"hostname": "retry-cross-tenant-host", "os": "linux"})
+
+	principal := runPrincipal("exec-caller-a", []string{"steward:execute-scripts"}, "tenant-a")
+	rec := postScriptRetry(server, principal, stewardID, "exec-1")
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"tenant-a caller must not be able to retry a script on tenant-b's steward: %s", rec.Body.String())
+}
+
 // ---------------------------------------------------------------------------
 // Script library handler tests (Issue #1670)
 // ---------------------------------------------------------------------------
@@ -605,4 +620,73 @@ func TestHandlePutScriptPrivilege_ServiceUnavailable(t *testing.T) {
 	rec := putScriptPrivilege(server, principal, "any-id", `{}`)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestScriptStewardRoutes_CrossTenant_NotFound covers the four remaining
+// authorizeStewardScopeLenient gates in this file (executions list, single
+// execution, metrics, status) alongside the retry gate above: a test-tenant caller
+// must not read tenant-b's script history, and the refusal must not disclose that
+// the steward — or its execution record — exists.
+func TestScriptStewardRoutes_CrossTenant_NotFound(t *testing.T) {
+	server, tracker := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "tenant-b",
+		map[string]string{"hostname": "scripts-cross-tenant-host", "os": "linux"})
+	seedExecution(t, tracker, "exec-cross-tenant", stewardID, "scripts/tenant-b-only.sh", "completed")
+
+	// NewTestKey is scoped to "test-tenant", not "tenant-b".
+	apiKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+
+	routes := map[string]string{
+		"executions": "/api/v1/stewards/" + stewardID + "/scripts/executions",
+		"execution":  "/api/v1/stewards/" + stewardID + "/scripts/executions/exec-cross-tenant",
+		"metrics":    "/api/v1/stewards/" + stewardID + "/scripts/metrics",
+		"status":     "/api/v1/stewards/" + stewardID + "/scripts/status",
+	}
+
+	for name, path := range routes {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-API-Key", apiKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"%s must refuse an out-of-scope caller: %s", path, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			require.NotNil(t, errResp.Error)
+			assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code,
+				"the cross-tenant answer must be indistinguishable from a genuine miss")
+			assert.NotContains(t, rec.Body.String(), "tenant-b-only.sh",
+				"no execution detail may leak in the refusal")
+		})
+	}
+}
+
+// TestScriptStewardRoutes_OwningTenant_Returns200 is the over-denial control for the
+// gates exercised above: the steward's own tenant still reads its script history.
+func TestScriptStewardRoutes_OwningTenant_Returns200(t *testing.T) {
+	server, tracker := setupScriptServer(t)
+	stewardID := registerStewardInTenant(t, server.controllerService, "test-tenant",
+		map[string]string{"hostname": "scripts-same-tenant-host", "os": "linux"})
+	seedExecution(t, tracker, "exec-same-tenant", stewardID, "scripts/owned.sh", "completed")
+
+	apiKey := NewTestKey(t, server, []string{"steward:read-scripts"})
+
+	for name, path := range map[string]string{
+		"executions": "/api/v1/stewards/" + stewardID + "/scripts/executions",
+		"execution":  "/api/v1/stewards/" + stewardID + "/scripts/executions/exec-same-tenant",
+		"metrics":    "/api/v1/stewards/" + stewardID + "/scripts/metrics",
+		"status":     "/api/v1/stewards/" + stewardID + "/scripts/status",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("X-API-Key", apiKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code,
+				"%s must not deny the owning tenant: %s", path, rec.Body.String())
+		})
+	}
 }

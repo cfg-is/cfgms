@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1118,6 +1119,35 @@ func TestHandleAddPin_CaseNotFoundReturns404(t *testing.T) {
 	srv.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleAddPin_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue #4335:
+// a request whose ctxkeys.TenantScope was never established must be refused, not
+// silently treated as unrestricted, even for a case that legitimately exists.
+func TestHandleAddPin_UnsetTenantScope_Refused(t *testing.T) {
+	srv := setupCasesTestServer(t)
+	cs := srv.CasesStore()
+	c := seedCase(t, cs, "tenant-alpha")
+
+	body := map[string]interface{}{
+		"kind":                "observation-version",
+		"observation_version": "v1",
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/cases/"+c.ID+"/pins", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = mux.SetURLVars(req, map[string]string{"id": c.ID})
+	// Deliberately no ctxkeys.TenantScopeKey in context.
+	rec := httptest.NewRecorder()
+	srv.handleAddPin(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"an unset tenant scope must be refused: %s", rec.Body.String())
+
+	stored, err := cs.GetCase(context.Background(), c.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.Pins, "no pin must be added when the caller's scope is unset")
 }
 
 func TestHandleAddPin_CrossTenantCaseReturns404(t *testing.T) {

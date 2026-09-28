@@ -676,8 +676,9 @@ func TestRollout_UnreadableStatusStopsTheRollout(t *testing.T) {
 
 // TestRollout_Halt_CrossTenantForbidden verifies that a scoped caller cannot halt a rollout
 // owned by another tenant. Supplying a victim tenant's rollout ID to POST /halt must return
-// 403 FORBIDDEN and must not modify the victim's record. This mirrors the GET cross-tenant
-// guard (TestRollout_GetStatus_CrossTenant) for the halt path.
+// the same 404 ROLLOUT_NOT_FOUND as a genuinely unknown rollout ID (Issue #4335) — not a
+// distinguishable 403 — and must not modify the victim's record. This mirrors the GET
+// cross-tenant guard (TestRollout_GetStatus_CrossTenant) for the halt path.
 func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
 	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
 
@@ -692,10 +693,10 @@ func TestRollout_Halt_CrossTenantForbidden(t *testing.T) {
 		RingsTotal:    2,
 	}))
 
-	// Caller is tenant-a — must be forbidden.
+	// Caller is tenant-a — must be refused, indistinguishably from not-found.
 	rec := doHaltRollout(server, "tenant-a", "other-rollout")
-	assert.Equal(t, http.StatusForbidden, rec.Code, "cross-tenant halt must be forbidden: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "FORBIDDEN")
+	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant halt must be refused: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_NOT_FOUND")
 
 	// The victim's rollout must not have been halted.
 	stored, err := rolloutStore.GetRollout(context.Background(), "other-rollout")
@@ -797,7 +798,8 @@ func TestRollout_GetStatus_NotFound(t *testing.T) {
 }
 
 // TestRollout_GetStatus_CrossTenant verifies that a caller cannot read rollouts from
-// another tenant.
+// another tenant. [REQUIRED TEST] Issue #4335: refused indistinguishably from
+// not-found (404 ROLLOUT_NOT_FOUND), not a distinguishable 403.
 func TestRollout_GetStatus_CrossTenant(t *testing.T) {
 	server, rolloutStore, _ := setupRolloutServer(t, "tenant-a", nil)
 
@@ -811,9 +813,10 @@ func TestRollout_GetStatus_CrossTenant(t *testing.T) {
 		RingsTotal:    2,
 	}))
 
-	// Caller is tenant-a — must be forbidden.
+	// Caller is tenant-a — must be refused, indistinguishably from not-found.
 	rec := doGetRollout(server, "tenant-a", "other-rollout")
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ROLLOUT_NOT_FOUND")
 }
 
 // TestRollout_Start_CrossTenantRejected verifies that a scoped (non-admin) caller cannot

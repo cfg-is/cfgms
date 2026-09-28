@@ -786,6 +786,218 @@ func TestConfigRollback_CancelRollback(t *testing.T) {
 	})
 }
 
+// TestConfigRollback_CancelRollback_CrossTenant_NotFound is the [REQUIRED TEST] for
+// Issue #4335: a tenant-a caller cannot cancel a rollback whose target steward
+// belongs to tenant-b, and gets the same 404 as an unknown rollback ID — not a
+// distinguishable error — so the endpoint cannot be used to probe existence.
+func TestConfigRollback_CancelRollback_CrossTenant_NotFound(t *testing.T) {
+	stack := newRollbackStack(t)
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusPending)
+
+	req := httptest.NewRequest("POST", "/api/v1/rollback/"+id+"/cancel", strings.NewReader(`{"reason":"cross-tenant attempt"}`))
+	ctx := context.WithValue(req.Context(), ctxkeys.UserIDKey, "tenant-a-caller")
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a"))
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"rollback_id": id})
+	rec := httptest.NewRecorder()
+	handler.CancelRollback(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"tenant-a caller must not be able to cancel tenant-b's rollback: %s", rec.Body.String())
+
+	operation, err := stack.store.GetOperation(context.Background(), id)
+	require.NoError(t, err)
+	require.NotNil(t, operation)
+	assert.Equal(t, rollback.RollbackStatusPending, operation.Status,
+		"cross-tenant cancel must not modify the victim's rollback status")
+}
+
+// scopedRollbackRequest builds a request carrying the caller's ctxkeys.TenantScope exactly
+// as authenticationMiddleware establishes it, plus the mux path vars the rollback routes
+// read. It is the read-side counterpart to newRollbackRequest, which covers the
+// execute route's actor-identity-only context.
+func scopedRollbackRequest(method, url, body string, scope ctxkeys.TenantScope, vars map[string]string) *http.Request {
+	req := httptest.NewRequest(method, url, strings.NewReader(body))
+	ctx := context.WithValue(req.Context(), ctxkeys.UserIDKey, "scoped-caller")
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scope)
+	req = req.WithContext(ctx)
+	if vars != nil {
+		req = mux.SetURLVars(req, vars)
+	}
+	return req
+}
+
+// TestConfigRollback_ListRollbackPoints_CrossTenant_EmptyList is a [REQUIRED TEST] for
+// Issue #4335: a tenant-a caller asking for the rollback points of a steward registered
+// to tenant-b gets the same empty list as a target with no recorded rollback points, so
+// the endpoint cannot be used to probe cross-tenant existence. The root-scoped control
+// request proves the empty list is the authorization guard's work and not an empty
+// repository.
+func TestConfigRollback_ListRollbackPoints_CrossTenant_EmptyList(t *testing.T) {
+	stack := newRollbackStack(t)
+	// A device target is used because the production manager only derives repository IDs
+	// for device/group/client/msp targets (getRepositoryID); the tenant guard under test
+	// is target-type independent.
+	stack.seedRepository(t, rollback.TargetTypeDevice, "device-tenant-b")
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+
+	const url = "/api/v1/rollback/points?target_type=device&target_id=device-tenant-b"
+	decodePoints := func(t *testing.T, rec *httptest.ResponseRecorder) []rollback.RollbackPoint {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp struct {
+			Points []rollback.RollbackPoint `json:"rollback_points"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp.Points
+	}
+
+	// Control: a root-scoped caller sees the target's real rollback points.
+	rec := httptest.NewRecorder()
+	handler.ListRollbackPoints(rec, scopedRollbackRequest("GET", url, "", ctxkeys.NewRootScope(), nil))
+	require.NotEmpty(t, decodePoints(t, rec),
+		"the seeded repository must expose rollback points to an in-scope caller")
+
+	// A tenant-a caller must see nothing for tenant-b's steward.
+	rec = httptest.NewRecorder()
+	handler.ListRollbackPoints(rec, scopedRollbackRequest("GET", url, "", ctxkeys.NewTenantScope("tenant-a"), nil))
+	assert.Empty(t, decodePoints(t, rec),
+		"tenant-a must not see the rollback points of a steward registered to tenant-b")
+
+	// An unset scope (the auth-plumbing-bug signature) must be refused the same way.
+	rec = httptest.NewRecorder()
+	handler.ListRollbackPoints(rec, scopedRollbackRequest("GET", url, "", ctxkeys.TenantScope{}, nil))
+	assert.Empty(t, decodePoints(t, rec),
+		"an unset tenant scope must not be treated as unrestricted")
+}
+
+// TestConfigRollback_PreviewRollback_CrossTenant_Rejected is a [REQUIRED TEST] for Issue
+// #4335: previewing a rollback of another tenant's steward is refused with the same
+// CROSS_TENANT_ROLLBACK response ExecuteRollback returns, so the preview route cannot be
+// used to read a cross-tenant diff. The root-scoped control proves the rejection comes
+// from the guard rather than from the preview failing for unrelated reasons.
+func TestConfigRollback_PreviewRollback_CrossTenant_Rejected(t *testing.T) {
+	stack := newRollbackStack(t)
+	// Device target, for the same getRepositoryID reason as the rollback-points test above.
+	baseline := stack.seedRepository(t, rollback.TargetTypeDevice, "device-tenant-b")
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+
+	body := fmt.Sprintf(
+		`{"target_type":"device","target_id":"device-tenant-b","rollback_type":"full","rollback_to":%q,"reason":"revert bad config"}`,
+		baseline)
+
+	// Control: a root-scoped caller gets a real preview from the production manager.
+	rec := httptest.NewRecorder()
+	handler.PreviewRollback(rec, scopedRollbackRequest("POST", "/api/v1/rollback/preview", body, ctxkeys.NewRootScope(), nil))
+	require.Equal(t, http.StatusOK, rec.Code, "in-scope preview must reach the manager: %s", rec.Body.String())
+	var previewResp struct {
+		Preview *rollback.RollbackPreview `json:"preview"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&previewResp))
+	require.NotNil(t, previewResp.Preview, "in-scope preview must return a preview")
+
+	// tenant-a must be refused before the manager is consulted.
+	for name, scope := range map[string]ctxkeys.TenantScope{
+		"cross-tenant scope": ctxkeys.NewTenantScope("tenant-a"),
+		"unset scope":        {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.PreviewRollback(rec, scopedRollbackRequest("POST", "/api/v1/rollback/preview", body, scope, nil))
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			var resp map[string]interface{}
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			assert.Equal(t, "CROSS_TENANT_ROLLBACK", resp["code"])
+			assert.Nil(t, resp["preview"], "a refused preview must not disclose a diff")
+		})
+	}
+}
+
+// TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound is a [REQUIRED TEST] for
+// Issue #4335: reading the status of a rollback whose target steward belongs to another
+// tenant returns the same 404 as an unknown rollback ID. The root-scoped control proves
+// the operation is readable when the caller is in scope.
+func TestConfigRollback_GetRollbackStatus_CrossTenant_NotFound(t *testing.T) {
+	stack := newRollbackStack(t)
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	id := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusPending)
+
+	url := "/api/v1/rollback/" + id + "/status"
+	vars := map[string]string{"rollback_id": id}
+
+	// Control: a root-scoped caller can read the operation.
+	rec := httptest.NewRecorder()
+	handler.GetRollbackStatus(rec, scopedRollbackRequest("GET", url, "", ctxkeys.NewRootScope(), vars))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Rollback rollback.RollbackOperation `json:"rollback"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, id, resp.Rollback.ID)
+
+	for name, scope := range map[string]ctxkeys.TenantScope{
+		"cross-tenant scope": ctxkeys.NewTenantScope("tenant-a"),
+		"unset scope":        {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.GetRollbackStatus(rec, scopedRollbackRequest("GET", url, "", scope, vars))
+
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"an out-of-scope status read must be indistinguishable from an unknown rollback ID: %s", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "steward-tenant-b",
+				"the refusal must not disclose the victim's target")
+		})
+	}
+}
+
+// TestConfigRollback_ListRollbackHistory_CrossTenant_EmptyList is a [REQUIRED TEST] for
+// Issue #4335, covering the fourth read path guarded by authorizedForTargetTenant: the
+// history of another tenant's steward reads as empty rather than 403, so the endpoint
+// cannot be used to probe cross-tenant existence.
+func TestConfigRollback_ListRollbackHistory_CrossTenant_EmptyList(t *testing.T) {
+	stack := newRollbackStack(t)
+	lookup := func(_ string) string { return "tenant-b" }
+	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), lookup, nil)
+	wanted := stack.seedOperation(t, rollback.TargetTypeSteward, "steward-tenant-b", rollback.RollbackStatusCompleted)
+
+	const url = "/api/v1/rollback/history?target_type=steward&target_id=steward-tenant-b"
+	decodeOps := func(t *testing.T, rec *httptest.ResponseRecorder) []rollback.RollbackOperation {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp struct {
+			Operations []rollback.RollbackOperation `json:"rollback_operations"`
+		}
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		return resp.Operations
+	}
+
+	// Control: a root-scoped caller sees the recorded operation.
+	rec := httptest.NewRecorder()
+	handler.ListRollbackHistory(rec, scopedRollbackRequest("GET", url, "", ctxkeys.NewRootScope(), nil))
+	ops := decodeOps(t, rec)
+	require.Len(t, ops, 1)
+	require.Equal(t, wanted, ops[0].ID)
+
+	for name, scope := range map[string]ctxkeys.TenantScope{
+		"cross-tenant scope": ctxkeys.NewTenantScope("tenant-a"),
+		"unset scope":        {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ListRollbackHistory(rec, scopedRollbackRequest("GET", url, "", scope, nil))
+			assert.Empty(t, decodeOps(t, rec),
+				"tenant-a must not read the rollback history of a steward registered to tenant-b")
+		})
+	}
+}
+
 func TestConfigRollback_ListRollbackHistory(t *testing.T) {
 	stack := newRollbackStack(t)
 	handler := NewRollbackHandler(stack.manager, adminPrincipalExtractor(), nil, nil)

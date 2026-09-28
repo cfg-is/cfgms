@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -187,8 +188,27 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
+		return
+	}
+
+	// The tenant filter passed to the store is derived from ctxkeys.TenantScope, not
+	// the raw ctxkeys.TenantID authRunAccess returns (Issue #4335): an unset scope
+	// must be refused, not silently pass "" through to the store — which the store
+	// treats as "no filter, all tenants" for a genuine root caller. A raw-string
+	// comparison cannot tell a plumbing bug (context lost the caller's tenant) apart
+	// from a real unscoped admin, and either state reaching the store as "" would
+	// leak every tenant's batch jobs to a caller who was never actually root-scoped.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	var tenantFilter string
+	switch {
+	case scope.IsRoot():
+		tenantFilter = ""
+	case scope.IsTenant() && scope.Path() != "":
+		tenantFilter = scope.Path()
+	default:
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
 		return
 	}
 
@@ -212,10 +232,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jobs, err := s.batchJobStore.ListBatchJobs(r.Context(), tenantID, limit, offset)
+	jobs, err := s.batchJobStore.ListBatchJobs(r.Context(), tenantFilter, limit, offset)
 	if err != nil {
 		s.logger.Error("Failed to list batch jobs",
-			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"tenant_id", logging.SanitizeLogValue(tenantFilter),
 			"error", err,
 		)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")

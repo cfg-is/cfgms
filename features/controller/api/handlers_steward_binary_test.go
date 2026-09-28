@@ -110,21 +110,27 @@ func doPublish(server *Server, version, platform, arch, tenantID, sigBase64 stri
 // withScopedPrincipal injects a machine-assurance principal bound to tenantID plus the
 // tenant context value, mirroring authenticationMiddleware for an API-key request. An
 // empty tenantID models a non-human caller with no tenant (a genuine auth failure).
+// Also carries ctxkeys.TenantScope (Issue #4335), the value authenticationMiddleware
+// sets alongside ctxkeys.TenantID — without it, a handler migrated to read TenantScope
+// sees an unset scope and fails closed regardless of tenantID.
 func withScopedPrincipal(req *http.Request, tenantID string) *http.Request {
 	p := &Principal{ID: "api-key:" + tenantID, Assurance: session.AssuranceMachine, TenantID: tenantID}
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(tenantID))
 	return req.WithContext(ctx)
 }
 
 // withAdminPrincipal injects an mTLS admin principal (AssuranceBasic, GlobalScope=true,
 // empty tenant) plus the empty tenant context value, mirroring authenticationMiddleware
 // for an mTLS admin cert (middleware.go). This is the global-scope path that cannot be
-// reached via an X-API-Key request (Issue #1999, #2787).
+// reached via an X-API-Key request (Issue #1999, #2787). Also carries ctxkeys.TenantScope
+// (Issue #4335) as root scope, matching scopeForVerifiedAdminCert("").
 func withAdminPrincipal(req *http.Request) *http.Request {
 	p := &Principal{ID: "mtls-admin:cn", Name: "mtls-admin:cn", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, "")
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
 	return req.WithContext(ctx)
 }
 
@@ -779,6 +785,32 @@ func TestGetStewardBinary_AdminEmptyTenant_NotUnauthorized(t *testing.T) {
 		"admin mTLS principal with empty tenant must not be rejected with 401 on GET")
 	assert.Equal(t, http.StatusOK, getRec.Code)
 	assert.Equal(t, content, getRec.Body.Bytes())
+}
+
+// TestGetStewardBinary_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue
+// #4335: a session-assurance principal with an empty ctxkeys.TenantID passes
+// authRunAccess (it is not machine-assurance), but with no ctxkeys.TenantScope
+// established at all — the plumbing-bug signature — must still be refused, not
+// silently served from the "default" namespace a genuine root-scoped admin uses.
+func TestGetStewardBinary_UnsetTenantScope_Refused(t *testing.T) {
+	server, fix := setupStewardBinaryServer(t)
+	content := []byte("admin binary for unset-scope check")
+	sigBase64 := fix.signContent(content, "v1.9.9", "linux", "amd64")
+
+	pubRec := publishWithPrincipal(server, withAdminPrincipal, "v1.9.9", "linux", "amd64", sigBase64, content)
+	require.Equal(t, http.StatusOK, pubRec.Code, "admin publish must succeed: %s", pubRec.Body.String())
+
+	unsetScope := func(req *http.Request) *http.Request {
+		p := &Principal{ID: "session-acct", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""}
+		ctx := context.WithValue(req.Context(), principalContextKey, p)
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+		// Deliberately no ctxkeys.TenantScopeKey.
+		return req.WithContext(ctx)
+	}
+	getRec := getWithPrincipal(server, unsetScope, "v1.9.9", "linux", "amd64")
+
+	assert.Equal(t, http.StatusForbidden, getRec.Code,
+		"an unset tenant scope must be refused, not served from the default namespace: %s", getRec.Body.String())
 }
 
 // TestGetStewardBinary_NonAdminEmptyTenant_Unauthorized verifies that a NON-admin caller

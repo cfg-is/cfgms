@@ -40,9 +40,19 @@ func newTestWorkflowHandler(t *testing.T) (*WorkflowHandler, cfgconfig.ConfigSto
 	return handler, configStore
 }
 
-// withTenantContext injects a tenant ID into the request context, as the auth middleware does.
+// withTenantContext injects a tenant ID into the request context, as the auth middleware
+// does — and, since Issue #4335, the corresponding ctxkeys.TenantScope: an empty
+// tenantID mirrors scopeForVerifiedAdminCert (middleware.go) and becomes root scope,
+// a non-empty one becomes a tenant scope. Without this, workflowStoreForRequest sees
+// an unset scope and fails closed, which is correct for a real unscoped context but
+// wrong for these tests, which use "" to mean "unrestricted admin" like production does.
 func withTenantContext(r *http.Request, tenantID string) *http.Request {
 	ctx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
+	scope := ctxkeys.NewRootScope()
+	if tenantID != "" {
+		scope = ctxkeys.NewTenantScope(tenantID)
+	}
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scope)
 	return r.WithContext(ctx)
 }
 
@@ -905,6 +915,113 @@ func testRequirePermFn(resourceType, action string) func(http.Handler) http.Hand
 func withPermissions(r *http.Request, perms ...string) *http.Request {
 	p := &Principal{ID: "test-key", Assurance: session.AssuranceMachine, Permissions: perms}
 	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+}
+
+// --- unset tenant scope (Issue #4335) -----------------------------------------
+
+// withUnsetTenantScope injects the request context an auth-plumbing bug produces:
+// ctxkeys.TenantID is present, exactly as authenticationMiddleware sets it, but
+// ctxkeys.TenantScopeKey was never established (a dropped context, or a handler reached
+// through a path that never ran the scope middleware). withTenantContext deliberately
+// always sets a scope, so this is the only helper that reproduces the unset state
+// workflowStoreForRequest must fail closed on.
+func withUnsetTenantScope(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, ""))
+}
+
+// TestWorkflowHandler_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue #4335:
+// every workflow route that resolves a store through workflowStoreForRequest must refuse
+// a request whose ctxkeys.TenantScope was never established, rather than silently
+// resolving a store over the "" tenant bucket.
+//
+// The refusal is asserted on both the status and the body: it is a 404 whose error is
+// exactly "not found", which is what distinguishes it from every answer the pre-fix
+// "" bucket produced on these same routes — 200 with an empty list, a resource-specific
+// `workflow "x" not found`, or the tenant-isolation 403 "access denied". A tenant-scoped
+// control read proves the fixture's workflow and execution are reachable when a scope is
+// present, and the post-loop assertions prove the refused writes (create, update, delete,
+// execute, cancel) never reached the store or the engine.
+func TestWorkflowHandler_UnsetTenantScope_Refused(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	const tenant = "tenant-a"
+	// A long-running (delay-step) execution stays non-terminal so the cancel route reaches
+	// its tenant gate instead of short-circuiting on terminal state.
+	execID := createAndExecuteWorkflow(t, router, engine, "tenant-a-wf", tenant, true)
+
+	scopedGet := func(t *testing.T) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, withTenantContext(httptest.NewRequest("GET", "/workflows/tenant-a-wf", nil), tenant))
+		return rec
+	}
+	require.Equal(t, http.StatusOK, scopedGet(t).Code,
+		"control: a scoped caller must be able to read the seeded workflow")
+
+	routes := []struct {
+		method string
+		path   string
+		body   []byte
+	}{
+		{"GET", "/workflows", nil},
+		{"POST", "/workflows", minimalWorkflowBody("smuggled-wf")},
+		{"GET", "/workflows/tenant-a-wf", nil},
+		{"PUT", "/workflows/tenant-a-wf", minimalWorkflowBody("tenant-a-wf")},
+		{"DELETE", "/workflows/tenant-a-wf", nil},
+		{"POST", "/workflows/tenant-a-wf/execute", []byte("{}")},
+		{"GET", "/workflows/tenant-a-wf/executions", nil},
+		{"GET", "/workflows/tenant-a-wf/executions/" + execID, nil},
+		{"POST", "/workflows/tenant-a-wf/executions/" + execID + "/cancel", nil},
+	}
+
+	for _, tc := range routes {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
+			req = withUnsetTenantScope(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusNotFound, rec.Code,
+				"an unset tenant scope must be refused, not served from the \"\" bucket: %s", rec.Body.String())
+
+			var resp map[string]interface{}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, "not found", resp["error"],
+				"the refusal must be the scope-unset 404, not a resource-specific not-found or a 403")
+		})
+	}
+
+	// The refused writes must have left the tenant's workflows untouched: the seeded
+	// workflow is still readable (update and delete were refused) and the refused create
+	// added nothing the tenant can see.
+	require.Equal(t, http.StatusOK, scopedGet(t).Code,
+		"a refused update or delete must not have removed the tenant's workflow")
+
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, withTenantContext(httptest.NewRequest("GET", "/workflows", nil), tenant))
+	require.Equal(t, http.StatusOK, listRec.Code, "body: %s", listRec.Body.String())
+	var listResp struct {
+		Workflows []workflow.VersionedWorkflow `json:"workflows"`
+	}
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Workflows, 1, "a refused create must not write a workflow")
+	assert.Equal(t, "tenant-a-wf", listResp.Workflows[0].Name)
+
+	// The refused execute started no second execution, and the refused cancel left the
+	// seeded one running.
+	execRec := httptest.NewRecorder()
+	router.ServeHTTP(execRec, withTenantContext(httptest.NewRequest("GET", "/workflows/tenant-a-wf/executions", nil), tenant))
+	require.Equal(t, http.StatusOK, execRec.Code, "body: %s", execRec.Body.String())
+	var execResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(execRec.Body.Bytes(), &execResp))
+	assert.EqualValues(t, 1, execResp["count"], "a refused execute must not start a second execution")
+
+	execution, err := engine.GetExecution(execID)
+	require.NoError(t, err)
+	require.NotNil(t, execution)
+	assert.NotEqual(t, workflow.StatusCancelled, execution.GetStatus(),
+		"a refused cancel must not cancel the tenant's execution")
 }
 
 // newPermGatedWorkflowRouter creates a mux.Router with workflow routes registered

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
@@ -356,7 +357,12 @@ func TestHandleHypervProfile_RootAdminTenantTargeting(t *testing.T) {
 	// Without ?tenant= -> 400.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hyperv/profiles", bytes.NewReader(validHypervProfilePayload("infra-profile")))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, rootPrincipal))
+	ctx := context.WithValue(req.Context(), principalContextKey, rootPrincipal)
+	// Issue #4335: carry ctxkeys.TenantScope as root, matching scopeForVerifiedAdminCert —
+	// this test bypasses authenticationMiddleware (which would otherwise set it) and
+	// injects the principal directly.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	req = req.WithContext(ctx)
 	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, rootPrincipal.ID))
 	rec := httptest.NewRecorder()
 	handler := server.requirePermission("hyperv-profile", "create")(http.HandlerFunc(server.handleCreateHypervProfile))
@@ -367,7 +373,9 @@ func TestHandleHypervProfile_RootAdminTenantTargeting(t *testing.T) {
 	// With ?tenant=infra-x -> 201.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/hyperv/profiles?tenant=infra-x", bytes.NewReader(validHypervProfilePayload("infra-profile")))
 	req2.Header.Set("Content-Type", "application/json")
-	req2 = req2.WithContext(context.WithValue(req2.Context(), principalContextKey, rootPrincipal))
+	ctx2 := context.WithValue(req2.Context(), principalContextKey, rootPrincipal)
+	ctx2 = context.WithValue(ctx2, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	req2 = req2.WithContext(ctx2)
 	req2.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, rootPrincipal.ID))
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)

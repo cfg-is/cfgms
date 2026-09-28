@@ -375,6 +375,26 @@ func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id strin
 	return c
 }
 
+// authorizeCaseTenantScope re-checks a loaded case's tenant against the caller's
+// ctxkeys.TenantScope (Issue #4335), layered on top of loadCallerCase's existing
+// caseInCallerSubtree check rather than replacing it: caseInCallerSubtree (and the
+// callerTenantSubtree helper it and many other case/entity handlers outside this
+// story's scope share) still treats an empty caller tenant as unrestricted, the
+// exact ambiguity between "genuine root" and "plumbing bug lost the caller's scope"
+// this story exists to close. Migrating that shared primitive would ripple into
+// handlers_entities.go and handlers_cases_intake.go, well outside the file list this
+// story covers, so this handler-local check adds the fail-closed IsUnset() refusal
+// AC1 requires without touching the wider shared helper. On refusal it writes the
+// same "not found" response loadCallerCase already uses and returns false.
+func (s *Server) authorizeCaseTenantScope(w http.ResponseWriter, r *http.Request, c *business.Case, route string) bool {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, c.TenantID, route) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
 // addPinRequest is the JSON body for POST /api/v1/cases/{id}/pins.
 type addPinRequest struct {
 	Kind               string    `json:"kind"`
@@ -560,6 +580,9 @@ func (s *Server) handleAddPin(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
+	if !s.authorizeCaseTenantScope(w, r, c, "POST /api/v1/cases/{id}/pins") {
+		return
+	}
 
 	var req addPinRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -619,6 +642,9 @@ func (s *Server) handleRemovePin(w http.ResponseWriter, r *http.Request) {
 
 	c := s.loadCallerCase(w, r, id)
 	if c == nil {
+		return
+	}
+	if !s.authorizeCaseTenantScope(w, r, c, "DELETE /api/v1/cases/{id}/pins/{pin_id}") {
 		return
 	}
 

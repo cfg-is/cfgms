@@ -75,6 +75,25 @@ func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) str
 	return "steward/" + tenantID + "/" + version + "/" + platform + "/" + arch
 }
 
+// installerBlobTenantForCallerScope derives the steward-binary blob namespace from
+// the caller's ctxkeys.TenantScope (Issue #4335): root maps to the "default"
+// namespace (the same fallback installerBlobTenant(callerTenantID) uses for an
+// unscoped admin), a tenant scope maps to its own path, and an unset scope is
+// refused (ok=false) rather than silently falling back to "default" — closing the
+// gap where a caller whose context lost its tenant scope could reach the same
+// namespace a genuine root-scoped admin publishes into.
+func (s *Server) installerBlobTenantForCallerScope(r *http.Request) (tenantID string, ok bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	switch {
+	case scope.IsRoot():
+		return "default", true
+	case scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), true
+	default:
+		return "", false
+	}
+}
+
 // handlePublishStewardBinary handles POST /api/v1/installer/steward-binaries/{version}/{platform}/{arch}.
 // Verifies the Ed25519 publisher signature against CFGMSPublisherIdentity before storing the blob.
 // Returns 400 if signature is absent or invalid, 409 if the binary already exists (use ?force=true to overwrite).
@@ -86,12 +105,21 @@ func (s *Server) handlePublishStewardBinary(w http.ResponseWriter, r *http.Reque
 	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
 	// and publish into the global namespace; only a NON-admin caller with no tenant is a
 	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
-	// Admins (empty tenant) store under the "default" namespace; scoped callers under their own.
-	tenantID := installerBlobTenant(callerTenantID)
+	// The blob namespace is derived from ctxkeys.TenantScope, not the raw
+	// ctxkeys.TenantID authRunAccess returns (Issue #4335): an unset scope must be
+	// refused, not silently fall back to the same "default" namespace a genuine
+	// root-scoped admin publishes into — that ambiguity would let a caller whose
+	// context lost its tenant scope publish steward binaries into the shared
+	// default namespace every genuine admin trusts.
+	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return
+	}
 
 	vars := mux.Vars(r)
 	version := vars["version"]
@@ -269,12 +297,17 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
 	// and read from the global namespace; only a NON-admin caller with no tenant is a
 	// genuine auth failure (Issue #1999, same pattern as #1990's authRunAccess).
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
-	// Admins (empty tenant) read from the "default" namespace; scoped callers from their own.
-	tenantID := installerBlobTenant(callerTenantID)
+	// Derived from ctxkeys.TenantScope, not the raw callerTenantID (Issue #4335) —
+	// see installerBlobTenantForCallerScope's doc comment.
+	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)
+	if !tenantOK {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return
+	}
 
 	vars := mux.Vars(r)
 	version := vars["version"]
@@ -340,6 +373,14 @@ func (s *Server) handleGetStewardBinary(w http.ResponseWriter, r *http.Request) 
 // at the steward side. The required tenant parameter identifies which namespace to serve from.
 // This endpoint is called by stewards during the upgrade flow; steward mTLS certs do not
 // carry the admin marker required by the authenticated GET endpoint. (Issue #1948)
+//
+// Intentionally pre-authentication: there is no caller identity to scope by
+// (unauthenticated steward download path, upgrade flow), and the binary's
+// Ed25519 signature is what authenticates the content, not a tenant check. The
+// ?tenant= query param picks a namespace to serve from, not a caller identity
+// to authorize.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication download path, no caller identity (Issue #4335)
 func (s *Server) handleGetStewardBinaryPublic(w http.ResponseWriter, r *http.Request) {
 	if s.blobStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Binary storage not available", "SERVICE_UNAVAILABLE")
