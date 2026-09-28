@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 )
@@ -71,6 +72,20 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 	// NEVER be mintable by a sub-Strong-assurance principal.
 	if principal.Assurance < session.AssuranceStrong {
 		s.writeErrorResponse(w, http.StatusForbidden, "Strong assurance required", "FORBIDDEN")
+		return
+	}
+
+	// Issue #4334: the credential this endpoint mints is bound exclusively to the
+	// caller's own identity (commonName/ClientID below come from principal, never
+	// from the request) — there is no separate target resource whose tenant could
+	// diverge. The check here is the fail-closed contract itself (Issue #4316): an
+	// unset scope, or a scope that somehow disagrees with the authenticated
+	// principal's own tenant, must be refused rather than silently treated as
+	// self-consistent. signing-credential:request granting reachability does not by
+	// itself prove a valid caller scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, principal.TenantID, "POST /api/v1/signing-credential/request") {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this identity is not permitted", "FORBIDDEN")
 		return
 	}
 

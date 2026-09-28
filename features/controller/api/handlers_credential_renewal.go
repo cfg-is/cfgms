@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
@@ -363,6 +364,20 @@ func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acct == nil {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"No account is bound to the presented certificate; renewal is not permitted", "NO_ACCOUNT_BINDING")
+		return
+	}
+
+	// Issue #4334: renewal is scoped exclusively to the account resolved from the
+	// presented certificate's own serial — there is no separate caller-supplied
+	// target, so this is the fail-closed contract itself (Issue #4316): an unset
+	// scope, or a scope that somehow disagrees with the resolved account's own
+	// tenant, must be refused rather than silently treated as self-consistent.
+	// Reaching this handler at all (credential-renewal carries no requirePermission
+	// gate) does not by itself prove a valid caller scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, acct.TenantID, "POST /api/v1/credential-renewal") {
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"No account is bound to the presented certificate; renewal is not permitted", "NO_ACCOUNT_BINDING")
 		return

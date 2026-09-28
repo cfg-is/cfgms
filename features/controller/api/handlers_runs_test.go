@@ -67,10 +67,15 @@ func (s *testBlastRadiusPolicyStore) SetPolicy(_ context.Context, p *business.Bl
 }
 
 // withPrincipal injects a principal + its tenant into the request context exactly
-// as authenticationMiddleware does for an mTLS admin cert (Issue #1990).
+// as authenticationMiddleware does for an mTLS admin cert (Issue #1990), including
+// the TenantScope authenticationMiddleware sets alongside it (Issue #4316/#4334) —
+// an empty TenantID is treated as root scope, mirroring scopeForVerifiedAdminCert,
+// so a handler that switched from the legacy TenantID string to isAuthorizedForTenant
+// does not see every test caller as unset-scope (fail-closed denied).
 func withPrincipal(req *http.Request, p *Principal) *http.Request {
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	return req.WithContext(ctx)
 }
 

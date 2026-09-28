@@ -652,7 +652,10 @@ func TestActualAPIFunctionality(t *testing.T) {
 	t.Run("API Key CRUD operations work with proper permissions", func(t *testing.T) {
 		// POST/DELETE /api/v1/api-keys are Tier-3 (mTLS-only): use admin cert.
 		// GET /api/v1/api-keys and GET /api/v1/api-keys/{id} are Tier-1: API key suffices.
-		listReadKey := NewTestKey(t, server, []string{"api-key:list", "api-key:read"})
+		// Issue #4334: handleGetAPIKey now enforces tenant containment, so the reader
+		// key must share the created key's tenant — a cross-tenant read is exactly the
+		// gap this story closes and must return 404, not the key's details.
+		listReadKey := NewEphemeralTestKey(t, server, []string{"api-key:list", "api-key:read"}, "func-test-tenant", 5*time.Minute)
 
 		// 1. Create a new API key (Tier-3: admin cert required).
 		createReq := APIKeyCreateRequest{

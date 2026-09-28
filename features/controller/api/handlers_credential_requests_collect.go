@@ -218,6 +218,14 @@ func (s *Server) signAndBindCollectedCertificate(ctx context.Context, claimed *p
 // Unauthenticated by API key or mTLS — gated entirely on the collect secret presented
 // as a bearer credential (Issue #3719), mirroring handleLodgeCredentialRequest.
 // Registered on the base router, not the authenticated api subrouter.
+//
+// Issue #4334: pre-authentication — the caller has no Principal or TenantScope at all
+// (auth is proving possession of the collect secret for the named id, checked above —
+// a wrong secret and an unknown id are indistinguishable). The minted certificate is
+// bound to the account recorded at approval time, never to anything this caller
+// supplies.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication; see Issue #4334 comment above
 func (s *Server) handleCollectCredentialRequest(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	if id == "" {

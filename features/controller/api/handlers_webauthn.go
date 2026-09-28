@@ -62,6 +62,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -171,6 +172,18 @@ func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Req
 		return nil, nil, false
 	}
 	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound,
+			"Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, nil, false
+	}
+	// Issue #4334: tenant containment. Unlike the cookie-auth path above (self-scoped
+	// by construction), an mTLS/API-key admin names the target account by path
+	// username, with no tenant check at all — a tenant-scoped admin could otherwise
+	// register, list, or revoke WebAuthn credentials for any tenant's account. Not
+	// found and out-of-scope return the same response so this surface cannot be used
+	// to probe for account existence across tenants.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, acct.TenantID, "/api/v1/accounts/{username}/webauthn/*") {
 		s.writeErrorResponse(w, http.StatusNotFound,
 			"Account not found", "ACCOUNT_NOT_FOUND")
 		return nil, nil, false

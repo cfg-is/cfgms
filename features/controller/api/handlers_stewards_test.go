@@ -2298,6 +2298,13 @@ func TestHandleCreateAPIKey_AcceptsStewardReadLogs(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	ctx := req.Context()
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, "test-tenant")
+	// Issue #4334: root scope, since this test is about the permission catalogue
+	// entry, not tenant containment — the request body names no tenant_id, which
+	// defaults to "default" and is only reachable by an unscoped caller.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID: "logs-key-caller", ImplicitAdmin: true, TenantID: "test-tenant",
+	})
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	server.handleCreateAPIKey(rec, req)

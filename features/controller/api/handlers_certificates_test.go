@@ -26,6 +26,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -1137,6 +1138,56 @@ func TestHandleRotateSigningCert_NegativeOverlapRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestHandleRotateSigningCert_TenantScope_Returns403 is the [REQUIRED TEST] for Issue
+// #4334: the signing CA is a single fleet-wide resource, so a tenant-scoped caller
+// (even one meeting the AssuranceStrong bar) must be refused — only an unscoped
+// (root) caller may rotate it. This must succeed (rotate the CA) before the fix and
+// be refused after.
+func TestHandleRotateSigningCert_TenantScope_Returns403(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{
+		ID:         "scoped-admin",
+		Assurance:  session.AssuranceStrong,
+		TenantID:   "client-1",
+		CertSerial: "scoped-admin-serial",
+	})
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-1"))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleRotateSigningCert(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "the signing CA must not be rotated for a tenant-scoped caller")
+}
+
+// TestHandleRotateSigningCert_UnsetScope_Returns403 verifies the fail-closed contract
+// (Issue #4316): a request reaching the handler with no TenantScope ever established
+// is refused, never treated as unrestricted root access.
+func TestHandleRotateSigningCert_UnsetScope_Returns403(t *testing.T) {
+	server, _, _ := setupRotationTestServer(t)
+
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{
+		ID:         "unset-scope-admin",
+		Assurance:  session.AssuranceStrong,
+		CertSerial: "unset-scope-admin-serial",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleRotateSigningCert(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
 // setupProvisionTestServer creates a server wired with a real cert manager and a real
 // certificate provisioning service. The cert manager's storage path is returned so a
 // test can inject a storage fault (the provisioning service writes every issued cert
@@ -1188,6 +1239,12 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
+	// Issue #4334: wire a real steward store so tenant-containment tests can resolve
+	// an existing steward's owning tenant. Every pre-existing caller of this helper
+	// authenticates via the unscoped bootstrap-fallback admin cert (newAdminPeerCert),
+	// so the handler's new tenant check short-circuits on IsRoot() and never touches
+	// this store — attaching it changes nothing for them.
+	server.SetStewardStore(storageManager.GetStewardStore())
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -1197,6 +1254,16 @@ func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
 	})
 
 	return server, certMgr, certStoragePath
+}
+
+// scopedProvisionContext builds a context carrying a tenant-scoped TenantScope for
+// tenantID, mirroring scopedRevokeContext for the provision handler (Issue #4334).
+// An empty tenantID models an unscoped (root) caller.
+func scopedProvisionContext(tenantID string) context.Context {
+	if tenantID == "" {
+		return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	}
+	return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
 }
 
 // newAdminPeerCert issues an mTLS admin certificate from certMgr and returns it parsed,
@@ -1365,6 +1432,192 @@ func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T)
 		"the error response must not disclose internal filesystem paths")
 	assert.NotContains(t, body, "BEGIN",
 		"no certificate material may be returned on the failure path")
+}
+
+// TestHandleProvisionCertificate_TenantScope_SiblingTenant_Returns403 is the
+// [REQUIRED TEST] for Issue #4334: a caller scoped to client-1 must be refused when
+// provisioning a certificate for a steward already registered under sibling tenant
+// client-2 — this must fail (issue a certificate) before the fix and be refused after.
+func TestHandleProvisionCertificate_TenantScope_SiblingTenant_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client2"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "no certificate may be issued for a cross-tenant provision")
+}
+
+// TestHandleProvisionCertificate_TenantScope_OwnTenant_Succeeds verifies a caller
+// scoped to client-1 CAN provision a certificate for a steward registered under its
+// own tenant.
+func TestHandleProvisionCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_UnknownSteward_Returns403 verifies the
+// containment check fails closed on an absent steward record, matching the revoke
+// path in the same file: without a durable record the steward_id cannot be attributed
+// to the caller's subtree, so an unused steward_id must not be a free pass through the
+// check for an endpoint that returns a certificate and its private key.
+func TestHandleProvisionCertificate_TenantScope_UnknownSteward_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"brand-new-steward"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before),
+		"no certificate may be issued for a steward with no durable record")
+}
+
+// TestHandleProvisionCertificate_TenantScope_RootOnboardsNewSteward_Succeeds verifies
+// that denying the unattributable case for tenant-scoped callers leaves new-device
+// onboarding available to a root/unscoped caller.
+func TestHandleProvisionCertificate_TenantScope_RootOnboardsNewSteward_Succeeds(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"brand-new-steward"}`))
+	req = req.WithContext(scopedProvisionContext("")) // root scope
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_SpoofedCommonName_Returns403 is the
+// certificate-identity half of Issue #4334: the containment check resolves steward_id,
+// but consumers authenticate on the Subject CommonName (PeerStewardID,
+// pkg/transport/quic/tls.go). A tenant-scoped caller passing containment with its own
+// steward must not be able to name a victim steward in common_name and receive a
+// CA-signed certificate (plus private key) that impersonates it.
+func TestHandleProvisionCertificate_TenantScope_SpoofedCommonName_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	ctx := context.Background()
+	require.NoError(t, server.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "steward-client1-cn", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+	require.NoError(t, server.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "steward-victim", TenantID: "client-2", Hostname: "h2", Platform: "linux", Arch: "amd64",
+	}))
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-cn","common_name":"steward-victim"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before),
+		"no certificate may be issued with a Subject naming another steward")
+	assert.NotContains(t, rec.Body.String(), "BEGIN",
+		"no certificate material may be returned on the denial path")
+}
+
+// TestHandleProvisionCertificate_TenantScope_SpoofedOrganization_Returns403 covers the
+// second Subject field: the internal-delivery peer authorizer
+// (pkg/controlplane/internaldelivery/peer_auth.go) refuses steward leaves on the
+// Organization marker alone, so a caller-chosen non-steward Organization is a step
+// towards cluster-node authority and must be refused.
+func TestHandleProvisionCertificate_TenantScope_SpoofedOrganization_Returns403(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client1-org", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-org","organization":"CFGMS Controllers"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_SubjectComesFromRecord verifies the
+// positive side of the Subject rule: a tenant-scoped provision for an in-subtree
+// steward issues a certificate whose CommonName is the steward's own ID and whose
+// Organization is the steward marker the internal-delivery authorizer rejects.
+func TestHandleProvisionCertificate_TenantScope_SubjectComesFromRecord(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client1-subject", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-subject","common_name":"steward-client1-subject"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Data CertificateProvisionResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	issued, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
+	require.NoError(t, err)
+	assert.Equal(t, "steward-client1-subject", issued.Subject.CommonName)
+	assert.Contains(t, issued.Subject.Organization, internaldelivery.StewardCertOrganization,
+		"a tenant-scoped provision must carry the steward organization marker")
+}
+
+// TestHandleProvisionCertificate_UnsetScope_Returns403 verifies the fail-closed
+// contract (Issue #4316): a request that reaches the handler with no TenantScope ever
+// established is refused, never treated as unrestricted root access.
+func TestHandleProvisionCertificate_UnsetScope_Returns403(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-unset-scope"}`))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 }
 
 // TestProvisionFailureDetail_CoversEveryFailureCondition exercises each condition

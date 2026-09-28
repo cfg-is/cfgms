@@ -111,10 +111,36 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Issue #4334: a caller may not grant a permission it does not itself hold. This
+	// is independent of the tenant-containment check below — it closes the
+	// privilege-escalation path where a caller holding only api-key:create could
+	// mint a key carrying any permission in the catalogue, including ones the
+	// caller was never granted.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	for _, p := range createReq.Permissions {
+		if !s.hasPermission(principal, p) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Cannot grant a permission you do not hold: "+p, "PERMISSION_ESCALATION")
+			return
+		}
+	}
+
 	// Set default tenant if not specified
 	tenantID := createReq.TenantID
 	if tenantID == "" {
 		tenantID = "default"
+	}
+
+	// Issue #4334: the created key's tenant is bounded by the caller's own scope — a
+	// tenant-scoped caller cannot mint a key for a sibling tenant, nor for the
+	// catch-all "default" tenant outside its own subtree. An unset scope is refused
+	// outright (Issue #4316 fail-closed contract): holding api-key:create does not by
+	// itself prove a valid caller scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/api-keys") {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Cannot create an API key outside your tenant scope", "FORBIDDEN")
+		return
 	}
 
 	// Generate new API key (256-bit cryptographically secure)
@@ -249,6 +275,15 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
+	// response so this endpoint cannot be used to probe for a key's existence across
+	// tenants.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "GET /api/v1/api-keys/{id}") {
+		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
+		return
+	}
+
 	// Return key info without the actual key
 	keyInfo := APIKeyInfo{
 		ID:          foundKey.ID,
@@ -288,6 +323,15 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if foundKey == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
+		return
+	}
+
+	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
+	// response so this endpoint cannot be used to probe for a key's existence across
+	// tenants.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "DELETE /api/v1/api-keys/{id}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
 		return
 	}

@@ -57,7 +57,13 @@ func deleteAccount(t *testing.T, server *Server, principal *Principal, username 
 }
 
 func testAdminPrincipal() *Principal {
-	return &Principal{ID: "test-mtls-admin", Name: "mtls-admin:test", Assurance: session.AssuranceBasic}
+	// ImplicitAdmin mirrors the real bootstrap-fallback mTLS admin shape
+	// (extractAdminPrincipal, middleware.go): an unbound admin cert carries no
+	// TenantID and no specific Permissions, so hasPermission's ImplicitAdmin gate is
+	// what lets it grant any permission (Issue #4334) — this test helper's callers
+	// request specific permissions without a matching Principal.Permissions entry,
+	// so it must not be a permission-limited principal.
+	return &Principal{ID: "test-mtls-admin", Name: "mtls-admin:test", Assurance: session.AssuranceBasic, ImplicitAdmin: true}
 }
 
 // dropAccountCache clears the in-memory web-account cache so the next lookup
@@ -645,6 +651,225 @@ func TestAccounts_RootScope_DeleteWorks(t *testing.T) {
 	acct, err = server.getAccount(context.Background(), "root-delete-user")
 	require.NoError(t, err)
 	assert.Nil(t, acct, "account must be unreachable from the store after delete")
+}
+
+// TestAccounts_Delete_CrossTenantForbidden is the [REQUIRED TEST] for Issue #4334:
+// handleDeleteAccount had no tenant check at all — a caller scoped to client-1 must
+// be refused (404, to avoid disclosing existence) when deleting an account belonging
+// to sibling tenant client-2, and the account must survive. This must succeed (delete
+// the account) before the fix and be refused after.
+func TestAccounts_Delete_CrossTenantForbidden(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "client2-delete-target",
+		TenantID: "root/msp-a/client-2",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-2")
+
+	client1Admin := &Principal{
+		ID:        "client1-delete-admin",
+		TenantID:  "root/msp-a/client-1",
+		Assurance: session.AssuranceStrong,
+	}
+	delRec := deleteAccount(t, server, client1Admin, "client2-delete-target")
+
+	assert.Equal(t, http.StatusNotFound, delRec.Code, "body: %s", delRec.Body.String())
+
+	acct, err := server.getAccount(context.Background(), "client2-delete-target")
+	require.NoError(t, err)
+	require.NotNil(t, acct, "a forbidden cross-tenant delete must not remove the account")
+	assert.False(t, acct.Disabled, "a forbidden cross-tenant delete must not even disable the account")
+}
+
+// TestAccounts_Delete_OwnTenantSucceeds verifies a caller scoped to client-1 CAN
+// delete an account belonging to its own tenant.
+func TestAccounts_Delete_OwnTenantSucceeds(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "client1-delete-target",
+		TenantID: "root/msp-a/client-1",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account in client-1")
+
+	client1Admin := &Principal{
+		ID:        "client1-delete-admin",
+		TenantID:  "root/msp-a/client-1",
+		Assurance: session.AssuranceStrong,
+	}
+	delRec := deleteAccount(t, server, client1Admin, "client1-delete-target")
+
+	require.Equal(t, http.StatusOK, delRec.Code, "body: %s", delRec.Body.String())
+}
+
+// TestAccounts_Delete_UnsetScope_Returns404 verifies the fail-closed contract (Issue
+// #4316): a request reaching the handler with no TenantScope ever established is
+// refused, never treated as unrestricted root access.
+func TestAccounts_Delete_UnsetScope_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "unset-scope-delete-target",
+		TenantID: "root/msp-a/client-1",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/accounts/unset-scope-delete-target", nil)
+	req = withVars(req, map[string]string{"username": "unset-scope-delete-target"})
+	rec = httptest.NewRecorder()
+	server.handleDeleteAccount(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold is a
+// [REQUIRED TEST] for Issue #4334: a caller holding only account:create cannot mint
+// an account carrying certificate:rotate — a permission it does not itself hold.
+func TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold(t *testing.T) {
+	server := setupTestServer(t)
+
+	limitedCaller := &Principal{
+		ID:          "limited-account-caller",
+		TenantID:    "root/msp-a/client-1",
+		Assurance:   session.AssuranceStrong,
+		Permissions: []string{"account:create"},
+	}
+	rec := postAccount(t, server, limitedCaller, AccountRequest{
+		Username:    "escalation-target",
+		TenantID:    "root/msp-a/client-1",
+		Permissions: []string{"certificate:rotate"},
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PERMISSION_ESCALATION")
+
+	acct, err := server.getAccount(context.Background(), "escalation-target")
+	require.NoError(t, err)
+	assert.Nil(t, acct, "no account may be persisted when the caller lacks a requested permission")
+}
+
+// TestAccounts_CreateEscalation_ResetCannotRetainPermissionsCallerDoesNotHold covers
+// the upsert/retention bypass of the Issue #4334 guard: POSTing an existing username
+// with permissions OMITTED retains the target account's stored permission set, so a
+// guard that loops over the request body iterates zero times and passes while the
+// resulting account keeps every privileged permission. With reset_credentials the
+// handler also wipes the target's passkeys and returns a fresh bearer enrollment link,
+// which would hand a caller holding only account:create an authenticator slot on a
+// privileged account. The effective resulting set must be checked, so the reset is
+// refused and neither the passkeys nor the link state change.
+func TestAccounts_CreateEscalation_ResetCannotRetainPermissionsCallerDoesNotHold(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username:    "privileged-admin",
+		TenantID:    "root/msp-a/client-1",
+		Permissions: []string{"certificate:rotate"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create privileged account")
+
+	// The target holds a passkey, so a successful reset is the only way to mint a link.
+	acct, err := server.getAccount(context.Background(), "privileged-admin")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	acct.Credentials = []WebAuthnCredential{{
+		ID:           []byte("cred-1"),
+		PublicKey:    []byte("public-key-bytes"),
+		SignCount:    1,
+		Label:        "escalation-test-credential",
+		RegisteredAt: time.Now().UTC(),
+	}}
+	acct.EnrollmentLinkHash = ""
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test-setup"))
+	server.cacheAccount(acct)
+
+	limitedCaller := &Principal{
+		ID:          "limited-reset-caller",
+		TenantID:    "root/msp-a/client-1",
+		Assurance:   session.AssuranceStrong,
+		Permissions: []string{"account:create"},
+	}
+	rec = postAccount(t, server, limitedCaller, AccountRequest{
+		Username:         "privileged-admin",
+		ResetCredentials: true,
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PERMISSION_ESCALATION")
+	assert.NotContains(t, rec.Body.String(), "enrollment_magic_link\":\"",
+		"no enrollment credential may be returned on the denial path")
+
+	dropAccountCache(server)
+	after, err := server.getAccount(context.Background(), "privileged-admin")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, []string{"certificate:rotate"}, after.Permissions)
+	assert.Len(t, after.Credentials, 1, "a refused reset must not wipe the account's passkeys")
+	assert.False(t, enrollmentLinkOutstanding(after),
+		"a refused reset must not leave an outstanding enrollment link")
+}
+
+// TestAccounts_CreateEscalation_ResetOfEquallyPrivilegedAccountSucceeds is the
+// counterpart: the effective-set check must not break the legitimate containment
+// reset — a caller that holds everything the target holds may still reset it.
+func TestAccounts_CreateEscalation_ResetOfEquallyPrivilegedAccountSucceeds(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username:    "peer-admin",
+		TenantID:    "root/msp-a/client-1",
+		Permissions: []string{"certificate:rotate"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
+
+	peerCaller := &Principal{
+		ID:          "peer-reset-caller",
+		TenantID:    "root/msp-a/client-1",
+		Assurance:   session.AssuranceStrong,
+		Permissions: []string{"account:create", "certificate:rotate"},
+	}
+	rec = postAccount(t, server, peerCaller, AccountRequest{
+		Username:         "peer-admin",
+		ResetCredentials: true,
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	dropAccountCache(server)
+	after, err := server.getAccount(context.Background(), "peer-admin")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.Equal(t, []string{"certificate:rotate"}, after.Permissions,
+		"a permitted reset still retains the omitted permission set")
+}
+
+// TestAccounts_UpdateEscalation_CannotGrantPermissionCallerDoesNotHold is the update
+// equivalent of TestAccounts_CreateEscalation_CannotGrantPermissionCallerDoesNotHold.
+func TestAccounts_UpdateEscalation_CannotGrantPermissionCallerDoesNotHold(t *testing.T) {
+	server := setupTestServer(t)
+
+	rec := postAccount(t, server, testAdminPrincipal(), AccountRequest{
+		Username: "update-escalation-target",
+		TenantID: "root/msp-a/client-1",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "setup: create account")
+
+	limitedCaller := &Principal{
+		ID:          "limited-update-caller",
+		TenantID:    "root/msp-a/client-1",
+		Assurance:   session.AssuranceStrong,
+		Permissions: []string{"account:update"},
+	}
+	newPerms := []string{"certificate:rotate"}
+	rec = putAccount(t, server, limitedCaller, "update-escalation-target", AccountUpdateRequest{Permissions: &newPerms})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "PERMISSION_ESCALATION")
+
+	acct, err := server.getAccount(context.Background(), "update-escalation-target")
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	assert.Empty(t, acct.Permissions, "no permission may be persisted when the caller lacks a requested permission")
 }
 
 // ---- Issue #2974: enrollment magic link tests ----

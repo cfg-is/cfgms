@@ -807,21 +807,54 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		acct.Permissions = []string{}
 	}
 
-	// Issue #2974: enforce tenant-subtree scope, matching handleRevokeEnrollmentLink
-	// and handleListAccounts. This endpoint issues a bearer enrollment credential,
-	// so a tenant-scoped caller must not be able to target a username outside its own
+	// Issue #2974/#4334: enforce tenant-subtree scope via the fail-closed
+	// isAuthorizedForTenant (Issue #4316), matching handleRevokeEnrollmentLink and
+	// handleListAccounts. This endpoint issues a bearer enrollment credential, so a
+	// tenant-scoped caller must not be able to target a username outside its own
 	// subtree, nor mint a root-scoped account (root scope resolves to TenantID "",
 	// which is inside no scoped caller's subtree). Both the record being replaced and
 	// the requested destination scope are checked, so a reset cannot pull an
-	// out-of-subtree account into the caller's tenant.
-	callerTenant := s.callerTenantID(r)
-	if existing != nil && !isWithinTenantScope(callerTenant, existing.TenantID) {
+	// out-of-subtree account into the caller's tenant. An unset scope is refused
+	// outright — holding account:create does not by itself prove a valid caller
+	// scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if existing != nil && !s.isAuthorizedForTenant(scope, existing.TenantID, "POST /api/v1/accounts") {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
 		return
 	}
-	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+	if !s.isAuthorizedForTenant(scope, acct.TenantID, "POST /api/v1/accounts") {
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
 		return
+	}
+
+	// Issue #4334: a caller may not grant a permission it does not itself hold — the
+	// catalogue check above only proves each requested permission exists, not that this
+	// caller holds it. This closes the privilege-escalation path where a caller holding
+	// only account:create mints an account carrying any permission in the catalogue.
+	//
+	// The check runs against acct.Permissions — the EFFECTIVE resulting set — and not
+	// against req.Permissions, because this endpoint is an upsert: when permissions are
+	// omitted, the retention block above copies the target account's existing set onto
+	// acct, so a loop over req.Permissions iterates zero times and passes while the
+	// resulting principal keeps every privileged permission the target held. That
+	// matters here and not in handleUpdateAccount because a create/reset also mints a
+	// bearer EnrollmentMagicLink and returns it in the response body: with
+	// reset_credentials the target's passkeys are dropped, so a caller holding only
+	// account:create could POST {"username":"<privileged admin>","reset_credentials":true},
+	// receive an enrollment link for the wiped account, register its own passkey and
+	// authenticate with that account's full permission set. Checking the effective set
+	// refuses the reset unless the caller already holds everything the account carries.
+	//
+	// Placed after both tenant checks so an out-of-subtree caller is refused by the
+	// generic FORBIDDEN above: the message below names a permission, and for a retained
+	// (omitted-permissions) reset that permission comes from the stored account, which
+	// would otherwise make this an out-of-subtree permission oracle.
+	for _, p := range acct.Permissions {
+		if !s.hasPermission(principal, p) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Cannot grant a permission you do not hold: "+p, "PERMISSION_ESCALATION")
+			return
+		}
 	}
 
 	// If a reset moves the account to a different storage tenant, remove the old
@@ -1243,10 +1276,13 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue #3126: enforce tenant-subtree scope before mutating anything.
-	// A cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+	// Issue #3126/#4334: enforce tenant-subtree scope before mutating anything, via
+	// the fail-closed isAuthorizedForTenant (Issue #4316). A cross-tenant caller gets
+	// 404 — not 403 — to avoid disclosing account existence. An unset scope is
+	// refused outright — holding account:update does not by itself prove a valid
+	// caller scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, acct.TenantID, "PUT /api/v1/accounts/{username}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
@@ -1255,6 +1291,19 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	actingPrincipalID := ""
 	if principal != nil {
 		actingPrincipalID = principal.ID
+	}
+
+	// Issue #4334: a caller may not grant a permission it does not itself hold — the
+	// catalogue check above only proves the permission exists, not that this caller
+	// holds it.
+	if req.Permissions != nil {
+		for _, p := range *req.Permissions {
+			if !s.hasPermission(principal, p) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Cannot grant a permission you do not hold: "+p, "PERMISSION_ESCALATION")
+				return
+			}
+		}
 	}
 
 	// Apply partial updates — only modify fields that were provided.
@@ -1416,6 +1465,16 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return
+	}
+
+	// Issue #4334: enforce tenant-subtree scope before offboarding anything. A
+	// cross-tenant caller gets 404 — not 403 — to avoid disclosing account existence,
+	// matching handleGetAccount/handleUpdateAccount. An unset scope is refused
+	// outright (Issue #4316 fail-closed contract).
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, acct.TenantID, "DELETE /api/v1/accounts/{username}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}

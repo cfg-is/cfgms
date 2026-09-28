@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -201,6 +202,78 @@ func TestRenewCredential_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, acct.CertBindings, 1, "exactly one live certificate binding must exist for this account after renewal")
 	assert.Equal(t, resp.SerialNumber, acct.CertBindings[0].Serial)
+}
+
+// TestRenewCredential_TenantScope_MismatchRejected is the [REQUIRED TEST] for Issue
+// #4334: renewal is scoped exclusively to the account resolved from the presented
+// certificate's own serial, so a caller whose carried TenantScope disagrees with that
+// account's own tenant must be refused — the exact plumbing-bug signature
+// isAuthorizedForTenant exists to catch (Issue #4316). Calls the handler directly
+// (bypassing the router) to inject a scope that cannot arise from a genuine mTLS
+// handshake, proving the check is real rather than vacuously always-true. This must
+// succeed (renew the credential) before the fix and be refused after.
+func TestRenewCredential_TenantScope_MismatchRejected(t *testing.T) {
+	server := setupRenewalTestServer(t)
+	fx := issueRenewableCredential(t, server, "renew-tenant", "renew-mismatch-owner", ApproveCredentialRequestBody{GrantAdminMarker: true}, nil)
+	presented := withNotAfter(fx.oldCert, time.Now().UTC().Add(10*24*time.Hour))
+
+	newKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	csrPEM := encodeTestCSR(t, newKey, "renew-test-device")
+	body, err := json.Marshal(RenewCredentialRequest{CSRPEM: csrPEM})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-renewal", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{presented}}
+	principal := &Principal{
+		ID: fx.accountID, Assurance: session.AssuranceStrong,
+		TenantID: fx.tenantID, CertSerial: fx.oldSerial,
+	}
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	// Deliberately mismatched: the resolved account's tenant is fx.tenantID, but the
+	// caller's carried scope claims an unrelated one.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("some-other-tenant"))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	server.handleRenewCredential(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "NO_ACCOUNT_BINDING", errCode(t, rec.Body.Bytes()))
+
+	revoked, err := server.certManager.IsRevoked(fx.oldSerial)
+	require.NoError(t, err)
+	assert.False(t, revoked, "a refused renewal must not revoke the still-valid old certificate")
+}
+
+// TestRenewCredential_UnsetScope_Returns403 verifies the fail-closed contract (Issue
+// #4316): a request reaching the handler with no TenantScope ever established is
+// refused, never treated as unrestricted root access.
+func TestRenewCredential_UnsetScope_Returns403(t *testing.T) {
+	server := setupRenewalTestServer(t)
+	fx := issueRenewableCredential(t, server, "renew-tenant", "renew-unset-owner", ApproveCredentialRequestBody{GrantAdminMarker: true}, nil)
+	presented := withNotAfter(fx.oldCert, time.Now().UTC().Add(10*24*time.Hour))
+
+	newKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	csrPEM := encodeTestCSR(t, newKey, "renew-test-device")
+	body, err := json.Marshal(RenewCredentialRequest{CSRPEM: csrPEM})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-renewal", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{presented}}
+	principal := &Principal{
+		ID: fx.accountID, Assurance: session.AssuranceStrong,
+		CertSerial: fx.oldSerial,
+	}
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+
+	rec := httptest.NewRecorder()
+	server.handleRenewCredential(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 }
 
 // ---- renewal window -----------------------------------------------------------------

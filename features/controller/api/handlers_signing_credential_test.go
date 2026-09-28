@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -172,6 +173,64 @@ func TestHandleRequestSigningCredential_MachineAssurance403(t *testing.T) {
 	assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
 }
 
+// TestHandleRequestSigningCredential_TenantScope_MismatchRejected is the [REQUIRED
+// TEST] for Issue #4334: the credential this endpoint mints is bound exclusively to
+// the caller's own identity, so a caller authenticated to tenant A is refused when
+// its carried TenantScope disagrees with its own principal.TenantID (tenant B) — the
+// exact plumbing-bug signature isAuthorizedForTenant exists to catch (Issue #4316).
+// This must succeed (issue a credential) before the fix and be refused after.
+func TestHandleRequestSigningCredential_TenantScope_MismatchRejected(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "mismatched-admin")
+	_, pubPEM := generateSigningCredentialTestKey(t)
+	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
+	require.NoError(t, err)
+
+	principal := &Principal{
+		ID:         "mismatched-admin",
+		Name:       "mtls-admin:mismatched-admin",
+		Assurance:  session.AssuranceStrong,
+		TenantID:   "tenant-b",
+		CertSerial: adminCert.SerialNumber.String(),
+	}
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a"))
+	req = req.WithContext(ctx)
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "mismatched-admin"))
+	rec := httptest.NewRecorder()
+	server.handleRequestSigningCredential(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleRequestSigningCredential_UnsetScope_Returns403 verifies the fail-closed
+// contract (Issue #4316): a request reaching the handler with no TenantScope ever
+// established is refused, never treated as unrestricted root access.
+func TestHandleRequestSigningCredential_UnsetScope_Returns403(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	adminCert := issueSigningCredentialAdminCert(t, certMgr, "unset-scope-admin")
+	_, pubPEM := generateSigningCredentialTestKey(t)
+	body, err := json.Marshal(SigningCredentialRequest{PublicKeyPEM: pubPEM})
+	require.NoError(t, err)
+
+	principal := &Principal{
+		ID:         "unset-scope-admin",
+		Name:       "mtls-admin:unset-scope-admin",
+		Assurance:  session.AssuranceStrong,
+		CertSerial: adminCert.SerialNumber.String(),
+	}
+	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	req.Header.Set(presenceTokenHeader, mintPresenceToken(t, server, "unset-scope-admin"))
+	rec := httptest.NewRecorder()
+	server.handleRequestSigningCredential(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
 func TestHandleRequestSigningCredential_BasicAssuranceGetsStepUp(t *testing.T) {
 	server, _ := setupCertTestServer(t)
 
@@ -318,7 +377,11 @@ func TestHandleRequestSigningCredential_NilCertManager_Returns503(t *testing.T) 
 	require.NoError(t, err)
 
 	req := httptest.NewRequest("POST", "/api/v1/signing-credential/request", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, strongPrincipal))
+	ctx := context.WithValue(req.Context(), principalContextKey, strongPrincipal)
+	// Issue #4334: root scope, matching the ImplicitAdmin principal above — this test
+	// targets the nil-certManager path, not tenant containment.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
 	server.handleRequestSigningCredential(rec, req)

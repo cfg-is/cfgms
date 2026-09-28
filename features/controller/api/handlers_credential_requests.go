@@ -557,6 +557,13 @@ func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Reque
 // Unauthenticated by API key or mTLS — gated entirely on the pre-shared enrolment
 // token presented as a bearer credential (Issue #3717). Registered on the base
 // router, not the authenticated /api/v1 subrouter, mirroring handleRegister.
+//
+// Issue #4334: pre-authentication bootstrap — the caller has no Principal or
+// TenantScope at all (auth is the bearer enrolment token itself, checked above). The
+// created pendingCredentialRequest inherits the resolved token's own TenantID
+// directly (freshTok.TenantID) — there is no caller-supplied tenant to contain.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication bootstrap; see Issue #4334 comment above
 func (s *Server) handleLodgeCredentialRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

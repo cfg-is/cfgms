@@ -86,11 +86,16 @@ func setupCertBindingServer(t *testing.T) (*Server, *cert.Manager) {
 }
 
 // strongPrincipal returns a Principal with AssuranceStrong for mutating operations.
+// ImplicitAdmin mirrors the real bootstrap-fallback mTLS admin shape
+// (extractAdminPrincipal, middleware.go), since callers of this helper drive
+// handlers directly — bypassing requirePermission — and request specific
+// permissions with no matching Principal.Permissions entry (Issue #4334).
 func strongPrincipal() *Principal {
 	return &Principal{
-		ID:        "test-mtls-strong",
-		Name:      "mtls-admin:strong",
-		Assurance: session.AssuranceStrong,
+		ID:            "test-mtls-strong",
+		Name:          "mtls-admin:strong",
+		Assurance:     session.AssuranceStrong,
+		ImplicitAdmin: true,
 	}
 }
 
