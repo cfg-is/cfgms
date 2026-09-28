@@ -17,27 +17,61 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# Install Chocolatey if not present
-if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-    Write-Host "`n=== Installing Chocolatey ===" -ForegroundColor Yellow
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-    # Refresh environment variables
-    $env:ChocolateyInstall = Convert-Path "$((Get-Command choco).Path)\..\.."
-    Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
-    refreshenv
-} else {
-    Write-Host "Chocolatey already installed" -ForegroundColor Green
+# Core development tools, installed via winget (Windows Package Manager,
+# built into Windows 10 1809+/Windows 11) -- never a piped remote script.
+# winget resolves each package through its own signed-manifest catalog and
+# validates the downloaded installer's signature/hash itself before running
+# it, the same trust model this repo's Dockerfile gives apt-get for Linux
+# packages (CLAUDE.md's own banned-pattern list targets exactly the
+# `iex (...).DownloadString(...)` shape this replaces -- Issue #4343). Every
+# package is pinned to an exact version so a bare `winget install` can never
+# silently pick up a newer, unvetted release; refresh these the same way the
+# repo refreshes any other pin (see the `refresh-pins` skill).
+#
+# Refresh-if-stale: verify each version is still published with
+# `winget show --id <ID> --versions` before bumping.
+function Update-SessionPath {
+    # winget-installed tools land on the Machine/User PATH via the installer,
+    # not via a Chocolatey-style shell profile refresh -- re-read both from
+    # the registry so this session sees them without a new shell.
+    $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machine;$user"
 }
 
-# Install core development tools
-Write-Host "`n=== Installing Core Development Tools ===" -ForegroundColor Yellow
-choco install -y golang git make gh nodejs
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: winget (Windows Package Manager) is not available." -ForegroundColor Red
+    Write-Host "It ships with Windows 10 1809+/Windows 11 via the 'App Installer' package." -ForegroundColor Red
+    Write-Host "Install it from the Microsoft Store, then re-run this script." -ForegroundColor Red
+    exit 1
+}
 
-# Refresh environment to pick up new PATHs
-refreshenv
+Write-Host "`n=== Installing Core Development Tools (winget) ===" -ForegroundColor Yellow
+
+$coreTools = @(
+    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.1'; Command = 'go' },   # matches .devcontainer/Dockerfile's golang:1.27.1-trixie
+    @{ Name = 'Git';        Id = 'Git.Git';         Version = '2.47.1'; Command = 'git' },
+    @{ Name = 'Make';       Id = 'GnuWin32.Make';   Version = '3.81';   Command = 'make' },
+    @{ Name = 'GitHub CLI'; Id = 'GitHub.cli';      Version = '2.63.2'; Command = 'gh' },
+    @{ Name = 'Node.js';    Id = 'OpenJS.NodeJS';   Version = '26.0.0'; Command = 'node' }    # major must track web/.nvmrc
+)
+
+foreach ($tool in $coreTools) {
+    if (Get-Command $tool.Command -ErrorAction SilentlyContinue) {
+        Write-Host "  [OK] $($tool.Name) already on PATH — skipping" -ForegroundColor Green
+        continue
+    }
+    Write-Host "  installing $($tool.Name) $($tool.Version) ..."
+    & winget install --id $tool.Id --version $tool.Version --exact --silent `
+        --accept-package-agreements --accept-source-agreements | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [--] $($tool.Name): winget install failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  [OK] $($tool.Name)" -ForegroundColor Green
+    }
+}
+
+Update-SessionPath
 
 # =====================================================================
 # CFGMS validation tooling (lint + security scanners)
@@ -216,8 +250,13 @@ if (-not $SkipDocker) {
     if (Get-Command docker -ErrorAction SilentlyContinue) {
         Write-Host "Docker already installed" -ForegroundColor Green
     } else {
-        # Install Docker Desktop
-        choco install -y docker-desktop
+        # Install Docker Desktop -- winget, pinned (Issue #4343). Refresh the
+        # same way as $coreTools above via `winget show --id Docker.DockerDesktop --versions`.
+        & winget install --id Docker.DockerDesktop --version 4.36.0 --exact --silent `
+            --accept-package-agreements --accept-source-agreements | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [--] Docker Desktop: winget install failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+        }
 
         Write-Host "`nDocker Desktop installed. Important notes:" -ForegroundColor Cyan
         Write-Host "  - You may need to restart your computer after installation"
@@ -252,42 +291,52 @@ if (-not $SkipDocker) {
 }
 
 # Refresh environment
-refreshenv
+Update-SessionPath
 
-# Install Claude Code via npm
+# Install Claude Code via npm, pinned -- matches CLAUDE_CODE_VERSION in
+# .devcontainer/Dockerfile (Issue #4343: every tool this script installs is
+# pinned, not just the ones with a release binary to hash-verify; npm itself
+# resolves and integrity-checks the pinned tarball against the registry).
+$ClaudeCodeVersion = '2.1.273'
 if (-not $SkipClaudeCode) {
-    Write-Host "`n=== Installing Claude Code ===" -ForegroundColor Yellow
-    npm install -g @anthropic-ai/claude-code
+    Write-Host "`n=== Installing Claude Code $ClaudeCodeVersion ===" -ForegroundColor Yellow
+    npm install -g "@anthropic-ai/claude-code@$ClaudeCodeVersion"
 }
 
 # Refresh environment one more time
-refreshenv
+Update-SessionPath
 
 # Verify installations
 Write-Host "`n=== Verification ===" -ForegroundColor Green
 
 $tools = @(
-    @{Name="Go"; Command="go version"},
-    @{Name="Git"; Command="git --version"},
-    @{Name="Make"; Command="make --version"},
-    @{Name="GitHub CLI"; Command="gh --version"},
-    @{Name="Node.js"; Command="node --version"},
-    @{Name="npm"; Command="npm --version"}
+    @{Name="Go"; Command=@('go','version')},
+    @{Name="Git"; Command=@('git','--version')},
+    @{Name="Make"; Command=@('make','--version')},
+    @{Name="GitHub CLI"; Command=@('gh','--version')},
+    @{Name="Node.js"; Command=@('node','--version')},
+    @{Name="npm"; Command=@('npm','--version')}
 )
 
 if (-not $SkipDocker) {
-    $tools += @{Name="Docker"; Command="docker --version"}
+    $tools += @{Name="Docker"; Command=@('docker','--version')}
 }
 
 if (-not $SkipClaudeCode) {
-    $tools += @{Name="Claude Code"; Command="claude --version"}
+    $tools += @{Name="Claude Code"; Command=@('claude','--version')}
 }
 
+# Each Command is an argument slice (exe, then its args) invoked via the call
+# operator -- never a composed string handed to Invoke-Expression (Issue
+# #4343: Invoke-Expression is CLAUDE.md's banned pattern regardless of
+# whether the string being evaluated is attacker-reachable here).
 foreach ($tool in $tools) {
     try {
-        $result = Invoke-Expression $tool.Command 2>$null
+        $exe = $tool.Command[0]
+        $exeArgs = $tool.Command[1..($tool.Command.Length - 1)]
+        $result = & $exe @exeArgs 2>$null
         if ($result) {
-            Write-Host "  [OK] $($tool.Name): $($result.Split("`n")[0])" -ForegroundColor Green
+            Write-Host "  [OK] $($tool.Name): $($result | Select-Object -First 1)" -ForegroundColor Green
         } else {
             Write-Host "  [--] $($tool.Name): Not found or not in PATH" -ForegroundColor Yellow
         }

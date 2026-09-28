@@ -33,21 +33,47 @@ content: |
   #!/bin/bash
   set -euo pipefail
 
-  BACKUP_PATH="${BACKUP_PATH:?BACKUP_PATH is required}"
-  RETENTION_DAYS="${RETENTION_DAYS:-30}"
-  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-  HOSTNAME=$(hostname)
-  BACKUP_DIR="$BACKUP_PATH/${HOSTNAME}_${TIMESTAMP}"
+  # Parameters are read from this process's own environment, which is the only
+  # channel the steward script executor uses: it resolves every declared
+  # parameter and injects it into cmd.Env for the child process alone, keeping
+  # values off the command line (/proc/<pid>/cmdline, ps output, Windows event
+  # 4688) and out of this script's text. A bash literal parameter arrives as
+  # CFGMS_PARAM_<NAME>, a secret-store parameter as the bare <NAME>; both are
+  # read below, so the template works under either binding. See
+  # features/modules/stdlib/script/executor.go and param_binding.go -- the
+  # executor never passes positional arguments, so reading $1/$2 here would
+  # leave this template permanently broken on the real execution path.
+  #
+  # Every reference below is braced and double-quoted, and the script-local
+  # names are lowercase, so this content contains no "$BACKUP_PATH"-shaped
+  # token for a text-substituting caller to replace with a parameter value --
+  # that substitution is what turns an attacker-controlled value into literal
+  # shell source. A value stays one opaque shell token whatever characters it
+  # contains, and no command string is composed at runtime (Issue #4343).
+  backup_path="${CFGMS_PARAM_BACKUP_PATH:-${BACKUP_PATH:-}}"
+  : "${backup_path:?BACKUP_PATH is required}"
+  retention_days="${CFGMS_PARAM_RETENTION_DAYS:-${RETENTION_DAYS:-30}}"
+
+  # Validate before use: retention_days is interpolated into a find predicate,
+  # so constrain it to digits at this boundary rather than trusting the caller.
+  if [[ ! "${retention_days}" =~ ^[0-9]+$ ]]; then
+      echo "Error: RETENTION_DAYS must be a whole number of days" >&2
+      exit 1
+  fi
+
+  timestamp="$(date +%Y%m%d_%H%M%S)"
+  host="$(hostname)"
+  backup_dir="${backup_path}/${host}_${timestamp}"
 
   echo "Configuration Backup Script"
-  echo "Backup path: $BACKUP_PATH"
-  echo "Retention: $RETENTION_DAYS days"
+  echo "Backup path: ${backup_path}"
+  echo "Retention: ${retention_days} days"
 
   # Create backup directory
-  mkdir -p "$BACKUP_DIR"
+  mkdir -p "${backup_dir}"
 
   # Define critical configuration paths
-  CONFIG_PATHS=(
+  config_paths=(
       "/etc/fstab"
       "/etc/hosts"
       "/etc/hostname"
@@ -61,25 +87,25 @@ content: |
   )
 
   # Backup each path
-  for path in "${CONFIG_PATHS[@]}"; do
-      if [ -e "$path" ]; then
-          echo "Backing up: $path"
-          parent_dir=$(dirname "$path")
-          mkdir -p "$BACKUP_DIR$parent_dir"
-          cp -pr "$path" "$BACKUP_DIR$path" 2>/dev/null || true
+  for path in "${config_paths[@]}"; do
+      if [ -e "${path}" ]; then
+          echo "Backing up: ${path}"
+          parent_dir="$(dirname "${path}")"
+          mkdir -p "${backup_dir}${parent_dir}"
+          cp -pr "${path}" "${backup_dir}${path}" 2>/dev/null || true
       fi
   done
 
   # Create archive
-  cd "$BACKUP_PATH"
-  tar -czf "${HOSTNAME}_${TIMESTAMP}.tar.gz" "${HOSTNAME}_${TIMESTAMP}"
-  rm -rf "$BACKUP_DIR"
+  cd "${backup_path}"
+  tar -czf "${host}_${timestamp}.tar.gz" "${host}_${timestamp}"
+  rm -rf "${backup_dir}"
 
-  echo "Backup created: ${HOSTNAME}_${TIMESTAMP}.tar.gz"
+  echo "Backup created: ${host}_${timestamp}.tar.gz"
 
   # Cleanup old backups
-  find "$BACKUP_PATH" -name "${HOSTNAME}_*.tar.gz" -type f -mtime +$RETENTION_DAYS -delete
-  echo "Cleanup completed (kept last $RETENTION_DAYS days)"
+  find "${backup_path}" -name "${host}_*.tar.gz" -type f -mtime "+${retention_days}" -delete
+  echo "Cleanup completed (kept last ${retention_days} days)"
 
   exit 0
 

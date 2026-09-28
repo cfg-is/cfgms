@@ -1125,6 +1125,68 @@ test_check_no_python_in_core() {
     rm -f "$out_file"
 }
 
+# Fixture suite for scripts/check-no-banned-exec-patterns.sh — the
+# banned-execution-pattern gate for windows-setup.ps1 and the script
+# templates (Issue #4343). Delegates to
+# scripts/check-no-banned-exec-patterns_test.sh, which asserts each banned
+# pattern (iex, Invoke-Expression, powershell -Command "<string>",
+# -EncodedCommand, -ExecutionPolicy Bypass, bash -c "<string>", eval,
+# python -c) is independently detected, that a comment merely naming one does
+# not self-trip, and that the gate fails closed on a missing file.
+#
+# Also runs the gate against the real repo, so a piped-installer or
+# composed-command-string pattern reintroduced into windows-setup.ps1 or
+# either template fails `make test` rather than merging green.
+test_check_no_banned_exec_patterns() {
+    log_test "Testing check-no-banned-exec-patterns.sh..."
+
+    local gate_script="scripts/check-no-banned-exec-patterns.sh"
+    local test_script="scripts/check-no-banned-exec-patterns_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-no-banned-exec-patterns.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-no-banned-exec-patterns.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-no-banned-exec-patterns_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-no-banned-exec-patterns_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-banned-exec-patterns_test.sh: All fixture tests passed"
+    else
+        log_fail "check-no-banned-exec-patterns_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-no-banned-exec-patterns.sh: Real repo tree is clean"
+    else
+        log_fail "check-no-banned-exec-patterns.sh: Real repo tree failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Fixture suite for scripts/check-dead-packages.sh — the package-reachability
 # gate (Issue #4317). Delegates to scripts/check-dead-packages_test.sh, which
 # builds throwaway Go modules (each with its own go.mod, so `go list` resolves
@@ -5452,6 +5514,7 @@ DISPATCH_TABLE=(
     "test_check_binary_artifacts:core"
     "test_check_docs_boundary:core"
     "test_check_no_python_in_core:core"
+    "test_check_no_banned_exec_patterns:core"
     "test_check_dead_packages:core"
     "test_unit_tests_aggregator_no_python_gate:core"
     "test_detect_tooling_changed:core"
