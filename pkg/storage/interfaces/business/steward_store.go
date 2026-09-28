@@ -164,12 +164,39 @@ type StewardStore interface {
 	GetSteward(ctx context.Context, stewardID string) (*StewardRecord, error)
 
 	// GetStewardByDeviceID retrieves the record whose DeviceID matches the given
-	// 64-character hex fingerprint. Returns ErrStewardNotFound when no matching
-	// record exists. Callers must inspect the returned record's Status field and
-	// return ErrStewardRevoked if Status == StewardStatusRevoked — the store does
-	// not surface the revocation error directly (ADR-010 §3 revocation-before-PoP
-	// ordering invariant).
+	// 64-character hex fingerprint, with NO tenant predicate. Device identifiers
+	// are allowed to collide across tenants by design (only same-tenant device_id
+	// is unique, enforced by ErrStewardDeviceIDConflict), so when more than one
+	// record shares deviceID this returns a single, deterministic record — the
+	// match with the lexicographically smallest ID — never an arbitrary one.
+	//
+	// This is the unscoped form. A caller holding an authenticated tenant MUST
+	// use GetStewardByDeviceIDForTenant instead; this form exists ONLY for the
+	// pre-authentication registration-refresh handshake (handleRefreshChallenge /
+	// handleRefreshComplete in handlers_registration_refresh.go), where the tenant
+	// is not yet known — it arrives, if at all, as an unauthenticated, caller-
+	// asserted request field and MUST NOT be used to scope this lookup. On that
+	// path the returned record's identity is instead confirmed by proof-of-
+	// possession: the caller must sign the challenge nonce with the private key
+	// matching the returned record's IdentityKeyPub, so a device-id collision
+	// cannot be used to act on another tenant's record even though the lookup
+	// itself is unscoped (Issue #4350).
+	//
+	// Returns ErrStewardNotFound when no matching record exists. Callers must
+	// inspect the returned record's Status field and return ErrStewardRevoked if
+	// Status == StewardStatusRevoked — the store does not surface the revocation
+	// error directly (ADR-010 §3 revocation-before-PoP ordering invariant).
 	GetStewardByDeviceID(ctx context.Context, deviceID string) (*StewardRecord, error)
+
+	// GetStewardByDeviceIDForTenant retrieves the record whose DeviceID matches
+	// the given fingerprint AND whose TenantID matches tenantID. This is the
+	// tenant-scoped form: use it whenever the caller holds an authenticated
+	// tenant (e.g. from a registration token, an authorized admin principal, or
+	// an already-tenant-checked pending-* record) so a device_id collision with a
+	// different tenant can never be returned. Returns ErrStewardNotFound when no
+	// matching record exists in the given tenant, even if deviceID matches a
+	// record belonging to a different tenant.
+	GetStewardByDeviceIDForTenant(ctx context.Context, deviceID, tenantID string) (*StewardRecord, error)
 
 	// ListStewards returns all steward records regardless of status.
 	ListStewards(ctx context.Context) ([]*StewardRecord, error)

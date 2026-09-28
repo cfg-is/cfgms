@@ -502,29 +502,156 @@ func TestHandleRefreshComplete_Lifecycle_Archived(t *testing.T) {
 		"policy must not be consulted for archived stewards")
 }
 
-func TestHandleRefreshComplete_CrossTenantReturns403(t *testing.T) {
-	pub, _ := newTestEd25519KeyPair(t)
+// TestHandleRefreshComplete_ReqTenantIDIsNotASecurityControl replaces the old
+// TestHandleRefreshComplete_CrossTenantReturns403: req.TenantID is an
+// unauthenticated, caller-asserted field on a pre-authentication endpoint
+// (Issue #4350), so it must never gate the outcome — omitting it, or setting it
+// to any value at all, must not change what the handshake does. The only thing
+// that determines the outcome is proof-of-possession against the resolved
+// record's IdentityKeyPub.
+func TestHandleRefreshComplete_ReqTenantIDIsNotASecurityControl(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+
+	for _, reqTenantID := range []string{"", "test-tenant", "some-other-tenant", "tenant-b"} {
+		t.Run("tenant_id="+reqTenantID, func(t *testing.T) {
+			f := newRefreshFixture(t, nil)
+			f.addSteward(t, &business.StewardRecord{
+				ID:             "steward-a",
+				DeviceID:       testDeviceID,
+				TenantID:       "tenant-a",
+				Status:         business.StewardStatusArchived,
+				IdentityKeyPub: []byte(pub),
+			})
+
+			challenge := issueChallenge(t, f.server, testDeviceID, reqTenantID)
+			req := buildValidCompleteRequest(t, testDeviceID, reqTenantID, challenge, priv, nil)
+			rec := postComplete(f.server, testDeviceID, req)
+
+			require.Equal(t, http.StatusAccepted, rec.Code,
+				"a valid PoP signature must succeed regardless of req.TenantID: %s", rec.Body.String())
+		})
+	}
+}
+
+// TestHandleRefreshComplete_DeviceIDCollisionAcrossTenants covers the
+// [REQUIRED TEST] from Issue #4350: two stewards in different tenants share
+// one device_id (allowed by design — only same-tenant device_id is unique).
+// The pre-authentication refresh handshake uses the unscoped, deterministic
+// GetStewardByDeviceID lookup, which always resolves the collision to
+// "steward-a" (the lexicographically smallest ID). Every outcome below must be
+// attributed to tenant-a — never tenant-b — regardless of what req.TenantID
+// asserts, proving the collision cannot be used to act on the other tenant's
+// record and that req.TenantID has no effect on which record is acted upon.
+func TestHandleRefreshComplete_DeviceIDCollisionAcrossTenants(t *testing.T) {
+	pubA, privA := newTestEd25519KeyPair(t)
+	pubB, _ := newTestEd25519KeyPair(t)
+
 	f := newRefreshFixture(t, nil)
 	f.addSteward(t, &business.StewardRecord{
 		ID:             "steward-a",
 		DeviceID:       testDeviceID,
 		TenantID:       "tenant-a",
-		Status:         business.StewardStatusActive,
-		IdentityKeyPub: []byte(pub),
+		Status:         business.StewardStatusArchived,
+		IdentityKeyPub: []byte(pubA),
+	})
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-b",
+		DeviceID:       testDeviceID,
+		TenantID:       "tenant-b",
+		Status:         business.StewardStatusArchived,
+		IdentityKeyPub: []byte(pubB),
 	})
 
-	// Manually plant a nonce so we reach the cross-tenant gate.
-	f.plantNonce(t, testDeviceID)
+	for _, reqTenantID := range []string{"", "tenant-a", "tenant-b"} {
+		t.Run("req_tenant_id="+reqTenantID, func(t *testing.T) {
+			challenge := issueChallenge(t, f.server, testDeviceID, reqTenantID)
+			req := buildValidCompleteRequest(t, testDeviceID, reqTenantID, challenge, privA, nil)
+			rec := postComplete(f.server, testDeviceID, req)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		})
+	}
 
-	// Request from "tenant-b" for a steward that belongs to "tenant-a".
-	rec := postComplete(f.server, testDeviceID, RefreshCompleteRequest{
-		TenantID:  "tenant-b",
-		Nonce:     base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
-		IssuedAt:  time.Now().UnixNano(),
-		Signature: base64.RawURLEncoding.EncodeToString(make([]byte, 64)),
+	entries, err := f.pending.ListPendingRefresh(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	for _, e := range entries {
+		assert.Equal(t, "tenant-a", e.TenantID,
+			"every queued entry must belong to the deterministically-resolved, PoP-confirmed tenant-a record")
+		assert.Equal(t, testDeviceID, e.DeviceID)
+	}
+}
+
+// TestHandleRefreshComplete_DeviceIDCollision_WrongOwnerPoPFails is the other
+// half of the same [REQUIRED TEST]: the device that actually belongs to
+// tenant-b signs with its own private key. The collision still resolves the
+// lookup to tenant-a's record, so tenant-b's real signature cannot verify
+// against tenant-a's public key — the handshake fails outright rather than
+// silently acting on tenant-a's record on tenant-b's behalf.
+func TestHandleRefreshComplete_DeviceIDCollision_WrongOwnerPoPFails(t *testing.T) {
+	pubA, _ := newTestEd25519KeyPair(t)
+	_, privB := newTestEd25519KeyPair(t)
+
+	f := newRefreshFixture(t, nil)
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-a",
+		DeviceID:       testDeviceID,
+		TenantID:       "tenant-a",
+		Status:         business.StewardStatusArchived,
+		IdentityKeyPub: []byte(pubA),
 	})
-	// Must be 403, not 404, so the steward's existence is acknowledged but access denied.
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	f.addSteward(t, &business.StewardRecord{
+		ID:       "steward-b",
+		DeviceID: testDeviceID,
+		TenantID: "tenant-b",
+		Status:   business.StewardStatusArchived,
+	})
+
+	challenge := issueChallenge(t, f.server, testDeviceID, "")
+	req := buildValidCompleteRequest(t, testDeviceID, "", challenge, privB, nil)
+	rec := postComplete(f.server, testDeviceID, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"tenant-b's real device must not be able to complete a refresh via the collision")
+
+	entries, err := f.pending.ListPendingRefresh(context.Background(), "")
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a failed PoP verification must not queue or act on any record")
+}
+
+// TestHandleRefreshChallenge_RevokedSiblingDeviceIDCollision covers the
+// [REQUIRED TEST]: a revoked record is still rejected at the refresh gate when
+// a non-revoked sibling exists with the same device_id in a different tenant.
+// Deterministic resolution picks "steward-a" (revoked) over "steward-b"
+// (active), so the challenge must be denied before any nonce is issued —
+// revocation-before-PoP still holds even under a device_id collision.
+func TestHandleRefreshChallenge_RevokedSiblingDeviceIDCollision(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	f.addSteward(t, &business.StewardRecord{
+		ID:       "steward-a",
+		DeviceID: testDeviceID,
+		TenantID: "tenant-a",
+		Status:   business.StewardStatusRevoked,
+	})
+	f.addSteward(t, &business.StewardRecord{
+		ID:       "steward-b",
+		DeviceID: testDeviceID,
+		TenantID: "tenant-b",
+		Status:   business.StewardStatusActive,
+	})
+
+	body, err := json.Marshal(RefreshChallengeRequest{})
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+testDeviceID+"/refresh/challenge", bytes.NewReader(body))
+	r = mux.SetURLVars(r, map[string]string{"device_id": testDeviceID})
+	rec := httptest.NewRecorder()
+	f.server.handleRefreshChallenge(rec, r)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"deterministic ordering must resolve the collision to the revoked record and deny before any nonce is issued")
+
+	entry := f.findAuditAction(t, "refresh_challenge_rejected")
+	require.NotNil(t, entry)
+	assert.Equal(t, "revoked", entry.Details["reason"])
 }
 
 func TestHandleRefreshComplete_AuditEmittedOnAllOutcomes(t *testing.T) {
@@ -871,6 +998,61 @@ func TestHandleRefreshApprove_NotFound(t *testing.T) {
 	f.server.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandleApproveRefresh_DeviceIDCollisionAcrossTenants covers the
+// [REQUIRED TEST]: handleApproveRefresh with a colliding device_id resolves
+// only the steward belonging to entry.TenantID, not a same-device-id steward
+// in a different tenant. "steward-0-other-tenant" is named to sort BEFORE
+// "steward-a" so that the deterministic-by-ID unscoped lookup (used elsewhere
+// in the pre-authentication handshake) would pick the wrong tenant's record if
+// this handler had not been fixed to call the tenant-scoped
+// GetStewardByDeviceIDForTenant — this test fails under the pre-fix code path.
+func TestHandleApproveRefresh_DeviceIDCollisionAcrossTenants(t *testing.T) {
+	pubA, _ := newTestEd25519KeyPair(t)
+	pubOther, _ := newTestEd25519KeyPair(t)
+
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-a",
+		DeviceID:       testDeviceID,
+		TenantID:       testTenantID,
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pubA),
+	})
+	f.addSteward(t, &business.StewardRecord{
+		ID:             "steward-0-other-tenant",
+		DeviceID:       testDeviceID,
+		TenantID:       "other-tenant",
+		Status:         business.StewardStatusActive,
+		IdentityKeyPub: []byte(pubOther),
+	})
+
+	pendingID := "refresh-approve-collision"
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID, // resolved and authorized against this tenant
+		CSRPEM:    testValidCSRPEM,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
+	rec := httptest.NewRecorder()
+	f.server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "approve must succeed: %s", rec.Body.String())
+
+	entry := f.findAuditAction(t, "refresh_admin_approved")
+	require.NotNil(t, entry, "refresh_admin_approved audit event expected")
+	assert.Equal(t, testTenantID, entry.TenantID,
+		"the approved record must belong to entry.TenantID, never the colliding other-tenant record")
+
+	updated, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusApproved, updated.Status)
 }
 
 func TestHandleRefreshReject_Unauthenticated(t *testing.T) {

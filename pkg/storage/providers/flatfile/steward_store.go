@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -153,8 +154,12 @@ func (s *FlatFileStewardStore) GetSteward(_ context.Context, stewardID string) (
 }
 
 // GetStewardByDeviceID returns the record whose DeviceID matches the given
-// 64-character hex fingerprint. Scans all steward files via readAllStewards.
-// Returns ErrStewardNotFound when no matching record exists.
+// 64-character hex fingerprint, with NO tenant predicate. Scans all steward
+// files via readAllStewards. When more than one record shares deviceID (allowed
+// across tenants by design), the match with the lexicographically smallest ID
+// is returned — deterministic, not incidental file-listing order. Returns
+// ErrStewardNotFound when no matching record exists. See the interface doc
+// comment (business.StewardStore) for who may call this unscoped form.
 func (s *FlatFileStewardStore) GetStewardByDeviceID(_ context.Context, deviceID string) (*business.StewardRecord, error) {
 	if deviceID == "" {
 		return nil, fmt.Errorf("flatfile: device ID cannot be empty")
@@ -165,12 +170,47 @@ func (s *FlatFileStewardStore) GetStewardByDeviceID(_ context.Context, deviceID 
 	if err != nil {
 		return nil, err
 	}
+	var matches []*business.StewardRecord
 	for _, r := range all {
 		if r.DeviceID == deviceID {
-			return r, nil
+			matches = append(matches, r)
 		}
 	}
-	return nil, business.ErrStewardNotFound
+	return deterministicStewardMatch(matches)
+}
+
+// GetStewardByDeviceIDForTenant returns the record whose DeviceID matches the
+// given fingerprint AND whose TenantID matches tenantID. Returns
+// ErrStewardNotFound when no matching record exists in the given tenant, even
+// if deviceID matches a record belonging to a different tenant.
+func (s *FlatFileStewardStore) GetStewardByDeviceIDForTenant(_ context.Context, deviceID, tenantID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("flatfile: device ID cannot be empty")
+	}
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	all, err := s.readAllStewards()
+	if err != nil {
+		return nil, err
+	}
+	var matches []*business.StewardRecord
+	for _, r := range all {
+		if r.DeviceID == deviceID && r.TenantID == tenantID {
+			matches = append(matches, r)
+		}
+	}
+	return deterministicStewardMatch(matches)
+}
+
+// deterministicStewardMatch picks the match with the lexicographically
+// smallest ID so repeated lookups over the same data are deterministic,
+// instead of depending on incidental file-listing order.
+func deterministicStewardMatch(matches []*business.StewardRecord) (*business.StewardRecord, error) {
+	if len(matches) == 0 {
+		return nil, business.ErrStewardNotFound
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	return matches[0], nil
 }
 
 // ListStewards returns all steward records. Reads every file in the stewards directory.

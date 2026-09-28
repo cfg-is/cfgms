@@ -193,7 +193,13 @@ func (s *DatabaseStewardStore) GetSteward(ctx context.Context, stewardID string)
 	return scanStewardDBRow(row)
 }
 
-// GetStewardByDeviceID retrieves the record whose device_id matches the given fingerprint.
+// GetStewardByDeviceID retrieves the record whose device_id matches the given
+// fingerprint, with NO tenant predicate. Device identifiers are allowed to
+// collide across tenants by design, so when more than one row matches, the
+// row with the lexicographically smallest id is returned — ORDER BY id ASC
+// makes this deterministic instead of leaving the choice to whichever row the
+// planner visits first. See the interface doc comment (business.StewardStore)
+// for who may call this unscoped form.
 // Returns ErrStewardNotFound when no matching record exists.
 // Callers must inspect the returned record's Status and return ErrStewardRevoked if
 // Status == StewardStatusRevoked (revocation-before-PoP ordering invariant, ADR-010 §3).
@@ -205,7 +211,24 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
-		FROM steward_records WHERE device_id = $1 LIMIT 1`, deviceID)
+		FROM steward_records WHERE device_id = $1 ORDER BY id ASC LIMIT 1`, deviceID)
+	return scanStewardDBRow(row)
+}
+
+// GetStewardByDeviceIDForTenant retrieves the record whose device_id matches
+// the given fingerprint AND whose tenant_id matches tenantID. Returns
+// ErrStewardNotFound when no matching record exists in the given tenant, even
+// if deviceID matches a record belonging to a different tenant.
+func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context, deviceID, tenantID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("database: device ID cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
+		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY id ASC LIMIT 1`,
+		deviceID, tenantID)
 	return scanStewardDBRow(row)
 }
 
