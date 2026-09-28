@@ -131,8 +131,7 @@ func (p *SQLiteEntityGraphProvider) QueryEntities(ctx context.Context, filter in
 	}
 	if filter.TenantFilter != "" {
 		// Use filter+"/" to avoid matching sibling tenants that share a name prefix.
-		conds = append(conds, "(owning_tenant = ? OR owning_tenant LIKE ?)")
-		args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
+		conds = append(conds, tenantSubtreeCond("owning_tenant", filter.TenantFilter, &args))
 	}
 
 	where := ""

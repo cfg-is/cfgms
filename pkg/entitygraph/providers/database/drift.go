@@ -225,9 +225,7 @@ func (p *DatabaseEntityGraphProvider) ListDrifted(ctx context.Context, filter in
 				 FROM eg_drift_projection d
 				 JOIN eg_entity_index i ON i.subject = d.subject`
 		if filter.TenantFilter != "" {
-			conds = append(conds, fmt.Sprintf("(i.owning_tenant = $%d OR i.owning_tenant LIKE $%d)", n, n+1))
-			args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
-			n += 2
+			conds = append(conds, tenantSubtreeCond("i.owning_tenant", filter.TenantFilter, &n, &args))
 		}
 		if filter.Kind != "" {
 			conds = append(conds, fmt.Sprintf("i.entity_kind = $%d", n))

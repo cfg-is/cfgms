@@ -24,6 +24,19 @@ func escapeLIKE(s string) string {
 	return s
 }
 
+// tenantSubtreeCond returns the SQL predicate "(<col> = ? OR <col> LIKE ? ESCAPE
+// '\')" matching col against tenantPath exactly or any of its descendants, and
+// appends the two bound arguments (literal tenantPath, escaped descendant
+// pattern) to *args. tenantPath is escaped via escapeLIKE so a tenant path
+// containing a LIKE metacharacter ('%' or '_') matches only its own literal
+// subtree — never a sibling tenant that merely looks like a wildcard match
+// against the unescaped pattern. This is the sole builder for tenant subtree
+// predicates in this package; a new call site gets the escaping for free.
+func tenantSubtreeCond(col, tenantPath string, args *[]interface{}) string {
+	*args = append(*args, tenantPath, escapeLIKE(tenantPath)+"/%")
+	return fmt.Sprintf("(%s = ? OR %s LIKE ? ESCAPE '\\')", col, col)
+}
+
 // resolveGroupMembersCurrentState walks the same-as graph from eid using the
 // current edge projection (fast path for non-temporal reads). Returns all group
 // member EIDs including the subject itself. The group is traversed as an

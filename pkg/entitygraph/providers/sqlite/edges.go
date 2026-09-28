@@ -147,11 +147,9 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 	}
 	if filter.TenantFilter != "" {
 		conds = append(conds,
-			"(fi.owning_tenant = ? OR fi.owning_tenant LIKE ?)",
-			"(ti.owning_tenant = ? OR ti.owning_tenant LIKE ?)",
+			tenantSubtreeCond("fi.owning_tenant", filter.TenantFilter, &args),
+			tenantSubtreeCond("ti.owning_tenant", filter.TenantFilter, &args),
 		)
-		args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
-		args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
 	}
 
 	where := ""

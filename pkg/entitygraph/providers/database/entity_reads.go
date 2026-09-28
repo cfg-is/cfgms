@@ -220,9 +220,7 @@ func (p *DatabaseEntityGraphProvider) QueryEntities(ctx context.Context, filter 
 		n++
 	}
 	if filter.TenantFilter != "" {
-		conds = append(conds, fmt.Sprintf("(owning_tenant = $%d OR owning_tenant LIKE $%d)", n, n+1))
-		args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
-		n += 2
+		conds = append(conds, tenantSubtreeCond("owning_tenant", filter.TenantFilter, &n, &args))
 	}
 
 	query := "SELECT subject FROM eg_entity_index"
