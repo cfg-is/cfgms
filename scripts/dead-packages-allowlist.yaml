@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026 Jordan Ritz
+#
+# dead-packages-allowlist.yaml — packages intentionally unreachable from
+# every `main` package in the module (Issue #4317), read by
+# scripts/check-dead-packages.sh.
+#
+# This is not a place to silence the gate. Every entry needs a written
+# reason: either a genuine contract that intentionally has no implementation
+# yet, a package that is unreachable from `main` by design (a test suite
+# entry point, never imported), or a tracked baseline entry pending its own
+# removal-or-wiring-in follow-up story. It is not a home for abandoned code.
+#
+# Format: each entry is a list item with a `path` (import path relative to
+# the module root, i.e. without the `github.com/cfgis/cfgms/` prefix) and a
+# `reason`. check-dead-packages.sh parses only the `- path: <value>` line of
+# each entry with a line-oriented match — keep one entry's `path` on its own
+# list-item line, exactly as below.
+#
+# A package leaving this list because it was wired into a main package or
+# removed should have its entry deleted in the same change — a stale entry
+# (allowlisting a package the gate no longer finds unreachable) fails the
+# gate just like an unlisted unreachable package does.
+
+packages:
+  # --- Confirmed contracts with no implementation yet -----------------------
+  - path: pkg/storage/interfaces/secrets
+    reason: >
+      Confirmed contract with no implementation yet — no secrets storage
+      provider exists under pkg/storage/providers/ (CLAUDE.md Central
+      Provider System, pkg/storage).
+
+  - path: pkg/storage/interfaces/timeseries
+    reason: >
+      Confirmed contract with no implementation yet — no timeseries storage
+      provider exists under pkg/storage/providers/ (CLAUDE.md Central
+      Provider System, pkg/storage / pkg/logging timescale backing store).
+
+  - path: pkg/directory/interfaces
+    reason: >
+      Confirmed contract with no implementation yet. Reachable only through
+      features/controller/directory, which is reachable only through
+      features/controller — and neither of those is reachable from any
+      main package either (see the features/controller entry below). An
+      importer-walking check would follow that chain and wrongly conclude
+      this package is live; the dependency-closure-from-main computation in
+      check-dead-packages.sh does not make that mistake.
+
+  # --- Test suite entry points: never imported by design ---------------------
+  # These packages ARE the integration/E2E/unit test suites (Test File
+  # Taxonomy, CLAUDE.md). They are executed directly via `go test`, not
+  # imported by any main package or by any other package's tests — that is
+  # the correct, permanent state for a test-suite root, not drift.
+  - path: test/e2e
+    reason: test suite entry point (test/e2e), run via `go test`, never imported.
+  - path: test/e2e/fleet
+    reason: test suite entry point (test/e2e/fleet), run via `go test`, never imported.
+  - path: test/integration
+    reason: test suite entry point (test/integration), run via `go test`, never imported.
+  - path: test/integration/cluster
+    reason: test suite entry point (test/integration/cluster), run via `go test`, never imported.
+  - path: test/integration/controller
+    reason: test suite entry point (test/integration/controller), run via `go test`, never imported.
+  - path: test/integration/ha
+    reason: test suite entry point (test/integration/ha), run via `go test`, never imported.
+  - path: test/integration/logging
+    reason: test suite entry point (test/integration/logging), run via `go test`, never imported.
+  - path: test/integration/standalone
+    reason: test suite entry point (test/integration/standalone), run via `go test`, never imported.
+  - path: test/integration/testutil
+    reason: >
+      Support helpers for test/integration (test_helper.go), never imported
+      outside the test/integration tree itself.
+  - path: test/integration/transport
+    reason: test suite entry point (test/integration/transport), run via `go test`, never imported.
+  - path: test/unit
+    reason: test suite entry point (test/unit), run via `go test`, never imported.
+  - path: test/unit/build
+    reason: test suite entry point (test/unit/build), run via `go test`, never imported.
+  - path: test/unit/controller
+    reason: test suite entry point (test/unit/controller), run via `go test`, never imported.
+  - path: test/unit/steward
+    reason: test suite entry point (test/unit/steward), run via `go test`, never imported.
+
+  # --- Baseline (Issue #4317): tracked for removal or wiring-in -------------
+  # These are the packages check-dead-packages.sh found unreachable when the
+  # gate was introduced and that are neither a confirmed contract nor a test
+  # suite entry point. Removing or wiring in any of these is explicitly out
+  # of scope for Issue #4317 (see its "Out of Scope" section) and is
+  # follow-up work; this baseline exists only so the gate can go live without
+  # blocking on that follow-up landing first. NEW unreachable packages must
+  # not be added here — they must be wired in, removed, or justified on their
+  # own merits.
+  - path: api/proto
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: api/proto/steward
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/config/git/providers
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/controller
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/controller/cirunner
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/controller/directory
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/modules/extended/activedirectory
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/modules/extended/activedirectory/tests
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/modules/extended/network_activedirectory
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/rbac/jit
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/reports
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/saas
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/siem
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/steward/modules/runtime
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/auth
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/conditional_access
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_admin_unit
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_application
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_group
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/entra_user
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/gdap
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/gdap/types
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/graph
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/modules/m365/intune_policy
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/templates
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/transform
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: features/workflow/transform/builtin
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: internal/cli/commands
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: internal/controller
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/configrouting
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/directory/dna
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/directory/providers/network_activedirectory
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/directory/types
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/entitygraph/writers/correlator
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  - path: pkg/entitygraph/writers/tenantsync
+    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.

@@ -1301,6 +1301,9 @@ check-architecture:
 	@echo ""
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
+	@echo ""
+	@echo "📦 Checking every non-test package is reachable from a main package..."
+	@bash ./scripts/check-dead-packages.sh
 
 # License Header Verification
 # Ensures all source files have SPDX license headers
