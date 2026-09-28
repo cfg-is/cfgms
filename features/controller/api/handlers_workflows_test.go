@@ -46,11 +46,24 @@ func withTenantContext(r *http.Request, tenantID string) *http.Request {
 	return r.WithContext(ctx)
 }
 
+// allowAllPermFn is an always-allow permission gate for tests that exercise workflow
+// CRUD behavior without caring about RBAC. RegisterWorkflowRoutes fails closed on a
+// nil gate (Issue #4316), so tests that used to rely on that nil meaning "ungated"
+// wire this in explicitly instead.
+func allowAllPermFn(_, _ string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler { return next }
+}
+
 // newWorkflowRouter wires a WorkflowHandler onto a fresh mux.Router.
 func newWorkflowRouter(h *WorkflowHandler) *mux.Router {
+	if h.requirePermFn == nil {
+		h.SetRequirePermFn(allowAllPermFn)
+	}
 	router := mux.NewRouter()
 	sub := router.PathPrefix("/workflows").Subrouter()
-	h.RegisterWorkflowRoutes(sub)
+	if err := h.RegisterWorkflowRoutes(sub); err != nil {
+		panic("newWorkflowRouter: " + err.Error())
+	}
 	return router
 }
 
@@ -427,6 +440,27 @@ func TestWorkflowHandler_GetWorkflowExecutions_EmptyResult_Returns200(t *testing
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.EqualValues(t, 0, resp["count"])
+}
+
+// TestWorkflowHandler_GetWorkflowExecutions_CrossTenant_Returns403 proves the
+// tenant-isolation gate added by Issue #4316: a tenant that can guess another
+// tenant's workflow name must not be able to read its execution history. Mirrors
+// TestWorkflowHandler_GetExecution_CrossTenant_Returns403 on the sibling route.
+func TestWorkflowHandler_GetWorkflowExecutions_CrossTenant_Returns403(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// Create and execute the workflow in tenant A so at least one execution exists.
+	createAndExecuteWorkflow(t, router, engine, "xsec-list-wf", "tenant-a", false)
+
+	// Tenant B has no workflow named "xsec-list-wf" → listing its executions must
+	// deny, not silently return tenant A's execution history.
+	req := httptest.NewRequest("GET", "/workflows/xsec-list-wf/executions", nil)
+	req = withTenantContext(req, "tenant-b")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- trigger routes ----------------------------------------------------------
@@ -879,8 +913,62 @@ func newPermGatedWorkflowRouter(h *WorkflowHandler) *mux.Router {
 	h.SetRequirePermFn(testRequirePermFn)
 	router := mux.NewRouter()
 	sub := router.PathPrefix("/workflows").Subrouter()
-	h.RegisterWorkflowRoutes(sub)
+	if err := h.RegisterWorkflowRoutes(sub); err != nil {
+		panic("newPermGatedWorkflowRouter: " + err.Error())
+	}
 	return router
+}
+
+// TestWorkflowHandler_RegisterWorkflowRoutes_NilGate_ReturnsError covers the
+// fail-closed branch added in Issue #4316: a WorkflowHandler that never had
+// SetRequirePermFn called must make RegisterWorkflowRoutes return an error and
+// register no routes at all, instead of silently exposing every workflow route
+// ungated.
+func TestWorkflowHandler_RegisterWorkflowRoutes_NilGate_ReturnsError(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	require.Nil(t, h.requirePermFn, "precondition: no permission gate may be wired")
+
+	router := mux.NewRouter()
+	sub := router.PathPrefix("/workflows").Subrouter()
+
+	err := h.RegisterWorkflowRoutes(sub)
+	require.Error(t, err, "nil permission gate must fail closed")
+	assert.Contains(t, err.Error(), "workflow routes: no permission gate wired")
+	assert.Contains(t, err.Error(), "SetRequirePermFn")
+
+	assert.Empty(t, walkRoutes(t, sub),
+		"no workflow route may be registered when the permission gate is nil")
+
+	// Nothing is served: every workflow method/path the success branch would have
+	// registered 404s on the router the subrouter belongs to.
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/workflows"},
+		{"POST", "/workflows"},
+		{"GET", "/workflows/wf-1"},
+		{"PUT", "/workflows/wf-1"},
+		{"DELETE", "/workflows/wf-1"},
+		{"POST", "/workflows/wf-1/execute"},
+		{"GET", "/workflows/wf-1/executions"},
+		{"GET", "/workflows/wf-1/executions/exec-1"},
+		{"POST", "/workflows/wf-1/executions/exec-1/cancel"},
+	} {
+		req := withTenantContext(httptest.NewRequest(tc.method, tc.path, nil), "test-tenant")
+		req = withAdminPrincipal(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"%s %s must not be served when registration failed closed", tc.method, tc.path)
+	}
+
+	// Positive control on the same handler: wiring a gate makes registration
+	// succeed and register the full route set, proving the empty result above is
+	// the nil-gate branch and not an unrelated registration failure.
+	h.SetRequirePermFn(testRequirePermFn)
+	gated := mux.NewRouter()
+	gatedSub := gated.PathPrefix("/workflows").Subrouter()
+	require.NoError(t, h.RegisterWorkflowRoutes(gatedSub))
+	assert.Len(t, walkRoutes(t, gatedSub), 9,
+		"a wired gate must register every workflow route")
 }
 
 // TestWorkflowPermission_Execute_ForbiddenWithoutPermission verifies that

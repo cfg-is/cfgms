@@ -107,3 +107,46 @@ func TestAuthClaimsKeyCollision(t *testing.T) {
 	assert.False(t, ok, "struct-typed key must not match plain string key")
 	assert.Nil(t, got)
 }
+
+// TestTenantScope_ZeroValueIsUnset proves the zero value of TenantScope — what a
+// context produces when TenantScopeKey was never set — is the unset state, not
+// something that could be mistaken for root (Issue #4316).
+func TestTenantScope_ZeroValueIsUnset(t *testing.T) {
+	var s ctxkeys.TenantScope
+	assert.True(t, s.IsUnset())
+	assert.False(t, s.IsRoot())
+	assert.False(t, s.IsTenant())
+	assert.Empty(t, s.Path())
+}
+
+func TestTenantScope_NewRootScope(t *testing.T) {
+	s := ctxkeys.NewRootScope()
+	assert.False(t, s.IsUnset())
+	assert.True(t, s.IsRoot())
+	assert.False(t, s.IsTenant())
+	assert.Empty(t, s.Path())
+}
+
+func TestTenantScope_NewTenantScope(t *testing.T) {
+	s := ctxkeys.NewTenantScope("root/msp-a")
+	assert.False(t, s.IsUnset())
+	assert.False(t, s.IsRoot())
+	assert.True(t, s.IsTenant())
+	assert.Equal(t, "root/msp-a", s.Path())
+}
+
+func TestTenantScopeKeyRoundtrip(t *testing.T) {
+	scope := ctxkeys.NewTenantScope("root/msp-a")
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, scope)
+	got, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	assert.True(t, ok)
+	assert.True(t, got.IsTenant())
+	assert.Equal(t, "root/msp-a", got.Path())
+}
+
+func TestTenantScopeKeyMissingIsUnset(t *testing.T) {
+	ctx := context.Background()
+	got, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	assert.False(t, ok, "no value set — type assertion fails, zero value is unset")
+	assert.True(t, got.IsUnset())
+}

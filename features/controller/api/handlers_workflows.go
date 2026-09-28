@@ -66,13 +66,20 @@ func (h *WorkflowHandler) SetRequirePermFn(fn func(resourceType, action string) 
 
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.
 // Each route is wrapped with the permission gate set by SetRequirePermFn (Issue #2725).
-// When requirePermFn is nil (unit-test scenarios without RBAC wiring) routes are ungated.
-func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
+//
+// Fails closed (Issue #4316): a nil requirePermFn returns an error and registers no
+// routes at all, instead of the previous behavior of silently registering every
+// workflow route ungated. A misconfigured gate is a startup-time programming error —
+// SetWorkflowHandler always calls SetRequirePermFn before this method in production —
+// not a condition a live server should ever serve requests under. Callers that
+// deliberately want ungated routes for a unit test must wire an explicit
+// always-allow gate via SetRequirePermFn rather than relying on nil to mean that.
+func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) error {
 	gate := h.requirePermFn
+	if gate == nil {
+		return fmt.Errorf("workflow routes: no permission gate wired; call SetRequirePermFn before RegisterWorkflowRoutes")
+	}
 	wrap := func(action string, fn http.HandlerFunc) http.Handler {
-		if gate == nil {
-			return fn
-		}
 		return gate("workflow", action)(fn)
 	}
 	router.Handle("", wrap("list", h.handleListWorkflows)).Methods("GET")
@@ -84,6 +91,7 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
 	router.Handle("/{id}/executions", wrap("read", h.handleGetWorkflowExecutions)).Methods("GET")
 	router.Handle("/{id}/executions/{exec_id}", wrap("read", h.handleGetExecution)).Methods("GET")
 	router.Handle("/{id}/executions/{exec_id}/cancel", wrap("cancel", h.handleCancelExecution)).Methods("POST")
+	return nil
 }
 
 // NewRegistrationApprovalHook creates a RegistrationApprovalHook backed by this handler's
@@ -403,6 +411,22 @@ func (h *WorkflowHandler) handleGetWorkflowExecutions(w http.ResponseWriter, r *
 	}
 	if executions == nil {
 		executions = []*workflow.WorkflowExecution{}
+	}
+
+	// Tenant isolation (Issue #4316): the engine's execution list is not itself
+	// tenant-scoped, so a caller guessing another tenant's workflow name could
+	// otherwise read its execution history. Gate only when there is something to
+	// leak — a name with no matching executions (including one nobody has created
+	// yet) legitimately answers with an empty list without a store round trip,
+	// mirroring handleGetExecution/handleCancelExecution's check on this handler's
+	// sibling routes.
+	if len(executions) > 0 && h.configStore != nil {
+		store := h.workflowStoreForRequest(r)
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for workflow executions list", "name", nameForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
 	}
 
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{

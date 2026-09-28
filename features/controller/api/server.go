@@ -1451,7 +1451,13 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	}
 	h.SetRequirePermFn(s.requirePermission)
 	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
-	h.RegisterWorkflowRoutes(workflowRouter)
+	if err := h.RegisterWorkflowRoutes(workflowRouter); err != nil {
+		// SetRequirePermFn was just called above with a non-nil gate, so this is
+		// unreachable in a correctly wired server; RegisterWorkflowRoutes' fail-closed
+		// contract (Issue #4316) makes that guarantee worth asserting rather than
+		// leaving workflow routes silently unregistered if it ever regresses.
+		panic(fmt.Sprintf("SetWorkflowHandler: %v", err))
+	}
 	triggerRouter := s.apiRouter.PathPrefix("/triggers").Subrouter()
 	triggerRouter.Use(s.requirePermission("trigger", "manage"))
 	h.RegisterTriggerRoutes(triggerRouter)

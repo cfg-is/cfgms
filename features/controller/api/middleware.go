@@ -684,6 +684,21 @@ func (s *Server) emitBootstrapFallbackAudit(ctx context.Context, serial, commonN
 	)
 }
 
+// scopeForVerifiedAdminCert builds the ctxkeys.TenantScope for a principal that
+// authenticationMiddleware has just resolved from a verified mTLS admin certificate
+// (extractAdminPrincipal — cert.HasAdminMarker checked, revocation checked, disabled
+// accounts rejected). This is the one call site ctxkeys.NewRootScope's
+// restricted-caller architecture test allow-lists (Issue #4316): root scope is
+// granted only here, only after certificate verification, and only when the resolved
+// principal carries no tenant restriction. A tenant-bound admin cert instead gets a
+// tenant-scoped value — it never had unrestricted access.
+func scopeForVerifiedAdminCert(tenantID string) ctxkeys.TenantScope {
+	if tenantID == "" {
+		return ctxkeys.NewRootScope()
+	}
+	return ctxkeys.NewTenantScope(tenantID)
+}
+
 // isWithinTenantScope reports whether resourceTenant is within callerTenant's
 // authorized subtree. An empty callerTenant (mTLS admin with no tenant scope)
 // has unrestricted access and always returns true.
@@ -693,6 +708,48 @@ func isWithinTenantScope(callerTenant, resourceTenant string) bool {
 	}
 	return resourceTenant == callerTenant ||
 		strings.HasPrefix(resourceTenant, callerTenant+"/")
+}
+
+// isAuthorizedForTenant answers "may this caller act on resourceTenant" for the
+// explicit three-state ctxkeys.TenantScope (Issue #4316). It is the fail-closed
+// replacement for comparing an empty tenant string by hand: unlike
+// isWithinTenantScope(""), the unset state here is never treated as unrestricted.
+//
+// route identifies the HTTP route for the denial log (pass the route template or
+// r.URL.Path, never a resource ID) so a denial is traceable to the endpoint that
+// produced it.
+//
+//   - Unset scope (context never carried an explicit TenantScope, or a tenant scope
+//     was built with an empty path) always denies and logs the reason — this is
+//     exactly the plumbing-bug signature the type exists to catch: a lookup that
+//     read the wrong context key, or a context.Background() call that dropped the
+//     request's scope. Silently treating it as "no restriction" is the defect this
+//     story closes.
+//   - Root scope always allows.
+//   - Tenant scope defers to isWithinTenantScope, preserving its existing subtree
+//     semantics (including the trailing-separator guard) — see that function's tests.
+func (s *Server) isAuthorizedForTenant(scope ctxkeys.TenantScope, resourceTenant, route string) bool {
+	switch {
+	case scope.IsRoot():
+		return true
+	case scope.IsTenant() && scope.Path() != "":
+		if isWithinTenantScope(scope.Path(), resourceTenant) {
+			return true
+		}
+		s.logger.Warn("Tenant scope authorization denied",
+			"route", logging.SanitizeLogValue(route),
+			"reason", "resource_outside_caller_subtree",
+		)
+		return false
+	default:
+		// Covers both the unset zero value and a tenant scope with an empty path
+		// (see NewTenantScope's doc comment on why the latter is treated as unset).
+		s.logger.Warn("Tenant scope authorization denied",
+			"route", logging.SanitizeLogValue(route),
+			"reason", "unset_scope",
+		)
+		return false
+	}
 }
 
 // hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
@@ -735,6 +792,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
 			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
 			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
+			// Sole call site for ctxkeys.NewRootScope (via scopeForVerifiedAdminCert),
+			// enforced by ctxkeys' restricted-caller architecture test (Issue #4316).
+			ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(adminPrincipal.TenantID))
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
@@ -868,6 +928,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
 					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+					// Never root-scoped here: NewRootScope is reserved for a verified mTLS
+					// admin certificate (Issue #4316), which a Bearer session token is not,
+					// even when the bound account is unscoped (tenantID == "").
+					ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -995,6 +1059,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
 				ctx = context.WithValue(ctx, ctxkeys.TenantID, webSess.TenantID)
+				// Never root-scoped here: NewRootScope is reserved for a verified mTLS
+				// admin certificate (Issue #4316), which a cookie session is not, even
+				// when the bound account is unscoped (webSess.TenantID == "").
+				ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(webSess.TenantID))
 				// Issue #2493: mark this request as cookie-authenticated so csrfMiddleware
 				// can enforce the session-bound CSRF check on unsafe methods.
 				ctx = context.WithValue(ctx, cookieAuthContextKey, true)
@@ -1058,6 +1126,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, principalContextKey, principal)
 		ctx = context.WithValue(ctx, ctxkeys.UserIDKey, keyInfo.ID)
 		ctx = context.WithValue(ctx, ctxkeys.TenantID, keyInfo.TenantID)
+		// API-key principals are never root-scoped (Issue #4316): NewRootScope is
+		// reserved for a verified mTLS admin certificate.
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(keyInfo.TenantID))
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

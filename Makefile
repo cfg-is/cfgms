@@ -1293,6 +1293,12 @@ check-architecture:
 	@echo "📦 Checking raw Raft leader primitive usage outside pkg/ha..."
 	@go test ./pkg/ha/... -run TestNoRawLeaderPrimitiveOutsidePkgHA -count=1 -timeout 120s
 	@echo ""
+	@echo "📦 Checking ctxkeys.NewRootScope has no unauthorized callers..."
+	@go test ./pkg/ctxkeys/... -run TestNewRootScope_RestrictedCaller -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking wrapper-registered handlers consume caller tenant scope..."
+	@go test ./features/controller/api/... -run TestHandlersConsumeCallerScope -count=1 -timeout 120s
+	@echo ""
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
 
