@@ -1529,6 +1529,81 @@ func TestManager_RestoreTenant_CycleDetected(t *testing.T) {
 	assert.Contains(t, err.Error(), "cycle")
 }
 
+// TestManager_SuspendRestore_ConcurrentAncestorSuspendVsDescendantRestore is a
+// [REQUIRED TEST] for Issue #4347: SuspendTenant and RestoreTenant each walk
+// the subtree with sequential read-then-write store calls and, before this
+// fix, no lock and no optimistic concurrency. A concurrent SuspendTenant on an
+// ancestor and RestoreTenant on an already-independently-suspended descendant
+// could interleave so the descendant's stale RestoreTenant write (read before
+// the ancestor's cascade was recorded) overwrites the ancestor's cascade
+// write, leaving the descendant Active even though its ancestor is suspended.
+//
+// This exercises real concurrency (goroutines + WaitGroup against a shared
+// Manager and real SQLite+flatfile storage), not a sequential simulation, and
+// repeats across independent tenant trees to make the race likely to surface
+// if the two calls are not actually serialized.
+func TestManager_SuspendRestore_ConcurrentAncestorSuspendVsDescendantRestore(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	const iterations = 100
+	ancestorIDs := make([]string, iterations)
+	descendantIDs := make([]string, iterations)
+
+	for i := 0; i < iterations; i++ {
+		ancestorIDs[i] = fmt.Sprintf("race-ancestor-%d", i)
+		descendantIDs[i] = fmt.Sprintf("race-descendant-%d", i)
+
+		_, err := manager.CreateTenant(ctx, &TenantRequest{ID: ancestorIDs[i]})
+		require.NoError(t, err)
+		_, err = manager.CreateTenant(ctx, &TenantRequest{ID: descendantIDs[i], ParentID: ancestorIDs[i]})
+		require.NoError(t, err)
+
+		// The descendant starts independently suspended, so RestoreTenant has a
+		// real, in-flight write to make (clearing DirectlySuspended) concurrently
+		// with the ancestor's cascade write.
+		_, err = manager.SuspendTenant(ctx, descendantIDs[i])
+		require.NoError(t, err)
+	}
+
+	// All 2*iterations goroutines, across every independent tenant tree, are
+	// launched and released from one shared start gate together, rather than
+	// pair-by-pair, to maximize real OS-thread contention on the single-connection
+	// SQLite store and make any actual interleaving between the two operations'
+	// read-then-write calls likely to surface.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2 * iterations)
+	for i := 0; i < iterations; i++ {
+		ancestorID := ancestorIDs[i]
+		descendantID := descendantIDs[i]
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = manager.SuspendTenant(ctx, ancestorID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = manager.RestoreTenant(ctx, descendantID)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < iterations; i++ {
+		ancestor, err := manager.GetTenant(ctx, ancestorIDs[i])
+		require.NoError(t, err)
+		descendant, err := manager.GetTenant(ctx, descendantIDs[i])
+		require.NoError(t, err)
+
+		if ancestor.Status == business.TenantStatusSuspended {
+			assert.Equal(t, business.TenantStatusSuspended, descendant.Status,
+				"iteration %d: descendant must not be Active once the ancestor's suspension is recorded", i)
+		}
+	}
+}
+
 // TestManager_SuspendRestore_AuditEvents verifies that both operations emit audit
 // events when an audit manager is wired, and that no panic occurs when it is not.
 func TestManager_SuspendRestore_AuditEvents(t *testing.T) {
@@ -1827,4 +1902,77 @@ func TestEnforceRealmGuard_ValidRealm_AcceptedOnEveryDeploymentShape(t *testing.
 			require.NoError(t, EnforceRealmGuard(cfg), "realm=%q mode=%q", realm, mode)
 		}
 	}
+}
+
+// TestEnforceRealmGuard_ProductionEnvNormalization_TreatedAsProduction is a
+// [REQUIRED TEST] for Issue #4347: CFGMS_TELEMETRY_ENVIRONMENT must be
+// normalised (trimmed and case-folded) before comparison, so a value
+// differing from "production" only by surrounding whitespace or
+// capitalisation is still treated as production rather than silently
+// disabling the realm guard. Verified indirectly: an empty RealmID on a
+// cluster deployment must still be rejected for each variant.
+func TestEnforceRealmGuard_ProductionEnvNormalization_TreatedAsProduction(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{"surrounding whitespace", "  production  "},
+		{"different capitalisation", "PRODUCTION"},
+		{"whitespace and capitalisation", "\tProduction\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", tt.env)
+
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+				RealmID: "",
+			}
+			err := EnforceRealmGuard(cfg)
+			require.Error(t, err, "normalized production value %q must still require a realm", tt.env)
+			assert.Contains(t, err.Error(), "realm")
+
+			// The same normalized value must be accepted once a realm is configured —
+			// confirming the failure above is the realm-emptiness check, not the
+			// unrecognised-value guard misfiring on a formatting difference.
+			cfg.RealmID = "cell1"
+			require.NoError(t, EnforceRealmGuard(cfg), "env=%q", tt.env)
+		})
+	}
+}
+
+// TestEnforceRealmGuard_UnrecognisedEnvironment_ClusterMode_Errors is a
+// [REQUIRED TEST] for Issue #4347: an unrecognised CFGMS_TELEMETRY_ENVIRONMENT
+// value in cluster mode must be an error, not silently treated as
+// non-production (which would skip ADR-032 Decision 3's realm check on a
+// deployment that is, in fact, production but misconfigured).
+func TestEnforceRealmGuard_UnrecognisedEnvironment_ClusterMode_Errors(t *testing.T) {
+	for _, env := range []string{"prod", "PROD", "live", "productionn"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", env)
+
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+				RealmID: "cell1", // valid realm configured — must still fail closed
+			}
+			err := EnforceRealmGuard(cfg)
+			require.Error(t, err, "unrecognised env value %q must fail closed in cluster mode", env)
+			assert.Contains(t, err.Error(), "CFGMS_TELEMETRY_ENVIRONMENT")
+		})
+	}
+}
+
+// TestEnforceRealmGuard_UnrecognisedEnvironment_NonClusterMode_NeverGated
+// verifies the unrecognised-value guard is scoped to cluster mode, matching
+// TestEnforceRealmGuard_SelfHostedNeverGated's existing scope for the
+// emptiness check.
+func TestEnforceRealmGuard_UnrecognisedEnvironment_NonClusterMode_NeverGated(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "prod")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "single"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
 }
