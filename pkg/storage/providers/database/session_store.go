@@ -81,13 +81,16 @@ func setTenantLocal(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	return err
 }
 
-// setTenantMoveAuthorized sets the transaction-local flag steward_records' rls_update
-// WITH CHECK reads to permit a cross-tenant move (Issue #4321 acceptance follow-up).
-// Callers other than UpdateStewardTenant must never set this: it exists specifically
-// to narrow that one method's exception to itself, rather than leaving WITH CHECK
-// unconditionally TRUE for every tenant-scoped session.
-func setTenantMoveAuthorized(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, "SELECT set_config('app.tenant_move_authorized', 'true', true)")
+// setTenantMoveTarget sets the transaction-local app.tenant_move_target that
+// steward_records' rls_read and rls_update policies read to permit a cross-tenant
+// move to exactly targetTenantID (Issue #4321). rls_update's WITH CHECK accepts the
+// moved row only when its tenant_id equals this target, and rls_read must admit the
+// target too, because Postgres applies SELECT policies to the new row of an UPDATE
+// whose WHERE reads the table. Callers other than UpdateStewardTenant must never set
+// this: it exists to narrow that one method's exception to itself and to one
+// destination.
+func setTenantMoveTarget(ctx context.Context, tx *sql.Tx, targetTenantID string) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('app.tenant_move_target', $1, true)", targetTenantID)
 	return err
 }
 

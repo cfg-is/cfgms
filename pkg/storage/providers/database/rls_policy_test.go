@@ -126,13 +126,14 @@ func rlsWriteExecAsTenant(t *testing.T, dsn, tenant, query string, args ...inter
 	return conn.ExecContext(ctx, query, args...)
 }
 
-// rlsWriteExecAsTenantWithMoveAuthorized mirrors what UpdateStewardTenant
-// (steward_store.go) does before its own UPDATE: both GUCs set transaction-local
-// (is_local=true) inside an explicit transaction that also runs the UPDATE, on a
-// single pinned connection (see rlsWriteExecAsTenant's comment on why pinning
-// matters). Used to prove steward_records' rls_update WITH CHECK exception is
-// reachable only through the flag, not merely by being steward_records.
-func rlsWriteExecAsTenantWithMoveAuthorized(t *testing.T, dsn, tenant, query string, args ...interface{}) (sql.Result, error) {
+// rlsWriteExecAsTenantWithMoveTarget mirrors what UpdateStewardTenant
+// (steward_store.go) does before its own UPDATE: app.current_tenant and
+// app.tenant_move_target set transaction-local (is_local=true) inside an explicit
+// transaction that also runs the UPDATE, on a single pinned connection (see
+// rlsWriteExecAsTenant's comment on why pinning matters). Used to prove
+// steward_records' rls_update WITH CHECK exception is reachable only by naming the
+// destination tenant, not merely by being steward_records.
+func rlsWriteExecAsTenantWithMoveTarget(t *testing.T, dsn, tenant, target, query string, args ...interface{}) (sql.Result, error) {
 	t.Helper()
 	pool, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
@@ -149,7 +150,7 @@ func rlsWriteExecAsTenantWithMoveAuthorized(t *testing.T, dsn, tenant, query str
 
 	_, err = tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, true)`, tenant)
 	require.NoError(t, err)
-	_, err = tx.ExecContext(ctx, `SELECT set_config('app.tenant_move_authorized', 'true', true)`)
+	_, err = tx.ExecContext(ctx, `SELECT set_config('app.tenant_move_target', $1, true)`, target)
 	require.NoError(t, err)
 
 	res, err := tx.ExecContext(ctx, query, args...)
@@ -273,15 +274,18 @@ func TestRLSWritePolicy_StewardRecords(t *testing.T) {
 // impossible: USING and a plain tenant-scoped WITH CHECK read the same
 // current_setting('app.current_tenant') value within one statement, so no
 // tenant-scoped session could ever produce a row whose tenant_id differs from its
-// own. steward_records' rls_update therefore additionally accepts a row moving
-// tenant when the transaction-local app.tenant_move_authorized flag is 'true' --
-// USING still requires the targeted row belong to the caller's own tenant (pinned
-// above by UpdateCrossTenant_ZeroRows), and WITH CHECK requires that flag to accept
-// a different resulting tenant_id. This test exists so a future reader who removes
-// the flag check here -- reasonably, by analogy with the other three tables --
-// finds a failing test pointing back at UpdateStewardTenant instead of silently
-// breaking it. See TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused
-// for the companion case: the same move, without the flag, is refused.
+// own. steward_records' rls_update therefore additionally accepts a row moving to
+// exactly the tenant named by the transaction-local app.tenant_move_target -- USING
+// still requires the targeted row belong to the caller's own tenant (pinned above
+// by UpdateCrossTenant_ZeroRows), and WITH CHECK requires the resulting tenant_id to
+// equal that target. rls_read admits the target too: Postgres applies SELECT
+// policies to the NEW row of an UPDATE whose WHERE reads the table, so without it
+// this exact statement fails with "new row violates row-level security policy" --
+// which is how it failed in the merge queue when only WITH CHECK had the exception.
+// This test exists so a future reader who removes either clause -- reasonably, by
+// analogy with the other three tables -- finds a failing test pointing back at
+// UpdateStewardTenant instead of silently breaking it. See the UnauthorizedRefused
+// and NonTargetTenantRefused companions below.
 func TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed(t *testing.T) {
 	db := getTestDB(t)
 	defer func() { _ = db.Close() }()
@@ -293,7 +297,7 @@ func TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed(t *testing
 
 	dsn := provisionRLSWriteProbeRole(t, db, []string{"steward_records"})
 
-	res, err := rlsWriteExecAsTenantWithMoveAuthorized(t, dsn, rlsWriteTenantA,
+	res, err := rlsWriteExecAsTenantWithMoveTarget(t, dsn, rlsWriteTenantA, rlsWriteTenantB,
 		`UPDATE steward_records SET tenant_id = $1 WHERE id = $2 AND tenant_id = $3`,
 		rlsWriteTenantB, id, rlsWriteTenantA)
 	require.NoError(t, err, "steward_records must allow a tenant-scoped, CAS-guarded move like UpdateStewardTenant")
@@ -310,11 +314,11 @@ func TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed(t *testing
 // TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused is the companion
 // to the IntentionallyAllowed test above and the acceptance-review remedy for
 // PR #4361: the identical cross-tenant move, issued by a session that never sets
-// app.tenant_move_authorized -- i.e. any raw SQL client or compromised session that
-// is not going through UpdateStewardTenant -- must be refused by WITH CHECK. This is
+// app.tenant_move_target -- i.e. any raw SQL client or compromised session that is
+// not going through UpdateStewardTenant -- must be refused by WITH CHECK. This is
 // what closes the AC-5 gap the acceptance reviewer flagged: "an UPDATE that would
 // move a row to tenant B is refused" now holds for steward_records too, with the one
-// documented, narrowly-flagged exception pinned by the test above.
+// documented, narrowly-targeted exception pinned by the test above.
 func TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused(t *testing.T) {
 	db := getTestDB(t)
 	defer func() { _ = db.Close() }()
@@ -329,7 +333,33 @@ func TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused(t *testing.
 	_, err := rlsWriteExecAsTenant(t, dsn, rlsWriteTenantA,
 		`UPDATE steward_records SET tenant_id = $1 WHERE id = $2 AND tenant_id = $3`,
 		rlsWriteTenantB, id, rlsWriteTenantA)
-	require.Error(t, err, "moving a steward_records row to a different tenant without app.tenant_move_authorized must be refused by WITH CHECK")
+	require.Error(t, err, "moving a steward_records row to a different tenant without app.tenant_move_target must be refused by WITH CHECK")
+
+	var gotTenant string
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT tenant_id FROM steward_records WHERE id = $1`, id).Scan(&gotTenant))
+	require.Equal(t, rlsWriteTenantA, gotTenant, "the row must not have moved")
+}
+
+// TestRLSWritePolicy_StewardRecordsTenantMove_NonTargetTenantRefused pins that the
+// exception is scoped to the named destination, not to "any move while a target is
+// set": a session that names tenant B as its move target but writes the row to a
+// third tenant must be refused by WITH CHECK.
+func TestRLSWritePolicy_StewardRecordsTenantMove_NonTargetTenantRefused(t *testing.T) {
+	db := getTestDB(t)
+	defer func() { _ = db.Close() }()
+
+	require.NoError(t, NewDatabaseSchemas().CreateStewardRecordsTable(context.Background(), db))
+
+	id := "rls4321-steward-move-nontarget-" + rlsWriteTenantA
+	rlsSeedStewardRecord(t, db, id, rlsWriteTenantA)
+
+	dsn := provisionRLSWriteProbeRole(t, db, []string{"steward_records"})
+
+	_, err := rlsWriteExecAsTenantWithMoveTarget(t, dsn, rlsWriteTenantA, rlsWriteTenantB,
+		`UPDATE steward_records SET tenant_id = $1 WHERE id = $2 AND tenant_id = $3`,
+		"rls4321-tenant-c", id, rlsWriteTenantA)
+	require.Error(t, err, "a move to a tenant other than app.tenant_move_target must be refused by WITH CHECK")
 
 	var gotTenant string
 	require.NoError(t, db.QueryRowContext(context.Background(),

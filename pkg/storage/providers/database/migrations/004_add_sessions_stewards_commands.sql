@@ -8,8 +8,9 @@
 -- condition (matches no row), never a wildcard. INSERT and UPDATE/DELETE all carry a
 -- tenant predicate (Issue #4321); UPDATE additionally refuses to move a row to a
 -- different tenant via WITH CHECK, except on steward_records, where a transaction-local
--- authorization flag (app.tenant_move_authorized) narrows that exception to exactly one
--- caller, UpdateStewardTenant (see that table's policy comment below).
+-- move target (app.tenant_move_target) narrows that exception to exactly one caller,
+-- UpdateStewardTenant, and to exactly one destination tenant (see that table's policy
+-- comment below).
 --   INSERT WITH CHECK / UPDATE USING / DELETE USING: tenant_id = current_setting('app.current_tenant', true)
 --
 -- The Go store layer is responsible for calling set_config('app.current_tenant', $tenantID, true)
@@ -109,9 +110,16 @@ DROP POLICY IF EXISTS rls_update ON steward_records;
 DROP POLICY IF EXISTS rls_delete ON steward_records;
 
 -- SELECT: permissive when no tenant context (fleet management), filtered when context is set.
+-- The app.tenant_move_target clause exists for UpdateStewardTenant (Issue #4321): an UPDATE
+-- whose WHERE reads the row also applies SELECT policies to the NEW row, so a moved row
+-- (tenant_id = target) must be visible or Postgres rejects it with "new row violates
+-- row-level security policy". It admits exactly one extra tenant, the one the transaction
+-- named as its move target -- no wider than setting app.current_tenant to that tenant.
 CREATE POLICY rls_read ON steward_records FOR SELECT USING (
     current_setting('app.current_tenant', true) = ''
     OR tenant_id = current_setting('app.current_tenant', true)
+    OR (coalesce(current_setting('app.tenant_move_target', true), '') <> ''
+        AND tenant_id = current_setting('app.tenant_move_target', true))
 );
 
 -- INSERT: tenant must be set in the transaction before inserting.
@@ -121,20 +129,22 @@ CREATE POLICY rls_write ON steward_records FOR INSERT WITH CHECK (
 
 -- UPDATE (Issue #4321): the target row must belong to the caller's current tenant --
 -- an unset tenant matches nothing (fail closed), not every row. WITH CHECK allows a
--- row to keep its own tenant OR move to a different one when app.tenant_move_authorized
--- is set to 'true' in the same transaction. That flag is set by exactly one caller,
--- UpdateStewardTenant (steward_store.go) -- a real product feature that moves a
--- steward to a different tenant, gated at the Go/API layer (handlers_stewards.go's
--- handleMoveSteward requires a root caller or a scoped admin whose scope covers both
--- tenants). USING and a plain tenant-scoped WITH CHECK read the same
--- current_setting('app.current_tenant') value within one statement, so without this
--- flag a tenant-scoped WITH CHECK would make that move impossible for any caller; a
--- raw-SQL session that never sets the flag still cannot move a row cross-tenant.
+-- row to keep its own tenant, OR to move to exactly the tenant named by the
+-- transaction-local app.tenant_move_target -- not to any other tenant. That GUC is set
+-- by exactly one caller, UpdateStewardTenant (steward_store.go) -- a real product
+-- feature that moves a steward to a different tenant, gated at the Go/API layer
+-- (handlers_stewards.go's handleMoveSteward requires a root caller or a scoped admin
+-- whose scope covers both tenants). USING and a plain tenant-scoped WITH CHECK read the
+-- same current_setting('app.current_tenant') value within one statement, so without a
+-- named target a tenant-scoped WITH CHECK would make that move impossible for any
+-- caller; a raw-SQL session that never names a target still cannot move a row
+-- cross-tenant.
 CREATE POLICY rls_update ON steward_records FOR UPDATE
     USING (tenant_id = current_setting('app.current_tenant', true))
     WITH CHECK (
         tenant_id = current_setting('app.current_tenant', true)
-        OR coalesce(current_setting('app.tenant_move_authorized', true), '') = 'true'
+        OR (coalesce(current_setting('app.tenant_move_target', true), '') <> ''
+            AND tenant_id = current_setting('app.tenant_move_target', true))
     );
 CREATE POLICY rls_delete ON steward_records FOR DELETE
     USING (tenant_id = current_setting('app.current_tenant', true));
