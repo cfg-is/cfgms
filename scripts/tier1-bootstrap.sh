@@ -39,6 +39,41 @@
 #   controller by sealing its current cleartext /etc/cfgms/secrets.key and then
 #   removing it.
 #
+# Admin bundle at rest (Issue #4342):
+#   The same argument applies to the admin credential `--init` issues: once
+#   written to persistent storage, `shred` cannot dependably erase it either, so
+#   the fix is to never write it there — not to write-then-shred. The
+#   controller.cfg in force is made to point admin_bundle_path at this script's
+#   own tmpfs-backed directory, /run/cfgms-admin-bundle, and Step 4 FAILS THE
+#   RUN if it points anywhere else — including at a config an operator supplied
+#   with --config, and including a config written by an older version of this
+#   script that predates the key (the key is appended to it). The bundle is
+#   printed to this script's stdout exactly once (Step 9) — the operator's only
+#   copy — and a trap removes it on every exit path (success, a later step's
+#   failure, or a signal). Every other byte produced by the run — this script's
+#   own messages AND the stdout of every child it spawns — goes to stderr, so
+#   that `ssh ... 'sudo bash tier1-bootstrap.sh ...' > admin.bundle.yaml`
+#   captures nothing but the bundle. That is enforced structurally (fd 1 is
+#   pointed at stderr for the whole script and the caller's stdout kept on
+#   fd 3), not by remembering `>&2` at each call site. Re-running an
+#   already-initialized controller does not re-issue or re-print it: the
+#   issuance marker at /etc/cfgms/.admin-bundle-issued (now written by this
+#   script, not by --init) gates it, and steps 7-8 skip rather than use a stale
+#   credential. A controller provisioned by an earlier version of this script
+#   has the bundle sitting in cleartext at /etc/cfgms/admin.bundle.yaml
+#   indefinitely; the cleanup trap removes it on every run — including runs that
+#   fail after it was armed — so an existing deployment converges without a
+#   manual step.
+#
+#   This script never `rm -rf`s a directory it did not create. The bundle
+#   directory is validated to be its own dedicated path under /run before
+#   anything is removed from it, only the bundle file itself is deleted, and the
+#   directory is reclaimed with `rmdir`, which refuses to touch a non-empty
+#   directory. An earlier revision re-derived the directory from
+#   admin_bundle_path and `rm -rf`'d whatever that resolved to, which destroyed
+#   /etc/cfgms — sealed root key included — for a config pointing the bundle
+#   there.
+#
 # Test isolation:
 #   CFGMS_INSTALL_PREFIX=/tmp/test bash tier1-bootstrap.sh --hostname=test-host
 #   All write paths are prefixed. Binary must be pre-populated at
@@ -50,6 +85,25 @@
 # See: docs/operations/tier1-controller-bringup.md
 
 set -euo pipefail
+
+# stdout is reserved, for the whole run, for the admin bundle printed in Step 9
+# (Issue #4342). Reserving it per-statement does not hold: this script's own
+# `log`/`warn`/`die` honour it, but the CHILDREN it runs do not — `cfgms-controller
+# --init` prints its completion banner, `cfg tenant create` prints "tenant
+# created: <id>" three times, and tier1-smoke-test.sh prints "[PASS] ..." and a
+# result line, all on stdout. Those ~10 lines landed ahead of the bundle in
+# `ssh host 'sudo bash tier1-bootstrap.sh ...' > admin.bundle.yaml`, corrupting
+# the operator's ONLY copy of a live admin credential that this script will not
+# re-issue.
+#
+# So the reservation is made structural instead of per-call-site: the caller's
+# real stdout is saved on fd 3 and fd 1 is pointed at stderr for the rest of the
+# script. Anything this script or any process it spawns writes to fd 1 goes to
+# stderr, and the single `>&3` in Step 9 is the only path to the caller's stdout
+# — including for children added later, which cannot reintroduce the leak.
+# Command substitutions, pipelines and `> file` redirections establish their own
+# fd 1 and are unaffected.
+exec 3>&1 1>&2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_PREFIX="${CFGMS_INSTALL_PREFIX:-}"
@@ -108,9 +162,20 @@ CONTROLLER_BIN="${CFGMS_BIN_DIR}/cfgms-controller"
 CFG_BIN="${CFGMS_BIN_DIR}/cfg"
 CONTROLLER_CFG="${CFGMS_ETC_DIR}/controller.cfg"
 CONTROLLER_SERVICE="${CFGMS_SYSTEMD_DIR}/cfgms-controller.service"
-ADMIN_BUNDLE="${CFGMS_ETC_DIR}/admin.bundle.yaml"
+
+# Admin bundle: tmpfs only, never persistent storage. See "Admin bundle at
+# rest" above. This directory is dedicated to this script — it is the only
+# directory the script creates, writes the bundle into, and removes from, and
+# Step 4 refuses to run if the controller.cfg in force names any other location.
+ADMIN_BUNDLE_DIR="${INSTALL_PREFIX}/run/cfgms-admin-bundle"
+ADMIN_BUNDLE="${ADMIN_BUNDLE_DIR}/admin.bundle.yaml"
+
 INIT_MARKER="${CFGMS_ETC_DIR}/.admin-bundle-issued"
 BOOTSTRAP_RECORD="${CFGMS_ETC_DIR}/.bootstrap-record"
+
+# Legacy cleartext admin bundle path from before this script stopped leaving it
+# on persistent storage (Issue #4342). Opportunistically removed every run.
+LEGACY_ADMIN_BUNDLE="${CFGMS_ETC_DIR}/admin.bundle.yaml"
 
 # Legacy cleartext path. Read (to migrate it) and then removed. Never written.
 LEGACY_SECRETS_KEY_FILE="${CFGMS_ETC_DIR}/secrets.key"
@@ -120,7 +185,9 @@ LEGACY_SECRETS_KEY_FILE="${CFGMS_ETC_DIR}/secrets.key"
 SECRETS_KEY_CRED="${CFGMS_ETC_DIR}/secrets.key.cred"
 SECRETS_KEY_CRED_ID="cfgms-secrets-key"
 
-log() { echo "[bootstrap] $*"; }
+# All status output goes to stderr — stdout is reserved for the admin bundle
+# printed in Step 9, so `command > admin.bundle.yaml` captures only the bundle.
+log() { echo "[bootstrap] $*" >&2; }
 warn() { echo "[bootstrap] WARNING: $*" >&2; }
 die() { echo "[bootstrap] Error: $*" >&2; exit 1; }
 
@@ -393,10 +460,24 @@ log "Step 4: Config"
 
 if [[ -f "$CONTROLLER_CFG" ]]; then
     log "Config already exists at $CONTROLLER_CFG — skipping generation."
+    # A config written before this script stopped leaving the admin bundle on
+    # persistent storage (Issue #4342) has no admin_bundle_path at all, and the
+    # controller then falls back to its own default — /etc/cfgms/admin.bundle.yaml
+    # (features/controller/initialization/bundle_marker.go). Appending the key is
+    # what makes an already-provisioned host converge; without it `--init` writes
+    # the full admin cert and key to persistent storage and this run aborts with
+    # that file left behind. Same append the --config branch below does.
+    if ! grep -q '^admin_bundle_path:' "$CONTROLLER_CFG"; then
+        echo "admin_bundle_path: \"${ADMIN_BUNDLE}\"" >> "$CONTROLLER_CFG"
+        log "  Existing config predates admin_bundle_path — appended ${ADMIN_BUNDLE}."
+    fi
 else
     if [[ -n "$CONFIG_OVERRIDE" ]]; then
         cp "$CONFIG_OVERRIDE" "$CONTROLLER_CFG"
         log "Config installed from override: $CONFIG_OVERRIDE"
+        if ! grep -q '^admin_bundle_path:' "$CONTROLLER_CFG"; then
+            echo "admin_bundle_path: \"${ADMIN_BUNDLE}\"" >> "$CONTROLLER_CFG"
+        fi
     else
         cat > "$CONTROLLER_CFG" <<EOF
 # CFGMS Controller Configuration
@@ -411,6 +492,7 @@ listen_addr: "0.0.0.0:9080"
 metrics_listen_addr: "127.0.0.1:9090"
 external_url: "https://${HOSTNAME_FLAG}:9080"
 data_dir: "/var/lib/cfgms"
+admin_bundle_path: "${ADMIN_BUNDLE}"
 
 certificate:
   enable_cert_management: true
@@ -455,9 +537,79 @@ EOF
     fi
 fi
 
+# The config actually in force (generated, overridden, or pre-existing from an
+# earlier run) is the source of truth for where --init will write the admin
+# bundle, so read it back rather than trust the default above — and then hold it
+# to that default rather than following it wherever it points. The value is
+# operator-controlled: this script creates, writes to and deletes from the
+# directory it names, so anything other than its own dedicated tmpfs directory
+# fails the run. Accepting a value under /etc/cfgms or /var/lib/cfgms would mean
+# deleting the sealed root key, the CA, or the stored config.
+CONFIGURED_ADMIN_BUNDLE="$(sed -n 's/^admin_bundle_path:[[:space:]]*//p' "$CONTROLLER_CFG" | head -1)"
+CONFIGURED_ADMIN_BUNDLE="${CONFIGURED_ADMIN_BUNDLE%$'\r'}"
+CONFIGURED_ADMIN_BUNDLE="${CONFIGURED_ADMIN_BUNDLE#[\"\']}"
+CONFIGURED_ADMIN_BUNDLE="${CONFIGURED_ADMIN_BUNDLE%[\"\']}"
+
+if grep -q '^admin_bundle_path:' "$CONTROLLER_CFG" && [[ -z "$CONFIGURED_ADMIN_BUNDLE" ]]; then
+    die "admin_bundle_path in ${CONTROLLER_CFG} is present but empty or unparseable.
+  Set it to \"${ADMIN_BUNDLE}\" or remove the key and re-run."
+fi
+
+if [[ -n "$CONFIGURED_ADMIN_BUNDLE" && "$CONFIGURED_ADMIN_BUNDLE" != "$ADMIN_BUNDLE" ]]; then
+    die "admin_bundle_path in ${CONTROLLER_CFG} is ${CONFIGURED_ADMIN_BUNDLE}.
+  This script issues the admin bundle only into its own dedicated tmpfs
+  directory, ${ADMIN_BUNDLE_DIR}, which it creates and removes; it will not
+  create files in — or delete files from — a directory an operator chose,
+  because that directory may be /etc/cfgms or /var/lib/cfgms and hold the
+  sealed root key, the CA, or this very config.
+  Set admin_bundle_path to \"${ADMIN_BUNDLE}\", or drop the key and let this
+  script write it. To issue the bundle somewhere else, run
+  'cfgms-controller --init --config ...' yourself and take responsibility for
+  capturing and removing the credential
+  (docs/operations/tier1-controller-bringup.md §9, Step 5)."
+fi
+
+# The directory must be one this script owns outright. A symlink here would let
+# every removal below land somewhere else entirely.
+if [[ -L "$ADMIN_BUNDLE_DIR" ]]; then
+    die "${ADMIN_BUNDLE_DIR} is a symlink — refusing to issue the admin bundle through it."
+fi
+
+# ── Credential cleanup trap ───────────────────────────────────────────────────
+#
+# Armed here, before anything is issued, and stays armed for the REST of the
+# script so every cleartext credential this run can produce is removed on every
+# exit path it can take: success, any later step's failure, or a signal. It runs
+# on a run that skips issuance entirely too — that is what converges a host
+# provisioned by an older version of this script, whose bundle is still sitting
+# at ${LEGACY_ADMIN_BUNDLE}.
+#
+# Nothing here is `rm -rf` against an operator-controlled path: the bundle and
+# the legacy bundle are single files, INIT_CRED_DIR is a path this script
+# itself created, and the bundle directory is reclaimed with rmdir, which fails
+# rather than delete a directory that unexpectedly has something else in it.
+INIT_CRED_DIR=""
+cleanup_credential_material() {
+    if [[ -e "$LEGACY_ADMIN_BUNDLE" ]]; then
+        rm -f "$LEGACY_ADMIN_BUNDLE"
+        log "Removed legacy cleartext admin bundle at ${LEGACY_ADMIN_BUNDLE}."
+    fi
+    if [[ -n "$INIT_CRED_DIR" && -d "$INIT_CRED_DIR" ]]; then
+        rm -rf "$INIT_CRED_DIR"
+    fi
+    rm -f "$ADMIN_BUNDLE"
+    if [[ -d "$ADMIN_BUNDLE_DIR" ]] && ! rmdir "$ADMIN_BUNDLE_DIR" 2>/dev/null; then
+        warn "left ${ADMIN_BUNDLE_DIR} in place: it is not empty. Inspect it — the admin"
+        warn "  bundle itself was removed, but something else is in that directory."
+    fi
+}
+trap cleanup_credential_material EXIT INT TERM
+
 # ── Step 5: Init ──────────────────────────────────────────────────────────────
 
 log "Step 5: Controller init"
+
+FRESH_BUNDLE_ISSUED=false
 
 if [[ -f "$INIT_MARKER" ]]; then
     log "Init marker found at $INIT_MARKER — controller already initialized, skipping."
@@ -466,7 +618,9 @@ else
     # directory. The sealed key is unsealed into a short-lived directory on
     # tmpfs — asserted to be tmpfs, never assumed, because /tmp is a directory
     # on the root filesystem on Debian and Ubuntu and `shred` cannot reliably
-    # undo a write there (ADR-030).
+    # undo a write there (ADR-030). The admin bundle --init issues lands in a
+    # second tmpfs-backed directory for the identical reason — see "Admin
+    # bundle at rest" above.
     if [[ -z "$INSTALL_PREFIX" ]]; then
         RUNTIME_FSTYPE="$(findmnt -no FSTYPE --target /run 2>/dev/null || true)"
         if [[ "$RUNTIME_FSTYPE" != "tmpfs" ]]; then
@@ -478,23 +632,67 @@ else
         mkdir -p "$INIT_CRED_DIR"
     fi
     chmod 0700 "$INIT_CRED_DIR"
-    cleanup_init_creds() { rm -rf "$INIT_CRED_DIR"; }
-    trap cleanup_init_creds EXIT INT TERM
+
+    # Both directories are tmpfs-only, start to finish. The directory is created
+    # if absent and only the bundle FILE is removed — a stale one from a run
+    # that died between issuance and cleanup. Step 4 already proved this is the
+    # script's own dedicated directory and armed the trap that removes the
+    # bundle again on exit.
+    mkdir -p "$ADMIN_BUNDLE_DIR"
+    chmod 0700 "$ADMIN_BUNDLE_DIR"
+    rm -f "$ADMIN_BUNDLE"
 
     unseal_secrets_key "${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}"
 
     if [[ -z "$INSTALL_PREFIX" ]]; then
         chown -R cfgms:cfgms "$INIT_CRED_DIR"
+        chown cfgms:cfgms "$ADMIN_BUNDLE_DIR"
+        # `--init` prints a completion banner (CA fingerprint, storage provider)
+        # on stdout. It is operator information, not bundle content, so it is
+        # sent to stderr explicitly here as well as by the fd swap at the top of
+        # the script — the invariant is stated at the call site that would
+        # otherwise violate it.
         runuser --user cfgms -- env "CFGMS_SECRETS_KEY_FILE=${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}" \
-            "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG"
+            "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG" >&2
     else
         CFGMS_SECRETS_KEY_FILE="${INIT_CRED_DIR}/${SECRETS_KEY_CRED_ID}" \
-            "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG"
+            "$CONTROLLER_BIN" --init --config "$CONTROLLER_CFG" >&2
     fi
 
-    cleanup_init_creds
-    trap - EXIT INT TERM
+    # The unsealed root key is consumed the moment --init returns; remove it
+    # now instead of waiting for script exit. The Step 4 trap stays armed — the
+    # admin bundle it also covers is still needed by steps 7 and 8.
+    rm -rf "$INIT_CRED_DIR"
+
+    if [[ ! -f "$ADMIN_BUNDLE" ]]; then
+        die "controller --init did not produce an admin bundle at $ADMIN_BUNDLE."
+    fi
+
+    # Script-owned issuance marker (Issue #4342): --init no longer writes the
+    # bundle anywhere this script would find a co-located marker (the bundle
+    # lives on tmpfs now), so this script records issuance itself. Its
+    # presence is what step 5 checks above, and what steps 7-9 use to tell a
+    # fresh issuance from a re-run.
+    {
+        echo "# Written by tier1-bootstrap.sh — do not edit."
+        echo "issued_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$INIT_MARKER"
+    chmod 0640 "$INIT_MARKER"
+
+    FRESH_BUNDLE_ISSUED=true
+    log "Controller initialized; admin bundle issued (kept on tmpfs only, never persistent storage)."
 fi
+
+# Opportunistic migration (Issue #4342) — a controller provisioned by an earlier
+# version of this script has the admin bundle sitting in cleartext at
+# ${LEGACY_ADMIN_BUNDLE} indefinitely — is handled by cleanup_credential_material
+# (Step 4), not here: doing it inline removed the legacy copy only on runs that
+# reached this line, leaving it on disk exactly when a step in between failed.
+# Plain rm, not shred: shred cannot dependably erase overwritten data on
+# ext4/XFS/btrfs or thin-provisioned disks either (see "Admin bundle at rest"
+# above) — the fix is to stop creating the durable copy, not to try harder to
+# erase it after the fact. The legacy path can never be this run's own bundle:
+# Step 4 fails the run unless admin_bundle_path is the tmpfs path.
 
 # ── Step 6: Systemd ───────────────────────────────────────────────────────────
 
@@ -583,6 +781,11 @@ fi
 
 if [[ "$SKIP_TENANT_SEED" == "true" ]]; then
     log "Step 7: Tenant seeding skipped (--skip-tenant-seed)."
+elif [[ "$FRESH_BUNDLE_ISSUED" != "true" ]]; then
+    log "Step 7: Tenant seeding skipped — controller was already initialized and no admin"
+    log "  credential is available this run (Issue #4342: it is never kept past issuance)."
+    log "  Tenants were seeded during the initial bootstrap; use your own retained"
+    log "  credential with 'cfg tenant create' if you need to seed additional ones."
 else
     log "Step 7: Tenant seed"
 
@@ -611,12 +814,16 @@ else
         if [[ -n "$parent_flag" ]]; then
             args+=("--parent=${parent_flag}")
         fi
+        # `cfg tenant create` prints "tenant created: <id>" on stdout; this
+        # script reports the outcome itself via log(), so the child's stdout is
+        # sent to stderr. `>&2` precedes `2>/dev/null` so fd 1 is duplicated
+        # from the still-live stderr before fd 2 is discarded.
         if [[ -n "$INSTALL_PREFIX" ]]; then
-            CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" 2>/dev/null \
+            CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" >&2 2>/dev/null \
                 && log "  Tenant ${tenant_id}: created." \
                 || log "  Tenant ${tenant_id}: already exists (idempotent)."
         else
-            CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" \
+            CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" >&2 \
                 && log "  Tenant ${tenant_id}: created." \
                 || log "  Tenant ${tenant_id}: already exists (idempotent)."
         fi
@@ -633,6 +840,10 @@ fi
 
 if [[ "$SKIP_SMOKE" == "true" ]]; then
     log "Step 8: Smoke test skipped (--skip-smoke)."
+elif [[ "$FRESH_BUNDLE_ISSUED" != "true" ]]; then
+    log "Step 8: Smoke test skipped — controller was already initialized and no admin"
+    log "  credential is available this run (Issue #4342: it is never kept past issuance)."
+    log "  Run tier1-smoke-test.sh manually with your own retained credential if needed."
 else
     log "Step 8: Smoke test"
 
@@ -646,31 +857,66 @@ else
     if [[ -n "$INSTALL_PREFIX" ]]; then
         log "Test isolation: smoke test skipped (no live controller in test mode)."
     else
-        CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" bash "$SMOKE_SCRIPT"
+        # The smoke test prints "[PASS] ..." lines and a result summary on
+        # stdout; they are not bundle content (and are not valid YAML), so they
+        # go to stderr. A non-zero exit still propagates under `set -e`.
+        CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" bash "$SMOKE_SCRIPT" >&2
     fi
 fi
 
 # ── Step 9: Final output ──────────────────────────────────────────────────────
+#
+# The admin bundle is never written to persistent storage (Step 5). It is
+# printed to the caller's stdout below, and ONLY there — every other message
+# produced by this run, this section's own banner and the output of every child
+# process (`controller --init`, `cfg tenant create`, tier1-smoke-test.sh)
+# included, goes to stderr, because fd 1 was pointed at stderr for the whole
+# script at the top and the caller's stdout kept on fd 3. So
+# `ssh ... 'sudo bash tier1-bootstrap.sh ...' > admin.bundle.yaml` captures
+# exactly the bundle and nothing else.
 
 DISPLAY_HOST="$(hostname -f 2>/dev/null || echo "${HOSTNAME_FLAG}")"
+EXTERNAL_URL="https://${HOSTNAME_FLAG}:9080"
 
-echo ""
-echo "=========================================="
-echo " Tier 1 Controller Bootstrap Complete"
-echo "=========================================="
-echo ""
-echo "Admin bundle:  ${ADMIN_BUNDLE}"
-echo ""
-echo "To copy the admin bundle to your workstation:"
-echo "  scp ${DISPLAY_HOST}:${ADMIN_BUNDLE} /tmp/admin.bundle.yaml"
-echo ""
-echo "Then store it in your OS keychain:"
-echo "  Linux:  secret-tool store --label='CFGMS Admin Bundle' service cfgms bundle admin < /tmp/admin.bundle.yaml"
-echo "  macOS:  security add-generic-password -s cfgms -a admin -w \"\$(cat /tmp/admin.bundle.yaml)\""
-echo "  Then:   rm /tmp/admin.bundle.yaml"
-echo ""
-echo "Load the bundle in future sessions:"
-echo "  source scripts/cfgms-bundle-load"
-echo ""
-echo "See docs/operations/tier1-controller-bringup.md for the full runbook."
-echo ""
+{
+    echo ""
+    echo "=========================================="
+    echo " Tier 1 Controller Bootstrap Complete"
+    echo "=========================================="
+    echo ""
+
+    if [[ "$FRESH_BUNDLE_ISSUED" == "true" ]]; then
+        echo "Admin bundle: issued for this run and printed to stdout, below — that is"
+        echo "the only copy. It is never written to disk on ${DISPLAY_HOST}."
+        echo ""
+        echo "On your workstation:"
+        echo "  1. Capture the bundle printed on stdout to a file, e.g. admin.bundle.yaml."
+        echo "     If you ran this over ssh, redirect stdout directly so nothing but the"
+        echo "     bundle lands in the file:"
+        echo "       ssh ${DISPLAY_HOST} 'sudo bash tier1-bootstrap.sh --hostname=${HOSTNAME_FLAG} ...' > admin.bundle.yaml"
+        echo "  2. cfg connect --bundle admin.bundle.yaml --url ${EXTERNAL_URL}"
+        echo "     Stores a session token in your OS keychain and the credential itself"
+        echo "     SOPS-encrypted under your user config directory — cfg's normal"
+        echo "     stateless invoke-and-exit model, not a new mechanism."
+        echo "  3. rm admin.bundle.yaml — cfg connect no longer needs the plaintext copy."
+        echo "  4. Reconnect in future sessions with: cfg connect ${HOSTNAME_FLAG}"
+        echo ""
+        echo "If you did not capture the bundle above, do not re-run this script — it"
+        echo "will find the issuance marker at ${INIT_MARKER} and skip re-issuing."
+        echo "Regenerate instead: cfgms-controller bootstrap-admin --regenerate"
+        echo "(then revoke the old serial: cfgms-controller bootstrap-admin --revoke <serial>)."
+    else
+        echo "Admin bundle: already issued in an earlier run (marker: ${INIT_MARKER})."
+        echo "This run did not re-issue or re-expose it."
+    fi
+
+    echo ""
+    echo "See docs/operations/tier1-controller-bringup.md for the full runbook."
+    echo ""
+} >&2
+
+if [[ "$FRESH_BUNDLE_ISSUED" == "true" ]]; then
+    # fd 3 is the caller's real stdout, saved before fd 1 was pointed at stderr
+    # at the top of the script. This is the only write to it in the entire run.
+    cat "$ADMIN_BUNDLE" >&3
+fi
