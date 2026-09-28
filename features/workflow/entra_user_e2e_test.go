@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
+
+//go:build !windows
+
 package workflow
 
 import (
@@ -22,6 +25,18 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 )
 
+// Windows-excluded (build tag above): entra_user/cmd/main.go, like every other
+// out-of-process module binary in this repo (all ten STDLIB_MODULES plus both
+// echo_module test fixtures), listens with net.Listen("unix", socketPath) —
+// this package's own ModuleRuntime already special-cases Windows to a named
+// pipe address instead (runtime/socket_windows.go), so a unix-socket module
+// binary cannot serve it there. This is a pre-existing, repo-wide gap in the
+// module out-of-process transport, not something introduced or fixable here;
+// features/workflow/runtime/runtime_test.go (the same fork/exec-over-unix-socket
+// shape, one directory over) carries the identical `!windows` exclusion for the
+// same reason. Fixing it for all eleven binaries at once is a separate,
+// cross-cutting change, not part of Issue #4325's one-module scope.
+//
 // [REQUIRED TEST] Issue #4325: with the m365-entra-user bundle published and
 // approved, WorkflowModuleFactory.CreateModuleInstance resolves it, fork/execs
 // it, and a workflow step reaches the module over gRPC. This test builds the
