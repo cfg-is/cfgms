@@ -1125,6 +1125,73 @@ test_check_no_python_in_core() {
     rm -f "$out_file"
 }
 
+# Fixture suite for scripts/check-dead-packages.sh — the package-reachability
+# gate (Issue #4317). Delegates to scripts/check-dead-packages_test.sh, which
+# builds throwaway Go modules (each with its own go.mod, so `go list` resolves
+# offline) and asserts the reachability-closure algorithm: a reachable child of
+# an unreachable parent is not flagged, every link of an importer chain that no
+# main package reaches IS flagged, allowlisted packages pass, a missing entry
+# fails naming only that package, a stale entry fails, test-only-reachable
+# packages need no entry, and the gate fails closed (exit 2) outside a module
+# root. These assertions are the only thing validating that algorithm, so they
+# must run under `make test`, not only under `make check-architecture` — which
+# runs the gate but nothing that proves the gate is correct, and which no CI
+# workflow invokes at all (`unit-tests-scripts` is this gate's only automated
+# runner). Same shape as test_check_no_python_in_core above.
+#
+# Also runs the gate against the real repo (2s, four `go list` passes), so a
+# package that stops being reachable from any main package — or an allowlist
+# entry that goes stale — fails `make test` rather than merging green.
+test_check_dead_packages() {
+    log_test "Testing check-dead-packages.sh..."
+
+    local gate_script="scripts/check-dead-packages.sh"
+    local test_script="scripts/check-dead-packages_test.sh"
+
+    if [[ ! -f "$gate_script" ]]; then
+        log_fail "check-dead-packages.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$gate_script" ]]; then
+        log_fail "check-dead-packages.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    if [[ ! -f "$test_script" ]]; then
+        log_fail "check-dead-packages_test.sh: Not found"
+        return
+    fi
+
+    if [[ ! -x "$test_script" ]]; then
+        log_fail "check-dead-packages_test.sh: Not executable (chmod +x needed)"
+        return
+    fi
+
+    local out_file rc=0
+    out_file=$(mktemp)
+    bash "$test_script" >"$out_file" 2>&1 || rc=$?
+
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-dead-packages_test.sh: All fixture tests passed"
+    else
+        log_fail "check-dead-packages_test.sh: Fixture tests failed (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+
+    rc=0
+    out_file=$(mktemp)
+    bash "$gate_script" >"$out_file" 2>&1 || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        log_pass "check-dead-packages.sh: Real repo has no unallowlisted unreachable package"
+    else
+        log_fail "check-dead-packages.sh: Real repo failed the gate (exit $rc)"
+        sed 's/^/    /' "$out_file" >&2
+    fi
+    rm -f "$out_file"
+}
+
 # Regression guard for the `unit-tests` aggregator's no-Python gate (Issue
 # #4303). Extracts the "Aggregate group results" step's actual `run:` block
 # from .github/workflows/test-suite.yml -- rather than reimplementing the
@@ -5385,6 +5452,7 @@ DISPATCH_TABLE=(
     "test_check_binary_artifacts:core"
     "test_check_docs_boundary:core"
     "test_check_no_python_in_core:core"
+    "test_check_dead_packages:core"
     "test_unit_tests_aggregator_no_python_gate:core"
     "test_detect_tooling_changed:core"
     "test_classify_tooling_changed:devinfra"
