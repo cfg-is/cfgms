@@ -102,41 +102,61 @@ func provisionRLSWriteProbeRole(t *testing.T, db *sql.DB, tables []string) strin
 // and executes query. A fresh connection per call matters here exactly as it does in
 // rlsCountStewards (rls_unscoped_read_test.go): once a connection has set the GUC,
 // current_setting() behaves differently for the rest of that connection's life.
+//
+// It pins a single physical backend via pool.Conn rather than relying on
+// SetMaxOpenConns(1): that cap keeps the pool from ever holding two connections at
+// once, but does not stop database/sql from transparently discarding and replacing
+// a connection it judges bad and opening a fresh one for the next call -- which
+// would silently reset this session-scoped GUC. Conn pins the exact backend for its
+// whole lifetime, which set_config's session scope requires.
 func rlsWriteExecAsTenant(t *testing.T, dsn, tenant, query string, args ...interface{}) (sql.Result, error) {
 	t.Helper()
-	conn, err := sql.Open("postgres", dsn)
+	pool, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	conn.SetMaxOpenConns(1)
-	require.NoError(t, conn.Ping())
+	defer func() { _ = pool.Close() }()
 
 	ctx := context.Background()
+	conn, err := pool.Conn(ctx)
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
 	_, err = conn.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, false)`, tenant)
 	require.NoError(t, err)
 
 	return conn.ExecContext(ctx, query, args...)
 }
 
-// rlsWriteExecAsTenantWithMoveAuthorized is rlsWriteExecAsTenant plus setting
-// app.tenant_move_authorized = 'true' on the same connection/transaction-local scope,
-// mirroring what UpdateStewardTenant (steward_store.go) does before its own UPDATE.
-// Used to prove steward_records' rls_update WITH CHECK exception is reachable only
-// through that flag, not merely by being steward_records.
+// rlsWriteExecAsTenantWithMoveAuthorized mirrors what UpdateStewardTenant
+// (steward_store.go) does before its own UPDATE: both GUCs set transaction-local
+// (is_local=true) inside an explicit transaction that also runs the UPDATE, on a
+// single pinned connection (see rlsWriteExecAsTenant's comment on why pinning
+// matters). Used to prove steward_records' rls_update WITH CHECK exception is
+// reachable only through the flag, not merely by being steward_records.
 func rlsWriteExecAsTenantWithMoveAuthorized(t *testing.T, dsn, tenant, query string, args ...interface{}) (sql.Result, error) {
 	t.Helper()
-	conn, err := sql.Open("postgres", dsn)
+	pool, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	conn.SetMaxOpenConns(1)
-	require.NoError(t, conn.Ping())
+	defer func() { _ = pool.Close() }()
 
 	ctx := context.Background()
-	_, err = conn.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, false)`, tenant)
+	conn, err := pool.Conn(ctx)
 	require.NoError(t, err)
-	_, err = conn.ExecContext(ctx, `SELECT set_config('app.tenant_move_authorized', 'true', false)`)
+	defer func() { _ = conn.Close() }()
+
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, true)`, tenant)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, `SELECT set_config('app.tenant_move_authorized', 'true', true)`)
 	require.NoError(t, err)
 
-	return conn.ExecContext(ctx, query, args...)
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return res, err
+	}
+	return res, tx.Commit()
 }
 
 // ── sessions ─────────────────────────────────────────────────────────────────
@@ -429,9 +449,9 @@ func TestRLSWritePolicy_SessionTokenStore(t *testing.T) {
 // ── rbac_roles (migration 003) ───────────────────────────────────────────────
 
 // TestRLSAdminOverride_RBACRoles pins the migration-003 fix: FORCE ROW LEVEL
-// SECURITY on rbac_roles, and the REVOKE that constrains admin_override_policy
-// from an open bypass (any role that knows to set app.is_admin) to one only a
-// role explicitly granted SET on that parameter can trigger.
+// SECURITY on rbac_roles, and the role-membership check that constrains
+// admin_override_policy from an open bypass to one only a role explicitly granted
+// membership in cfgms_rls_admin_override can trigger.
 //
 // schemas.go does not provision RLS for rbac_roles -- RBAC durable storage does
 // not route through RLS on the live provisioning path today, and adding that is
@@ -439,6 +459,23 @@ func TestRLSWritePolicy_SessionTokenStore(t *testing.T) {
 // security to tables that do not have it today"). This test applies the same
 // DDL migrations/003_enable_rls.sql declares directly, so it exercises the
 // shipped policy text rather than a paraphrase of it.
+// rlsSeedRBACRole inserts a tenant-scoped rbac_roles row as the (superuser) test
+// role, which bypasses RLS, so the row exists regardless of policy. is_system_role
+// is deliberately false: tenant_isolation_policy admits system roles into every
+// tenant, so a system row could not distinguish a working admin-override gate from
+// an open one.
+func rlsSeedRBACRole(t *testing.T, db *sql.DB, id, tenant string) {
+	t.Helper()
+	_, err := db.ExecContext(context.Background(), `
+		INSERT INTO rbac_roles (id, name, is_system_role, tenant_id)
+		VALUES ($1, $1, false, $2)
+		ON CONFLICT (id) DO NOTHING`, id, tenant)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM rbac_roles WHERE id = $1`, id)
+	})
+}
+
 func TestRLSAdminOverride_RBACRoles(t *testing.T) {
 	db := getTestDB(t)
 	defer func() { _ = db.Close() }()
@@ -453,19 +490,22 @@ func TestRLSAdminOverride_RBACRoles(t *testing.T) {
 		`CREATE POLICY tenant_isolation_policy ON rbac_roles
 			USING (is_system_role = true OR tenant_id = current_setting('app.current_tenant', true))
 			WITH CHECK (is_system_role = true OR tenant_id = current_setting('app.current_tenant', true))`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cfgms_rls_admin_override') THEN
+				CREATE ROLE cfgms_rls_admin_override NOLOGIN;
+			END IF;
+		END
+		$$`,
 		`DROP POLICY IF EXISTS admin_override_policy ON rbac_roles`,
 		`CREATE POLICY admin_override_policy ON rbac_roles
-			USING (current_setting('app.is_admin', true)::boolean = true)
-			WITH CHECK (current_setting('app.is_admin', true)::boolean = true)`,
-		`REVOKE SET ON PARAMETER app.is_admin FROM PUBLIC`,
+			USING (pg_has_role(current_user, 'cfgms_rls_admin_override', 'MEMBER'))
+			WITH CHECK (pg_has_role(current_user, 'cfgms_rls_admin_override', 'MEMBER'))`,
 	}
 	for _, stmt := range rlsStmts {
 		_, err := db.ExecContext(ctx, stmt)
 		require.NoErrorf(t, err, "applying rbac_roles RLS setup: %s", stmt)
 	}
-	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), `GRANT SET ON PARAMETER app.is_admin TO PUBLIC`)
-	})
 
 	t.Run("ForceRowLevelSecurity_Set", func(t *testing.T) {
 		var forced bool
@@ -474,7 +514,13 @@ func TestRLSAdminOverride_RBACRoles(t *testing.T) {
 		require.True(t, forced, "rbac_roles must declare FORCE ROW LEVEL SECURITY")
 	})
 
-	t.Run("ApplicationRoleCannotSetIsAdmin", func(t *testing.T) {
+	// TestRLSAdminOverride_RBACRoles/ApplicationRoleCannotAssumeAdminOverride replaces
+	// a round-2 attempt at this same AC that gated the override on a custom placeholder
+	// GUC (app.is_admin) constrained by REVOKE SET ON PARAMETER. That failed in the
+	// merge queue's real-Postgres run: an ordinary role could still set_config it after
+	// the REVOKE. Role membership has no equivalent ambiguity -- SET ROLE requires the
+	// caller to already be a member of the target role, which the probe role never is.
+	t.Run("ApplicationRoleCannotAssumeAdminOverride", func(t *testing.T) {
 		dsn := provisionRLSWriteProbeRole(t, db, []string{"rbac_roles"})
 		conn, err := sql.Open("postgres", dsn)
 		require.NoError(t, err)
@@ -482,9 +528,56 @@ func TestRLSAdminOverride_RBACRoles(t *testing.T) {
 		conn.SetMaxOpenConns(1)
 		require.NoError(t, conn.Ping())
 
-		_, err = conn.ExecContext(context.Background(),
-			`SELECT set_config('app.is_admin', 'true', false)`)
-		require.Error(t, err, "an ordinary application role must not be able to set app.is_admin -- "+
-			"the admin_override_policy comment in migrations/003_enable_rls.sql relies on this being true")
+		_, err = conn.ExecContext(context.Background(), `SET ROLE cfgms_rls_admin_override`)
+		require.Error(t, err, "an ordinary application role must not be able to assume the admin-override "+
+			"role -- admin_override_policy in migrations/003_enable_rls.sql relies on membership in "+
+			"cfgms_rls_admin_override being explicitly granted, never self-service")
+
+		var isAdmin bool
+		require.NoError(t, conn.QueryRowContext(context.Background(),
+			`SELECT pg_has_role(current_user, 'cfgms_rls_admin_override', 'MEMBER')`).Scan(&isAdmin))
+		require.False(t, isAdmin, "the probe role must not satisfy admin_override_policy's predicate")
+	})
+
+	// The subtest above pins the mechanism (the probe role cannot become a member).
+	// This one pins the consequence the finding actually turns on: that an ordinary
+	// role cannot reach another tenant's rbac_roles rows through admin_override_policy.
+	// Kept as a separate assertion because the two can diverge -- a future change that
+	// keeps pg_has_role() false for the probe role while reintroducing some other
+	// permissive bypass policy on this table would still pass the mechanism check, and
+	// must fail here.
+	t.Run("ApplicationRoleCannotReadOtherTenantRows", func(t *testing.T) {
+		roleA := "rls4321-rbacrole-" + rlsWriteTenantA
+		roleB := "rls4321-rbacrole-" + rlsWriteTenantB
+		rlsSeedRBACRole(t, db, roleA, rlsWriteTenantA)
+		rlsSeedRBACRole(t, db, roleB, rlsWriteTenantB)
+
+		dsn := provisionRLSWriteProbeRole(t, db, []string{"rbac_roles"})
+		pool, err := sql.Open("postgres", dsn)
+		require.NoError(t, err)
+		defer func() { _ = pool.Close() }()
+
+		// Pinned to one backend for the same reason rlsWriteExecAsTenant is: the GUC
+		// below is session-scoped.
+		probe, err := pool.Conn(ctx)
+		require.NoError(t, err)
+		defer func() { _ = probe.Close() }()
+
+		_, err = probe.ExecContext(ctx,
+			`SELECT set_config('app.current_tenant', $1, false)`, rlsWriteTenantA)
+		require.NoError(t, err)
+
+		var foreign int
+		require.NoError(t, probe.QueryRowContext(ctx,
+			`SELECT count(*) FROM rbac_roles WHERE id = $1`, roleB).Scan(&foreign))
+		require.Equal(t, 0, foreign, "a tenant-A-scoped application role must not see tenant B's "+
+			"rbac_roles row -- a non-zero count means admin_override_policy is an open cross-tenant bypass again")
+
+		// Control: without this, the zero above would also be produced by a seeding or
+		// search_path failure, which would make the assertion vacuous.
+		var own int
+		require.NoError(t, probe.QueryRowContext(ctx,
+			`SELECT count(*) FROM rbac_roles WHERE id = $1`, roleA).Scan(&own))
+		require.Equal(t, 1, own, "the probe role must still see its own tenant's rbac_roles row")
 	})
 }

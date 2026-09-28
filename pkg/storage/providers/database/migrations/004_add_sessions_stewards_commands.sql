@@ -13,8 +13,9 @@
 --   INSERT WITH CHECK / UPDATE USING / DELETE USING: tenant_id = current_setting('app.current_tenant', true)
 --
 -- The Go store layer is responsible for calling set_config('app.current_tenant', $tenantID, true)
--- inside each transaction so these policies enforce correctly.  The application DB role must NOT
--- have the privilege to SET app.is_admin = true.
+-- inside each transaction so these policies enforce correctly. Migration 003's rbac_roles
+-- admin override is gated on membership in the cfgms_rls_admin_override role, not a settable
+-- GUC, so there is no equivalent "must not have a privilege" condition here to preserve.
 
 -- ── sessions ─────────────────────────────────────────────────────────────────
 -- session_id_hash is the HMAC-SHA256 hex of the bearer token; the plaintext token is never stored.
