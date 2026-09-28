@@ -129,6 +129,46 @@ func TestStrictModeAcceptsAdditionalPublisher(t *testing.T) {
 	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, additional))
 }
 
+// [REQUIRED TEST] TestStrictModeAdditionalPublisherCannotDisplaceCFGMSIdentity
+// verifies Issue #4324 item 3: an additional publisher named the same as the
+// baked-in CFGMS identity ("cfgms") must not change the key a bundle is
+// verified against. Before the fix, verifyStrict added the baked-in identity
+// first and then looped additionalPublishers into the same map-backed store,
+// discarding AddPublisher's return value — a same-named additional publisher
+// silently overwrote the baked-in entry.
+func TestStrictModeAdditionalPublisherCannotDisplaceCFGMSIdentity(t *testing.T) {
+	cfgmsPub, cfgmsPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	// The attacker controls a distinct keypair but registers it under the
+	// baked-in publisher's own name.
+	attackerPub, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	require.NotEqual(t, []byte(cfgmsPub), []byte(attackerPub))
+
+	colliding := []stewardtrust.PublisherIdentity{
+		{Name: "cfgms", PublicKey: []byte(attackerPub), Algorithm: "ed25519"},
+	}
+	enforcer := testEnforcer(cfgmsPub)
+
+	// A bundle signed by the real CFGMS key must still verify: the colliding
+	// additional publisher did not displace the baked-in identity.
+	genuine := makeTestBundle()
+	signBundle(genuine, "cfgms", cfgmsPriv)
+	assert.NoError(t, enforcer.VerifyForLoad(genuine, stewardtypes.ModuleTrustModeStrict, colliding),
+		"a bundle signed by the real baked-in CFGMS key must still verify")
+
+	// A bundle signed by the attacker's colliding key must NOT verify — if the
+	// attacker's key had displaced the baked-in identity, this would pass
+	// (store.GetPublisher("cfgms") would return the attacker's key instead of
+	// rejecting the signature as invalid against the real one).
+	forged := makeTestBundle()
+	signBundle(forged, "cfgms", attackerPriv)
+	err = enforcer.VerifyForLoad(forged, stewardtypes.ModuleTrustModeStrict, colliding)
+	require.Error(t, err, "a bundle signed by the colliding additional publisher's key must not verify")
+	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
+}
+
 // TestUnknownModeReturnsError: an unrecognised mode string returns an error.
 func TestUnknownModeReturnsError(t *testing.T) {
 	b := makeTestBundle()

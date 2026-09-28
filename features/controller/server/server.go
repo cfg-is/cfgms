@@ -1783,6 +1783,12 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	configService.SetRollbackManager(rollbackManager)
 	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
 
+	// Issue #4324: wire the controller's durable audit sink into the
+	// inheritance resolver so a refused security-posture downgrade
+	// (module_trust or script_signing) during cascade resolution is recorded,
+	// not just logged.
+	configService.SetAuditManager(auditManager)
+
 	// Story #416: Wire reports engine into API server over the shared DNA
 	// storage manager. The controller server owns the manager's lifecycle
 	// (closed on Stop).

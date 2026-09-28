@@ -18,6 +18,11 @@ func MergeScriptSigningConfig(parent, child ScriptSigningConfig) (ScriptSigningC
 	return stewardtypes.MergeScriptSigningConfig(parent, child)
 }
 
+// ModuleTrustModeLevel delegates to the shared stewardtypes implementation.
+func ModuleTrustModeLevel(mode ModuleTrustMode) int {
+	return stewardtypes.ModuleTrustModeLevel(mode)
+}
+
 // GetConvergeInterval delegates to the shared stewardtypes implementation.
 func GetConvergeInterval(cfg StewardConfig) time.Duration {
 	return stewardtypes.GetConvergeInterval(cfg)

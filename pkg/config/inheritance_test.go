@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -283,7 +284,7 @@ func TestApplyConfigurationWithSource_PreservesResourceOrder(t *testing.T) {
 		resources[i] = stewardconfig.ResourceConfig{Name: name, Module: "hyperv.vm"}
 	}
 
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{Resources: resources}, src)
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{Resources: resources}, src)
 
 	assert.Equal(t, declared, resourceNames(effective.Config.Resources),
 		"resource declaration order must be preserved through inheritance merging")
@@ -302,14 +303,14 @@ func TestApplyConfigurationWithSource_OverrideKeepsPositionAppendsNew(t *testing
 		{Name: "sw-a", Module: "hyperv.vswitch"},
 		{Name: "vm-1", Module: "hyperv.vm"},
 	}}
-	ir.applyConfigurationWithSource(effective, base, &InheritanceSource{Source: "base"})
+	ir.applyConfigurationWithSource(context.Background(), effective, base, &InheritanceSource{Source: "base"})
 
 	// Child layer: overrides vm-1 and adds a new vm-2.
 	child := &stewardconfig.StewardConfig{Resources: []stewardconfig.ResourceConfig{
 		{Name: "vm-1", Module: "hyperv.vm", Config: map[string]interface{}{"cpu_count": 4}},
 		{Name: "vm-2", Module: "hyperv.vm"},
 	}}
-	ir.applyConfigurationWithSource(effective, child, &InheritanceSource{Source: "child"})
+	ir.applyConfigurationWithSource(context.Background(), effective, child, &InheritanceSource{Source: "child"})
 
 	assert.Equal(t, []string{"sw-a", "vm-1", "vm-2"}, resourceNames(effective.Config.Resources),
 		"override must keep the base position; new resources append")
@@ -371,7 +372,7 @@ func TestApplyConfigurationWithSource_DesiredVersionInherited(t *testing.T) {
 			},
 		},
 	}
-	ir.applyConfigurationWithSource(effective, parentCfg, parentSrc)
+	ir.applyConfigurationWithSource(context.Background(), effective, parentCfg, parentSrc)
 
 	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
 		"desired_version must be applied from parent config")
@@ -387,7 +388,7 @@ func TestApplyConfigurationWithSource_DesiredVersionInherited(t *testing.T) {
 	childCfg := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{ID: "child-steward"},
 	}
-	ir.applyConfigurationWithSource(effective, childCfg, childSrc)
+	ir.applyConfigurationWithSource(context.Background(), effective, childCfg, childSrc)
 
 	assert.Equal(t, "v0.5.21", effective.Config.Steward.Upgrade.DesiredVersion,
 		"child with empty desired_version must not clobber inherited value")
@@ -408,7 +409,7 @@ func TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins(t *testi
 			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: true},
 		},
 	}
-	ir.applyConfigurationWithSource(effective, parentCfg, parentSrc)
+	ir.applyConfigurationWithSource(context.Background(), effective, parentCfg, parentSrc)
 	require.True(t, effective.Config.Steward.Upgrade.AllowDowngrade, "parent sets allow_downgrade=true")
 
 	// Child explicitly sets allow_downgrade=false (zero-value for bool) — it cannot
@@ -419,7 +420,7 @@ func TestApplyConfigurationWithSource_AllowDowngrade_MorePermissiveWins(t *testi
 			Upgrade: stewardconfig.UpgradeConfig{AllowDowngrade: false},
 		},
 	}
-	ir.applyConfigurationWithSource(effective, childCfg, childSrc)
+	ir.applyConfigurationWithSource(context.Background(), effective, childCfg, childSrc)
 
 	assert.True(t, effective.Config.Steward.Upgrade.AllowDowngrade,
 		"more-permissive-wins: child false cannot revoke parent true")
@@ -940,7 +941,7 @@ func TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins(t *testing.T
 
 	// MSP: monthly window on 1st Saturday (looser/less-frequent)
 	mspWindow := makeMonthlyWindow("America/New_York", time.Saturday, 1)
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{RebootWindow: mspWindow},
 	}, mspSrc)
 
@@ -952,7 +953,7 @@ func TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins(t *testing.T
 
 	// Client: weekly Mon+Thu (tighter / more-frequent than MSP monthly)
 	clientWindow := makeWeeklyWindow("America/Chicago", time.Monday, time.Thursday)
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{RebootWindow: clientWindow},
 	}, clientSrc)
 
@@ -964,7 +965,7 @@ func TestApplyConfigurationWithSource_RebootWindowCascade_LaterWins(t *testing.T
 
 	// Device: monthly 1st Wednesday (looser than client weekly)
 	deviceWindow := makeMonthlyWindow("UTC", time.Wednesday, 1)
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{RebootWindow: deviceWindow},
 	}, deviceSrc)
 
@@ -983,13 +984,13 @@ func TestApplyConfigurationWithSource_RebootWindowNilDoesNotClobber(t *testing.T
 
 	parentSrc := &InheritanceSource{Source: "parent", TenantID: "msp"}
 	parentWindow := makeWeeklyWindow("America/New_York", time.Monday)
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{RebootWindow: parentWindow},
 	}, parentSrc)
 
 	// Child has no RebootWindow (nil) — must not clear the inherited value.
 	childSrc := &InheritanceSource{Source: "child", TenantID: "client"}
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{ID: "child-id"},
 	}, childSrc)
 
@@ -1036,14 +1037,14 @@ func TestApplyConfigurationWithSource_TenantDefaultTimezoneCascade(t *testing.T)
 	effective := &EffectiveConfiguration{Sources: make(map[string]*InheritanceSource)}
 
 	rootSrc := &InheritanceSource{Source: "root", TenantID: "root"}
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "America/New_York"},
 	}, rootSrc)
 	assert.Equal(t, "America/New_York", effective.Config.Steward.TenantDefaultTimezone)
 	assert.Equal(t, rootSrc, effective.Sources["steward.tenant_default_timezone"])
 
 	clientSrc := &InheritanceSource{Source: "client", TenantID: "client"}
-	ir.applyConfigurationWithSource(effective, &stewardconfig.StewardConfig{
+	ir.applyConfigurationWithSource(context.Background(), effective, &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{TenantDefaultTimezone: "Europe/London"},
 	}, clientSrc)
 	assert.Equal(t, "Europe/London", effective.Config.Steward.TenantDefaultTimezone,
@@ -1101,4 +1102,206 @@ func TestResolveRebootWindowTimezone_DeviceExplicit(t *testing.T) {
 	got := ResolveRebootWindowTimezone(cfg, "America/New_York")
 	assert.Equal(t, "device", got,
 		`explicit "device" timezone must be returned as-is, not overridden by tenantDefault`)
+}
+
+// --- Security posture downgrade guard (Issue #4324) ---
+
+// [REQUIRED TEST] TestResolveConfiguration_ScriptSigningRelaxation_RefusedThroughMergePath
+// verifies AC item 4: MergeScriptSigningConfig is invoked on the real cascade
+// merge path (applyConfigurationWithSource), and a child tenant attempting to
+// relax a parent's signing requirement is refused there — not merely in an
+// isolated unit test of MergeScriptSigningConfig itself.
+func TestResolveConfiguration_ScriptSigningRelaxation_RefusedThroughMergePath(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NotNil(t, cs)
+
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyRequired},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyNone},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err, "resolution itself must not fail — only the weakening delta is refused")
+
+	assert.Equal(t, stewardconfig.ScriptSigningPolicyRequired, effective.Config.Steward.ScriptSigning.Policy,
+		"a child tenant's attempt to relax script_signing must be refused, keeping the parent's tightened policy")
+}
+
+// TestResolveConfiguration_ScriptSigningTightening_Allowed is the control case:
+// a child level tightening script_signing beyond the parent's policy must apply.
+func TestResolveConfiguration_ScriptSigningTightening_Allowed(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyOptional},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ScriptSigning: stewardconfig.ScriptSigningConfig{Policy: stewardconfig.ScriptSigningPolicyRequired},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ScriptSigningPolicyRequired, effective.Config.Steward.ScriptSigning.Policy,
+		"a child tenant tightening script_signing beyond the parent's policy must apply")
+}
+
+// [REQUIRED TEST] TestResolveConfiguration_ModuleTrustDowngrade_RefusedWithoutAuthorization
+// verifies AC item 6 for module_trust: strict→controller is refused unless the
+// downgrading level explicitly sets authorize_downgrade.
+func TestResolveConfiguration_ModuleTrustDowngrade_RefusedWithoutAuthorization(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeController},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ModuleTrustModeStrict, effective.Config.Steward.ModuleTrust.Mode,
+		"an unauthorized strict→controller downgrade must be refused, keeping the parent's stricter mode")
+}
+
+// TestResolveConfiguration_ModuleTrustDowngrade_AllowedWithAuthorization verifies
+// that authorize_downgrade set on the downgrading level permits the transition.
+func TestResolveConfiguration_ModuleTrustDowngrade_AllowedWithAuthorization(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeController, AuthorizeDowngrade: true},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+
+	assert.Equal(t, stewardconfig.ModuleTrustModeController, effective.Config.Steward.ModuleTrust.Mode,
+		"an explicitly authorized downgrade must apply")
+}
+
+// [REQUIRED TEST] TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent
+// verifies AC item 6's audit requirement end to end: a refused module_trust
+// downgrade is recorded via pkg/audit.Manager.RecordEvent, keyed by the
+// cfg-declared resource id (steward:<cfg.Steward.ID>) rather than the stewardID
+// argument passed to ResolveConfiguration.
+func TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedThreeLevelTenants(t, ctx, sm)
+
+	auditManager, err := audit.NewManager(sm.GetAuditStore(), "test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = auditManager.Stop(stopCtx)
+	})
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeStrict},
+			},
+		}),
+	}))
+	// The cfg-declared steward ID ("device-declared-1") deliberately differs from
+	// the stewardID argument passed to ResolveConfiguration below, so the test
+	// proves the audit resource id comes from the cfg, not the live call.
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Steward: stewardconfig.StewardSettings{
+				ID:          "device-declared-1",
+				ModuleTrust: stewardconfig.ModuleTrustConfig{Mode: stewardconfig.ModuleTrustModeBypass},
+			},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm).WithAuditManager(auditManager)
+	_, err = ir.ResolveConfiguration(ctx, "client", "steward-live-id")
+	require.NoError(t, err)
+
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, auditManager.Flush(flushCtx))
+
+	trail, err := auditManager.GetResourceAuditTrail(context.Background(), "steward_config", "steward:device-declared-1", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, trail, "a refused module_trust downgrade must be recorded in the audit log")
+
+	found := false
+	for _, entry := range trail {
+		if entry.Action == "steward_config.security_posture_downgrade" && entry.Result == business.AuditResultDenied {
+			found = true
+			assert.Equal(t, "module_trust", entry.Details["setting"])
+		}
+	}
+	assert.True(t, found, "expected a denied steward_config.security_posture_downgrade audit entry")
 }

@@ -1076,10 +1076,16 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	}
 
 	// Downgrade guard: reject if stored enrollment had stronger trust assurance.
+	// priorCAPinFingerprint carries the previously pinned CA (if any) into every
+	// connectWithApprovedRegistration call below so a TOFU re-pin on full
+	// re-registration is compared against history rather than treated as first-pin
+	// (same class of gap as the registration-refresh path, Issue #4324 item 5).
+	var priorCAPinFingerprint string
 	if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
 		if dgErr := checkTrustDowngrade(trustSrc, installCAPEM, storedID); dgErr != nil {
 			return nil, dgErr
 		}
+		priorCAPinFingerprint = storedID.CAPinFingerprint
 	}
 
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
@@ -1184,7 +1190,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			if approved != nil {
 				enrichApprovedWithDeviceIdentity(approved, ks)
 				_ = clearPendingState(certStoreDir)
-				return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+				return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, priorCAPinFingerprint, runtimeCfg, publicBeta, logger)
 			}
 			// approved == nil: pending record expired (HTTP 410); fall through to fresh registration.
 			logger.Info("Persisted pending record expired on controller; performing fresh registration")
@@ -1249,7 +1255,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		}
 		enrichApprovedWithDeviceIdentity(approved, ks)
 		_ = clearPendingState(certStoreDir)
-		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+		return connectWithApprovedRegistration(ctx, *approved, certStoreDir, token, trustSrc, installCAPEM, priorCAPinFingerprint, runtimeCfg, publicBeta, logger)
 	}
 
 	// Immediate approval (HTTP 200): proceed directly to transport setup.
@@ -1272,7 +1278,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		IssuerChain:      regResp.IssuerChain,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, trustSrc, installCAPEM, priorCAPinFingerprint, runtimeCfg, publicBeta, logger)
 }
 
 // pollForApproval polls GET /api/v1/registration/status/{pendingID} with exponential
@@ -1360,12 +1366,23 @@ func pollForApproval(
 // trustSrc and installCAPEM implement ADR-013 §3 trust anchoring (Issue #1517).
 // For TOFU mode, the CA from reg.CACert is pinned to disk before the identity
 // is saved. For install-pinned, the fingerprint of installCAPEM is recorded.
+//
+// priorCAPinFingerprint carries the CAPinFingerprint already recorded for this
+// steward, if any (from a previously stored identity). Seeding it into the
+// fresh persistedID before the TOFU pin check below is what makes pinTOFUCA
+// compare the new CA against the historically pinned one instead of treating
+// every call as a first-time pin (Issue #4324 item 5) — without it, a fresh
+// persistedID always starts with an empty CAPinFingerprint and pinTOFUCA
+// silently re-pins to whatever CA the caller (e.g. a compromised controller
+// on the registration-refresh path) supplies. Pass "" when there is no prior
+// identity (first enrollment).
 func connectWithApprovedRegistration(
 	ctx context.Context,
 	reg approvedRegistration,
 	certStoreDir, token string,
 	trustSrc TrustSource,
 	installCAPEM string,
+	priorCAPinFingerprint string,
 	runtimeCfg stewardconfig.StewardConfig,
 	publicBeta bool,
 	logger logging.Logger,
@@ -1392,6 +1409,7 @@ func connectWithApprovedRegistration(
 		DeviceID:         reg.DeviceID,
 		IdentityKeyPub:   reg.IdentityKeyPub,
 		TrustMode:        trustModeString(trustSrc),
+		CAPinFingerprint: priorCAPinFingerprint,
 	}
 
 	// Record the CA pin fingerprint for install-pinned and TOFU modes.
@@ -1882,6 +1900,24 @@ func refreshAndConnect(
 	logger.Info("Registration refresh approved; storing new certificate",
 		"steward_id", logging.SanitizeLogValue(id.StewardID))
 
+	// Preserve the stored trust mode on refresh — the trust anchor is already
+	// established, matching registerAndConnect's reconnect semantics.
+	refreshTrustSrc := trustSourceFromMode(id.TrustMode)
+	if refreshTrustSrc == 0 {
+		refreshTrustSrc = trustSourceCompileBaked
+	}
+
+	// Trust downgrade guard (Issue #4324 item 5): registerAndConnect already runs
+	// checkTrustDowngrade before enrolling; the refresh path reached this point
+	// without an equivalent check, so a controller (or MITM) returning a
+	// different CA in completeResp went undetected for install-pinned and
+	// compile-baked trust sources. refreshTrustSrc is derived from id.TrustMode
+	// itself so this never rejects on trust-source level, but it does reject a
+	// CA swap against the fingerprint already pinned in id.
+	if dgErr := checkTrustDowngrade(refreshTrustSrc, completeResp.CACert, id); dgErr != nil {
+		return nil, fmt.Errorf("registration refresh rejected: %w", dgErr)
+	}
+
 	// Persist the refreshed identity with updated certs.
 	// The controller's refresh response does not include TransportAddress or ServerCert
 	// (the connection endpoint and signing cert do not change during cert refresh).
@@ -1910,12 +1946,11 @@ func refreshAndConnect(
 		IssuerChain:      completeResp.IssuerChain,
 	}
 	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	// Preserve the stored trust mode on refresh — the trust anchor is already established.
-	refreshTrustSrc := trustSourceFromMode(id.TrustMode)
-	if refreshTrustSrc == 0 {
-		refreshTrustSrc = trustSourceCompileBaked
-	}
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", runtimeCfg, publicBeta, logger)
+	// id.CAPinFingerprint (real pinned state, not a zero value) flows through so
+	// a TOFU-sourced refresh compares completeResp.CACert against history via
+	// pinTOFUCA instead of treating this call as a first-time pin (Issue #4324
+	// item 5).
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", id.CAPinFingerprint, runtimeCfg, publicBeta, logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the

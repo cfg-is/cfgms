@@ -140,12 +140,33 @@ func ValidateConfiguration(config StewardConfig) error {
 // ValidateModuleTrustConfig validates a ModuleTrustConfig for internal consistency.
 func ValidateModuleTrustConfig(cfg ModuleTrustConfig) error {
 	switch cfg.Mode {
-	case ModuleTrustModeStrict, ModuleTrustModeController, ModuleTrustModeBypass, "":
+	case ModuleTrustModeStrict, ModuleTrustModeController, "":
 		// valid; empty defaults to "controller" at runtime
+	case ModuleTrustModeBypass:
+		if !moduleTrustBypassBuildAllowed {
+			return fmt.Errorf("module_trust mode %q is unavailable in a release build", cfg.Mode)
+		}
 	default:
 		return fmt.Errorf("invalid module_trust mode %q: must be strict, controller, or bypass", cfg.Mode)
 	}
 	return nil
+}
+
+// ModuleTrustModeLevel returns the numeric strictness level of a module trust
+// mode. Higher values are more restrictive. An empty mode defaults to
+// "controller" strictness, matching its runtime default. Returns -1 for
+// unknown values. Mirrors scriptSigningPolicyLevel's ordering scheme so both
+// steward security-posture settings compare the same way (Issue #4324).
+func ModuleTrustModeLevel(mode ModuleTrustMode) int {
+	switch mode {
+	case ModuleTrustModeBypass:
+		return 0
+	case ModuleTrustModeController, "":
+		return 1
+	case ModuleTrustModeStrict:
+		return 2
+	}
+	return -1
 }
 
 // MergeScriptSigningConfig merges a parent ScriptSigningConfig into a child, applying inheritance rules.

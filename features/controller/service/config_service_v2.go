@@ -20,6 +20,7 @@ import (
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	clusterregistry "github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/config"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -327,6 +328,18 @@ func (s *ConfigurationServiceV2) Close() {
 // SetRollbackManager wires the canonical rollback manager into the service.
 func (s *ConfigurationServiceV2) SetRollbackManager(m rollback.RollbackManager) {
 	s.rollbackManager = m
+}
+
+// SetAuditManager wires the controller's durable audit sink into the
+// inheritance resolver, so a security-posture downgrade refused during
+// cascade resolution (module_trust or script_signing — Issue #4324) is
+// recorded via pkg/audit.Manager.RecordEvent. Optional: without it, refusals
+// are still enforced and logged, just not durably audited (matches
+// InheritanceResolver.WithAuditManager's nil-safe contract).
+func (s *ConfigurationServiceV2) SetAuditManager(m *audit.Manager) {
+	if s.inheritanceResolver != nil {
+		s.inheritanceResolver.WithAuditManager(m)
+	}
 }
 
 // RegisterFanoutCallback registers a callback that is invoked once, synchronously,

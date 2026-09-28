@@ -206,6 +206,14 @@ type ModuleTrustConfig struct {
 	// the CFGMS publisher identity baked into the steward binary.
 	// Only consulted when Mode is "strict".
 	AdditionalPublishers []string `yaml:"additional_publishers,omitempty" json:"additional_publishers,omitempty"`
+
+	// AuthorizeDowngrade must be set explicitly, at the same config level that
+	// weakens Mode (e.g. strict→controller or strict→bypass), for that transition
+	// to be accepted. Without it, a transition that lowers trust is refused and
+	// the previously established (stronger) mode continues to apply (Issue #4324).
+	// Mirrors the more-permissive-wins precedent of Upgrade.AllowDowngrade: the
+	// permission must be granted deliberately, it is never inferred.
+	AuthorizeDowngrade bool `yaml:"authorize_downgrade,omitempty" json:"authorize_downgrade,omitempty"`
 }
 
 // RequiredModule declares a module bundle that must be present and approved in

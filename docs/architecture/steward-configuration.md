@@ -161,8 +161,9 @@ resources:
 - `module_trust.mode`: Controls how module bundle signatures are verified on the steward.
   - `controller` (default): The steward accepts any bundle the controller has approved. Trust decisions are delegated to the controller.
   - `strict`: The steward independently verifies publisher signatures. The CFGMS publisher identity is baked into the steward binary; `additional_publishers` extends the trusted set.
-  - `bypass`: Disables all trust enforcement. Development environments only — never use in production.
-- `module_trust.additional_publishers`: List of publisher identifiers trusted in addition to the baked-in CFGMS publisher identity. Only consulted when `mode` is `strict`. Changing this list requires a steward restart.
+  - `bypass`: Disables all trust enforcement. Unavailable in a release build — gated by the `cfgms_dev_bypass` build tag, the same mechanism used for test-only routes, so `ValidateModuleTrustConfig` rejects it from pushed configuration on any normally built steward.
+- `module_trust.additional_publishers`: List of publisher identifiers trusted in addition to the baked-in CFGMS publisher identity. Only consulted when `mode` is `strict`. Changing this list requires a steward restart. A supplied entry sharing the baked-in identity's name can never displace it.
+- `module_trust.authorize_downgrade`: Must be set explicitly, at the level that weakens `mode` (e.g. `strict` → `controller` or `strict` → `bypass`), for that transition to take effect during config cascade resolution. Otherwise the transition is refused and recorded in the audit log (Issue #4324).
 
 ### Required Modules Section
 

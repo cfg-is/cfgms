@@ -233,10 +233,15 @@ The steward verifies module bundle signatures according to the `module_trust.mod
 |------|-------------|-------------|
 | **`controller`** (default) | None — the steward accepts any bundle the controller has approved | Normal deployment; trust is delegated to the controller |
 | **`strict`** | Steward independently verifies Ed25519 signatures against its local trust set: the CFGMS publisher identity baked in at build time, plus any publishers listed in `additional_publishers` | High-security environments where a compromised controller must not be able to push arbitrary code to stewards |
-| **`bypass`** | None — no verification | Development and testing only |
+| **`bypass`** | None — no verification | Development and testing only; unavailable in a release build (gated by the `cfgms_dev_bypass` build tag — `ValidateModuleTrustConfig` rejects it from pushed configuration otherwise, Issue #4324) |
+
+A transition that weakens this setting (`strict` → `controller` or `strict` → `bypass`) is refused
+during config cascade resolution unless the level making the change also sets
+`module_trust.authorize_downgrade: true`, and the refusal (or the authorized downgrade) is recorded
+in the audit log.
 
 In `strict` mode, the trusted publisher set is:
-1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push.
+1. The `cfgms` publisher identity — a 32-byte Ed25519 public key compiled into the steward binary at build time via `-ldflags`. This identity cannot be changed via cfg push, including by a same-named entry in `additional_publishers`.
 2. Additional publishers listed in `steward.cfg` under `module_trust.additional_publishers` (by name).
 
 **Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
