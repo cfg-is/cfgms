@@ -267,9 +267,13 @@ func (tie *TenantIsolationEngine) ValidateTenantAccess(ctx context.Context, requ
 			return response, nil
 		}
 
-		// Check access level permissions
-		maxLevel, exists := rule.CrossTenantAccess.AccessLevels[request.SubjectTenantID]
-		if exists && !tie.isAccessLevelSufficient(maxLevel, request.AccessLevel) {
+		// Check access level permissions. A subject tenant absent from AccessLevels
+		// has no configured level and must be treated as having no access — the map
+		// lookup's zero value (empty CrossTenantLevel) orders below every real level
+		// in isAccessLevelSufficient, so the cap below is always evaluated rather
+		// than skipped for a missing entry.
+		maxLevel := rule.CrossTenantAccess.AccessLevels[request.SubjectTenantID]
+		if !tie.isAccessLevelSufficient(maxLevel, request.AccessLevel) {
 			response.Reason = fmt.Sprintf("Insufficient access level: max %s, requested %s", maxLevel, request.AccessLevel)
 			_ = tie.auditLogger.LogAccessAttempt(ctx, request, response)
 			return response, nil

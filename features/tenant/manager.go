@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
@@ -37,6 +38,14 @@ type Manager struct {
 	validator    cfgpkg.MountPointValidator // optional; validates git mount points on create/update
 	secretStore  secretsiface.SecretStore   // optional; provides credentials to validator
 	auditManager *audit.Manager             // optional; records config source lifecycle events
+
+	// suspendMu serializes SuspendTenant and RestoreTenant against each other and
+	// against themselves. Both walk the tenant subtree with sequential
+	// read-then-write store calls and no other concurrency control (the store's
+	// UpdateTenant takes no version), so two interleaved concurrent administrative
+	// calls could otherwise leave a descendant active after an ancestor's
+	// suspension has already been recorded (Issue #4347).
+	suspendMu sync.Mutex
 
 	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
 	// Decision 3). Empty by default (self-hosted: no realm concept). It is never
@@ -290,6 +299,9 @@ func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeS
 		return nil, ErrCannotSuspendDefault
 	}
 
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+
 	result := &CascadeSuspendResult{
 		Target:                tenantID,
 		NewlyCascadeSuspended: []string{},
@@ -399,6 +411,9 @@ func childProvenanceAfterRestore(td *business.TenantData) *string {
 //
 // An audit event is recorded on success (fire-and-forget).
 func (m *Manager) RestoreTenant(ctx context.Context, tenantID string) (*CascadeRestoreResult, error) {
+	m.suspendMu.Lock()
+	defer m.suspendMu.Unlock()
+
 	result := &CascadeRestoreResult{
 		Target:         tenantID,
 		Restored:       []string{},
@@ -956,6 +971,24 @@ func (m *Manager) QualifiedTenantID(unqualifiedID string) (string, error) {
 	return qualified, nil
 }
 
+// normalizeTelemetryEnvironment trims surrounding whitespace and case-folds
+// raw, the value of CFGMS_TELEMETRY_ENVIRONMENT, so that "Production",
+// " production ", and "PRODUCTION" are all treated identically to
+// "production" rather than silently falling through to the non-production
+// path on a formatting difference alone. recognized reports whether the
+// normalized value is empty (unset) or one of the documented deployment
+// environments (pkg/telemetry/config.go: development, staging, production);
+// any other value is unrecognised.
+func normalizeTelemetryEnvironment(raw string) (normalized string, recognized bool) {
+	normalized = strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "", "development", "staging", "production":
+		return normalized, true
+	default:
+		return normalized, false
+	}
+}
+
 // EnforceRealmGuard fails closed when a configured realm is malformed (any
 // deployment shape) or when a SaaS cluster deployment reaches production with
 // no realm configured at all. Mirrors
@@ -991,11 +1024,33 @@ func EnforceRealmGuard(cfg *controllerconfig.Config) error {
 		}
 	}
 
-	isProduction := os.Getenv("CFGMS_TELEMETRY_ENVIRONMENT") == "production"
-	if !isProduction {
+	rawEnv := os.Getenv("CFGMS_TELEMETRY_ENVIRONMENT")
+	normalizedEnv, recognized := normalizeTelemetryEnvironment(rawEnv)
+
+	if !cfg.HA.IsClusterMode() {
 		return nil
 	}
-	if !cfg.HA.IsClusterMode() {
+
+	// An unrecognised value cannot be safely assumed non-production — that would
+	// let a typo or stray whitespace in CFGMS_TELEMETRY_ENVIRONMENT silently
+	// disable this guard on a real production cluster. Fail closed instead of
+	// falling through to the isProduction check below.
+	if !recognized {
+		return fmt.Errorf(
+			"controller refused to start:\n"+
+				"  Reason: CFGMS_TELEMETRY_ENVIRONMENT=%q is not a recognised deployment\n"+
+				"  environment for a cluster (ha.mode: cluster) deployment.\n"+
+				"  Recognised values are \"development\", \"staging\", and \"production\"\n"+
+				"  (case-insensitive, surrounding whitespace ignored). An unrecognised\n"+
+				"  value cannot be safely treated as non-production, so the realm guard\n"+
+				"  fails closed instead of silently skipping ADR-032 Decision 3's check.\n"+
+				"  Fix: set CFGMS_TELEMETRY_ENVIRONMENT to one of those values.\n"+
+				"  See: docs/operations/cluster-ca.md",
+			rawEnv,
+		)
+	}
+
+	if normalizedEnv != "production" {
 		return nil
 	}
 	if cfg.RealmID == "" {
