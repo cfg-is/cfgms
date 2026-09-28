@@ -56,13 +56,19 @@ func (e *RingHealthNodeExecutor) ExecuteRingHealthStep(ctx context.Context, step
 		err = fmt.Errorf("query_ring_health step %q: desired_version must not be empty", step.Name)
 		return failedRingHealthResult(startTime, err), err
 	}
-	if cfg.TenantID == "" {
-		err = fmt.Errorf("query_ring_health step %q: tenant_id must not be empty — fleet queries must be tenant-scoped to prevent cross-tenant data leakage", step.Name)
+
+	// The fleet query is scoped to the execution's authenticated tenant
+	// (Issue #4338), never to step.Config's tenant_id alone — step.Config is
+	// workflow-author-writable. A configured tenant_id that disagrees with the
+	// authenticated tenant is refused, not silently corrected.
+	tenantID, err := requireAuthorizedTenant(execution, cfg.TenantID)
+	if err != nil {
+		err = fmt.Errorf("query_ring_health step %q: %w", step.Name, err)
 		return failedRingHealthResult(startTime, err), err
 	}
 
 	filter := fleet.Filter{
-		TenantID:      cfg.TenantID,
+		TenantID:      tenantID,
 		DNAAttributes: map[string]string{"deployment_ring": cfg.Ring},
 	}
 	stewards, err := e.fleetQuery.Search(ctx, filter)

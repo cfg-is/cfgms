@@ -48,7 +48,8 @@ func (e *MoveResourceToClusterNodeExecutor) ExecuteMoveResourceToClusterStep(ctx
 	if err != nil {
 		return failedMoveResult(startTime, fmt.Errorf("move_resource_to_cluster step %q: %w", step.Name, err)), err
 	}
-	tenantID, err := requireStringVar(execution, "tenant_id")
+	configuredTenantID, _ := optionalStringVar(execution, "tenant_id")
+	tenantID, err := requireAuthorizedTenant(execution, configuredTenantID)
 	if err != nil {
 		return failedMoveResult(startTime, fmt.Errorf("move_resource_to_cluster step %q: %w", step.Name, err)), err
 	}
