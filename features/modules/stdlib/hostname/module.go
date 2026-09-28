@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -108,7 +109,7 @@ func (m *hostnameModule) Get(ctx context.Context, resourceID string) (modules.Co
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("hostname"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Getting hostname configuration",
 		"operation", "hostname_get",
@@ -160,7 +161,7 @@ func (m *hostnameModule) Set(ctx context.Context, resourceID string, config modu
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("hostname"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Setting hostname configuration",
 		"operation", "hostname_set",

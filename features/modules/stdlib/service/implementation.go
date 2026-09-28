@@ -19,6 +19,7 @@ import (
 	"regexp"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -69,7 +70,7 @@ func (m *serviceModule) Get(ctx context.Context, resourceID string) (modules.Con
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("service"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Getting service state",
 		"operation", "service_get",
@@ -126,7 +127,7 @@ func (m *serviceModule) Set(ctx context.Context, resourceID string, config modul
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("service"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Setting service state",
 		"operation", "service_set",

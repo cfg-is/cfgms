@@ -22,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -113,7 +114,7 @@ func (m *timeModule) Get(ctx context.Context, resourceID string) (modules.Config
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("time"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Getting time configuration",
 		"operation", "time_get",
@@ -173,7 +174,7 @@ func (m *timeModule) Set(ctx context.Context, resourceID string, config modules.
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("time"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Setting time configuration",
 		"operation", "time_set",

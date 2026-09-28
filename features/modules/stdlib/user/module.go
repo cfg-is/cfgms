@@ -24,6 +24,7 @@ import (
 	"sort"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -100,7 +101,7 @@ func (m *userModule) Get(ctx context.Context, resourceID string) (modules.Config
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("user"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Getting user state",
 		"operation", "user_get",
@@ -168,7 +169,7 @@ func (m *userModule) Set(ctx context.Context, resourceID string, config modules.
 	}
 
 	logger := m.GetEffectiveLogger(logging.ForModule("user"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Setting user state",
 		"operation", "user_set",
