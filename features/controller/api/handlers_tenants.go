@@ -35,35 +35,69 @@ const (
 	tenantAuthNeedsCrossing
 )
 
+// subjectToTenantCrossingBoundary reports whether principal is subject to ADR-025
+// Decision 1's root<->MSP crossing boundary at all — the question authorizeTenantAccess,
+// requirePermission's boundary gate, tenantScopedTerminalWrapper, and
+// handleUpdateStewardConfig all ask before deciding allow/deny/needs-crossing.
+//
+// Issue #4337 (ADR-025 Amendment 5): for a principal resolved from a durable account
+// record (principal.AccountBound), the answer is principal.GlobalScope — which for a
+// bound principal is always acct.RootScope (middleware.go:389, :901/:917, :1067/:1079),
+// a durable per-account field independent of the current request's assurance. This
+// replaces principal.RootScoped for bound principals because RootScoped's session-path
+// derivation (rootScopeFromAssertion) requires the CURRENT request to be phishing-resistant
+// and goes false the moment it is not, even though the account's RootScope has not
+// changed — silently exempting a legitimate, still-root-scoped caller from the boundary
+// (and from the crossing audit record) exactly when their proof of identity is weakest.
+//
+// For a principal that is NOT AccountBound (the mTLS bootstrap fallback with no bound
+// account, or a Bearer session with no resolvable account — middleware.go:425, :859),
+// GlobalScope carries no account-level root-scope signal at all: it is unconditionally
+// true for the former and merely mirrors sess.TenantID == "" for the latter — the exact
+// ambiguity ADR-025 Amendment 1 A1.3 introduced RootScoped to resolve. Collapsing that
+// case onto GlobalScope too would pull every legacy unscoped admin cert into the crossing
+// boundary, which authorizeTenantAccess's cert-authenticated branch below documents as
+// provably unchanged. So an unbound principal is still judged on RootScoped alone.
+func subjectToTenantCrossingBoundary(principal *Principal) bool {
+	if principal == nil {
+		return false
+	}
+	if principal.AccountBound {
+		return principal.GlobalScope
+	}
+	return principal.RootScoped
+}
+
 // authorizeTenantAccess decides whether principal may act on resourceTenant.
 //
 //   - An unscoped, certificate-authenticated principal (TenantID == "", CertSerial != "")
-//     that is NOT RootScoped has unrestricted access — today's exact behavior, unchanged
-//     for every admin cert issued before the ADR-025 Amendment 1 A1.3 root-scope marker
-//     existed, and for the 31 pre-existing callerTenant=="" branches elsewhere in this
-//     package (none of which call this function). The certificate authentication path is
-//     out of scope for ADR-025 Amendment 4 and must be provably unchanged by it.
+//     that is not subjectToTenantCrossingBoundary has unrestricted access — today's exact
+//     behavior, unchanged for every admin cert issued before the ADR-025 Amendment 1 A1.3
+//     root-scope marker existed, and for the 31 pre-existing callerTenant=="" branches
+//     elsewhere in this package (none of which call this function). The certificate
+//     authentication path is out of scope for ADR-025 Amendment 4 and must be provably
+//     unchanged by it.
 //   - An unscoped, NON-certificate-authenticated principal (session, API key, or any
-//     future auth path) that is NOT RootScoped is denied (ADR-025 Amendment 4 A4.2): the
-//     absence of the explicit marker must not be read as unrestricted access for a caller
-//     that never went through certificate authentication, or a phishing-resistant
-//     assertion downgrading mid-session would silently fall back to unrestricted instead
-//     of confined.
+//     future auth path) that is not subjectToTenantCrossingBoundary is denied (ADR-025
+//     Amendment 4 A4.2): the absence of the explicit marker must not be read as
+//     unrestricted access for a caller that never went through certificate authentication.
 //   - A tenant-scoped principal must have resourceTenant equal to or a genuine
 //     ParentID-chain descendant of its own TenantID (ADR-025 Amendment 1 A1.2) — never
 //     a string-prefix match against tenant IDs. Real tenant IDs are flat, validated
 //     single DNS-label-style tokens (features/tenant/manager.go's k8sNameRegex) and
 //     can never contain '/': the prefix-match shape the older isWithinTenantScope
 //     helper (middleware.go) uses is dead code against them.
-//   - A RootScoped principal (ADR-025 Amendment 1 A1.3) is confined to "root" itself;
-//     a strict descendant requires an active grant or break-glass crossing (ADR-025
-//     Decision 1, Decision 2), else tenantAuthNeedsCrossing.
+//   - A principal subjectToTenantCrossingBoundary (ADR-025 Amendment 1 A1.3 / Amendment 5)
+//     is confined to "root" itself; a strict descendant requires an active grant or
+//     break-glass crossing (ADR-025 Decision 1, Decision 2), else tenantAuthNeedsCrossing —
+//     evaluated, and audited, on every such request regardless of the caller's current
+//     assurance level (Issue #4337).
 func (s *Server) authorizeTenantAccess(ctx context.Context, principal *Principal, resourceTenant string) tenantAuthDecision {
 	var callerTenant, principalID string
-	var rootScoped, certAuthenticated bool
+	var certAuthenticated bool
+	rootScoped := subjectToTenantCrossingBoundary(principal)
 	if principal != nil {
 		callerTenant = principal.TenantID
-		rootScoped = principal.RootScoped
 		principalID = principal.ID
 		// CertSerial is set in exactly two places, both inside extractAdminPrincipal
 		// (middleware.go), both after its revocation check and only when the

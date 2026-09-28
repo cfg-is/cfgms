@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -39,6 +40,26 @@ func rootScopedPrincipal(id string) *Principal {
 		TenantID:      "",
 		RootScoped:    true,
 		ImplicitAdmin: true,
+	}
+}
+
+// accountBoundLowAssuranceRootPrincipal returns a Principal shaped like a Bearer/web
+// session bound to a root-scope account (acct.RootScope == true) whose CURRENT request
+// is below the phishing-resistant assurance threshold — exactly the middleware.go:926/
+// :1079 rootScopeFromAssertion shape that leaves RootScoped false even though the
+// account's own scope has not changed (Issue #4337, ADR-025 Amendment 5). AccountBound
+// is what makes GlobalScope (not RootScoped) the crossing-boundary signal for this
+// principal — see subjectToTenantCrossingBoundary.
+func accountBoundLowAssuranceRootPrincipal(id string) *Principal {
+	return &Principal{
+		ID:            id,
+		Name:          "session:" + id,
+		Assurance:     session.AssuranceBasic,
+		GlobalScope:   true,
+		TenantID:      "",
+		RootScoped:    false,
+		AccountBound:  true,
+		ImplicitAdmin: true, // mirrors middleware.go's acct.RootScope branch (implicitAdmin/implicitAdminWeb = true)
 	}
 }
 
@@ -72,7 +93,23 @@ func requestAsPrincipal(t *testing.T, method, path string, targetID string, prin
 // (handlers_assurance_policy_test.go's newAssuranceTestServer).
 func setupCrossingTestServer(t *testing.T) *Server {
 	t.Helper()
-	server := setupTestServer(t)
+	return wireCrossingStore(t, setupTestServer(t))
+}
+
+// setupCrossingTestServerWithLogger is setupCrossingTestServer with the logger supplied
+// at construction. Tests that capture authorization audit records must use this rather
+// than assigning server.logger afterwards: New() starts background sweep goroutines
+// (startCliPresenceRequestSweep, startCredentialRequestSweep) that read s.logger, so a
+// post-construction assignment onto a running server is a data race under -race.
+func setupCrossingTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
+	t.Helper()
+	return wireCrossingStore(t, setupTestServerWithLogger(t, logger))
+}
+
+// wireCrossingStore attaches a SQLite-backed TenantCrossingStore to an already
+// constructed test server and returns it.
+func wireCrossingStore(t *testing.T, server *Server) *Server {
+	t.Helper()
 	sm := pkgtesting.SetupTestStorage(t)
 	tcs := sm.GetTenantCrossingStore()
 	require.NotNil(t, tcs, "OSS bundle path must populate TenantCrossingStore")
@@ -142,6 +179,65 @@ func TestAuthorizeRootScopedCaller_AllowedWithActiveGrant(t *testing.T) {
 	data, ok := resp.Data.(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "msp-a", data["id"])
+}
+
+// TestAuthorizeAccountBoundCaller_LowAssuranceStillGatedByBoundary is the REQUIRED
+// TEST for Issue #4337's GlobalScope-binding decision: a root-scope account's session,
+// currently below phishing-resistant assurance, must still be evaluated by the ADR-025
+// crossing boundary (not silently treated as unbounded, and not flatly denied) — the
+// same step-up-shaped challenge a high-assurance root-scoped caller gets.
+func TestAuthorizeAccountBoundCaller_LowAssuranceStillGatedByBoundary(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := accountBoundLowAssuranceRootPrincipal("low-assurance-root-1")
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleGetTenant(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a low-assurance root-scope-account session absent a crossing must get a step-up-shaped "+
+			"challenge — not silent, unconditional access")
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}
+
+// TestAuthorizeAccountBoundCaller_LowAssuranceAllowedWithActiveGrant is the REQUIRED
+// TEST's positive counterpart: the same low-assurance root-scope-account session, with
+// an active crossing grant, must be let through — Issue #4337's binding decision must
+// not turn into a blanket deny for every session that is not currently phishing-resistant.
+func TestAuthorizeAccountBoundCaller_LowAssuranceAllowedWithActiveGrant(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := accountBoundLowAssuranceRootPrincipal("low-assurance-root-2")
+
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:          "grant-low-assurance-1",
+		TenantID:    "msp-a",
+		PrincipalID: caller.ID,
+		Kind:        business.TenantCrossingKindGrant,
+		GrantedBy:   "msp-a-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}))
+
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/msp-a", "msp-a", caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleGetTenant(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"an active grant must let the low-assurance root-scope-account session through")
 }
 
 // TestAuthorizeRootScopedCaller_RootItselfAlwaysAllowed verifies "root" is not itself

@@ -29,7 +29,7 @@ func newTerminalScopeTestServer(t *testing.T, stewards map[string]string) *Serve
 	for id, tenant := range stewards {
 		require.NoError(t, cs.RegisterSteward(id, tenant, "addr", "active"))
 	}
-	return &Server{controllerService: cs}
+	return &Server{controllerService: cs, logger: logging.NewNoopLogger()}
 }
 
 // serveTerminalScope drives a request through the wrapper with a sentinel
@@ -154,6 +154,74 @@ func TestTerminalScope_RootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"root-scoped caller without crossing must receive a tenant-crossing challenge")
 	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}
+
+// TestTerminalScope_EmptyTenantNoRootScope_Refused is the REQUIRED TEST for Issue
+// #4337's fall-through fix: a principal with an empty tenant (callerTenant == "") that
+// is also not subject to the root-scope crossing boundary (RootScoped == false,
+// GlobalScope == false) used to match no branch in tenantScopedTerminalWrapper and fall
+// through to the handler unconditionally. Account creation ties an empty tenant to an
+// explicit root-scope grant, so an ordinary caller cannot normally reach this shape —
+// but the wrapper must refuse it outright rather than rely on that invariant.
+func TestTerminalScope_EmptyTenantNoRootScope_Refused(t *testing.T) {
+	s := newTerminalScopeTestServer(t, map[string]string{"steward-msp": "root/msp-a"})
+	principal := &Principal{ID: "neither-scoped-1", TenantID: "", RootScoped: false, GlobalScope: false}
+	rec, reached := serveTerminalScopeAsRootScoped(s, principal, "steward-msp")
+
+	assert.False(t, *reached,
+		"a principal with no tenant scope and no root scope must not reach the terminal handler")
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestTerminalScope_AccountBoundLowAssurance_NoCrossing_Returns401Challenge verifies
+// the GlobalScope-binding half of Issue #4337 on the terminal wrapper specifically: a
+// root-scope account's session below phishing-resistant assurance (RootScoped == false,
+// AccountBound + GlobalScope == true) must still hit the crossing check — not the
+// fall-through this story closes, and not an unconditional bypass.
+func TestTerminalScope_AccountBoundLowAssurance_NoCrossing_Returns401Challenge(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	require.NoError(t, server.controllerService.RegisterSteward("steward-msp", "msp-a", "addr", "active"))
+
+	principal := accountBoundLowAssuranceRootPrincipal("low-assurance-op-terminal")
+	rec, reached := serveTerminalScopeAsRootScoped(server, principal, "steward-msp")
+	assert.False(t, *reached, "low-assurance account-bound caller without crossing must not reach handler")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}
+
+// TestTerminalScope_AccountBoundLowAssurance_WithCrossing_Allowed is the positive
+// counterpart: an active grant lets the same low-assurance account-bound caller through.
+func TestTerminalScope_AccountBoundLowAssurance_WithCrossing_Allowed(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	require.NoError(t, server.controllerService.RegisterSteward("steward-msp", "msp-a", "addr", "active"))
+
+	principal := accountBoundLowAssuranceRootPrincipal("low-assurance-op-terminal-2")
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:          "grant-terminal-low-assurance-1",
+		TenantID:    "msp-a",
+		PrincipalID: principal.ID,
+		Kind:        business.TenantCrossingKindGrant,
+		GrantedBy:   "msp-a-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}))
+
+	rec, reached := serveTerminalScopeAsRootScoped(server, principal, "steward-msp")
+	assert.True(t, *reached, "active crossing must admit the low-assurance account-bound caller")
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 // TestTerminalScope_RootScoped_WithCrossing_Allowed verifies the REQUIRED TEST

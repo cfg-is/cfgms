@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 func init() { RegisterRoutes(registerTerminalRoutes) }
@@ -55,6 +56,15 @@ func registerTerminalRoutes(s *Server, api *mux.Router) {
 // enforces the ADR-025 Decision 1 boundary inline — same approach as the reboot-window
 // handler. tenantAuthNeedsCrossing emits a step-up-shaped crossing challenge
 // (ADR-025 Decision 3); tenantAuthDenied returns 404 (existence oracle).
+//
+// Every branch below ends in an explicit decision (proceed, challenge, or refuse) —
+// there is no implicit fall-through to next.ServeHTTP. Issue #4337: callerTenant == ""
+// with a principal that was also neither RootScoped nor tenant-scoped used to match no
+// case here and fall through to next.ServeHTTP unconditionally. It is now routed
+// through authorizeTenantAccess like every other branch, which already has a decision
+// for that exact shape (Amendment 4 A4.2: deny unless certificate-authenticated) — so
+// the fix is one code path handling every callerTenant == "" principal uniformly,
+// rather than a bespoke refusal bolted on beside it.
 func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -65,6 +75,7 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 		}
 		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
 		info, exists := s.controllerService.GetStewardInfo(stewardID)
+
 		if callerTenant != "" {
 			stewardTenant := ""
 			if exists {
@@ -77,28 +88,51 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 				return
 			}
-		} else if !exists {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !exists {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
-		} else if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil && principal.RootScoped {
-			// callerTenant == "" and steward exists: enforce ADR-025 Decision 1 for root-scoped principals.
-			stewardTenant := info.TenantID
-			if s.tenantManager == nil {
-				// Fail closed: no ancestry source wired, treat as if no crossing is active.
-				s.writeTenantCrossingChallenge(w, stewardTenant)
-				return
-			}
-			switch s.authorizeTenantAccess(r.Context(), principal, stewardTenant) {
-			case tenantAuthAllowed:
-				// Active crossing grant or steward is in the root tenant itself.
-			case tenantAuthNeedsCrossing:
-				s.writeTenantCrossingChallenge(w, stewardTenant)
-				return
-			default:
-				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
-			}
 		}
-		next.ServeHTTP(w, r)
+
+		// callerTenant == "" and steward exists: delegate to authorizeTenantAccess for
+		// every principal shape, not only ones subject to the crossing boundary. Its
+		// callerTenant == "" branches already cover: unconditional legacy access for a
+		// certificate-authenticated, non-boundary-subject admin (the 31 pre-existing
+		// branches authorizeTenantAccess's doc comment describes, provably unchanged
+		// here too); the ADR-025 Decision 1 crossing gate for a principal subject to the
+		// boundary (subjectToTenantCrossingBoundary — Issue #4337: GlobalScope for an
+		// account-bound principal, so a low-assurance session for a root-scope account
+		// still gates here); and Amendment 4 A4.2's deny for every other shape — the
+		// fall-through this story closes, now a real decision instead of an absent one.
+		//
+		// The tenantManager nil-guard only applies when the principal is actually
+		// boundary-subject: authorizeTenantAccess never dereferences tenantManager for
+		// the other two branches, so skipping it there would fail closed on a caller
+		// this guard was never meant to affect.
+		principal, _ := r.Context().Value(principalContextKey).(*Principal)
+		stewardTenant := info.TenantID
+		if subjectToTenantCrossingBoundary(principal) && s.tenantManager == nil {
+			// Fail closed: no ancestry source wired, treat as if no crossing is active.
+			s.writeTenantCrossingChallenge(w, stewardTenant)
+			return
+		}
+		switch s.authorizeTenantAccess(r.Context(), principal, stewardTenant) {
+		case tenantAuthAllowed:
+			next.ServeHTTP(w, r)
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, stewardTenant)
+		default:
+			principalID := ""
+			if principal != nil {
+				principalID = principal.ID
+			}
+			s.logger.Warn("Terminal access refused: principal has no tenant scope and is not authorized for this steward",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"principal_id", logging.SanitizeLogValue(principalID))
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		}
 	})
 }
