@@ -1352,9 +1352,14 @@ func (s DatabaseSchemas) CreateSessionsTable(ctx context.Context, db *sql.DB) er
 		`CREATE POLICY rls_write ON sessions FOR INSERT WITH CHECK (
 			tenant_id = current_setting('app.current_tenant', true)
 		);`,
-		// UPDATE/DELETE: unrestricted at DB level; keyed by globally-unique session_id_hash.
-		`CREATE POLICY rls_update ON sessions FOR UPDATE USING (TRUE);`,
-		`CREATE POLICY rls_delete ON sessions FOR DELETE USING (TRUE);`,
+		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
+		// current tenant, and an UPDATE may not move a row to a different tenant --
+		// an unset tenant matches nothing (fail closed), not every row.
+		`CREATE POLICY rls_update ON sessions FOR UPDATE
+			USING (tenant_id = current_setting('app.current_tenant', true))
+			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
+		`CREATE POLICY rls_delete ON sessions FOR DELETE
+			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range rls {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -1428,9 +1433,21 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		`CREATE POLICY rls_write ON steward_records FOR INSERT WITH CHECK (
 			tenant_id = current_setting('app.current_tenant', true)
 		);`,
-		// UPDATE/DELETE: unrestricted at DB level; keyed by globally-unique steward ID.
-		`CREATE POLICY rls_update ON steward_records FOR UPDATE USING (TRUE);`,
-		`CREATE POLICY rls_delete ON steward_records FOR DELETE USING (TRUE);`,
+		// UPDATE (Issue #4321): the target row must belong to the caller's current
+		// tenant -- an unset tenant matches nothing (fail closed), not every row.
+		// WITH CHECK is deliberately TRUE, not tenant-scoped: UpdateStewardTenant
+		// (steward_store.go) is a real product feature that moves a steward to a
+		// different tenant, gated at the Go/API layer (handlers_stewards.go's
+		// handleMoveSteward requires a root caller or a scoped admin whose scope
+		// covers both tenants). USING and WITH CHECK read the same
+		// current_setting('app.current_tenant') value within one statement, so a
+		// tenant-scoped WITH CHECK here would make that move impossible for any
+		// caller. See TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed.
+		`CREATE POLICY rls_update ON steward_records FOR UPDATE
+			USING (tenant_id = current_setting('app.current_tenant', true))
+			WITH CHECK (TRUE);`,
+		`CREATE POLICY rls_delete ON steward_records FOR DELETE
+			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range rls {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -1496,9 +1513,14 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		`CREATE POLICY rls_write ON command_records FOR INSERT WITH CHECK (
 			tenant_id = current_setting('app.current_tenant', true)
 		);`,
-		// UPDATE/DELETE: unrestricted at DB level; keyed by globally-unique command ID.
-		`CREATE POLICY rls_update ON command_records FOR UPDATE USING (TRUE);`,
-		`CREATE POLICY rls_delete ON command_records FOR DELETE USING (TRUE);`,
+		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
+		// current tenant, and an UPDATE may not move a row to a different tenant --
+		// an unset tenant matches nothing (fail closed), not every row.
+		`CREATE POLICY rls_update ON command_records FOR UPDATE
+			USING (tenant_id = current_setting('app.current_tenant', true))
+			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
+		`CREATE POLICY rls_delete ON command_records FOR DELETE
+			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range rls {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -1609,8 +1631,14 @@ func (s DatabaseSchemas) CreateSessionTokenStoreTable(ctx context.Context, db *s
 		`CREATE POLICY rls_write ON session_token_store FOR INSERT WITH CHECK (
 			tenant_id = current_setting('app.current_tenant', true)
 		);`,
-		`CREATE POLICY rls_update ON session_token_store FOR UPDATE USING (TRUE);`,
-		`CREATE POLICY rls_delete ON session_token_store FOR DELETE USING (TRUE);`,
+		// UPDATE/DELETE (Issue #4321): the target row must belong to the caller's
+		// current tenant, and an UPDATE may not move a row to a different tenant --
+		// an unset tenant matches nothing (fail closed), not every row.
+		`CREATE POLICY rls_update ON session_token_store FOR UPDATE
+			USING (tenant_id = current_setting('app.current_tenant', true))
+			WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`,
+		`CREATE POLICY rls_delete ON session_token_store FOR DELETE
+			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}
 	for _, stmt := range rls {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {

@@ -138,7 +138,23 @@ func (s *DatabaseStewardStore) RegisterSteward(ctx context.Context, record *busi
 // UpdateHeartbeat updates last_heartbeat_at and last_seen to now.
 func (s *DatabaseStewardStore) UpdateHeartbeat(ctx context.Context, stewardID string) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin update heartbeat tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE steward_records SET last_heartbeat_at = $2, last_seen = $2 WHERE id = $1`,
 		stewardID, now)
 	if err != nil {
@@ -148,7 +164,23 @@ func (s *DatabaseStewardStore) UpdateHeartbeat(ctx context.Context, stewardID st
 	if n == 0 {
 		return business.ErrStewardNotFound
 	}
-	return nil
+	return tx.Commit()
+}
+
+// fetchStewardTenant looks up the tenant_id for stewardID. Used ahead of an
+// UPDATE/DELETE that needs app.current_tenant set for RLS (Issue #4321): the read
+// itself relies on rls_read's permissive-when-unset branch, so it works on a
+// connection that has not set a tenant.
+func (s *DatabaseStewardStore) fetchStewardTenant(ctx context.Context, stewardID string) (string, error) {
+	var tenantID string
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id FROM steward_records WHERE id = $1`, stewardID).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return "", business.ErrStewardNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("database: failed to fetch steward tenant for %s: %w", stewardID, err)
+	}
+	return tenantID, nil
 }
 
 // GetSteward retrieves the record for the given steward ID.
@@ -208,7 +240,22 @@ func (s *DatabaseStewardStore) ListStewardsByStatus(ctx context.Context, status 
 
 // UpdateStewardStatus sets the lifecycle status and bumps last_seen.
 func (s *DatabaseStewardStore) UpdateStewardStatus(ctx context.Context, stewardID string, status business.StewardStatus) error {
-	res, err := s.db.ExecContext(ctx, `
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin update steward status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE steward_records SET status = $2, last_seen = $3 WHERE id = $1`,
 		stewardID, string(status), time.Now().UTC())
 	if err != nil {
@@ -218,12 +265,27 @@ func (s *DatabaseStewardStore) UpdateStewardStatus(ctx context.Context, stewardI
 	if n == 0 {
 		return business.ErrStewardNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // SetStewardHidden sets the operator-controlled visibility flag for the given steward.
 func (s *DatabaseStewardStore) SetStewardHidden(ctx context.Context, stewardID string, hidden bool) error {
-	res, err := s.db.ExecContext(ctx, `
+	tenantID, err := s.fetchStewardTenant(ctx, stewardID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set hidden tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE steward_records SET hidden = $2 WHERE id = $1`,
 		stewardID, hidden)
 	if err != nil {
@@ -233,7 +295,7 @@ func (s *DatabaseStewardStore) SetStewardHidden(ctx context.Context, stewardID s
 	if n == 0 {
 		return business.ErrStewardNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // DeregisterSteward marks the steward as deregistered. Records are retained for audit.
@@ -241,9 +303,30 @@ func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID 
 	return s.UpdateStewardStatus(ctx, stewardID, business.StewardStatusDeregistered)
 }
 
-// UpdateStewardTenant moves a steward to a different tenant by updating its tenant_id column.
+// UpdateStewardTenant moves a steward to a different tenant by updating its tenant_id
+// column, guarded by the expectedTenantID compare-and-swap.
+//
+// steward_records' rls_update policy (Issue #4321) requires the row targeted by
+// UPDATE to belong to app.current_tenant -- set here to expectedTenantID, the
+// source tenant -- but deliberately leaves WITH CHECK unconstrained so the
+// resulting row can carry newTenantID. That asymmetry exists specifically for this
+// method: USING and WITH CHECK read the same current_setting() value within one
+// statement, so a tenant-scoped WITH CHECK would make any cross-tenant move
+// impossible for every caller, not just an unauthorized one. Authorization for the
+// move itself happens above this layer (handlers_stewards.go's handleMoveSteward
+// requires a root caller or a scoped admin whose scope covers both tenants).
 func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin update steward tenant tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, expectedTenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
 		`UPDATE steward_records SET tenant_id = $2 WHERE id = $1 AND tenant_id = $3`,
 		stewardID, newTenantID, expectedTenantID)
 	if err != nil {
@@ -253,7 +336,7 @@ func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardI
 	if n == 0 {
 		return business.ErrStewardNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetStewardsSeen returns all stewards whose last_seen is after the given time.

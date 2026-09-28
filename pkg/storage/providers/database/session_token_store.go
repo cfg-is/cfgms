@@ -223,7 +223,28 @@ func (s *DatabaseSessionTokenStore) GetByID(ctx context.Context, id string) (*se
 // current token and any in-grace prior-token entry simultaneously.
 // Returns ErrSessionNotFound when no rows matched (session was not in the store).
 func (s *DatabaseSessionTokenStore) Delete(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx,
+	// Determine the tenant from an existing row first (needed for RLS on the DELETE).
+	var tenantID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM session_token_store WHERE session_id = $1 LIMIT 1`, id).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return session.ErrSessionNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("database: session token delete: failed to fetch tenant: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: session token delete: failed to begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: session token delete: failed to set tenant context: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx,
 		`DELETE FROM session_token_store WHERE session_id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("database: session token delete failed: %w", err)
@@ -235,7 +256,7 @@ func (s *DatabaseSessionTokenStore) Delete(ctx context.Context, id string) error
 	if n == 0 {
 		return session.ErrSessionNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListAll returns one Session per unique session_id, de-duplicating rows that share a
@@ -295,13 +316,33 @@ func (s *DatabaseSessionTokenStore) ListAll(ctx context.Context) ([]*session.Ses
 // grace window elapses. The manager's in-memory prevExpiry continues to be authoritative
 // on the issuing node; this column makes the expiry durable and visible to peer nodes.
 func (s *DatabaseSessionTokenStore) StampGraceExpiry(ctx context.Context, tokenHash string, expiresAt time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE session_token_store SET hash_expires_at = $1 WHERE token_hash = $2`,
-		roundToStorablePrecision(expiresAt.UTC()), tokenHash)
+	// Determine the tenant from the existing row first (needed for RLS on the UPDATE).
+	var tenantID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM session_token_store WHERE token_hash = $1`, tokenHash).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return nil
+	}
 	if err != nil {
+		return fmt.Errorf("database: session token stamp grace expiry: failed to fetch tenant: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: session token stamp grace expiry: failed to begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: session token stamp grace expiry: failed to set tenant context: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE session_token_store SET hash_expires_at = $1 WHERE token_hash = $2`,
+		roundToStorablePrecision(expiresAt.UTC()), tokenHash); err != nil {
 		return fmt.Errorf("database: session token stamp grace expiry failed: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // storableSessionTimestamps holds sess's write-path timestamp fields rounded to
