@@ -132,7 +132,7 @@ proto-gen-clusterdelivery: check-proto-grpc-tools
 
 # Build all binaries
 .PHONY: build
-build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
+build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules build-workflow-modules
 
 # Build individual binaries
 .PHONY: build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
@@ -191,6 +191,25 @@ build-stdlib-modules: check-stdlib-payload-boundary
 	@for module in $(STDLIB_MODULES); do \
 		echo "  Building cfgms-module-$$module..."; \
 		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/stdlib/$$module/cmd || exit 1; \
+	done
+
+# Workflow-kind module binaries (controller-executed, out-of-process gRPC
+# binaries published to the controller module cache — see ADR-006 and
+# features/workflow/module_loader.go). Deliberately separate from
+# STDLIB_MODULES: workflow modules are never part of the steward installer
+# payload, and STDLIB_MODULES membership is a closed set fixed by ADR-016
+# (Issue #4325). List entries are paths relative to
+# features/workflow/modules/, e.g. "m365/entra_user".
+WORKFLOW_MODULES := \
+	m365/entra_user
+
+.PHONY: build-workflow-modules
+build-workflow-modules:
+	@echo "Building workflow module binaries..."
+	@for module in $(WORKFLOW_MODULES); do \
+		name=$$(echo $$module | tr '/_' '--'); \
+		echo "  Building cfgms-module-$$name..."; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$name ./features/workflow/modules/$$module/cmd || exit 1; \
 	done
 
 # Cross-platform build targets

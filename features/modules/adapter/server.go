@@ -43,7 +43,95 @@ func (s *moduleServer) Handshake(_ context.Context, _ *proto.HandshakeRequest) (
 
 // Get retrieves the current resource state and returns it as YAML-encoded ConfigData.
 func (s *moduleServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
-	state, err := s.module.Get(ctx, req.GetResourceId())
+	return moduleGet(ctx, s.module, req)
+}
+
+// Set applies the desired state from ConfigData (YAML) to the resource.
+func (s *moduleServer) Set(ctx context.Context, req *proto.SetRequest) (*proto.SetResponse, error) {
+	return moduleSet(ctx, s.module, req)
+}
+
+// Test checks compliance without applying changes. Calls Get and compares the
+// result against the desired ConfigData; returns InCompliance = true when the
+// current state matches all managed fields.
+func (s *moduleServer) Test(ctx context.Context, req *proto.TestRequest) (*proto.TestResponse, error) {
+	return moduleTest(ctx, s.module, req)
+}
+
+// Shutdown triggers a graceful gRPC server stop.
+func (s *moduleServer) Shutdown(_ context.Context, _ *proto.ShutdownRequest) (*proto.ShutdownResponse, error) {
+	return moduleShutdown(s.srv)
+}
+
+// NewWorkflow wraps module in a WorkflowModuleServiceServer that translates
+// gRPC calls to modules.Module calls — the workflow-kind (controller-executed)
+// counterpart to New. Out-of-process workflow module binaries (manifests
+// declaring executors: [controller], ADR-006) register the returned server
+// instead of New's ModuleServiceServer, since they are resolved via
+// WorkflowModuleFactory / features/workflow/runtime rather than the steward
+// module runtime and so speak WorkflowModuleService, not ModuleService — the
+// two contracts share every message type except Handshake (module.proto /
+// workflow_module.proto), which is why every RPC below except Handshake
+// delegates to the same helpers as moduleServer.
+// moduleName is reported in the Handshake capabilities list. The grpcServer
+// parameter is used by Shutdown to call GracefulStop.
+func NewWorkflow(m modules.Module, moduleName string, grpcServer interface{ GracefulStop() }) proto.WorkflowModuleServiceServer {
+	return &workflowModuleServer{
+		module:     m,
+		moduleName: moduleName,
+		srv:        grpcServer,
+	}
+}
+
+// workflowModuleServer adapts a modules.Module to the proto.WorkflowModuleServiceServer interface.
+type workflowModuleServer struct {
+	proto.UnimplementedWorkflowModuleServiceServer
+	module     modules.Module
+	moduleName string
+	srv        interface{ GracefulStop() }
+}
+
+// Handshake reports the module name as its capability.
+//
+// req.TenantId / req.AuthToken are not yet consumed here: the workflow engine
+// does not populate them today (features/workflow/runtime.Start's Handshake
+// call leaves both fields at their zero value), so per-call tenant scoping
+// for Get/Set continues to rely on ctx (ctxkeys.TenantID) exactly as
+// documented on entra_user.requireExecutionTenant. Wiring WorkflowHandshakeRequest's
+// tenant_id/auth_token through the engine -> module_loader -> runtime.Start
+// call chain is a separate, cross-cutting runtime change, not specific to
+// any one module (Issue #4325).
+func (s *workflowModuleServer) Handshake(_ context.Context, _ *proto.WorkflowHandshakeRequest) (*proto.WorkflowHandshakeResponse, error) {
+	return &proto.WorkflowHandshakeResponse{
+		Capabilities: []string{s.moduleName},
+	}, nil
+}
+
+// Get retrieves the current resource state and returns it as YAML-encoded ConfigData.
+func (s *workflowModuleServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+	return moduleGet(ctx, s.module, req)
+}
+
+// Set applies the desired state from ConfigData (YAML) to the resource.
+func (s *workflowModuleServer) Set(ctx context.Context, req *proto.SetRequest) (*proto.SetResponse, error) {
+	return moduleSet(ctx, s.module, req)
+}
+
+// Test checks compliance without applying changes.
+func (s *workflowModuleServer) Test(ctx context.Context, req *proto.TestRequest) (*proto.TestResponse, error) {
+	return moduleTest(ctx, s.module, req)
+}
+
+// Shutdown triggers a graceful gRPC server stop.
+func (s *workflowModuleServer) Shutdown(_ context.Context, _ *proto.ShutdownRequest) (*proto.ShutdownResponse, error) {
+	return moduleShutdown(s.srv)
+}
+
+// moduleGet is the shared Get implementation for both the ModuleService and
+// WorkflowModuleService adapters (their GetRequest/GetResponse types are the
+// same proto messages, defined once in module.proto).
+func moduleGet(ctx context.Context, m modules.Module, req *proto.GetRequest) (*proto.GetResponse, error) {
+	state, err := m.Get(ctx, req.GetResourceId())
 	if err != nil {
 		return nil, err
 	}
@@ -58,8 +146,8 @@ func (s *moduleServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.G
 	return &proto.GetResponse{ConfigData: string(data)}, nil
 }
 
-// Set applies the desired state from ConfigData (YAML) to the resource.
-func (s *moduleServer) Set(ctx context.Context, req *proto.SetRequest) (*proto.SetResponse, error) {
+// moduleSet is the shared Set implementation for both adapters.
+func moduleSet(ctx context.Context, m modules.Module, req *proto.SetRequest) (*proto.SetResponse, error) {
 	// Deserialise the YAML config map and wrap it as a mapConfigState.
 	var configMap map[string]interface{}
 	if err := yaml.Unmarshal([]byte(req.GetConfigData()), &configMap); err != nil {
@@ -73,23 +161,23 @@ func (s *moduleServer) Set(ctx context.Context, req *proto.SetRequest) (*proto.S
 	cs := &mapConfigState{m: configMap}
 
 	// If the module supports Configure, call it to prime AllowedBasePath before Set.
-	if configurable, ok := s.module.(modules.Configurable); ok {
+	if configurable, ok := m.(modules.Configurable); ok {
 		if err := configurable.Configure(cs); err != nil {
 			return &proto.SetResponse{Error: fmt.Sprintf("configure: %v", err)}, nil
 		}
 	}
 
-	if err := s.module.Set(ctx, req.GetResourceId(), cs); err != nil {
+	if err := m.Set(ctx, req.GetResourceId(), cs); err != nil {
 		return &proto.SetResponse{Error: err.Error()}, nil
 	}
 	return &proto.SetResponse{Applied: true}, nil
 }
 
-// Test checks compliance without applying changes. Calls Get and compares the
-// result against the desired ConfigData; returns InCompliance = true when the
-// current state matches all managed fields.
-func (s *moduleServer) Test(ctx context.Context, req *proto.TestRequest) (*proto.TestResponse, error) {
-	current, err := s.module.Get(ctx, req.GetResourceId())
+// moduleTest is the shared Test implementation for both adapters. Calls Get
+// and compares the result against the desired ConfigData; returns
+// InCompliance = true when the current state matches all managed fields.
+func moduleTest(ctx context.Context, m modules.Module, req *proto.TestRequest) (*proto.TestResponse, error) {
+	current, err := m.Get(ctx, req.GetResourceId())
 	if err != nil {
 		return nil, err
 	}
@@ -123,10 +211,10 @@ func (s *moduleServer) Test(ctx context.Context, req *proto.TestRequest) (*proto
 	return &proto.TestResponse{InCompliance: true}, nil
 }
 
-// Shutdown triggers a graceful gRPC server stop.
-func (s *moduleServer) Shutdown(_ context.Context, _ *proto.ShutdownRequest) (*proto.ShutdownResponse, error) {
-	if s.srv != nil {
-		go s.srv.GracefulStop()
+// moduleShutdown is the shared Shutdown implementation for both adapters.
+func moduleShutdown(srv interface{ GracefulStop() }) (*proto.ShutdownResponse, error) {
+	if srv != nil {
+		go srv.GracefulStop()
 	}
 	return &proto.ShutdownResponse{}, nil
 }
