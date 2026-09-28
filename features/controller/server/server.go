@@ -641,7 +641,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// Issue #3253: Construct the entity graph provider, tracking the same
 	// storage backend as the rest of the controller. The provider is registered
 	// in openedStores immediately so a mid-New failure releases its handle.
-	egProvider, egErr := initializeEntityGraphProvider(cfg, logger)
+	egProvider, egErr := initializeEntityGraphProvider(cfg, logger, controllerService)
 	if egErr != nil {
 		return nil, fmt.Errorf("failed to initialize entity graph provider: %w", egErr)
 	}
@@ -3925,7 +3925,15 @@ func initializeTagStore(
 //   - OSS composite mode (FlatfileRoot set): SQLiteEntityGraphProvider at a
 //     dedicated file alongside cfg.Storage.SQLitePath so the two stores never
 //     share the same *sql.DB handle.
-func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (egServerProvider, error) {
+//
+// tenantResolver is wired into every branch via WithTenantResolver so that a
+// peer-bound ObservationBatch (any steward-originated DNA-sync write, Issue
+// #4319) resolves owning_tenant from the controller's own steward registry —
+// *service.ControllerService.TenantForDevice — rather than failing closed to
+// an empty tenant for every real ingest. It may be nil (e.g. in unit tests
+// that only exercise the error/config paths below); nil is passed through
+// unchanged and reproduces the pre-#4319 fail-closed default.
+func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger, tenantResolver eginterfaces.TenantResolver) (egServerProvider, error) {
 	if cfg.Storage == nil {
 		return nil, fmt.Errorf("storage configuration required for entity graph provider")
 	}
@@ -3935,7 +3943,7 @@ func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (e
 		if cfg.Storage.Cluster != nil {
 			pgDSN = cfg.Storage.Cluster.PostgresDSN
 		}
-		p, err := egdatabase.NewDatabaseEntityGraphProvider(pgDSN)
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(pgDSN, egdatabase.WithTenantResolver(tenantResolver))
 		if err != nil {
 			return nil, fmt.Errorf("entity graph (cluster/postgres): %w", err)
 		}
@@ -3948,7 +3956,7 @@ func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (e
 		if dsnErr != nil {
 			return nil, fmt.Errorf("entity graph (database single-provider): %w", dsnErr)
 		}
-		p, err := egdatabase.NewDatabaseEntityGraphProvider(dsn)
+		p, err := egdatabase.NewDatabaseEntityGraphProvider(dsn, egdatabase.WithTenantResolver(tenantResolver))
 		if err != nil {
 			return nil, fmt.Errorf("entity graph (database single-provider): %w", err)
 		}
@@ -3961,7 +3969,7 @@ func initializeEntityGraphProvider(cfg *config.Config, logger logging.Logger) (e
 		return nil, fmt.Errorf("storage.sqlite_path is required for the entity graph provider in OSS composite mode")
 	}
 	egPath := filepath.Join(filepath.Dir(cfg.Storage.SQLitePath), "entitygraph.db")
-	p, err := egsqlite.NewSQLiteEntityGraphProvider(egPath)
+	p, err := egsqlite.NewSQLiteEntityGraphProvider(egPath, egsqlite.WithTenantResolver(tenantResolver))
 	if err != nil {
 		return nil, fmt.Errorf("entity graph (sqlite): %w", err)
 	}

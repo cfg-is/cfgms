@@ -170,6 +170,27 @@ func stateHistory(t *testing.T, p *sqliteprovider.SQLiteEntityGraphProvider, eid
 	return out
 }
 
+// staticTenantResolver is a test interfaces.TenantResolver mapping fixed peer
+// identities to their registered tenant, mirroring how the controller-side
+// steward registry would answer in production.
+type staticTenantResolver map[string]string
+
+func (m staticTenantResolver) TenantForDevice(peerIdentity string) (string, bool) {
+	t, ok := m[peerIdentity]
+	return t, ok
+}
+
+// newTestProviderWithResolver builds a provider wired with resolver so
+// AuthenticatedPeer-bound batches resolve owning_tenant from it.
+func newTestProviderWithResolver(t *testing.T, resolver interfaces.TenantResolver) *sqliteprovider.SQLiteEntityGraphProvider {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := sqliteprovider.NewSQLiteEntityGraphProvider(path, sqliteprovider.WithTenantResolver(resolver))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
 // --- constructor tests ---
 
 // TestNewWriterNilProvider verifies that New rejects a nil provider.
@@ -1126,4 +1147,88 @@ func TestClusterFragmentHasNoClaimScope(t *testing.T) {
 	records := stateHistory(t, p, clusterEID)
 	require.Len(t, records, 2,
 		"both stewards' cluster observations must survive — no implicit retraction on cluster-kind")
+}
+
+// --- AC Group F: owning_tenant bound to the authenticated peer (Issue #4319) ---
+
+// TestF1_ForeignTenantAssertionOverridden is a REQUIRED test: a fragment that
+// decodes a foreign owning_tenant must be stored under the reporting peer's
+// real, resolver-derived tenant — the assertion is overridden, not merely
+// ignored.
+func TestF1_ForeignTenantAssertionOverridden(t *testing.T) {
+	resolver := staticTenantResolver{"steward-real": "root/real-tenant"}
+	p := newTestProviderWithResolver(t, resolver)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId: "file:/etc/hosts",
+		Authority:  "enforcing-module:file",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{
+			"state":         "present",
+			"owning_tenant": "root/evil-tenant",
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-real", []*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	eid := mustParseEID(t, "host:steward-real/file:/etc/hosts")
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/real-tenant"})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.Equal(t, "root/real-tenant", view.Entity.OwningTenant,
+		"the peer's resolved tenant must win over the fragment's claimed owning_tenant")
+
+	// The fragment's claimed tenant must never be honored: a read scoped to it
+	// must not surface this entity.
+	viewEvil, errEvil := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/evil-tenant"})
+	if errEvil == nil {
+		require.Nil(t, viewEvil, "a fragment's claimed tenant must never become visible")
+	}
+}
+
+// TestF2_NoTenantAssertionUsesRealTenant is a REQUIRED test: a fragment that
+// asserts no tenant at all must still be stored under the reporting peer's
+// real tenant, never an empty (cross-tenant-visible) one.
+func TestF2_NoTenantAssertionUsesRealTenant(t *testing.T) {
+	resolver := staticTenantResolver{"steward-quiet": "root/quiet-tenant"}
+	p := newTestProviderWithResolver(t, resolver)
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := makeHostFrag("service:sshd", "enforcing-module:service") // no owning_tenant key at all
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-quiet", []*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	eid := mustParseEID(t, "host:steward-quiet/service:sshd")
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/quiet-tenant"})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.NotEmpty(t, view.Entity.OwningTenant, "owning_tenant must never be empty for a known, resolvable peer")
+	require.Equal(t, "root/quiet-tenant", view.Entity.OwningTenant,
+		"a fragment with no tenant assertion must still be bound to the peer's real tenant")
+}
+
+// TestF4_NoResolverWiredYieldsEmptyTenant verifies the fail-closed default: a
+// Writer whose provider has no TenantResolver wired stores every peer-bound
+// observation with an empty owning_tenant rather than trusting the fragment's
+// claim, mirroring dnasync.ClusterMembership's nil-verifier-denies default.
+func TestF4_NoResolverWiredYieldsEmptyTenant(t *testing.T) {
+	p := newTestProvider(t) // no resolver wired
+	w := newTestWriter(t, p)
+	ctx := context.Background()
+
+	frag := &commonpb.Fragment{
+		FragmentId: "file:/etc/hosts",
+		Authority:  "enforcing-module:file",
+		CanonicalBytes: makeTestCanonBytes(map[string]string{
+			"owning_tenant": "root/evil-tenant",
+			"state":         "present",
+		}),
+	}
+	require.NoError(t, w.WriteFragmentDelta(ctx, "steward-noresolver", []*commonpb.Fragment{frag}, nil, types.DefaultTaxonomy()))
+
+	eid := mustParseEID(t, "host:steward-noresolver/file:/etc/hosts")
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	require.Empty(t, view.Entity.OwningTenant, "with no resolver wired, owning_tenant must be empty, never the claimed value")
 }

@@ -210,6 +210,12 @@ func (w *Writer) WriteFragmentDelta(
 		// regardless of per-fragment Observation.Source values (ADR-022 §4).
 		Source:       peerHostAuthority,
 		Observations: allObs,
+		// AuthenticatedPeer is the same mTLS-verified peerHostAuthority — never
+		// a tenant the caller chooses. The provider resolves owning_tenant from
+		// it independently and overwrites whatever a fragment's payload
+		// claims, closing the tenant-spoofing gap a compromised steward would
+		// otherwise have (Issue #4319).
+		AuthenticatedPeer: peerHostAuthority,
 	}
 
 	// Host-scoped fragments get a ClaimScope: "peerHostAuthority has reported
@@ -249,6 +255,17 @@ func buildPayload(frag *commonpb.Fragment, confidence types.Confidence) map[stri
 		sum := sha256.Sum256(cb)
 		payload["fragment_hash"] = hex.EncodeToString(sum[:])
 	}
+
+	// A steward's fragment can decode a tenant_path/owning_tenant field just as
+	// easily as any other attribute — strip it unconditionally, the same way
+	// fragment_hash above is derived rather than copied. owning_tenant is the
+	// entity graph's sole access-control axis, so it must never reach storage
+	// as a value the reporting peer supplied: the provider derives it
+	// independently from the mTLS-verified peer identity via
+	// ObservationBatch.AuthenticatedPeer (Issue #4319), and overwrites this
+	// deletion's absence regardless.
+	delete(payload, "tenant_path")
+	delete(payload, "owning_tenant")
 
 	// Always set these — they are the non-negotiable provenance fields.
 	payload["fragment_id"] = frag.GetFragmentId()

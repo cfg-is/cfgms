@@ -186,6 +186,31 @@ type ObservationBatch struct {
 	// ClaimScopes, when non-empty, declares snapshot scopes that trigger
 	// implicit retraction of prior assertions outside this batch.
 	ClaimScopes []types.ClaimScope
+
+	// AuthenticatedPeer is the mTLS-verified identity of the reporting peer for
+	// a steward-originated batch (e.g. DNA sync). It is NOT a tenant: the
+	// caller asserts only which peer it verified, never which tenant that peer
+	// owns — that binding cannot be short-circuited by a future caller
+	// (Issue #4319). When non-empty, ReportObservations implementations
+	// resolve owning_tenant for every observation in the batch from their
+	// configured TenantResolver and overwrite whatever tenant_path/
+	// owning_tenant a payload asserts, rather than trusting it. Leave empty for
+	// internal/trusted writers (config pushes, tenant-tree mirroring, entity
+	// correlation), which keep the payload-supplied-tenant contract.
+	AuthenticatedPeer string
+}
+
+// TenantResolver resolves the tenant that owns an authenticated peer identity
+// (e.g. a registered steward), from controller-side registration state —
+// never from data the peer itself asserts. Implementations must answer only
+// for peers the controller has independently registered.
+//
+// ok=false (an unknown peer) is not license to invent a tenant: callers get an
+// empty owning tenant instead, which is excluded from every tenant-scoped read
+// (ADR-023 §7) rather than made cross-tenant-visible. Returning false is
+// always safe; a wrong non-empty answer never is.
+type TenantResolver interface {
+	TenantForDevice(peerIdentity string) (tenantID string, ok bool)
 }
 
 // RetentionPolicy configures the observation-history retention window applied

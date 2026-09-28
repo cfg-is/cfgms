@@ -3,13 +3,17 @@
 package server
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/pkg/cert"
+	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -80,6 +84,108 @@ func TestServer_New_WiresEntityGraphProviderIntoAPIServer(t *testing.T) {
 		"entity graph watch provider must be wired into the API server (else GET /api/v1/cases/{id}/watch 503s)")
 }
 
+// TestServer_New_WiresTenantResolverIntoEntityGraphProvider is the regression
+// guard for the PR #4354 acceptance-review finding on Issue #4319:
+// initializeEntityGraphProvider() gained a TenantResolver-aware ReportObservations
+// path and a WithTenantResolver constructor option, but New() constructed both
+// entity graph providers with zero options, so controllerService — the running
+// controller's own steward registry, and the only thing that knows a peer's
+// real tenant — was never wired in. Every real (non-test) steward-originated
+// observation therefore resolved owning_tenant to "" forever, identical to
+// what a compromised steward gets under the fail-closed default.
+//
+// This proves the wiring end-to-end through the exact path production takes:
+// New() -> initializeEntityGraphProvider(cfg, logger, controllerService) ->
+// WithTenantResolver(controllerService), then a peer-bound batch (as
+// dnasync.Writer sends, AuthenticatedPeer set, payload asserting a foreign
+// tenant) is ingested via the real srv.egProvider and read back to confirm the
+// registry-resolved tenant won, not the empty fail-closed default and not the
+// payload's claim.
+func TestServer_New_WiresTenantResolverIntoEntityGraphProvider(t *testing.T) {
+	logger := logging.NewNoopLogger()
+
+	tempDir := t.TempDir()
+	caDir := tempDir + "/ca"
+	_, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: tempDir,
+		CAConfig: &cert.CAConfig{
+			Organization: "EG Tenant Resolver Wiring Test",
+			Country:      "US",
+			ValidityDays: 3650,
+		},
+		LoadExistingCA: false,
+	})
+	require.NoError(t, err, "failed to create test CA")
+
+	cfg := &config.Config{
+		ListenAddr: "127.0.0.1:0",
+		Certificate: &config.CertificateConfig{
+			EnableCertManagement: true,
+			CAPath:               caDir,
+			Server: &config.ServerCertificateConfig{
+				CommonName:   "eg-tenant-resolver-wiring-controller",
+				Organization: "EG Tenant Resolver Wiring Test",
+			},
+		},
+		Transport: &config.TransportConfig{
+			ListenAddr:     "127.0.0.1:0",
+			UseCertManager: true,
+			MaxConnections: 10,
+		},
+		Storage: createTestStorageConfig(tempDir, "eg-tenant-resolver-wiring"),
+	}
+
+	srv, err := New(cfg, logger)
+	require.NoError(t, err)
+	require.NotNil(t, srv)
+	t.Cleanup(func() { assert.NoError(t, srv.Stop()) })
+
+	// Register a steward under its real tenant in the same registry
+	// initializeEntityGraphProvider was wired with — this is the "authoritative
+	// registration state" the acceptance criteria requires owning_tenant to be
+	// derived from.
+	const stewardID = "steward-real"
+	const realTenant = "root/real-tenant"
+	const foreignTenant = "root/foreign-tenant"
+	require.NoError(t, srv.GetControllerService().RegisterSteward(stewardID, realTenant, "127.0.0.1:0", "active"))
+
+	eid, err := egtypes.NewEID("host", stewardID, "eg-tenant-resolver-wiring-test")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	require.NoError(t, srv.egProvider.ReportObservations(ctx, eginterfaces.ObservationBatch{
+		Source:            stewardID,
+		AuthenticatedPeer: stewardID,
+		Observations: []egtypes.Observation{
+			{
+				Source:     stewardID,
+				ObservedAt: now,
+				RecordedAt: now,
+				Subject:    eid.String(),
+				Kind:       egtypes.ObservationKindState,
+				Confidence: egtypes.ConfidenceHigh,
+				Payload: map[string]interface{}{
+					"entity_kind":   "host",
+					"owning_tenant": foreignTenant,
+					"hostname":      "victim-host",
+				},
+			},
+		},
+	}))
+
+	view, err := srv.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{TenantFilter: realTenant})
+	require.NoError(t, err)
+	require.NotNil(t, view)
+	assert.Equal(t, realTenant, view.Entity.OwningTenant,
+		"production wiring must resolve owning_tenant from the controller's own steward registry, not leave it empty or trust the payload's claim")
+
+	viewForeign, errForeign := srv.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{TenantFilter: foreignTenant})
+	if errForeign == nil {
+		assert.Nil(t, viewForeign, "the fragment's claimed tenant must never become visible")
+	}
+}
+
 // TestInitializeEntityGraphProvider covers the error paths of
 // initializeEntityGraphProvider so that misconfiguration is caught at startup.
 func TestInitializeEntityGraphProvider(t *testing.T) {
@@ -87,7 +193,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 
 	t.Run("nil_storage_returns_error", func(t *testing.T) {
 		cfg := &config.Config{Storage: nil}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "nil storage must return an error")
 		assert.Nil(t, p)
 	})
@@ -100,7 +206,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				SQLitePath:   "",
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "OSS composite mode without sqlite_path must return an error")
 		assert.Nil(t, p)
 	})
@@ -113,7 +219,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				SQLitePath:   "/nonexistent/dir/cfgms.db",
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "bad sqlite path must return an error")
 		assert.Nil(t, p)
 	})
@@ -132,7 +238,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				},
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "unreachable DSN must return an error")
 		assert.Nil(t, p)
 	})
@@ -150,7 +256,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				},
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "cluster mode with an unreachable Postgres DSN must return an error")
 		assert.Nil(t, p)
 	})
@@ -164,7 +270,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				SQLitePath:   dir + "/cfgms.db",
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.NoError(t, err)
 		require.NotNil(t, p)
 		assert.NoError(t, p.Close())
@@ -196,7 +302,7 @@ func TestInitializeEntityGraphProvider(t *testing.T) {
 				},
 			},
 		}
-		p, err := initializeEntityGraphProvider(cfg, logger)
+		p, err := initializeEntityGraphProvider(cfg, logger, nil)
 		require.Error(t, err, "unreachable configured host must fail, not silently default to localhost")
 		assert.Nil(t, p)
 	})

@@ -218,7 +218,12 @@ func TestE1_MultipleEdgesFromOneFragment(t *testing.T) {
 // key does NOT appear in the entity's merged attribute set. A fragment payload
 // carrying the key must have it stripped before entity storage.
 func TestE2_EdgeKeyStrippedFromEntityAttributes(t *testing.T) {
-	p := newTestProvider(t)
+	// owning_tenant is now bound to the authenticated peer (Issue #4319),
+	// never trusted from the payload, so a resolver is wired here purely to
+	// keep the TenantFilter-scoped GetEntity read below working — this test's
+	// actual subject is the __entitygraph_edges key stripping, unrelated to
+	// tenant binding.
+	p := newTestProviderWithResolver(t, staticTenantResolver{"e2-peer": "root/e2-tenant"})
 	w := newTestWriter(t, p)
 	ctx := context.Background()
 
