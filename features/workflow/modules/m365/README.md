@@ -298,6 +298,44 @@ The modules include comprehensive error handling:
 - Principle of least privilege
 - Audit logging for all operations
 
+## Build, Publish, and Resolution (entra_user)
+
+Of the modules described above, only `entra_user` currently builds to a
+runnable binary and resolves end to end through the controller workflow
+engine (Issue #4325). `conditional_access` and `intune_policy` (along with
+`entra_admin_unit`, `entra_application`, `entra_group`) have no `cmd/main.go`
+and cannot be built, published, or executed yet — their sections above
+describe the intended `.cfg` shape, not a currently runnable path.
+
+**Build:**
+
+```bash
+make build-workflow-modules   # builds bin/cfgms-module-m365-entra-user
+```
+
+This is a separate Makefile list/target (`WORKFLOW_MODULES`) from the
+steward-installer `STDLIB_MODULES` payload — workflow-kind modules are never
+part of the steward installer (ADR-016 is a closed set) and are instead
+published to and pulled from the controller module cache (ADR-006), the same
+way the other six M365 modules will be once they gain a `cmd/main.go`.
+
+**Publish and resolve:** the built binary is wrapped in a publisher-signed
+`bundle.Bundle` (`publisher: cfgms`, matching `module.yaml`) and published
+through the existing controller module cache APIs
+(`features/controller/modules/cache`). Once approved,
+`WorkflowModuleFactory.CreateModuleInstance("m365-entra-user")` resolves the
+cached bundle, fork/execs the binary, and returns a live gRPC-backed
+`modules.Module` — see `features/workflow/module_loader.go` and
+`features/workflow/entra_user_e2e_test.go` for the exact flow.
+
+**Tenant resolution:** `entra_user`'s `Set`/`Get` take the CFGMS tenant from
+the authenticated workflow execution context (`ctxkeys.TenantID` on `ctx`),
+never from a step's `tenant_id` configuration or from a resource ID's own
+tenant segment — either of those is only checked for agreement with the
+execution context's tenant and refused on mismatch. Credentials
+(`SecretStoreCredentialStore`) are partitioned by that same real CFGMS
+tenant, not by the caller-supplied M365 tenant identifier.
+
 ## Getting Started
 
 1. **Register Azure AD Application**
