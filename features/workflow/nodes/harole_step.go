@@ -44,7 +44,8 @@ func (e *SetHARoleNodeExecutor) ExecuteSetHARoleStep(ctx context.Context, step w
 	if err != nil {
 		return failedHARoleResult(startTime, fmt.Errorf("set_ha_role step %q: %w", step.Name, err)), err
 	}
-	tenantID, err := requireStringVar(execution, "tenant_id")
+	configuredTenantID, _ := optionalStringVar(execution, "tenant_id")
+	tenantID, err := requireAuthorizedTenant(execution, configuredTenantID)
 	if err != nil {
 		return failedHARoleResult(startTime, fmt.Errorf("set_ha_role step %q: %w", step.Name, err)), err
 	}

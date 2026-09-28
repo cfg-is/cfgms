@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
@@ -149,9 +150,18 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 		mergedVars[k] = v
 	}
 
+	// Resolve the caller's authenticated tenant from the canonical context key —
+	// never from logging.ExtractTenantFromContext, a logging-only accessor never
+	// meant to gate authorization decisions (Issue #4326) — and inject it into
+	// the execution so step executors can authorize tenant-scoped actions
+	// against it instead of trusting workflow-author-controlled data
+	// (execution.Variables / step.Config) (Issue #4338).
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+
 	execution := &WorkflowExecution{
 		ID:           executionID,
 		WorkflowName: workflow.Name,
+		TenantID:     tenantID,
 		Status:       StatusPending,
 		StartTime:    time.Now(),
 		StepResults:  make(map[string]StepResult),
@@ -166,8 +176,6 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	e.executions[executionID] = execution
 	e.mutex.Unlock()
 
-	// Extract tenant context for structured logging
-	tenantID := logging.ExtractTenantFromContext(ctx)
 	logger := e.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Starting workflow execution",
@@ -724,6 +732,7 @@ func (e *Engine) GetExecution(executionID string) (*WorkflowExecution, error) {
 	executionCopy := WorkflowExecution{
 		ID:             execution.ID,
 		WorkflowName:   execution.WorkflowName,
+		TenantID:       execution.TenantID,
 		Status:         execution.GetStatus(),
 		StartTime:      execution.StartTime,
 		EndTime:        execution.GetEndTime(),
@@ -1229,6 +1238,7 @@ func (e *Engine) executeFanOutStep(ctx context.Context, step Step, execution *Wo
 			workerExecution := &WorkflowExecution{
 				ID:           fmt.Sprintf("%s_worker_%d", execution.ID, index),
 				WorkflowName: fmt.Sprintf("%s_worker_%d", execution.WorkflowName, index),
+				TenantID:     execution.TenantID,
 				Status:       StatusPending,
 				StartTime:    time.Now(),
 				StepResults:  make(map[string]StepResult),

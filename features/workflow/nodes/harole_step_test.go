@@ -19,6 +19,10 @@ import (
 )
 
 // newHARoleExecution returns a WorkflowExecution populated with the given variables.
+// The execution's authenticated TenantID (Issue #4338) is derived from vars'
+// "tenant_id" entry when present, mirroring the common case where the execution
+// owner and the step-declared tenant agree; tests exercising a disagreement
+// between the two construct a *workflow.WorkflowExecution directly instead.
 func newHARoleExecution(vars map[string]interface{}) *workflow.WorkflowExecution {
 	ex := &workflow.WorkflowExecution{
 		ID:          "exec-ha-test",
@@ -26,6 +30,9 @@ func newHARoleExecution(vars map[string]interface{}) *workflow.WorkflowExecution
 		StepResults: make(map[string]workflow.StepResult),
 		Variables:   make(map[string]interface{}),
 		Done:        make(chan struct{}),
+	}
+	if tenantID, ok := vars["tenant_id"].(string); ok {
+		ex.TenantID = tenantID
 	}
 	for k, v := range vars {
 		ex.SetVariable(k, v)
@@ -328,6 +335,60 @@ func TestSetHARoleNode_MissingVariable(t *testing.T) {
 		assert.Equal(t, workflow.StatusFailed, result.Status, "missing %q must produce StatusFailed", drop)
 		assert.Contains(t, err.Error(), drop, "error must mention missing variable %q", drop)
 	}
+}
+
+// TestSetHARoleNode_TenantMismatch_Refused is the REQUIRED AC test (Issue #4338):
+// a workflow owned by tenant A with tenant_id set to tenant B in its variables is
+// refused, and does not act on tenant B.
+func TestSetHARoleNode_TenantMismatch_Refused(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	const authenticatedTenant = "tenant-a"
+	const attackerTenant = "tenant-b"
+	const stewardID = "steward-victim"
+	const vmName = "vm-victim"
+	const clusterName = "cluster-x"
+
+	configSvc := controllersvc.NewConfigurationServiceV2(logger, sm, nil)
+	store := sm.GetConfigStore()
+
+	// Pre-populate a device config under tenant B — the tenant an attacker names
+	// in the workflow's (author-writable) variables.
+	storeInitialStewardConfig(t, store, attackerTenant, stewardID,
+		minimalStewardCfg(stewardID, []stewardtypes.ResourceConfig{
+			{Name: vmName, Module: "hyperv.vm", Config: map[string]interface{}{"memory_mb": 4096}},
+		}))
+
+	executor := NewSetHARoleNodeExecutor(store, configSvc)
+
+	// The execution is authenticated to (owned by) tenant A, but its variables
+	// name tenant B.
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-cross-tenant",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		TenantID:    authenticatedTenant,
+		Done:        make(chan struct{}),
+	}
+	execution.SetVariable("steward_id", stewardID)
+	execution.SetVariable("tenant_id", attackerTenant)
+	execution.SetVariable("vm_name", vmName)
+	execution.SetVariable("cluster_name", clusterName)
+
+	result, err := executor.ExecuteSetHARoleStep(ctx, newHARoleStep("cross-tenant"), execution)
+	require.Error(t, err)
+	assert.Equal(t, workflow.StatusFailed, result.Status)
+	assert.Contains(t, err.Error(), authenticatedTenant)
+	assert.Contains(t, err.Error(), attackerTenant)
+
+	// Tenant B's config must be unchanged — the step must not have acted on it.
+	unchanged := readStewardConfig(t, store, attackerTenant, stewardID)
+	vmResource := findResourceByName(t, unchanged, vmName)
+	_, hasHARole := vmResource.Config["ha_role"]
+	assert.False(t, hasHARole, "step must not modify tenant B's config when tenant_id disagrees with the authenticated tenant")
 }
 
 // TestSetHARoleNode_WrongVariableType verifies that a non-string required variable

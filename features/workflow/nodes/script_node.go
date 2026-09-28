@@ -108,6 +108,7 @@ type ScriptNode struct {
 	configProvider   script.ConfigProvider
 	secretStore      interfaces.SecretStore
 	fleetQuery       fleet.FleetQuery
+	tenantID         string
 	executionQueue   *script.ExecutionQueue
 	executionTracker script.ExecutionTracker
 }
@@ -127,20 +128,53 @@ func NewScriptNode(id, name string, config *ScriptStepConfig, repository script.
 	}
 }
 
-// resolveDeviceIDs returns the device IDs to target for this execution.
-// Priority: explicit Devices > fleet filter > localhost fallback.
-// A fleet filter matching zero devices returns (nil, nil) — the caller logs a
-// warning and returns success rather than treating this as an error.
-// The filter is re-evaluated on every call to support recurring workflows.
+// resolveDeviceIDs returns the device IDs to target for this execution, scoped to
+// n.tenantID — the execution's authenticated tenant, injected via SetTenantID and
+// never sourced from execution.Variables or step.Config (Issue #4338).
+//
+// Priority: explicit Devices > fleet filter. Both paths are verified against the
+// fleet, scoped to n.tenantID: a device outside the authenticated tenant is
+// dropped from the result, not dispatched to. Both paths share the same
+// preconditions (requireTenantAndFleet) — a missing tenant or a missing fleet
+// query is an error on either path, never an unverified passthrough of the
+// workflow author's device list. A fleet query matching zero devices returns
+// (nil, nil) — the caller logs a warning and returns success rather than
+// treating this as an error. The filter is re-evaluated on every call to support
+// recurring workflows.
+//
+// There is no localhost fallback. A step whose Devices/DeviceFilter cannot be
+// resolved to a target is a configuration error, not an implicit grant of
+// in-process execution on the controller host (Issue #4338).
 func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
-	// Priority 1: explicit device list wins
-	if len(n.config.Devices) > 0 {
-		return n.config.Devices, nil
-	}
+	switch {
+	case len(n.config.Devices) > 0:
+		if err := n.requireTenantAndFleet(); err != nil {
+			return nil, err
+		}
+		results, err := n.fleetQuery.Search(ctx, fleet.Filter{TenantID: n.tenantID, IDs: n.config.Devices})
+		if err != nil {
+			return nil, fmt.Errorf("fleet query failed: %w", err)
+		}
+		ids := make([]string, len(results))
+		for i, r := range results {
+			ids[i] = r.ID
+		}
+		return ids, nil
 
-	// Priority 2: fleet filter (re-evaluated each call for recurring workflows)
-	if n.config.DeviceFilter != nil && n.fleetQuery != nil {
-		results, err := n.fleetQuery.Search(ctx, *n.config.DeviceFilter)
+	case n.config.DeviceFilter != nil:
+		if err := n.requireTenantAndFleet(); err != nil {
+			return nil, err
+		}
+		// An author-supplied filter.TenantID (step.Config is workflow-author-
+		// writable) must name the authenticated tenant exactly. A mismatch is
+		// refused; it is never rewritten to n.tenantID, because rewriting would
+		// widen a deliberately narrow author scope into the whole tenant.
+		filter := *n.config.DeviceFilter
+		if filter.TenantID != "" && filter.TenantID != n.tenantID {
+			return nil, fmt.Errorf("device_filter tenant_id %q does not match the execution's authenticated tenant", filter.TenantID)
+		}
+		filter.TenantID = n.tenantID
+		results, err := n.fleetQuery.Search(ctx, filter)
 		if err != nil {
 			return nil, fmt.Errorf("fleet query failed: %w", err)
 		}
@@ -153,10 +187,36 @@ func (n *ScriptNode) resolveDeviceIDs(ctx context.Context) ([]string, error) {
 			ids[i] = r.ID
 		}
 		return ids, nil
-	}
 
-	// Priority 3: localhost fallback
-	return []string{"localhost"}, nil
+	default:
+		return nil, fmt.Errorf("no devices or device_filter configured; refusing to execute with no resolvable target")
+	}
+}
+
+// requireTenantAndFleet enforces the two preconditions every device-resolution
+// path depends on for tenant scoping to mean anything (Issue #4338).
+//
+// An empty tenant is not "no scoping applied", it is scoping REMOVED: an empty
+// fleet.Filter.TenantID matches every tenant in the fleet, so resolving devices
+// without an authenticated tenant would silently widen the query fleet-wide.
+// A nil fleet query is the same failure by a different route — without it there
+// is no way to check which tenant a named device belongs to. Both fail closed.
+func (n *ScriptNode) requireTenantAndFleet() error {
+	if n.tenantID == "" {
+		return fmt.Errorf("execution has no authenticated tenant_id; refusing to resolve devices against an unscoped fleet query")
+	}
+	if n.fleetQuery == nil {
+		return fmt.Errorf("no fleet query is available to verify device tenant membership")
+	}
+	return nil
+}
+
+// SetTenantID sets the execution's authenticated tenant (Issue #4338), injected by
+// the engine — never sourced from execution.Variables or step.Config.
+// resolveDeviceIDs uses it to scope both explicit device lists and DeviceFilter
+// queries so a step cannot target another tenant's devices.
+func (n *ScriptNode) SetTenantID(tenantID string) {
+	n.tenantID = tenantID
 }
 
 // Execute implements workflow.Node interface
@@ -312,7 +372,7 @@ func (n *ScriptNode) Execute(ctx context.Context, input workflow.NodeInput) (wor
 		apiKey, err = n.keyManager.GenerateKey(
 			n.config.ScriptID,
 			execution.ID,
-			"", // tenantID
+			n.tenantID,
 			deviceIDs[0],
 			ttl,
 			script.ScriptCallbackPermissions(),
@@ -457,8 +517,9 @@ func (n *ScriptNode) SetSecretStore(store interfaces.SecretStore) {
 	n.secretStore = store
 }
 
-// SetFleetQuery sets the fleet query implementation used to resolve device IDs
-// from DeviceFilter at execution time.
+// SetFleetQuery sets the fleet query implementation used to resolve and
+// tenant-verify device IDs at execution time. Required for both the explicit
+// Devices list and DeviceFilter — resolution fails closed without it.
 func (n *ScriptNode) SetFleetQuery(q fleet.FleetQuery) {
 	n.fleetQuery = q
 }
@@ -506,8 +567,14 @@ func NewScriptStepExecutor(repository script.ScriptRepository, monitor *script.E
 	}
 }
 
-// ExecuteStep implements workflow.StepExecutor interface
-func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step, variables map[string]interface{}) (workflow.StepResult, error) {
+// ExecuteStep implements workflow.StepExecutor interface. execution.TenantID —
+// the engine-injected authenticated tenant, never execution.Variables or
+// step.Config — is the only source of tenant scoping passed to the node
+// (Issue #4338). It is routed through requireAuthorizedTenant, so an execution
+// with no authenticated tenant fails the step closed here rather than reaching
+// the fleet with an unscoped (all-tenant) query — the same guard the
+// set_ha_role, config_scope_move and ring_health executors use.
+func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step, execution *workflow.WorkflowExecution) (workflow.StepResult, error) {
 	// Parse script config from step config
 	config, err := parseScriptStepConfig(step.Config)
 	if err != nil {
@@ -518,14 +585,32 @@ func (e *ScriptStepExecutor) ExecuteStep(ctx context.Context, step workflow.Step
 		}, err
 	}
 
+	// A device_filter may name a tenant; it must be the authenticated one.
+	var configuredTenantID string
+	if config.DeviceFilter != nil {
+		configuredTenantID = config.DeviceFilter.TenantID
+	}
+	tenantID, err := requireAuthorizedTenant(execution, configuredTenantID)
+	if err != nil {
+		err = fmt.Errorf("script step %q: %w", step.Name, err)
+		return workflow.StepResult{
+			Status:    workflow.StatusFailed,
+			StartTime: time.Now(),
+			Error:     err.Error(),
+		}, err
+	}
+
 	// Create script node
 	node := NewScriptNode(step.Name, step.Name, config, e.repository, e.monitor, e.keyManager)
 	node.SetDNAProvider(e.dnaProvider)
 	node.SetConfigProvider(e.configProvider)
 	node.SetSecretStore(e.secretStore)
 	node.SetFleetQuery(e.fleetQuery)
+	node.SetTenantID(tenantID)
 	node.SetExecutionQueue(e.executionQueue)
 	node.SetExecutionTracker(e.executionTracker)
+
+	variables := execution.GetVariables()
 
 	// Propagate workflow context so queue metadata includes workflow_run_id/workflow_name.
 	inputCtx := make(map[string]interface{})

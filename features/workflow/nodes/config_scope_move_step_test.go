@@ -19,6 +19,10 @@ import (
 )
 
 // newMoveExecution returns a WorkflowExecution populated with the given variables.
+// The execution's authenticated TenantID (Issue #4338) is derived from vars'
+// "tenant_id" entry when present, mirroring the common case where the execution
+// owner and the step-declared tenant agree; tests exercising a disagreement
+// between the two construct a *workflow.WorkflowExecution directly instead.
 func newMoveExecution(vars map[string]interface{}) *workflow.WorkflowExecution {
 	ex := &workflow.WorkflowExecution{
 		ID:          "exec-move-test",
@@ -26,6 +30,9 @@ func newMoveExecution(vars map[string]interface{}) *workflow.WorkflowExecution {
 		StepResults: make(map[string]workflow.StepResult),
 		Variables:   make(map[string]interface{}),
 		Done:        make(chan struct{}),
+	}
+	if tenantID, ok := vars["tenant_id"].(string); ok {
+		ex.TenantID = tenantID
 	}
 	for k, v := range vars {
 		ex.SetVariable(k, v)
@@ -482,6 +489,59 @@ func TestMoveResourceToCluster_ResourceMissingFromBoth_NoClusterDoc(t *testing.T
 	require.Error(t, err)
 	assert.Equal(t, workflow.StatusFailed, result.Status)
 	assert.Contains(t, err.Error(), vmName)
+}
+
+// TestMoveResourceToCluster_TenantMismatch_Refused mirrors the REQUIRED AC test
+// (Issue #4338) for the sibling set_ha_role step: a workflow owned by tenant A
+// with tenant_id set to tenant B in its variables is refused, and does not act
+// on tenant B.
+func TestMoveResourceToCluster_TenantMismatch_Refused(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	const authenticatedTenant = "tenant-a"
+	const attackerTenant = "tenant-b"
+	const stewardID = "steward-victim"
+	const vmName = "vm-victim"
+	const clusterName = "cluster-x"
+
+	configSvc := controllersvc.NewConfigurationServiceV2(logger, sm, nil)
+	store := sm.GetConfigStore()
+
+	// Pre-populate a device config under tenant B — the tenant an attacker names
+	// in the workflow's (author-writable) variables.
+	storeInitialStewardConfig(t, store, attackerTenant, stewardID,
+		minimalStewardCfg(stewardID, []stewardtypes.ResourceConfig{
+			{Name: vmName, Module: "hyperv.vm", Config: map[string]interface{}{"memory_mb": 4096}},
+		}))
+
+	executor := NewMoveResourceToClusterNodeExecutor(store, configSvc)
+
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-cross-tenant-move",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		TenantID:    authenticatedTenant,
+		Done:        make(chan struct{}),
+	}
+	execution.SetVariable("steward_id", stewardID)
+	execution.SetVariable("tenant_id", attackerTenant)
+	execution.SetVariable("vm_name", vmName)
+	execution.SetVariable("cluster_name", clusterName)
+
+	result, err := executor.ExecuteMoveResourceToClusterStep(ctx, newMoveStep("cross-tenant-move"), execution)
+	require.Error(t, err)
+	assert.Equal(t, workflow.StatusFailed, result.Status)
+	assert.Contains(t, err.Error(), authenticatedTenant)
+	assert.Contains(t, err.Error(), attackerTenant)
+
+	// Tenant B's device config must be unchanged, and no cluster-policies doc
+	// must have been created under tenant B — the step must not have acted on it.
+	unchanged := readStewardConfig(t, store, attackerTenant, stewardID)
+	assert.NotNil(t, findResourceInCfg(unchanged, vmName), "resource must remain untouched in tenant B's device doc")
+	assert.False(t, clusterConfigExists(t, store, attackerTenant, clusterName), "no cluster doc must be created under tenant B")
 }
 
 // TestMoveResourceToCluster_MissingVariable verifies that each required variable, when

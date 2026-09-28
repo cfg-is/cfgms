@@ -40,7 +40,9 @@ func newRingHealthStep(name, ring, desiredVersion string) workflow.Step {
 	}
 }
 
-// newRingExecution creates a fresh WorkflowExecution for testing.
+// newRingExecution creates a fresh WorkflowExecution for testing, authenticated
+// to "test-tenant" — the tenant every step-level tenant_id fixture in this file
+// also uses, so the equality check in requireAuthorizedTenant passes by default.
 func newRingExecution() *workflow.WorkflowExecution {
 	return &workflow.WorkflowExecution{
 		ID:           "exec-test",
@@ -48,6 +50,7 @@ func newRingExecution() *workflow.WorkflowExecution {
 		Status:       workflow.StatusRunning,
 		StepResults:  make(map[string]workflow.StepResult),
 		Variables:    make(map[string]interface{}),
+		TenantID:     "test-tenant",
 		Done:         make(chan struct{}),
 	}
 }
@@ -227,10 +230,49 @@ func TestRingHealthNode_MissingDesiredVersionConfig_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "desired_version must not be empty")
 }
 
-func TestRingHealthNode_MissingTenantIDConfig_ReturnsError(t *testing.T) {
+// TestRingHealthNode_MissingTenantIDConfig_UsesAuthenticatedTenant verifies that
+// when step.Config carries no tenant_id, the fleet query is scoped to the
+// execution's authenticated tenant instead of being left unscoped (Issue #4338).
+func TestRingHealthNode_MissingTenantIDConfig_UsesAuthenticatedTenant(t *testing.T) {
+	ctx := context.Background()
+	stewards := []fleet.StewardData{
+		makeRingTestSteward("s-1", map[string]string{"deployment_ring": "canary", "steward.version": "v2.0.0"}),
+	}
+	fleetQuery := fleet.NewMemoryQuery(&testStewardProvider{stewards: stewards})
+	executor := NewRingHealthNodeExecutor(fleetQuery, nil)
+
+	step := workflow.Step{
+		Name: "no-tenant-in-config",
+		Type: workflow.StepTypeQueryRingHealth,
+		Config: map[string]interface{}{
+			"ring":            "canary",
+			"desired_version": "v2.0.0",
+			// tenant_id is absent — the execution's authenticated tenant is used.
+		},
+	}
+
+	result, err := executor.ExecuteRingHealthStep(ctx, step, newRingExecution())
+	require.NoError(t, err)
+	assert.Equal(t, workflow.StatusCompleted, result.Status)
+	assert.InDelta(t, 100.0, result.Output["on_version_pct"], 0.001)
+}
+
+// TestRingHealthNode_NoAuthenticatedTenant_ReturnsError verifies that a step
+// fails closed when the execution itself carries no authenticated tenant
+// (Issue #4338) — an absent tenant must never be treated as unrestricted access.
+func TestRingHealthNode_NoAuthenticatedTenant_ReturnsError(t *testing.T) {
 	ctx := context.Background()
 	fleetQuery := fleet.NewMemoryQuery(&testStewardProvider{stewards: []fleet.StewardData{}})
 	executor := NewRingHealthNodeExecutor(fleetQuery, nil)
+
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-no-tenant",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		Done:        make(chan struct{}),
+		// TenantID intentionally left empty.
+	}
 
 	step := workflow.Step{
 		Name: "bad-step",
@@ -238,14 +280,49 @@ func TestRingHealthNode_MissingTenantIDConfig_ReturnsError(t *testing.T) {
 		Config: map[string]interface{}{
 			"ring":            "canary",
 			"desired_version": "v2.0.0",
-			// tenant_id is missing
 		},
 	}
 
-	result, err := executor.ExecuteRingHealthStep(ctx, step, newRingExecution())
+	result, err := executor.ExecuteRingHealthStep(ctx, step, execution)
 	require.Error(t, err)
 	assert.Equal(t, workflow.StatusFailed, result.Status)
-	assert.Contains(t, err.Error(), "tenant_id must not be empty")
+	assert.Contains(t, err.Error(), "no authenticated tenant_id")
+}
+
+// TestRingHealthNode_ConfiguredTenantMismatch_Refused is the REQUIRED AC test
+// (Issue #4338): a step whose step.Config tenant_id disagrees with the
+// execution's authenticated tenant is refused, not silently corrected.
+func TestRingHealthNode_ConfiguredTenantMismatch_Refused(t *testing.T) {
+	ctx := context.Background()
+	fleetQuery := fleet.NewMemoryQuery(&testStewardProvider{stewards: []fleet.StewardData{
+		makeRingTestSteward("s-victim", map[string]string{"deployment_ring": "canary", "steward.version": "v2.0.0"}),
+	}})
+	executor := NewRingHealthNodeExecutor(fleetQuery, nil)
+
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-cross-tenant",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		TenantID:    "tenant-a",
+		Done:        make(chan struct{}),
+	}
+
+	step := workflow.Step{
+		Name: "cross-tenant",
+		Type: workflow.StepTypeQueryRingHealth,
+		Config: map[string]interface{}{
+			"ring":            "canary",
+			"desired_version": "v2.0.0",
+			"tenant_id":       "tenant-b",
+		},
+	}
+
+	result, err := executor.ExecuteRingHealthStep(ctx, step, execution)
+	require.Error(t, err)
+	assert.Equal(t, workflow.StatusFailed, result.Status)
+	assert.Contains(t, err.Error(), "tenant-a")
+	assert.Contains(t, err.Error(), "tenant-b")
 }
 
 func TestRingHealthNode_FleetQueryError_ReturnsError(t *testing.T) {

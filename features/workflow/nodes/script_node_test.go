@@ -39,6 +39,30 @@ func makeSteward(id, status string, attrs map[string]string) fleet.StewardData {
 	}
 }
 
+// wireTenantFleet wires node with a real in-memory fleet query holding the given
+// device IDs under tenantID, and sets that tenant on the node. Every dispatch
+// path verifies its targets against the fleet and requires a non-empty tenant
+// (Issue #4338), so any test that expects devices to resolve must register them.
+func wireTenantFleet(node *ScriptNode, tenantID string, deviceIDs ...string) {
+	node.SetFleetQuery(tenantFleetQuery(tenantID, deviceIDs...))
+	node.SetTenantID(tenantID)
+}
+
+// tenantFleetQuery builds a real in-memory fleet query holding the given device
+// IDs under tenantID, in the order given.
+func tenantFleetQuery(tenantID string, deviceIDs ...string) fleet.FleetQuery {
+	stewards := make([]fleet.StewardData, 0, len(deviceIDs))
+	for _, id := range deviceIDs {
+		stewards = append(stewards, fleet.StewardData{
+			ID:            id,
+			TenantID:      tenantID,
+			Status:        "online",
+			LastHeartbeat: time.Now(),
+		})
+	}
+	return fleet.NewMemoryQuery(&testStewardProvider{stewards: stewards})
+}
+
 // errorFleetQuery is a test-local implementation of fleet.FleetQuery that
 // always returns a configured error. Used to verify error propagation.
 type errorFleetQuery struct {
@@ -168,8 +192,10 @@ func TestScriptNode_Execute_WiresExecutionContext(t *testing.T) {
 		Timeout:           10 * time.Second,
 		ExecutionContext:  script.ExecutionContextSystem,
 		WaitForCompletion: false,
+		Devices:           []string{"test-device"},
 	}
 	node := NewScriptNode("test-node", "Test Script", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "test-device")
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{})
 
@@ -365,10 +391,13 @@ func TestScriptStepExecutor_SetFleetQuery(t *testing.T) {
 }
 
 // TestResolveDeviceIDs_ExplicitDevicesWin verifies that explicit Devices take
-// priority over the fleet filter and the localhost fallback.
+// priority over the fleet filter, once verified against the fleet and scoped to
+// the execution's authenticated tenant (Issue #4338).
 func TestResolveDeviceIDs_ExplicitDevicesWin(t *testing.T) {
 	provider := &testStewardProvider{
 		stewards: []fleet.StewardData{
+			makeSteward("explicit-device-1", "online", map[string]string{"os": "linux"}),
+			makeSteward("explicit-device-2", "online", map[string]string{"os": "windows"}),
 			makeSteward("fleet-device", "online", map[string]string{"os": "linux"}),
 		},
 	}
@@ -379,11 +408,218 @@ func TestResolveDeviceIDs_ExplicitDevicesWin(t *testing.T) {
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 	}, nil, nil, nil)
 	node.SetFleetQuery(q)
+	node.SetTenantID("test-tenant") // matches makeSteward's fixed TenantID
 
 	ids, err := node.resolveDeviceIDs(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"explicit-device-1", "explicit-device-2"}, ids,
-		"explicit Devices must take priority over fleet filter")
+	assert.ElementsMatch(t, []string{"explicit-device-1", "explicit-device-2"}, ids,
+		"explicit Devices must take priority over fleet filter, verified against the fleet")
+}
+
+// TestResolveDeviceIDs_ExplicitDevice_OutsideTenant_Filtered is the REQUIRED AC
+// test (Issue #4338): a device named in an explicit list that belongs to a
+// different tenant than the execution's authenticated tenant is dropped from the
+// resolved targets, not dispatched to.
+func TestResolveDeviceIDs_ExplicitDevice_OutsideTenant_Filtered(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "tenant-a-device", TenantID: "tenant-a", Status: "online", LastHeartbeat: time.Now()},
+			{ID: "tenant-b-device", TenantID: "tenant-b", Status: "online", LastHeartbeat: time.Now()},
+		},
+	}
+	q := fleet.NewMemoryQuery(provider)
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		Devices: []string{"tenant-a-device", "tenant-b-device"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(q)
+	node.SetTenantID("tenant-a")
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tenant-a-device"}, ids,
+		"a device belonging to another tenant must be filtered out, not dispatched to")
+}
+
+// TestResolveDeviceIDs_ExplicitDevicesWithoutFleetQuery_FailsClosed verifies that
+// an explicit device list is never dispatched unverified: without a fleet query
+// there is no way to check tenant membership, so resolution errors instead of
+// returning the workflow author's raw list (Issue #4338).
+func TestResolveDeviceIDs_ExplicitDevicesWithoutFleetQuery_FailsClosed(t *testing.T) {
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		Devices: []string{"some-device", "other-tenant-device"},
+	}, nil, nil, nil)
+	node.SetTenantID("tenant-a")
+	// No SetFleetQuery call.
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.Error(t, err, "an unverifiable explicit device list must not be dispatched")
+	assert.Nil(t, ids)
+	assert.Contains(t, err.Error(), "no fleet query")
+}
+
+// TestResolveDeviceIDs_EmptyTenant_FailsClosed verifies that both resolution
+// branches refuse to run without an authenticated tenant. An empty
+// fleet.Filter.TenantID matches every tenant, so an unset tenant would make the
+// fleet query fleet-wide rather than merely unscoped (Issue #4338).
+func TestResolveDeviceIDs_EmptyTenant_FailsClosed(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "tenant-a-device", TenantID: "tenant-a", Status: "online", LastHeartbeat: time.Now()},
+			{ID: "tenant-b-device", TenantID: "tenant-b", Status: "online", LastHeartbeat: time.Now()},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		config *ScriptStepConfig
+	}{
+		{
+			name:   "explicit devices",
+			config: &ScriptStepConfig{Devices: []string{"tenant-a-device", "tenant-b-device"}},
+		},
+		{
+			name:   "device filter",
+			config: &ScriptStepConfig{DeviceFilter: &fleet.Filter{Status: "online"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := NewScriptNode("id", "name", tt.config, nil, nil, nil)
+			node.SetFleetQuery(fleet.NewMemoryQuery(provider))
+			// No SetTenantID call — execution carried no authenticated tenant.
+
+			ids, err := node.resolveDeviceIDs(context.Background())
+			require.Error(t, err, "an empty tenant must fail closed, not resolve across all tenants")
+			assert.Nil(t, ids, "no device may be resolved without an authenticated tenant")
+			assert.Contains(t, err.Error(), "no authenticated tenant_id")
+		})
+	}
+}
+
+// TestResolveDeviceIDs_FilterTenantMismatch_FailsClosed verifies that an
+// author-supplied device_filter naming a different tenant is refused, not
+// silently rewritten to the authenticated tenant (Issue #4338).
+func TestResolveDeviceIDs_FilterTenantMismatch_FailsClosed(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "tenant-a-device", TenantID: "tenant-a", Status: "online", LastHeartbeat: time.Now()},
+			{ID: "tenant-b-device", TenantID: "tenant-b", Status: "online", LastHeartbeat: time.Now()},
+		},
+	}
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{TenantID: "tenant-b"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(fleet.NewMemoryQuery(provider))
+	node.SetTenantID("tenant-a")
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.Error(t, err, "a filter naming another tenant must be refused")
+	assert.Nil(t, ids)
+	assert.Contains(t, err.Error(), "does not match the execution's authenticated tenant")
+}
+
+// TestResolveDeviceIDs_FilterTenantMatch_Honoured verifies that a device_filter
+// naming the authenticated tenant is accepted and its narrowing preserved.
+func TestResolveDeviceIDs_FilterTenantMatch_Honoured(t *testing.T) {
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "tenant-a-device", TenantID: "tenant-a", Status: "online", LastHeartbeat: time.Now()},
+			{ID: "tenant-b-device", TenantID: "tenant-b", Status: "online", LastHeartbeat: time.Now()},
+		},
+	}
+
+	node := NewScriptNode("id", "name", &ScriptStepConfig{
+		DeviceFilter: &fleet.Filter{TenantID: "tenant-a"},
+	}, nil, nil, nil)
+	node.SetFleetQuery(fleet.NewMemoryQuery(provider))
+	node.SetTenantID("tenant-a")
+
+	ids, err := node.resolveDeviceIDs(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tenant-a-device"}, ids)
+}
+
+// TestScriptStepExecutor_ExecuteStep_NoAuthenticatedTenant_FailsClosed verifies
+// that an execution carrying no authenticated tenant fails the step before any
+// device is resolved or dispatched — the script executor now uses the same
+// requireAuthorizedTenant guard as the set_ha_role, config_scope_move and
+// ring_health executors (Issue #4338).
+func TestScriptStepExecutor_ExecuteStep_NoAuthenticatedTenant_FailsClosed(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	executor := NewScriptStepExecutor(nil, monitor, nil)
+	executor.SetExecutionQueue(q)
+	executor.SetFleetQuery(tenantFleetQuery("tenant-a", "tenant-a-device"))
+
+	step := workflow.Step{
+		Name: "no-tenant-step",
+		Config: map[string]interface{}{
+			"script_id": "test-script",
+			"shell":     "bash",
+			"devices":   []interface{}{"tenant-a-device"},
+		},
+	}
+
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-no-tenant",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		// TenantID deliberately empty: ExecuteWorkflow was called with a context
+		// carrying no authenticated tenant.
+		Done: make(chan struct{}),
+	}
+
+	result, err := executor.ExecuteStep(context.Background(), step, execution)
+	require.Error(t, err, "a step with no authenticated tenant must fail closed")
+	assert.Equal(t, workflow.StatusFailed, result.Status)
+	assert.Contains(t, err.Error(), "no authenticated tenant_id")
+	assert.Equal(t, 0, q.GetQueueDepth("tenant-a-device"),
+		"nothing may be dispatched when the execution has no authenticated tenant")
+	assert.Empty(t, monitor.ListExecutions(""),
+		"no execution may be started when the execution has no authenticated tenant")
+}
+
+// TestScriptStepExecutor_ExecuteStep_FilterTenantMismatch_FailsClosed verifies
+// that a step whose device_filter names a tenant other than the execution's
+// authenticated tenant is refused outright (Issue #4338).
+func TestScriptStepExecutor_ExecuteStep_FilterTenantMismatch_FailsClosed(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", script.NewInMemoryQueueStore(), nil, 0)
+	defer q.Stop()
+
+	executor := NewScriptStepExecutor(nil, monitor, nil)
+	executor.SetExecutionQueue(q)
+	executor.SetFleetQuery(tenantFleetQuery("tenant-b", "tenant-b-device"))
+
+	step := workflow.Step{
+		Name: "cross-tenant-step",
+		Config: map[string]interface{}{
+			"script_id":     "test-script",
+			"shell":         "bash",
+			"device_filter": map[string]interface{}{"tenant_id": "tenant-b"},
+		},
+	}
+
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-cross-tenant",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		TenantID:    "tenant-a",
+		Done:        make(chan struct{}),
+	}
+
+	result, err := executor.ExecuteStep(context.Background(), step, execution)
+	require.Error(t, err, "a device_filter naming another tenant must fail the step")
+	assert.Equal(t, workflow.StatusFailed, result.Status)
+	assert.Equal(t, 0, q.GetQueueDepth("tenant-b-device"),
+		"no device of the named foreign tenant may be dispatched to")
 }
 
 // TestResolveDeviceIDs_FleetFilter verifies that the fleet filter is used to
@@ -402,6 +638,7 @@ func TestResolveDeviceIDs_FleetFilter(t *testing.T) {
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 	}, nil, nil, nil)
 	node.SetFleetQuery(q)
+	node.SetTenantID("test-tenant")
 
 	ids, err := node.resolveDeviceIDs(context.Background())
 	require.NoError(t, err)
@@ -410,14 +647,17 @@ func TestResolveDeviceIDs_FleetFilter(t *testing.T) {
 	assert.Contains(t, ids, "linux-2")
 }
 
-// TestResolveDeviceIDs_LocalhostFallback verifies that localhost is used when
-// no explicit devices and no device filter are configured.
-func TestResolveDeviceIDs_LocalhostFallback(t *testing.T) {
+// TestResolveDeviceIDs_NoTargetConfigured_ReturnsError verifies that resolving
+// devices fails closed — no localhost in-process fallback — when neither
+// explicit devices nor a device filter are configured (Issue #4338).
+func TestResolveDeviceIDs_NoTargetConfigured_ReturnsError(t *testing.T) {
 	node := NewScriptNode("id", "name", &ScriptStepConfig{}, nil, nil, nil)
+	node.SetTenantID("test-tenant")
 
 	ids, err := node.resolveDeviceIDs(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"localhost"}, ids)
+	require.Error(t, err, "no resolvable target must be a hard error, not an implicit localhost fallback")
+	assert.Nil(t, ids)
+	assert.Contains(t, err.Error(), "no devices or device_filter configured")
 }
 
 // TestResolveDeviceIDs_ZeroMatch verifies that a fleet filter matching no
@@ -434,6 +674,7 @@ func TestResolveDeviceIDs_ZeroMatch(t *testing.T) {
 		DeviceFilter: &fleet.Filter{OS: "linux"}, // no linux devices
 	}, nil, nil, nil)
 	node.SetFleetQuery(q)
+	node.SetTenantID("test-tenant")
 
 	ids, err := node.resolveDeviceIDs(context.Background())
 	require.NoError(t, err, "zero-match must not return an error")
@@ -441,16 +682,19 @@ func TestResolveDeviceIDs_ZeroMatch(t *testing.T) {
 }
 
 // TestResolveDeviceIDs_FilterWithoutFleetQuery verifies that when a device
-// filter is set but no fleet query is injected, localhost fallback is used.
+// filter is set but no fleet query is injected, resolution fails closed instead
+// of falling back to localhost (Issue #4338).
 func TestResolveDeviceIDs_FilterWithoutFleetQuery(t *testing.T) {
 	node := NewScriptNode("id", "name", &ScriptStepConfig{
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 	}, nil, nil, nil)
+	node.SetTenantID("test-tenant")
 	// No SetFleetQuery call.
 
 	ids, err := node.resolveDeviceIDs(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, []string{"localhost"}, ids, "missing fleet query falls back to localhost")
+	require.Error(t, err, "a device_filter that cannot be resolved must not fall back to localhost")
+	assert.Nil(t, ids)
+	assert.Contains(t, err.Error(), "no fleet query")
 }
 
 // TestResolveDeviceIDs_ReEvaluatedEachCall verifies that the fleet filter is
@@ -468,6 +712,7 @@ func TestResolveDeviceIDs_ReEvaluatedEachCall(t *testing.T) {
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 	}, nil, nil, nil)
 	node.SetFleetQuery(q)
+	node.SetTenantID("test-tenant")
 
 	ids1, err := node.resolveDeviceIDs(context.Background())
 	require.NoError(t, err)
@@ -504,6 +749,7 @@ func TestResolveDeviceIDs_FleetQueryError(t *testing.T) {
 		DeviceFilter: &fleet.Filter{OS: "linux"},
 	}, nil, nil, nil)
 	node.SetFleetQuery(&errorFleetQuery{err: sentinel})
+	node.SetTenantID("test-tenant")
 
 	ids, err := node.resolveDeviceIDs(context.Background())
 	require.Error(t, err, "fleet query error must be returned, not swallowed")
@@ -593,6 +839,66 @@ func TestScriptStepExecutor_SetExecutionQueue(t *testing.T) {
 	assert.Equal(t, q, executor.executionQueue, "SetExecutionQueue must assign the queue to the executor field")
 }
 
+// TestScriptNode_Execute_DoesNotDispatchToDeviceOutsideTenant is the REQUIRED AC
+// test (Issue #4338): a script step naming a device outside the execution's
+// tenant does not dispatch to it — verified end-to-end through Execute and the
+// execution queue, not just resolveDeviceIDs in isolation.
+func TestScriptNode_Execute_DoesNotDispatchToDeviceOutsideTenant(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+	store := script.NewInMemoryQueueStore()
+	q := script.NewExecutionQueue(monitor, nil, 0, "", store, nil, 0)
+	defer q.Stop()
+
+	provider := &testStewardProvider{
+		stewards: []fleet.StewardData{
+			{ID: "own-device", TenantID: "tenant-owner", Status: "online", LastHeartbeat: time.Now()},
+			{ID: "other-tenant-device", TenantID: "tenant-attacker", Status: "online", LastHeartbeat: time.Now()},
+		},
+	}
+	fq := fleet.NewMemoryQuery(provider)
+
+	config := &ScriptStepConfig{
+		ScriptID: "my-script",
+		Shell:    script.ShellBash,
+		Devices:  []string{"own-device", "other-tenant-device"},
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	node.SetFleetQuery(fq)
+	node.SetTenantID("tenant-owner")
+	node.SetExecutionQueue(q)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.NoError(t, err)
+	assert.True(t, output.Success)
+	assert.Equal(t, 1, output.Data["queued"], "only the in-tenant device must be dispatched")
+
+	assert.Equal(t, 1, q.GetQueueDepth("own-device"), "own-device must be queued")
+	assert.Equal(t, 0, q.GetQueueDepth("other-tenant-device"),
+		"device outside the execution's tenant must not be dispatched to")
+}
+
+// TestScriptNode_Execute_NoResolvableTarget_FailsClosed is the REQUIRED AC test
+// (Issue #4338): a script step with no fleet query and no resolvable target
+// returns an error and executes nothing, in particular nothing on the controller
+// host — the removed localhost in-process fallback must never run.
+func TestScriptNode_Execute_NoResolvableTarget_FailsClosed(t *testing.T) {
+	monitor := script.NewExecutionMonitor()
+
+	config := &ScriptStepConfig{
+		InlineScript: "echo should-never-run",
+		Shell:        script.ShellBash,
+		Timeout:      5 * time.Second,
+		// No Devices, no DeviceFilter, no fleet query wired.
+	}
+	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+
+	output, err := node.Execute(context.Background(), workflow.NodeInput{})
+	require.Error(t, err, "a step with no resolvable target must fail closed")
+	assert.False(t, output.Success)
+	assert.Empty(t, monitor.ListExecutions(""),
+		"no execution must be started — nothing may run on the controller host when no target resolves")
+}
+
 // TestScriptNode_Execute_QueueDispatch verifies that when an ExecutionQueue is wired,
 // ScriptNode.Execute enqueues one entry per device instead of executing inline.
 func TestScriptNode_Execute_QueueDispatch(t *testing.T) {
@@ -607,6 +913,7 @@ func TestScriptNode_Execute_QueueDispatch(t *testing.T) {
 		Devices:  []string{"device-1", "device-2"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1", "device-2")
 	node.SetExecutionQueue(q)
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{})
@@ -633,6 +940,7 @@ func TestScriptNode_Execute_NoContentResolution_WithQueue(t *testing.T) {
 		Devices:  []string{"device-1"},
 	}
 	node := NewScriptNode("id", "name", config, nil /* no repository */, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{})
@@ -659,6 +967,7 @@ func TestScriptNode_Execute_WorkflowRunIDInQueueMetadata(t *testing.T) {
 		Devices:  []string{"device-1"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{
@@ -691,6 +1000,7 @@ func TestScriptNode_Execute_WorkflowRunID_OmittedWhenAbsent(t *testing.T) {
 		Devices:  []string{"device-1"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	// Empty context — no workflow_run_id.
@@ -718,6 +1028,7 @@ func TestScriptNode_Execute_QueueDedup(t *testing.T) {
 		Devices:  []string{"device-1"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	// First dispatch.
@@ -751,6 +1062,7 @@ func TestScriptNode_Execute_QueueDedup_NoOrphanedMonitorEntries(t *testing.T) {
 		Devices:  []string{"device-1"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	// First dispatch — creates one monitor entry (running).
@@ -805,6 +1117,7 @@ func TestScriptNode_Execute_CatchUpDequeue(t *testing.T) {
 		Devices:  []string{"offline-device"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "offline-device")
 	node.SetExecutionQueue(q)
 
 	// Queue execution while device is "offline".
@@ -834,6 +1147,7 @@ func TestScriptNode_Execute_ExecutionContextInQueue(t *testing.T) {
 		ExecutionContext: script.ExecutionContextLoggedInUser,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-1")
 	node.SetExecutionQueue(q)
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{})
@@ -859,9 +1173,11 @@ func TestScriptNode_Execute_NilQueue_InlineFallback(t *testing.T) {
 		InlineScript: "echo fallback",
 		Shell:        shell,
 		Timeout:      10 * time.Second,
+		Devices:      []string{"fallback-device"},
 	}
 	// No queue set — executionQueue is nil.
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "fallback-device")
 
 	output, err := node.Execute(context.Background(), workflow.NodeInput{})
 	require.NoError(t, err, "nil queue must fall through to inline execution without error")
@@ -880,6 +1196,7 @@ func TestScriptStepExecutor_ExecuteStep_WorkflowRunIDPropagated(t *testing.T) {
 
 	executor := NewScriptStepExecutor(nil, monitor, nil)
 	executor.SetExecutionQueue(q)
+	executor.SetFleetQuery(tenantFleetQuery("test-tenant", "device-1"))
 
 	step := workflow.Step{
 		Name: "test-step",
@@ -890,12 +1207,18 @@ func TestScriptStepExecutor_ExecuteStep_WorkflowRunIDPropagated(t *testing.T) {
 		},
 	}
 
-	variables := map[string]interface{}{
-		"workflow_run_id": "wf-run-999",
-		"workflow_name":   "test-workflow",
+	execution := &workflow.WorkflowExecution{
+		ID:          "exec-run-id-propagated",
+		Status:      workflow.StatusRunning,
+		StepResults: make(map[string]workflow.StepResult),
+		Variables:   make(map[string]interface{}),
+		TenantID:    "test-tenant",
+		Done:        make(chan struct{}),
 	}
+	execution.SetVariable("workflow_run_id", "wf-run-999")
+	execution.SetVariable("workflow_name", "test-workflow")
 
-	result, err := executor.ExecuteStep(context.Background(), step, variables)
+	result, err := executor.ExecuteStep(context.Background(), step, execution)
 	require.NoError(t, err)
 	assert.Equal(t, workflow.StatusCompleted, result.Status)
 
@@ -971,6 +1294,7 @@ func TestScriptNode_Execute_InlinePath_WritesTrackingRecord(t *testing.T) {
 		Timeout:      10 * time.Second,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "device-track-1", "device-track-2")
 	node.SetExecutionTracker(tracker)
 
 	_, err := node.Execute(context.Background(), workflow.NodeInput{})
@@ -1007,6 +1331,7 @@ func TestScriptNode_Execute_InlinePath_DeviceView(t *testing.T) {
 		Timeout:      10 * time.Second,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "dev-a", "dev-b")
 	node.SetExecutionTracker(tracker)
 
 	_, err := node.Execute(context.Background(), workflow.NodeInput{})
@@ -1042,6 +1367,7 @@ func TestScriptNode_Execute_InlinePath_WorkflowContextPropagated(t *testing.T) {
 		Timeout:      10 * time.Second,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "dev-wf")
 	node.SetExecutionTracker(tracker)
 
 	input := workflow.NodeInput{
@@ -1078,6 +1404,7 @@ func TestScriptNode_Execute_InlinePath_AdHocHasEmptyWorkflowRunID(t *testing.T) 
 		Timeout:      10 * time.Second,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "dev-adhoc")
 	node.SetExecutionTracker(tracker)
 
 	// No Context set — ad-hoc execution
@@ -1106,6 +1433,7 @@ func TestScriptNode_Execute_QueuePath_WritesTrackingRecord(t *testing.T) {
 		Devices:  []string{"dev-q1"},
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "dev-q1")
 	node.SetExecutionQueue(q)
 	node.SetExecutionTracker(tracker) // tracker wired into queue via SetExecutionTracker
 
@@ -1158,6 +1486,7 @@ func TestScriptNode_Execute_QueuePath_WorkflowRunView(t *testing.T) {
 		Devices:  devices,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", devices...)
 	node.SetExecutionQueue(q)
 	node.SetExecutionTracker(tracker)
 
@@ -1211,6 +1540,7 @@ func TestScriptNode_Execute_InlinePath_ExactlyOneRecordPerDevice(t *testing.T) {
 		Timeout:      10 * time.Second,
 	}
 	node := NewScriptNode("id", "name", config, nil, monitor, nil)
+	wireTenantFleet(node, "test-tenant", "dev-once")
 	node.SetExecutionTracker(tracker)
 
 	// First execution

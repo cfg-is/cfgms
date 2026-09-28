@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -103,6 +104,54 @@ func TestEngine_ExecuteWorkflow_Simple(t *testing.T) {
 	finalExecution, err := engine.GetExecution(execution.ID)
 	require.NoError(t, err)
 	assert.Equal(t, StatusCompleted, finalExecution.GetStatus())
+}
+
+// TestEngine_ExecuteWorkflow_ResolvesAuthenticatedTenantFromContext verifies that
+// ExecuteWorkflow reads the caller's authenticated tenant from the canonical
+// ctxkeys.TenantID context key — not from logging.ExtractTenantFromContext, and
+// never from workflow-author-controlled variables — and injects it into
+// execution.TenantID for step executors to authorize against (Issue #4338).
+func TestEngine_ExecuteWorkflow_ResolvesAuthenticatedTenantFromContext(t *testing.T) {
+	moduleFactory := createTestFactory()
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
+
+	wf := Workflow{
+		Name: "tenant-resolve-workflow",
+		Steps: []Step{
+			{
+				Name: "noop",
+				Type: StepTypeConditional,
+				Condition: &Condition{
+					Type:     ConditionTypeVariable,
+					Variable: "should_run",
+					Operator: OperatorEqual,
+					Value:    false,
+				},
+				Steps: []Step{},
+			},
+		},
+	}
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-owner")
+	// A workflow-author-controlled variable naming a different tenant must have
+	// no effect on the authenticated tenant the engine injects.
+	variables := map[string]interface{}{
+		"should_run": false,
+		"tenant_id":  "tenant-attacker",
+	}
+
+	execution, err := engine.ExecuteWorkflow(ctx, wf, variables)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-owner", execution.TenantID,
+		"ExecuteWorkflow must resolve the authenticated tenant from ctxkeys.TenantID into execution.TenantID")
+
+	waitForWorkflowCompletion(t, execution, 2*time.Second)
+
+	finalExecution, err := engine.GetExecution(execution.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-owner", finalExecution.TenantID,
+		"GetExecution must return the authenticated tenant in its copy")
 }
 
 func TestEngine_ExecuteWorkflow_Parallel(t *testing.T) {

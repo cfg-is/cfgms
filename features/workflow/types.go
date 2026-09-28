@@ -346,6 +346,15 @@ type WorkflowExecution struct {
 	// WorkflowName is the name of the workflow being executed
 	WorkflowName string `json:"workflow_name"`
 
+	// TenantID is the authenticated tenant that owns this execution, resolved by
+	// the engine from the caller's verified context (ctxkeys.TenantID) at
+	// ExecuteWorkflow time. Unlike Variables and a step's Config — both of which
+	// are writable by whoever authored or triggered the workflow — this field is
+	// never populated from workflow-author-controlled data. Step executors read
+	// it to authorize tenant-scoped actions instead of trusting a workflow-
+	// supplied tenant_id (Issue #4338).
+	TenantID string `json:"tenant_id,omitempty"`
+
 	// Status is the current execution status
 	Status ExecutionStatus `json:"status"`
 
@@ -647,8 +656,11 @@ type WorkflowEngine interface {
 
 // StepExecutor defines the interface for executing individual steps
 type StepExecutor interface {
-	// ExecuteStep executes a single workflow step
-	ExecuteStep(ctx context.Context, step Step, variables map[string]interface{}) (StepResult, error)
+	// ExecuteStep executes a single workflow step. execution carries the
+	// engine-injected authenticated tenant (execution.TenantID) that
+	// tenant-scoped step executors must authorize against — never the
+	// author-writable execution.Variables or step.Config (Issue #4338).
+	ExecuteStep(ctx context.Context, step Step, execution *WorkflowExecution) (StepResult, error)
 }
 
 // HTTPConfig defines configuration for HTTP-based workflow steps
