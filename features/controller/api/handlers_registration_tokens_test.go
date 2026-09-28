@@ -128,10 +128,17 @@ func setupTestServerWithTokenStore(t *testing.T) (*Server, registration.Store) {
 // addressing a registration token by path variable. Delete and revoke require
 // AssuranceStrong, which an API key can never hold, so scope-enforcement tests
 // invoke the handler directly with the tenant in context and the mux var set.
+// Carries ctxkeys.TenantScope alongside ctxkeys.TenantID (Issue #4336), matching
+// what authenticationMiddleware sets together for a real tenant-scoped caller —
+// otherwise the handler's isAuthorizedForTenant check sees an unset scope and
+// refuses regardless of tenantID, which would make a "same tenant succeeds" case
+// impossible to add here without this helper hiding it.
 func makeScopedTokenRequest(t *testing.T, method, path, tenantID, tokenVar string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
+	req = req.WithContext(ctx)
 	return mux.SetURLVars(req, map[string]string{"token": tokenVar})
 }
 
@@ -268,6 +275,28 @@ func TestCreateRegistrationToken(t *testing.T) {
 
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
+
+	// TestCreateRegistrationToken_CrossTenantRefused (Issue #4336): a caller scoped
+	// to tenant-a cannot create a token naming tenant-b. registration:create-token
+	// requires AssuranceStrong, which a test API key cannot clear, so this calls the
+	// handler directly with only ctxkeys.TenantScope set.
+	t.Run("cross-tenant caller cannot create a token for another tenant", func(t *testing.T) {
+		reqBody := registration.TokenCreateRequest{
+			TenantID:      "tenant-b",
+			ControllerURL: "grpc://controller.example.com:7443",
+		}
+		body, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+		rec := httptest.NewRecorder()
+
+		server.handleCreateRegistrationToken(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	})
 }
 
 func TestListRegistrationTokens(t *testing.T) {
@@ -374,6 +403,31 @@ func TestListRegistrationTokens(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
+
+	// REQUIRED regression test for Issue #4336: the handler's default case must refuse
+	// a scope that is neither root nor a non-empty tenant path. The subtests above
+	// authenticate via API key, which authenticationMiddleware always resolves to a set
+	// scope, and the 401 case never reaches the handler at all — so this branch is only
+	// reachable by calling the handler directly with an authenticated principal whose
+	// ctxkeys.TenantScope was lost. Before this story, that unset scope resolved to the
+	// empty callerTenant string and listed every tenant's tokens.
+	t.Run("unset scope is refused", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/registration/tokens?tenant_id=other-tenant", nil)
+		principal := &Principal{ID: "bugged-caller", Permissions: []string{"registration:list-tokens"}}
+		// Principal present, but deliberately no ctxkeys.TenantScopeKey on the context.
+		req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+		rec := httptest.NewRecorder()
+
+		server.handleListRegistrationTokens(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code,
+			"unset scope must be refused, not resolve to the every-tenant filter: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant scope required")
+		assert.NotContains(t, rec.Body.String(), "test-tenant",
+			"a refused list must not disclose any token")
+		assert.NotContains(t, rec.Body.String(), "other-tenant",
+			"a refused list must not disclose any token")
+	})
 }
 
 func TestGetRegistrationToken(t *testing.T) {
@@ -431,6 +485,22 @@ func TestGetRegistrationToken(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	// TestGetRegistrationToken_CrossTenantRefused (Issue #4336): a caller scoped to
+	// tenant-a cannot read a token belonging to test-tenant. registration:read-token
+	// requires no elevated assurance, so this drives the full router with a real
+	// tenant-scoped API key.
+	t.Run("cross-tenant caller cannot read another tenant's token", func(t *testing.T) {
+		crossKey := NewEphemeralTestKey(t, server, []string{"registration:read-token"}, "tenant-a", 5*time.Minute)
+
+		req := httptest.NewRequest("GET", "/api/v1/registration/tokens/"+token.Token, nil)
+		req.Header.Set("X-API-Key", crossKey)
+		rec := httptest.NewRecorder()
+
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	})
 }
 
@@ -727,6 +797,39 @@ func TestRotateRegistrationToken(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
+}
+
+// TestRotateRegistrationToken_CrossTenantRefused is the REQUIRED regression test for
+// Issue #4336: a caller scoped to tenant-a cannot rotate tenant-b's registration
+// token, and the check must run before RotateToken mints a new secret — a refused
+// caller must never see, or cause the minting of, a token they are not authorized
+// for. Calls the handler directly (registration:rotate-token requires
+// AssuranceStrong, which a test API key cannot clear) with only ctxkeys.TenantScope
+// set, mirroring the direct-call pattern used throughout this story. Fails (201
+// Created, new secret returned, old token revoked) against the pre-#4336 code.
+func TestRotateRegistrationToken_CrossTenantRefused(t *testing.T) {
+	server, tokenStore := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	seed, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID:      "tenant-b",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Group:         "rotate-group",
+	})
+	require.NoError(t, err)
+	require.NoError(t, tokenStore.SaveToken(ctx, seed))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens/tenant-b/rotate", nil)
+	req = mux.SetURLVars(req, map[string]string{"tenant_id": "tenant-b"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleRotateRegistrationToken(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	still, err := tokenStore.GetToken(ctx, seed.Token)
+	require.NoError(t, err)
+	assert.False(t, still.Revoked, "a refused cross-tenant rotate must not revoke or replace the existing token")
 }
 
 func TestRegistrationTokenCRUDFlow(t *testing.T) {

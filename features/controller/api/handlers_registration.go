@@ -23,6 +23,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -172,13 +173,14 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := entry.TenantID == callerTenant || strings.HasPrefix(entry.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-			return
-		}
+	// Issue #4336: read ctxkeys.TenantScope directly rather than callerTenantID/
+	// isWithinTenantScope — an unset scope (a plumbing bug that lost the caller's
+	// tenant) must be refused, not treated as unrestricted the way an empty
+	// callerTenant string was.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/approve") {
+		http.Error(w, "pending registration not found", http.StatusNotFound)
+		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
 		// Issue #3895: GetPendingByID above already confirmed the entry exists, so
@@ -218,13 +220,12 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := entry.TenantID == callerTenant || strings.HasPrefix(entry.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-			return
-		}
+	// Issue #4336: see handleApproveRegistration's identical comment on why this
+	// reads ctxkeys.TenantScope directly instead of callerTenantID/isWithinTenantScope.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/deny") {
+		http.Error(w, "pending registration not found", http.StatusNotFound)
+		return
 	}
 	// The deny reason is optional, so an absent body is not an error. A body that
 	// is present but malformed is: the reason ends up in the audit record, and
@@ -599,6 +600,26 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 	return resp, nil
 }
 
+// tenantListFilterForScope resolves the tenant filter to pass to a per-tenant
+// ListPending call from the caller's ctxkeys.TenantScope (Issue #4336): a
+// root-scoped caller sees every tenant (the store's existing "" == no filter
+// convention, matching handleApproveByCIDR/handleApproveByCIDRPreview's
+// pre-existing behavior), a tenant-scoped caller is pinned to its own subtree, and
+// an unset scope is refused outright (ok=false) rather than falling through to the
+// root-scoped "" filter — the exact "empty tenant means root" ambiguity this story
+// exists to close.
+func (s *Server) tenantListFilterForScope(r *http.Request) (tenantFilter string, ok bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	switch {
+	case scope.IsRoot():
+		return "", true
+	case scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), true
+	default:
+		return "", false
+	}
+}
+
 // approveAllResponse is the JSON body returned by approve-all and approve-by-cidr.
 type approveAllResponse struct {
 	Approved int `json:"approved"`
@@ -670,7 +691,11 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := s.callerTenantID(r)
+	callerTenant, ok := s.tenantListFilterForScope(r)
+	if !ok {
+		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
+		return
+	}
 	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", logging.SanitizeLogValue(err.Error()))
@@ -735,7 +760,11 @@ func (s *Server) handleApproveByCIDRPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	callerTenant := s.callerTenantID(r)
+	callerTenant, ok := s.tenantListFilterForScope(r)
+	if !ok {
+		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
+		return
+	}
 	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations for approve-by-cidr preview", "error", err)

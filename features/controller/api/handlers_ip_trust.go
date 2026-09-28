@@ -5,12 +5,12 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -53,14 +53,12 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may not add ranges for other tenants.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := req.TenantID == callerTenant || strings.HasPrefix(req.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may not add ranges for
+	// other tenants; an unset scope is refused rather than treated as unrestricted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, req.TenantID, "POST /api/v1/registration/ip-trust") {
+		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
 	}
 
 	if err := s.ipTrustStore.AddTrustedRange(r.Context(), req.TenantID, req.CIDR, req.PreSeeded); err != nil {
@@ -99,14 +97,12 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may not revoke ranges for other tenants.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := tenantID == callerTenant || strings.HasPrefix(tenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke ranges
+	// for other tenants; an unset scope is refused rather than treated as unrestricted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, "DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}") {
+		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
 	}
 
 	if err := s.ipTrustStore.RevokeTrustedRange(r.Context(), tenantID, cidr); err != nil {
@@ -138,16 +134,23 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scoped callers: always use their own tenant.
-	// Unscoped (admin): require tenant_id query param to avoid open-ended scans.
-	callerTenant := s.callerTenantID(r)
-	tenantID := callerTenant
-	if tenantID == "" {
+	// Scoped callers: always use their own tenant. Root-scoped callers: require
+	// tenant_id query param to avoid open-ended scans. An unset scope (Issue #4336)
+	// is refused outright rather than falling through to the root-scoped path.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	var tenantID string
+	switch {
+	case scope.IsRoot():
 		tenantID = r.URL.Query().Get("tenant_id")
 		if tenantID == "" {
 			http.Error(w, "tenant_id query parameter is required for unscoped callers", http.StatusBadRequest)
 			return
 		}
+	case scope.IsTenant() && scope.Path() != "":
+		tenantID = scope.Path()
+	default:
+		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
+		return
 	}
 
 	entries, err := s.ipTrustStore.ListTrustedRanges(r.Context(), tenantID)

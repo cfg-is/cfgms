@@ -14,10 +14,31 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// moduleApprovalScopeAllowed reports whether the caller may approve/reject module
+// bundles (Issue #4336). Module bundles carry no TenantID anywhere (pkg/modules/bundle,
+// features/controller/modules/cache): approval is a single global decision — the shared
+// module cache serves the whole fleet — that makes a bundle runnable for every tenant at
+// once, so there is no per-bundle resource tenant to compare a caller's scope against.
+// module:approve and module:reject are grantable permission IDs (permissions.go) and the
+// route carries no tenant path variable, so requirePermission's tenant-isolation block
+// treats every holder as in-scope; without this guard a tenant-scoped caller holding the
+// permission could approve a bundle for the entire fleet, not just its own tenant.
+// Restrict to principals with no tenant confinement — unscoped admins and root-scoped
+// SaaS operators, who own the platform's module catalog — mirroring
+// clusterLifecycleScopeAllowed's identical reasoning for controller cluster membership.
+func moduleApprovalScopeAllowed(r *http.Request, principal *Principal) bool {
+	if subjectToTenantCrossingBoundary(principal) {
+		return true
+	}
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	return scope.IsRoot()
+}
 
 // moduleApprovalEntry is a single pending bundle entry in the list response.
 type moduleApprovalEntry struct {
@@ -116,6 +137,12 @@ func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !moduleApprovalScopeAllowed(r, principal) {
+		s.writeErrorResponse(w, http.StatusForbidden, "module bundle approval requires an unscoped principal", "FORBIDDEN")
+		return
+	}
+
 	rawAddr := mux.Vars(r)["address"]
 
 	addr, ok := s.resolveModuleAddress(w, rawAddr)
@@ -143,6 +170,12 @@ func (s *Server) handleApproveModuleBundle(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleRejectModuleBundle(w http.ResponseWriter, r *http.Request) {
 	if !s.moduleDecisionNodeIsAuthoritative() {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !moduleApprovalScopeAllowed(r, principal) {
+		s.writeErrorResponse(w, http.StatusForbidden, "module bundle rejection requires an unscoped principal", "FORBIDDEN")
 		return
 	}
 

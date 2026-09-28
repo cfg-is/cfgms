@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/cluster"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
 )
@@ -128,6 +129,37 @@ func TestHandleClusterNodeDrain_TenantScopedPrincipal_Returns403(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
 	assert.False(t, srv.clusterDraining.Load(), "health gate must not be set on 403")
+}
+
+// TestHandleClusterNodeDrain_UnsetScope_Refused is the REQUIRED regression test for
+// Issue #4336: a caller whose ctxkeys.TenantScope correctly reflects a real
+// tenant-scoped caller, but whose Principal.TenantID field is empty (as if cleared
+// or lost by an unrelated downstream bug), must still be refused. Before this
+// story's fix, clusterLifecycleScopeAllowed read only principal.TenantID == "" —
+// exactly the "empty tenant means root" ambiguity that promotes a plumbing bug to
+// fleet-wide cluster admin. This test fails (202, node drained) against that code.
+func TestHandleClusterNodeDrain_UnsetScope_Refused(t *testing.T) {
+	srv, store := setupClusterTestServer(t)
+	require.NoError(t, store.Register(cluster.NodeRecord{
+		ID:           "node-1",
+		State:        cluster.StateActive,
+		RegisteredAt: time.Now(),
+	}))
+
+	principal := &Principal{ID: "bugged-caller", Assurance: session.AssuranceStrong}
+	req := drainRequest("node-1")
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-1"))
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	srv.handleClusterNodeDrain(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := store.GetNode("node-1")
+	require.NoError(t, err)
+	assert.Equal(t, cluster.StateActive, got.State, "state must not change on 403")
 }
 
 // TestHandleClusterNodeDrain_RootScopedPrincipal_Returns202 verifies the in-scope side

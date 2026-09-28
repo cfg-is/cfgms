@@ -239,29 +239,58 @@ func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTen
 	})
 }
 
+// principalIsUnrestrictedAdmin reports whether principal has today's unrestricted
+// tenant-creation behavior: an unscoped, certificate-authenticated principal that is
+// not subject to the ADR-025 root<->MSP crossing boundary — exactly
+// authorizeTenantAccess's own definition of "unrestricted" (see that function's first
+// branch). It may create a root-level tenant or place one anywhere in the tree.
+//
+// Issue #4336: this used to be `principal == nil || (principal.TenantID == "" &&
+// !principal.RootScoped)` — true for a nil principal and for ANY unscoped,
+// non-RootScoped principal regardless of how (or whether) it was authenticated. That
+// let a caller whose principal was nil, or merely unscoped without ever having
+// presented a verified mTLS admin certificate (the ADR-025 Amendment 4 A4.2 gap
+// authorizeTenantAccess's own first branch already closes for every other tenant
+// route in this file), graft a tenant anywhere in the tree. Routing the "unrestricted"
+// decision through this single predicate — the same one authorizeTenantAccess uses —
+// keeps handleCreateTenant's guard consistent with every other handler in this file
+// instead of carrying its own, narrower-in-appearance-but-actually-wider fail-open path.
+func principalIsUnrestrictedAdmin(principal *Principal) bool {
+	if principal == nil || principal.TenantID != "" || subjectToTenantCrossingBoundary(principal) {
+		return false
+	}
+	return principal.CertSerial != ""
+}
+
 // authorizeTenantCreationParent decides whether principal may create a tenant under
 // parentID, writing the denial response itself and reporting false when it does.
 //
-//   - An unscoped principal that is not RootScoped keeps today's unrestricted behavior
-//     (authorizeTenantAccess's first branch): it may create a root-level tenant or place
-//     one anywhere in the tree.
-//   - Every scope-constrained principal — tenant-scoped (TenantID != "") or root-scoped
-//     (ADR-025 Amendment 1 A1.3) — must name a parent it is authorized for. An omitted
-//     parent_id is a denial, not a default: it would create a new top-level tenant
-//     outside the caller's subtree.
+//   - An unrestricted admin (principalIsUnrestrictedAdmin) keeps today's unrestricted
+//     behavior: it may create a root-level tenant or place one anywhere in the tree.
+//   - Every scope-constrained principal — tenant-scoped (TenantID != ""), root-scoped
+//     (ADR-025 Amendment 1 A1.3), or unscoped-but-not-certificate-authenticated — must
+//     name a parent it is authorized for. An omitted parent_id is a denial, not a
+//     default: it would create a new top-level tenant outside the caller's subtree.
+//     For the not-certificate-authenticated case, authorizeTenantAccess below denies
+//     regardless of parentID (ADR-025 Amendment 4 A4.2), so the response is the same
+//     403 either way.
 //
 // A parent that does not exist and a parent in a foreign subtree both fail closed to the
 // same 403 (IsTenantAncestor errors on an unknown descendant, which authorizeTenantAccess
 // maps to tenantAuthDenied), so this guard is not a cross-tenant existence oracle.
 func (s *Server) authorizeTenantCreationParent(w http.ResponseWriter, r *http.Request, principal *Principal, parentID string) bool {
-	if principal == nil || (principal.TenantID == "" && !principal.RootScoped) {
+	if principalIsUnrestrictedAdmin(principal) {
 		return true
 	}
 
 	if parentID == "" {
+		callerTenant, principalID := "", ""
+		if principal != nil {
+			callerTenant, principalID = principal.TenantID, principal.ID
+		}
 		s.logger.Info("Tenant create refused: scope-constrained caller omitted parent_id",
-			"caller_tenant", logging.SanitizeLogValue(principal.TenantID),
-			"principal_id", logging.SanitizeLogValue(principal.ID))
+			"caller_tenant", logging.SanitizeLogValue(callerTenant),
+			"principal_id", logging.SanitizeLogValue(principalID))
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"parent_id is required and must name the caller's own tenant or a descendant",
 			"CROSS_TENANT_ACCESS_DENIED")
@@ -277,9 +306,13 @@ func (s *Server) authorizeTenantCreationParent(w http.ResponseWriter, r *http.Re
 		s.writeTenantCrossingChallenge(w, parentID)
 		return false
 	default:
+		callerTenant := ""
+		if principal != nil {
+			callerTenant = principal.TenantID
+		}
 		s.logger.Info("Cross-tenant tenant create refused",
 			"parent_tenant", logging.SanitizeLogValue(parentID),
-			"caller_tenant", logging.SanitizeLogValue(principal.TenantID))
+			"caller_tenant", logging.SanitizeLogValue(callerTenant))
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"parent_id is required and must name the caller's own tenant or a descendant",
 			"CROSS_TENANT_ACCESS_DENIED")
