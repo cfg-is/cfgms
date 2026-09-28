@@ -414,6 +414,12 @@ Get configuration for a specific steward.
 **Authentication:** Required  
 **Required permission:** `steward:read-config`
 
+**Tenant scope:** a scoped caller may read configuration only for a steward
+within its own tenant subtree. A steward outside the subtree, or unknown to the
+caller, is rejected with `404 STEWARD_NOT_FOUND` — the same response for both
+cases, so the endpoint cannot be used to probe steward existence across
+tenants. Root/unscoped callers may read any steward's configuration.
+
 **Parameters:**
 
 - `id` (path): Steward ID
@@ -456,6 +462,13 @@ Update configuration for a specific steward.
 **Authentication:** Required  
 **Required permission:** `steward:write-config`
 
+**Tenant scope:** a scoped caller may write configuration only for a steward
+within its own tenant subtree; an out-of-subtree steward is rejected with
+`404 STEWARD_NOT_FOUND` (not `403`, to avoid disclosing that the steward exists
+in another tenant). Root/unscoped callers retain authority across tenants,
+subject to the ADR-025 root/MSP tenant-crossing-boundary check for principals
+that are subject to it.
+
 **Parameters:**
 
 - `id` (path): Steward ID
@@ -469,6 +482,14 @@ Get the effective (merged/inherited) configuration for a specific steward, resol
 **Authentication:** Required  
 **Required permission:** `steward:read-config`
 
+**Tenant scope:** resolved against the steward's own tenant when the steward is
+known to the controller's in-memory registry; a caller whose tenant differs
+from the steward's owning tenant is rejected, mapped to `500 INTERNAL_ERROR`
+(this check does not distinguish a cross-tenant rejection from a genuine
+resolution failure, unlike the plain GET endpoint above). A steward not yet in
+the registry falls back to resolving under the caller's own tenant, so a
+mismatch cannot disclose another tenant's configuration.
+
 **Parameters:**
 
 - `id` (path): Steward ID
@@ -479,6 +500,11 @@ Validate configuration for a steward without applying it.
 
 **Authentication:** Required  
 **Required permission:** `steward:validate-config`
+
+**Tenant scope:** a scoped caller may validate configuration only for a steward
+within its own tenant subtree. An out-of-subtree or unknown steward is rejected
+with `404 STEWARD_NOT_FOUND`. Root/unscoped callers may validate for any
+steward.
 
 **Parameters:**
 
@@ -669,6 +695,14 @@ List certificates.
 
 **Authentication:** Required  
 **Required permission:** `certificate:list`
+
+**Tenant scope:** a scoped caller sees only certificates whose owning steward is
+within its own tenant subtree; a certificate that cannot be attributed to any
+steward (a controller-internal CA/signing/server certificate) remains visible
+to every caller. If the steward store needed to evaluate subtree membership is
+unavailable, the request fails closed with `503 SERVICE_UNAVAILABLE` rather
+than returning an unfiltered list. Root/unscoped callers see every
+certificate, unfiltered.
 
 **Parameters:**
 
@@ -1035,6 +1069,11 @@ List API keys.
 **Authentication:** Required  
 **Required permission:** `api-key:list`
 
+**Tenant scope:** only API keys belonging to the caller's own tenant are
+returned — an exact tenant match, not a subtree (unlike most list endpoints in
+this document). A request with no resolved tenant is rejected with
+`401 AUTHENTICATION_REQUIRED`.
+
 **Response:**
 
 ```json
@@ -1219,6 +1258,12 @@ List registration tokens. Each entry includes `token_id` (stable UUID, safe to e
 **Authentication:** Required  
 **Required permission:** `registration:list-tokens`
 
+**Tenant scope:** a tenant-scoped caller always sees only its own tenant's
+tokens — a `tenant_id` query parameter is ignored for a tenant-scoped caller.
+Root/unscoped callers may narrow the list with `?tenant_id=`; omitting it lists
+every tenant's tokens. A caller with no resolved tenant scope at all is
+rejected with `403 FORBIDDEN`.
+
 #### POST /api/v1/registration/tokens
 
 Create a new registration token. The response includes the full secret (`token`) and the stable `token_id` — this is the only time the secret is returned.
@@ -1226,12 +1271,19 @@ Create a new registration token. The response includes the full secret (`token`)
 **Authentication:** Required  
 **Required permission:** `registration:create-token`
 
+**Tenant scope:** the token's `tenant_id` must be within the caller's own
+tenant subtree, or the request is rejected with `403 FORBIDDEN`.
+
 #### GET /api/v1/registration/tokens/{token}
 
 Get a specific registration token's metadata (redacted — no secret).
 
 **Authentication:** Required  
 **Required permission:** `registration:read-token`
+
+**Tenant scope:** a token owned by another tenant returns `404` (the same
+response as an unknown token), so this endpoint cannot be used to probe token
+existence across tenants. Root/unscoped callers may read any token.
 
 **Parameters:**
 
@@ -1244,6 +1296,10 @@ Delete a registration token.
 **Authentication:** Required  
 **Required permission:** `registration:delete-token`
 
+**Tenant scope:** a token owned by another tenant returns `404` (the same
+response as an unknown token) and is not deleted. Root/unscoped callers may
+delete any token.
+
 **Parameters:**
 
 - `token` (path): Registration token value or `token_id`
@@ -1255,6 +1311,10 @@ Revoke a registration token without deleting it. A revoked token remains in the 
 **Authentication:** Required  
 **Required permission:** `registration:revoke-token`
 
+**Tenant scope:** a token owned by another tenant returns `404` (the same
+response as an unknown token) and is not revoked. Root/unscoped callers may
+revoke any token.
+
 **Parameters:**
 
 - `token` (path): Registration token value or `token_id`
@@ -1265,6 +1325,10 @@ Atomically revoke the active token(s) for a tenant (optionally scoped to `group`
 
 **Authentication:** Required  
 **Required permission:** `registration:rotate-token`
+
+**Tenant scope:** `tenant_id` must be within the caller's own tenant subtree, or
+the request is rejected with `403 FORBIDDEN` before any token is minted.
+Root/unscoped callers may rotate tokens for any tenant.
 
 **Parameters:**
 
@@ -1915,6 +1979,21 @@ Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions r
 ### Workflow Triggers
 
 Trigger endpoints manage scheduled and event-driven workflow execution. The `/triggers` subrouter is registered alongside `/workflows` when a `WorkflowHandler` is wired in (`server.go:717`). All routes inherit the API subrouter's authentication middleware. Trigger types: `schedule`, `webhook`, `siem`, `manual`.
+
+**Tenant scope (applies to every endpoint below):** every trigger operation is
+scoped strictly to the caller's own resolved tenant — unlike most other
+endpoint families in this document, there is no root/unscoped-caller exception
+in this subsystem. `POST /api/v1/triggers` always stores the trigger under the
+caller's own tenant; a `tenant_id` in the request body is accepted but ignored
+(overwritten server-side) — the example bodies below show it only because the
+field is echoed back, not because it is honoured. `GET /api/v1/triggers`
+returns only the caller's own tenant's triggers; the `tenant_id` query
+parameter narrows further within that set — an exact match, not a path prefix
+— and can never broaden it to another tenant. Every other operation
+(`GET`/`PUT`/`DELETE /{id}`, `.../enable`, `.../disable`, `.../execute`,
+`.../executions`) treats a trigger outside the caller's tenant identically to
+an unknown ID and returns `404`. A request with no resolved tenant at all is
+rejected outright on create/list; per-ID operations simply match no trigger.
 
 #### GET /api/v1/triggers/health
 
@@ -2602,9 +2681,43 @@ List entities with active drift matching a filter.
 Tenant scoping: only drift records for entities in the caller's tenant subtree
 are returned.
 
-## Internal Test Endpoint (not for external use)
+## Internal Test Endpoints (not for external use)
 
-`PUT /api/v1/test/stewards/{id}/config` is registered without authentication for integration test use only. It must not be reachable in production deployments. The endpoint is gated by the absence of normal auth middleware and is documented here only to note its existence in the route table.
+Three routes exist solely for integration-test setup and carry no normal
+authentication. They are not reachable in a production build — not because of
+policy, but because of five controls that must all hold simultaneously:
+
+- `PUT /api/v1/test/stewards/{id}/config`
+- `PUT /api/v1/test/stewards/{id}/status`
+- `GET /api/v1/test/audit/count`
+
+1. **Build tag.** The routes are registered only in
+   `features/controller/api/test_endpoints_enabled.go`, gated by
+   `//go:build cfgms_test_endpoints`.
+2. **Paired negative-tag file.** `features/controller/api/test_endpoints_disabled.go`
+   carries the inverse tag (`//go:build !cfgms_test_endpoints`) and defines
+   `registerTestRoutes` as a no-op. The default build of every binary compiles
+   this file, not the one above, so the handlers do not exist in the compiled
+   binary at all — not merely disabled at runtime.
+3. **Environment gate.** Even in a binary built with the tag, each request is
+   checked at runtime against `CFGMS_ENABLE_TEST_ENDPOINTS`; unset, or set to
+   anything other than exactly `"true"`, returns a rejection instead of
+   invoking the handler.
+4. **Test-only wrapper.** The config/status routes are wrapped by a `testOnly`
+   closure (in `test_endpoints_enabled.go`) that performs the environment
+   check before delegating to the real handler; `handleTestSetStewardStatus`
+   independently re-checks the same variable as defense-in-depth.
+5. **Absent from release build targets.** No production `go build` or Docker
+   build in this repository passes `-tags cfgms_test_endpoints`. The only
+   places that set it are `docker-compose.test.yml` (a test-only compose file)
+   and the `test-fast` Makefile target's `go vet` step, which vets the
+   tag-gated code for compile errors without producing a binary.
+   `cmd/controller/Dockerfile`'s `GO_BUILD_TAGS` build argument defaults to
+   empty and is not overridden by any release or CI image-build workflow.
+
+`registerTestRoutes(s)` is called unconditionally from `server.go`; which of
+the two build-tag files above satisfies that call — the real registrations or
+the no-op — is decided entirely at compile time, before the binary exists.
 
 ## Error Codes
 
@@ -2704,11 +2817,13 @@ file is a full controller compromise.
 **Do not:**
 - Commit it to git. Dotfile repos (`~/.config` is frequently committed) are a common
   footgun. Add `admin.bundle.yaml` to your global `.gitignore`.
-- Store it in Dropbox, OneDrive, Google Drive, or any cloud-synced folder.
+- Store it in a cloud-synced folder (any provider that mirrors local files to a
+  remote drive).
 - Store it in a Windows roaming profile — it will be transmitted to every machine
   you log into.
-- Email it, paste it into Slack, or store it in a secrets manager that logs values
-  (only use secret managers with envelope encryption and audit-only access logs).
+- Email it, paste it into a chat tool, or store it in a secrets manager that logs
+  values (only use secret managers with envelope encryption and audit-only access
+  logs).
 
 **Do:**
 - Keep it `chmod 600` on Linux/macOS (the controller writes it this way automatically):
@@ -2853,6 +2968,10 @@ List all web admin accounts. No credential material (registered passkey public k
 **Authentication:** Required  
 **Required permission:** `account:list`
 
+**Tenant scope:** a scoped caller sees only accounts within its own tenant
+subtree (filtered silently — out-of-subtree accounts are simply omitted, not
+rejected). Root/unscoped callers see every tenant's accounts.
+
 **Response:**
 
 ```json
@@ -2916,6 +3035,12 @@ Bind an mTLS admin certificate to the account by serial number. The serial is th
 **Required permission:** `cert-binding:bind`  
 **Assurance:** Strong session required
 
+**Tenant scope:** the target account must be within the caller's own tenant
+subtree, checked after confirming the account exists — an unknown username
+returns `404 ACCOUNT_NOT_FOUND` first, an existing but out-of-subtree account
+returns `403 FORBIDDEN`. Root/unscoped callers may bind a certificate to any
+account.
+
 **Parameters:**
 
 - `username` (path): Username of the account to bind the certificate to
@@ -2963,6 +3088,11 @@ List all mTLS admin certificates bound to the account. Returns public metadata o
 **Authentication:** Required  
 **Required permission:** `cert-binding:list`
 
+**Tenant scope:** same rule as bind above — an unknown username returns
+`404 ACCOUNT_NOT_FOUND`; an existing but out-of-subtree account returns
+`403 FORBIDDEN`. Root/unscoped callers may list any account's bound
+certificates.
+
 **Parameters:**
 
 - `username` (path): Username of the account to list certificates for
@@ -2992,6 +3122,10 @@ Remove a certificate binding from the account **and** revoke the certificate via
 **Authentication:** Required  
 **Required permission:** `cert-binding:revoke`  
 **Assurance:** Strong session required
+
+**Tenant scope:** same rule as bind above — an unknown username returns
+`404 ACCOUNT_NOT_FOUND`; an existing but out-of-subtree account returns
+`403 FORBIDDEN`. Root/unscoped callers may revoke a binding on any account.
 
 **Parameters:**
 
@@ -3025,6 +3159,10 @@ Atomically bind a new certificate and revoke the old one as a single resumable o
 **Authentication:** Required  
 **Required permission:** `cert-binding:rotate`  
 **Assurance:** Strong session required
+
+**Tenant scope:** same rule as bind above — an unknown username returns
+`404 ACCOUNT_NOT_FOUND`; an existing but out-of-subtree account returns
+`403 FORBIDDEN`. Root/unscoped callers may rotate a binding on any account.
 
 **Parameters:**
 

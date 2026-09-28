@@ -327,7 +327,7 @@ The controller decides which steward gets which cfg based on:
 
 - **Direct assignment** — a cfg explicitly targets a steward by ID ✓ implemented (`config_service_v2.go`: per-steward config stored and retrieved by steward ID)
 - **Group membership** — a cfg targets a group; all stewards in that group receive it ✓ implemented (tenant/group path used in inheritance resolution)
-- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings at any depth ✓ implemented (`InheritanceResolver.ResolveConfiguration()`)
+- **Tenant hierarchy** — cfgs inherit through the recursive tenant hierarchy (e.g., MSP → Client → Group → Device). Child tenants can override parent settings, but `InheritanceResolver.ResolveConfiguration()` only ever applies the first three tenant-path levels (MSP, Client, Group) plus the Device leaf — a tenant path deeper than that has its extra intermediate levels silently skipped, not "any depth." See [Configuration Inheritance](../guides/configuration-inheritance.md#current-inheritance-depth) for the depth cap and its rationale.
 - **Cluster membership** — a steward that belongs to one or more clusters (Hyper-V, SQL, etc.) receives an additional `cluster-policies/<clusterName>` config layer inserted after Group-level and before Device-level in the merge order ✓ implemented (`InheritanceResolver` cluster-policies cascade, Issue #2425)
 - **Effective cfg** — the controller resolves inheritance and produces the effective cfg for each steward, merging all applicable layers ✓ implemented (`GetEffectiveConfiguration()`)
 - **Tag-based targeting** — stewards can carry arbitrary tags (e.g., `ring=canary`, `role=web-server`, `region=us-east`); a cfg targets stewards by tag expression via role configs ✓ implemented (`roleConfigAdapter` in config_service_v2.go injects matching role fragments into `InheritanceResolver`, Issue #2546)
@@ -1399,12 +1399,23 @@ Each cell is a complete, independent CFGMS deployment (its own controller cluste
 
 ### Cfg Inheritance
 
-Configuration resolves recursively from root to leaf:
+Configuration resolves from root toward the leaf, but not through every
+intermediate tenant on a deep path:
 
 1. Start with the root tenant's cfg
-2. At each level, merge the child tenant's cfg over the parent's
+2. Merge the child tenant's cfg over the parent's, but only for the first
+   three tenant-path levels (MSP, Client, Group) — `InheritanceResolver`
+   applies `msp-policies`, `client-policies` and `group-policies` at those
+   three levels specifically and skips any intermediate tenant beyond them;
+   a path deeper than three levels does not get a fourth merge step
 3. Named resources replace entire blocks (declarative merging)
-4. The leaf cfg (effective cfg for a steward) is the fully-resolved result
+4. Device-level cfg is then applied unconditionally, keyed by steward ID
+   rather than tenant-path depth, so the leaf layer always applies regardless
+   of how deep the steward's tenant sits
+5. The leaf cfg (effective cfg for a steward) is the fully-resolved result
+
+See [Configuration Inheritance — Current Inheritance Depth](../guides/configuration-inheritance.md#current-inheritance-depth)
+for the depth cap in full and its rationale.
 
 Every value in the effective cfg carries its **source path** and **version** for auditability — an admin can see exactly which tenant level provided each setting.
 
