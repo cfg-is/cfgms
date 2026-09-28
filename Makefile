@@ -1302,6 +1302,9 @@ check-architecture:
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
 	@echo ""
+	@echo "📦 Checking windows-setup.ps1 and script templates for banned execution patterns..."
+	@bash ./scripts/check-no-banned-exec-patterns.sh
+	@echo ""
 	@echo "📦 Checking every non-test package is reachable from a main package..."
 	@bash ./scripts/check-dead-packages.sh
 

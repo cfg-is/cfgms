@@ -32,53 +32,80 @@ content: |
   #!/bin/bash
   set -euo pipefail
 
-  LOG_PATH="${LOG_PATH:?LOG_PATH is required}"
-  KEEP_DAYS="${KEEP_DAYS:-30}"
-  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+  # Parameters are read from this process's own environment, which is the only
+  # channel the steward script executor uses: it resolves every declared
+  # parameter and injects it into cmd.Env for the child process alone, keeping
+  # values off the command line (/proc/<pid>/cmdline, ps output, Windows event
+  # 4688) and out of this script's text. A bash literal parameter arrives as
+  # CFGMS_PARAM_<NAME>, a secret-store parameter as the bare <NAME>; both are
+  # read below, so the template works under either binding. See
+  # features/modules/stdlib/script/executor.go and param_binding.go -- the
+  # executor never passes positional arguments, so reading $1/$2 here would
+  # leave this template permanently broken on the real execution path.
+  #
+  # Every reference below is braced and double-quoted, and the script-local
+  # names are lowercase, so this content contains no "$LOG_PATH"-shaped token
+  # for a text-substituting caller to replace with a parameter value -- that
+  # substitution is what turns an attacker-controlled value into literal shell
+  # source. A value stays one opaque shell token whatever characters it
+  # contains, and no command string is composed at runtime (Issue #4343).
+  log_path="${CFGMS_PARAM_LOG_PATH:-${LOG_PATH:-}}"
+  : "${log_path:?LOG_PATH is required}"
+  keep_days="${CFGMS_PARAM_KEEP_DAYS:-${KEEP_DAYS:-30}}"
+
+  # Validate before use: keep_days is interpolated into a find predicate, so
+  # constrain it to digits at this boundary rather than trusting the caller.
+  if [[ ! "${keep_days}" =~ ^[0-9]+$ ]]; then
+      echo "Error: KEEP_DAYS must be a whole number of days" >&2
+      exit 1
+  fi
+
+  timestamp="$(date +%Y%m%d_%H%M%S)"
 
   echo "Log Rotation Script"
-  echo "Log path: $LOG_PATH"
-  echo "Retention: $KEEP_DAYS days"
+  echo "Log path: ${log_path}"
+  echo "Retention: ${keep_days} days"
   echo ""
 
-  if [ ! -e "$LOG_PATH" ]; then
-      echo "Error: $LOG_PATH does not exist"
+  if [ ! -e "${log_path}" ]; then
+      echo "Error: log path does not exist: ${log_path}"
       exit 1
   fi
 
   rotate_file() {
-      local file=$1
-      local rotated="${file}.${TIMESTAMP}"
+      local file="$1"
+      local rotated="${file}.${timestamp}"
 
-      if [ ! -f "$file" ]; then
+      if [ ! -f "${file}" ]; then
           return
       fi
 
-      echo "Rotating: $file"
+      echo "Rotating: ${file}"
 
       # Copy and truncate
-      cp "$file" "$rotated"
-      > "$file"
+      cp "${file}" "${rotated}"
+      > "${file}"
 
       # Compress
-      gzip "$rotated"
+      gzip "${rotated}"
       echo "  Created: ${rotated}.gz"
   }
 
-  if [ -f "$LOG_PATH" ]; then
+  if [ -f "${log_path}" ]; then
       # Single file
-      rotate_file "$LOG_PATH"
-  elif [ -d "$LOG_PATH" ]; then
-      # Directory
-      find "$LOG_PATH" -type f -name "*.log" | while read logfile; do
-          rotate_file "$logfile"
-      done
+      rotate_file "${log_path}"
+  elif [ -d "${log_path}" ]; then
+      # Directory. -print0 / read -d '' so a newline in a filename cannot split
+      # one path into two arguments.
+      while IFS= read -r -d '' logfile; do
+          rotate_file "${logfile}"
+      done < <(find "${log_path}" -type f -name "*.log" -print0)
   fi
 
   # Cleanup old rotated logs
   echo ""
-  echo "Cleaning up logs older than $KEEP_DAYS days..."
-  find "$(dirname "$LOG_PATH")" -name "*.gz" -type f -mtime +$KEEP_DAYS -delete
+  echo "Cleaning up logs older than ${keep_days} days..."
+  find "$(dirname "${log_path}")" -name "*.gz" -type f -mtime "+${keep_days}" -delete
 
   echo "Log rotation completed"
   exit 0

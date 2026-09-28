@@ -103,9 +103,16 @@ jobs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/codeql_databases
-        key: ${{ runner.os }}-codeql-db-${{ matrix.language }}-${{ hashFiles('**/*.go', '**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-codeql-db-${{ matrix.language }}-
+        # The key includes the PR head SHA (or, off pull_request, github.sha)
+        # alongside the content hash (Issue #4343). The old restore-keys
+        # prefix fallback matched ANY earlier cache under this language,
+        # regardless of hashFiles — a cache miss on the exact key silently
+        # restored an extraction database built from a DIFFERENT commit's
+        # source, and "Perform CodeQL Analysis" then analyzed that stale
+        # database rather than this run's actual head. Dropping the fallback
+        # means a miss is a full rebuild, never a stale hit; the hashFiles
+        # component is kept so two runs of the identical commit still hit.
+        key: ${{ runner.os }}-codeql-db-${{ matrix.language }}-${{ github.event.pull_request.head.sha || github.sha }}-${{ hashFiles('**/*.go', '**/go.sum') }}
 
     - name: Download dependencies
       if: matrix.language == 'go'
