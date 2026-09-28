@@ -89,7 +89,13 @@ if ! go list ./... >"$workdir/all_raw.txt" 2>"$workdir/all.err"; then
     cat "$workdir/all.err" >&2
     exit 2
 fi
-awk -v pre="$MODPATH/" -v mod="$MODPATH" 'index($0, pre) == 1 || $0 == mod' \
+# `go list ./...` descends into vendored third-party trees. `web/node_modules`
+# ships Go sample files inside npm packages: unreachable by definition, not this
+# repository's code, and impossible to either wire in or delete. They are excluded
+# here rather than allowlisted, because the allowlist records deliberate choices
+# about our own packages. `vendor/` needs no exclusion — module mode already omits it.
+awk -v pre="$MODPATH/" -v mod="$MODPATH" \
+    '(index($0, pre) == 1 || $0 == mod) && $0 !~ /(^|\/)node_modules(\/|$)/' \
     "$workdir/all_raw.txt" | sort -u >"$workdir/all.txt"
 
 # --- 2. every `main` package: the set of binaries this module ships --------
