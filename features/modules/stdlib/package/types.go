@@ -68,7 +68,12 @@ type Config struct {
 	// "<ChocoSource>/chocolatey.nupkg" (path- or URL-joined) when unset — see
 	// resolveBootstrapPackageSource.
 	ChocoBootstrapPackage string `yaml:"choco_bootstrap_package,omitempty"`
-	Maintenance           struct {
+	// ChocoBootstrapSHA256 is the operator-pinned expected SHA-256 (64-char
+	// hex) of the chocolatey bootstrap package. Required for chocolatey
+	// bootstrap to proceed — a fetched payload that cannot be verified
+	// against this value is a fatal error, never a warning (Issue #4348).
+	ChocoBootstrapSHA256 string `yaml:"choco_bootstrap_sha256,omitempty"`
+	Maintenance          struct {
 		Window   string        `yaml:"window"`   // Optional: Reference to a named maintenance window
 		Schedule string        `yaml:"schedule"` // Optional: Inline schedule (cron format)
 		Duration time.Duration `yaml:"duration"` // Optional: Duration of the window
@@ -110,6 +115,9 @@ func (c *Config) AsMap() map[string]interface{} {
 	}
 	if c.ChocoBootstrapPackage != "" {
 		result["choco_bootstrap_package"] = c.ChocoBootstrapPackage
+	}
+	if c.ChocoBootstrapSHA256 != "" {
+		result["choco_bootstrap_sha256"] = c.ChocoBootstrapSHA256
 	}
 
 	// Only include maintenance if it has values
@@ -175,6 +183,9 @@ func (c *Config) GetManagedFields() []string {
 	}
 	if c.ChocoBootstrapPackage != "" {
 		fields = append(fields, "choco_bootstrap_package")
+	}
+	if c.ChocoBootstrapSHA256 != "" {
+		fields = append(fields, "choco_bootstrap_sha256")
 	}
 	if c.Maintenance.Window != "" || c.Maintenance.Schedule != "" {
 		fields = append(fields, "maintenance")
@@ -307,6 +318,10 @@ type PackageModule struct {
 	chocoSource           string
 	chocoSourceName       string
 	chocoBootstrapPackage string
+	// chocoBootstrapSHA256 is the operator-pinned expected SHA-256 (64-char
+	// hex) of the chocolatey bootstrap package fetchBytes retrieves. Required
+	// for bootstrapChocoReal to proceed — see verifyBootstrapChecksum.
+	chocoBootstrapSHA256 string
 	// chocoExeExists reports whether chocolatey is already installed at the
 	// well-known path (chocoExePath). nil means use the real filesystem check
 	// (chocoInstalled's default); tests override it so bootstrap-selection

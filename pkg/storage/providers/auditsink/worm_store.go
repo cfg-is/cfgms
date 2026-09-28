@@ -32,6 +32,7 @@ package auditsink
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,8 +55,10 @@ const wormNamespace = "audit-chain"
 const pendingMarkerNamespace = "audit-chain-pending"
 
 // tenantRegistryTenantID/tenantRegistryNamespace hold a durable, per-tenant
-// idempotent marker (blob name = tenant ID) recording every tenant the marker
-// store has ever seen a pending entry for. Reconciliation cannot enumerate
+// idempotent marker (blob name = encodeTenantRegistryName(tenant ID) — see
+// that function's doc comment for why the tenant ID itself cannot be the raw
+// Name) recording every tenant the marker store has ever seen a pending entry
+// for. Reconciliation cannot enumerate
 // "every tenant" through blob.BlobStore — ListBlobs requires a TenantID prefix
 // — so without this registry a fresh process would have no way to discover a
 // tenant's pending markers left over from before a restart until that tenant's
@@ -387,30 +390,82 @@ func (w *WORMAuditStore) isInFlight(entryID string) bool {
 	return ok
 }
 
+// encodeTenantRegistryName maps a (possibly hierarchical, "/"-separated)
+// tenant ID onto a blob.BlobKey.Name-safe string. The tenant registry parks
+// every tenant under the single fixed tenantRegistryTenantID/
+// tenantRegistryNamespace bucket (see the const doc comment above — ListBlobs
+// requires a TenantID prefix, so there is no other way to later enumerate
+// "every tenant" at all), which means the actual tenant ID — legitimately
+// containing "/" for a hierarchical tenant like "root/msp-a/client-1" — has to
+// live in Name instead of TenantID. Every concrete BlobStore's Name validation
+// rejects "/" (it is not a path-separator-safe field the way TenantID is), so
+// storing the raw tenant ID there deterministically failed
+// PutBlobIfAbsent for every hierarchical tenant, which is effectively every
+// real tenant. Base64 (URL-safe, unpadded) never produces "/", "\", or "..",
+// so the encoded form always passes Name validation regardless of what the
+// tenant ID contains.
+func encodeTenantRegistryName(tenantID string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(tenantID))
+}
+
+// decodeTenantRegistryName reverses encodeTenantRegistryName, with a fallback
+// for a registry entry written before this encoding existed: the tenant
+// registry (#4039) originally stored the raw tenant ID directly as Name, so a
+// slash-free legacy tenant ID already durably recorded on an upgraded
+// deployment is still sitting there unencoded. A decode failure (any
+// hierarchical legacy entry — it contains "/", which is not valid base64 at
+// all) falls back to the raw name directly. A decode success is verified by
+// re-encoding: encodeTenantRegistryName is deterministic, so a name this
+// function itself produced always round-trips exactly, while a legacy raw
+// name that happens to also be syntactically valid base64 (e.g. "tenant1")
+// essentially never does — its decoded bytes are not themselves the name's
+// own base64 encoding. Either way, this never returns an error: a
+// pre-existing entry must remain discoverable, not silently dropped.
+func decodeTenantRegistryName(name string) string {
+	raw, err := base64.RawURLEncoding.DecodeString(name)
+	if err != nil {
+		return name
+	}
+	decoded := string(raw)
+	if encodeTenantRegistryName(decoded) != name {
+		return name
+	}
+	return decoded
+}
+
 // registerTenant durably records tenantID in the tenant registry (idempotent,
 // via PutBlobIfAbsent) the first time this process observes it, so the
 // reconciliation loop can discover this tenant's pending markers even after a
 // restart with no further activity from it. knownTenants caches the result so
 // a hot AppendChainedEntry path pays the registry write at most once per
 // tenant per process lifetime.
+//
+// A failed registration is never treated as success: knownTenants is only
+// populated once PutBlobIfAbsent (or an idempotent ErrBlobAlreadyExists)
+// confirms the record is durable, so a transient storage failure is retried
+// on this tenant's next AppendChainedEntry call rather than being cached as
+// "done" and silently never retried for the rest of the process lifetime.
 func (w *WORMAuditStore) registerTenant(ctx context.Context, tenantID string) {
 	w.mu.Lock()
 	_, known := w.knownTenants[tenantID]
-	if !known {
-		w.knownTenants[tenantID] = struct{}{}
-	}
 	w.mu.Unlock()
 	if known {
 		return
 	}
 
-	key := blob.BlobKey{TenantID: tenantRegistryTenantID, Namespace: tenantRegistryNamespace, Name: tenantID}
-	if err := w.markerStore.PutBlobIfAbsent(ctx, key, bytes.NewReader(nil), blob.BlobMeta{ContentType: "application/octet-stream"}); err != nil && !errors.Is(err, blob.ErrBlobAlreadyExists) {
+	key := blob.BlobKey{TenantID: tenantRegistryTenantID, Namespace: tenantRegistryNamespace, Name: encodeTenantRegistryName(tenantID)}
+	err := w.markerStore.PutBlobIfAbsent(ctx, key, bytes.NewReader(nil), blob.BlobMeta{ContentType: "application/octet-stream"})
+	if err != nil && !errors.Is(err, blob.ErrBlobAlreadyExists) {
 		w.logger.Warn("audit sink: worm: failed to durably register tenant in marker registry — reconciliation may miss this tenant's markers until process restart",
 			"tenant_id", logging.SanitizeLogValue(tenantID),
 			"error", logging.SanitizeLogValue(err.Error()),
 		)
+		return
 	}
+
+	w.mu.Lock()
+	w.knownTenants[tenantID] = struct{}{}
+	w.mu.Unlock()
 }
 
 // listKnownTenants returns every tenant ID durably recorded in the tenant
@@ -422,7 +477,7 @@ func (w *WORMAuditStore) listKnownTenants(ctx context.Context) ([]string, error)
 	}
 	tenants := make([]string, 0, len(infos))
 	for _, info := range infos {
-		tenants = append(tenants, info.Key.Name)
+		tenants = append(tenants, decodeTenantRegistryName(info.Key.Name))
 	}
 	return tenants, nil
 }

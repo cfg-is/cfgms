@@ -128,6 +128,7 @@ func (m *PackageModule) Get(ctx context.Context, resourceID string) (modules.Con
 			ChocoSource:           m.chocoSource,
 			ChocoSourceName:       m.chocoSourceName,
 			ChocoBootstrapPackage: m.chocoBootstrapPackage,
+			ChocoBootstrapSHA256:  m.chocoBootstrapSHA256,
 		}, nil
 	}
 
@@ -197,6 +198,11 @@ func (m *PackageModule) Set(ctx context.Context, name string, config modules.Con
 			m.chocoBootstrapPackage = v
 		} else {
 			m.chocoBootstrapPackage = ""
+		}
+		if v, ok := configMap["choco_bootstrap_sha256"].(string); ok {
+			m.chocoBootstrapSHA256 = v
+		} else {
+			m.chocoBootstrapSHA256 = ""
 		}
 		return nil
 	}

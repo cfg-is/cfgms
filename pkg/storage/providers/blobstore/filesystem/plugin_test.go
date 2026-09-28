@@ -228,6 +228,38 @@ func TestFilesystemBlobStore_ListBlobs_Empty(t *testing.T) {
 	assert.Empty(t, results)
 }
 
+// TestFilesystemBlobStore_ListBlobs_HierarchicalTenantID is a REQUIRED test
+// (Issue #4348): a TenantID with internal "/" segments (CLAUDE.md's recursive
+// parent-child tenant model, e.g. "root/msp-a/client-1") must be reconstructed
+// correctly in the returned key. A fixed SplitN(relPath, "/", 3) previously
+// assumed TenantID was always exactly one path segment, silently misassigning
+// pieces of a multi-segment TenantID into Namespace/Name for any hierarchical
+// tenant with more than one "/" — which is the common case, not an edge case.
+func TestFilesystemBlobStore_ListBlobs_HierarchicalTenantID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const tenantID = "root/msp-a/client-1"
+	key := blob.BlobKey{TenantID: tenantID, Namespace: "audit-chain-pending", Name: "entry-1"}
+	require.NoError(t, s.PutBlob(ctx, key, bytes.NewReader([]byte("content")), blob.BlobMeta{}))
+
+	// Namespace-scoped listing.
+	results, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: tenantID, Namespace: "audit-chain-pending"})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, tenantID, results[0].Key.TenantID)
+	assert.Equal(t, "audit-chain-pending", results[0].Key.Namespace)
+	assert.Equal(t, "entry-1", results[0].Key.Name)
+
+	// Tenant-wide listing (Namespace omitted) must also reconstruct correctly.
+	all, err := s.ListBlobs(ctx, blob.BlobKey{TenantID: tenantID})
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, tenantID, all[0].Key.TenantID)
+	assert.Equal(t, "audit-chain-pending", all[0].Key.Namespace)
+	assert.Equal(t, "entry-1", all[0].Key.Name)
+}
+
 // TestFilesystemBlobStore_ListBlobs_TenantRequired checks TenantID validation.
 func TestFilesystemBlobStore_ListBlobs_TenantRequired(t *testing.T) {
 	s := newTestStore(t)

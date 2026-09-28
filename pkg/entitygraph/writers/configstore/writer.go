@@ -60,9 +60,22 @@ func New(provider interfaces.EntityGraphProvider) (*Writer, error) {
 // mechanism silently skips bit-identical observations.
 //
 // If eids is empty the call is a no-op and returns nil.
+//
+// Ingest binds rev.TenantID into every observation itself, as "owning_tenant"
+// (the key pkg/entitygraph/providers/database/observations.go's tenantPathOf
+// reads for a trusted/internal writer — this Writer carries no
+// AuthenticatedPeer, so the provider never resolves a tenant on its own).
+// This is a required field, not optional metadata the caller may or may not
+// think to add to DesiredState: a config revision that reaches Ingest without
+// a tenant would silently write an untenanted observation, invisible to every
+// tenant-scoped read (ADR-023 §7) — Writer.Ingest is the one place this
+// binding can be enforced regardless of what any given caller remembers to do.
 func (w *Writer) Ingest(ctx context.Context, rev ConfigRevision, eids []types.EID) error {
 	if len(eids) == 0 {
 		return nil
+	}
+	if rev.TenantID == "" {
+		return fmt.Errorf("configstore/writer: rev.TenantID must not be empty")
 	}
 
 	now := time.Now().UTC()
@@ -71,11 +84,18 @@ func (w *Writer) Ingest(ctx context.Context, rev ConfigRevision, eids []types.EI
 	// Build the shared payload. All targeted entities receive the same
 	// desired-state record for this revision; config_revision is injected so
 	// GetDesiredState can surface it via ConfigRevision on DesiredStateView.
-	payload := make(map[string]interface{}, len(rev.DesiredState)+1)
+	// owning_tenant/tenant_path are stripped from any caller-supplied
+	// DesiredState first so Writer.Ingest's own binding is always what wins,
+	// never a stale or mistaken value the caller happened to include.
+	payload := make(map[string]interface{}, len(rev.DesiredState)+2)
 	for k, v := range rev.DesiredState {
+		if k == "owning_tenant" || k == "tenant_path" {
+			continue
+		}
 		payload[k] = v
 	}
 	payload["config_revision"] = rev.Revision
+	payload["owning_tenant"] = rev.TenantID
 
 	observations := make([]types.Observation, len(eids))
 	for i, eid := range eids {

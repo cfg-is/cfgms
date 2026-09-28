@@ -6,6 +6,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,6 +19,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// sha256Hex returns the lowercase hex SHA-256 of data, for building the
+// expected-checksum inputs fetchBytes/bootstrapChocoReal now require.
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
 
 // buildTestNupkg constructs an in-memory zip archive (standing in for a
 // chocolatey .nupkg, which is itself a zip file) from the given path->content
@@ -167,16 +176,52 @@ func TestExtractZip(t *testing.T) {
 func TestFetchBytes_LocalPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chocolatey.nupkg")
-	require.NoError(t, os.WriteFile(path, []byte("nupkg-bytes"), 0o644))
+	content := []byte("nupkg-bytes")
+	require.NoError(t, os.WriteFile(path, content, 0o644))
 
-	data, err := fetchBytes(context.Background(), path)
+	data, err := fetchBytes(context.Background(), path, sha256Hex(content))
 	require.NoError(t, err)
 	assert.Equal(t, "nupkg-bytes", string(data))
 }
 
 func TestFetchBytes_MissingLocalPath(t *testing.T) {
-	_, err := fetchBytes(context.Background(), filepath.Join(t.TempDir(), "does-not-exist.nupkg"))
+	_, err := fetchBytes(context.Background(), filepath.Join(t.TempDir(), "does-not-exist.nupkg"), strings.Repeat("a", 64))
 	require.Error(t, err)
+}
+
+// TestFetchBytes_RejectsChecksumMismatch is a REQUIRED test (Issue #4348):
+// fetchBytes must reject a payload whose SHA-256 does not match the
+// operator-pinned expected value, before any caller can act on the bytes.
+func TestFetchBytes_RejectsChecksumMismatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chocolatey.nupkg")
+	require.NoError(t, os.WriteFile(path, []byte("tampered-payload"), 0o644))
+
+	wrongChecksum := sha256Hex([]byte("something-else-entirely"))
+	_, err := fetchBytes(context.Background(), path, wrongChecksum)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "integrity verification")
+}
+
+// TestFetchBytes_RejectsMissingChecksum is a REQUIRED test (Issue #4348): an
+// unset/malformed expected checksum must be a fatal error — an unverifiable
+// payload is never silently accepted.
+func TestFetchBytes_RejectsMissingChecksum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chocolatey.nupkg")
+	require.NoError(t, os.WriteFile(path, []byte("nupkg-bytes"), 0o644))
+
+	_, err := fetchBytes(context.Background(), path, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choco_bootstrap_sha256")
+}
+
+// TestVerifyBootstrapChecksum_CaseInsensitive verifies the hex comparison
+// tolerates upper/lower case, matching the equivalent github_runner convention.
+func TestVerifyBootstrapChecksum_CaseInsensitive(t *testing.T) {
+	data := []byte("nupkg-bytes")
+	expected := strings.ToUpper(sha256Hex(data))
+	assert.NoError(t, verifyBootstrapChecksum(data, expected))
 }
 
 // TestIsURL pins the path-vs-URL discrimination used by both
@@ -313,10 +358,11 @@ func TestBootstrapChocoReal_FullBootstrap(t *testing.T) {
 
 	rec := &recordingRunner{}
 	m := &PackageModule{
-		chocoSource:     nupkgDir,
-		chocoSourceName: "org",
-		chocoExeExists:  func() bool { return false },
-		runCommand:      rec.run,
+		chocoSource:          nupkgDir,
+		chocoSourceName:      "org",
+		chocoBootstrapSHA256: sha256Hex(nupkgBytes),
+		chocoExeExists:       func() bool { return false },
+		runCommand:           rec.run,
 	}
 
 	require.NoError(t, m.bootstrapChocoReal(context.Background()))
@@ -342,6 +388,36 @@ func TestBootstrapChocoReal_FullBootstrap(t *testing.T) {
 	assert.Equal(t, []string{"source", "remove", "-n", "chocolatey"}, rec.calls[1].args)
 	assert.Equal(t, "choco", rec.calls[2].name)
 	assert.Equal(t, []string{"source", "add", "-n", "org", "-s", nupkgDir, "--priority", "1"}, rec.calls[2].args)
+}
+
+// TestBootstrapChocoReal_RejectsUnverifiedPackage is a REQUIRED test (Issue
+// #4348): bootstrapChocoReal must refuse to run the installer when the
+// fetched bootstrap package does not match the configured
+// choco_bootstrap_sha256 — the installer command must never be invoked.
+func TestBootstrapChocoReal_RejectsUnverifiedPackage(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("bootstrapChocoReal refuses to run on non-Windows; see TestBootstrapChocoReal_NonWindows")
+	}
+
+	nupkgDir := t.TempDir()
+	nupkgPath := filepath.Join(nupkgDir, "chocolatey.nupkg")
+	nupkgBytes := buildTestNupkg(t, map[string]string{
+		"tools/chocolateyInstall.ps1": "Write-Host 'installing'",
+	})
+	require.NoError(t, os.WriteFile(nupkgPath, nupkgBytes, 0o644))
+
+	rec := &recordingRunner{}
+	m := &PackageModule{
+		chocoSource:          nupkgDir,
+		chocoSourceName:      "org",
+		chocoBootstrapSHA256: sha256Hex([]byte("not-the-real-package")),
+		chocoExeExists:       func() bool { return false },
+		runCommand:           rec.run,
+	}
+
+	err := m.bootstrapChocoReal(context.Background())
+	require.Error(t, err)
+	assert.Empty(t, rec.calls, "installer must never be invoked for an unverified package")
 }
 
 // TestBootstrapChocoReal_NoSourceConfigured verifies bootstrapChocoReal
