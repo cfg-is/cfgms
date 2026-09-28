@@ -52,6 +52,16 @@ type CommandPublisher interface {
 // an unsigned dispatch path without breaking the build.
 var _ CommandPublisher = (*commands.Publisher)(nil)
 
+// StewardTenantResolver resolves the tenant that authoritatively owns a
+// steward ID, backed by the controller's live registry (Issue #4346). It
+// binds the per-tenant back-pressure queue key in HandleGRPC to the mTLS peer's
+// actual registration, never to a wire-supplied claim — the same reasoning
+// HandleHeartbeatRoot already applies to the tenant field it deliberately never
+// forwards. *service.ControllerService satisfies this interface.
+type StewardTenantResolver interface {
+	TenantForDevice(deviceID string) (tenantID string, known bool)
+}
+
 // Ingest-side DoS bounds for a sync_dna snapshot.
 //
 // Stewards run on hosts that may be compromised (CLAUDE.md threat model), so every
@@ -131,6 +141,13 @@ type DNAHandler struct {
 	// never replacing it.
 	egWriter   *dnasync.Writer
 	egTaxonomy *egtypes.Taxonomy
+
+	// tenantResolver resolves the per-tenant queue key from the mTLS-verified
+	// peer identity rather than the wire-supplied tenant_id field (Issue
+	// #4346). Nil when not wired via WithTenantResolver, in which case
+	// HandleGRPC falls back to the wire value (test / degenerate; production
+	// always wires it in server.go).
+	tenantResolver StewardTenantResolver
 }
 
 // deltaRequest is the controller-side record of one outstanding partial-sync
@@ -202,6 +219,15 @@ func (h *DNAHandler) WithPartialSync(store FragmentDeltaStore, publisher Command
 func (h *DNAHandler) WithEntityGraph(writer *dnasync.Writer, taxonomy *egtypes.Taxonomy) *DNAHandler {
 	h.egWriter = writer
 	h.egTaxonomy = taxonomy
+	return h
+}
+
+// WithTenantResolver wires the authoritative steward→tenant resolver used to
+// derive the per-tenant back-pressure queue key from the mTLS-verified peer
+// identity (Issue #4346), rather than trusting the DNAChunk's wire-supplied
+// tenant_id field. Returns h for chaining.
+func (h *DNAHandler) WithTenantResolver(resolver StewardTenantResolver) *DNAHandler {
+	h.tenantResolver = resolver
 	return h
 }
 
@@ -371,7 +397,23 @@ func (h *DNAHandler) HandleGRPC(stream grpc.ClientStreamingServer[transportpb.DN
 		return status.Error(codes.PermissionDenied, "steward ID mismatch")
 	}
 
+	// The per-tenant queue key must come from controller-side state, never from
+	// the wire: firstChunk.GetTenantId() is steward-supplied and a compromised
+	// steward could claim any tenant to either dodge its own tenant's back-pressure
+	// limit or exhaust another tenant's (Issue #4346). peerID is already
+	// mTLS-verified above (and, for the non-delta path, matched against
+	// firstChunk.GetStewardId()), so resolving through it — the same reasoning
+	// HandleHeartbeatRoot already applies to the tenant field it deliberately
+	// never forwards — binds the queue key to the registered steward's real
+	// tenant. Fall back to the wire value only when no resolver is wired
+	// (test / degenerate; production always wires one in server.go) or the peer
+	// is not yet known to the registry.
 	tenantID := firstChunk.GetTenantId()
+	if h.tenantResolver != nil {
+		if resolvedTenant, known := h.tenantResolver.TenantForDevice(peerID); known {
+			tenantID = resolvedTenant
+		}
+	}
 	if qErr := h.queue.Acquire(tenantID); qErr != nil {
 		return status.Error(codes.ResourceExhausted, "tenant queue full")
 	}

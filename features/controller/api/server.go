@@ -413,6 +413,15 @@ func New(
 		decommissionTimeout: defaultDecommissionTimeout,
 	}
 
+	// Issue #4346: wire the certificate provisioning service's cross-tenant
+	// containment check to the same authoritative steward registry this
+	// server itself resolves ownership from. Service-layer defense-in-depth
+	// alongside handleProvisionCertificate's own containment check (Issue
+	// #4334) — several service-layer callers can exist beyond that one handler.
+	if certProvisioningService != nil && controllerService != nil {
+		certProvisioningService.SetTenantResolver(controllerService)
+	}
+
 	// Story #380: Initialize three-tier auth defense system
 	server.authDefense = authdefense.New(
 		authdefense.DefaultConfig(),

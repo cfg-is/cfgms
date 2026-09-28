@@ -593,13 +593,25 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	// provisionFailureDetail so no branch dereferences a possibly-nil error. The
 	// service's Message field carries internal error text (CA state, filesystem
 	// paths) and is deliberately logged rather than returned to the caller.
-	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
+	provisionResp, err := s.certProvisioningService.ProvisionCertificate(r.Context(), req)
 	if err != nil || provisionResp == nil || !provisionResp.Success {
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
 			"error", logging.SanitizeLogValue(provisionFailureDetail(provisionResp, err)))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+		// Issue #4346: the two service-layer refusals below are client input/
+		// authorization errors, not internal failures — map them to their own
+		// status rather than the generic 500 every other provisioning failure gets.
+		switch {
+		case errors.Is(err, service.ErrValidityCeilingExceeded):
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("validity_days must not exceed %d", service.MaxCertificateValidityDays),
+				"VALIDITY_DAYS_EXCEEDS_MAXIMUM")
+		case errors.Is(err, service.ErrCrossTenantCertificateAccess):
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		default:
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+		}
 		return
 	}
 

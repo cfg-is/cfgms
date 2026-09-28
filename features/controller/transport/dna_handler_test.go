@@ -741,6 +741,53 @@ func TestDNAHandler_QueueFull_ReturnsResourceExhausted(t *testing.T) {
 	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
 }
 
+// TestDNAHandler_QueueKeyIgnoresWireTenant is the required test for Issue
+// #4346: the per-tenant admission queue key must be derived from the peer's
+// registered tenant (looked up server-side via WithTenantResolver), never from
+// the DNAChunk's wire-supplied tenant_id. A compromised steward registered
+// under "tenant-real" could otherwise claim "tenant-victim" on the wire to
+// either dodge its own tenant's back-pressure limit or exhaust a victim
+// tenant's queue instead of its own.
+//
+// This is proven both ways: filling "tenant-real"'s bucket (the resolved
+// tenant) exhausts the request even though the wire claims a different,
+// unfilled tenant; filling only the wire-claimed tenant's bucket does not
+// exhaust it, because that bucket is never the one actually acquired.
+func TestDNAHandler_QueueKeyIgnoresWireTenant(t *testing.T) {
+	ca := newTestCA(t)
+	svc := registeredService(t, "steward-tenant-claim") // registered under tenant "t1"
+
+	t.Run("resolved tenant bucket full is honoured over the wire claim", func(t *testing.T) {
+		queue := NewTenantQueue()
+		for i := 0; i < MaxConcurrentPerTenant; i++ {
+			require.NoError(t, queue.Acquire("t1"))
+		}
+		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
+
+		stream := newTestDNAStream(peerContextWithCA(t, ca, "steward-tenant-claim"), &transportpb.DNAChunk{
+			StewardId: "steward-tenant-claim", TenantId: "tenant-victim",
+		})
+		err := h.HandleGRPC(stream)
+		require.Error(t, err, "the request must be gated on the resolved tenant's (t1) full bucket")
+		assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+	})
+
+	t.Run("wire-claimed tenant bucket full does not gate the request", func(t *testing.T) {
+		queue := NewTenantQueue()
+		for i := 0; i < MaxConcurrentPerTenant; i++ {
+			require.NoError(t, queue.Acquire("tenant-victim"))
+		}
+		h := NewDNAHandler(logging.NewNoopLogger(), queue, svc).WithTenantResolver(svc)
+
+		stream := newTestDNAStream(peerContextWithCA(t, ca, "steward-tenant-claim"), &transportpb.DNAChunk{
+			StewardId: "steward-tenant-claim", TenantId: "tenant-victim",
+			ChunkIndex: 0, TotalChunks: 1,
+		})
+		err := h.HandleGRPC(stream)
+		require.NoError(t, err, "the wire-claimed tenant's bucket must never be the one acquired")
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Round-trip integration tests
 // ---------------------------------------------------------------------------
