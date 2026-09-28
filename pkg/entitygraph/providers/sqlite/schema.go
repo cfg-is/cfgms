@@ -37,13 +37,30 @@ var ErrNotFound = interfaces.ErrNotFound
 // SQLite (WAL mode) serialises writers while permitting concurrent readers.
 type SQLiteEntityGraphProvider struct {
 	db *sql.DB
+
+	// tenantResolver resolves owning_tenant for a peer-bound batch (Issue
+	// #4319). Nil means no peer-bound batch can ever get a non-empty
+	// owning_tenant — the fail-closed default, matching a nil
+	// dnasync.ClusterMembership verifier.
+	tenantResolver interfaces.TenantResolver
+}
+
+// Option configures a SQLiteEntityGraphProvider at construction time.
+type Option func(*SQLiteEntityGraphProvider)
+
+// WithTenantResolver wires the controller-side tenant resolver used to bind
+// owning_tenant for any ObservationBatch carrying a non-empty
+// AuthenticatedPeer. Without it, such a batch always resolves to an empty
+// owning_tenant rather than trusting a payload-asserted value.
+func WithTenantResolver(r interfaces.TenantResolver) Option {
+	return func(p *SQLiteEntityGraphProvider) { p.tenantResolver = r }
 }
 
 // NewSQLiteEntityGraphProvider opens (or creates) the entity-graph database at
 // path, runs schema initialisation, and returns a ready provider.
 //
 // path may be ":memory:", a "file:" DSN, or a plain filesystem path.
-func NewSQLiteEntityGraphProvider(path string) (*SQLiteEntityGraphProvider, error) {
+func NewSQLiteEntityGraphProvider(path string, opts ...Option) (*SQLiteEntityGraphProvider, error) {
 	db, err := openDB(path)
 	if err != nil {
 		return nil, err
@@ -52,7 +69,13 @@ func NewSQLiteEntityGraphProvider(path string) (*SQLiteEntityGraphProvider, erro
 		_ = db.Close()
 		return nil, fmt.Errorf("entitygraph/sqlite: schema initialisation failed: %w", err)
 	}
-	return &SQLiteEntityGraphProvider{db: db}, nil
+	p := &SQLiteEntityGraphProvider{db: db}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	return p, nil
 }
 
 // Name returns the provider name used for registration and lookup.

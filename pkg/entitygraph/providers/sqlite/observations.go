@@ -47,6 +47,37 @@ func subjectKind(subject string) string {
 	return "edge"
 }
 
+// tenantPathOf extracts the owning tenant from an observation payload,
+// checking the conventional attribute keys. Returns "" when absent. Mirrors
+// the database provider's equivalent helper so a payload using either key is
+// honored identically by both providers.
+func tenantPathOf(payload map[string]interface{}) string {
+	for _, k := range []string{"tenant_path", "owning_tenant"} {
+		if v, ok := payload[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// withResolvedTenant returns a copy of payload with owning_tenant set to
+// tenant and tenant_path/owning_tenant stripped of whatever value payload
+// carried, never mutating the caller's map. Used whenever a batch carries
+// AuthenticatedPeer (Issue #4319): the peer-resolved tenant always overwrites
+// whatever a payload asserts, so a compromised or careless writer cannot place
+// (or hide) an observation under a tenant it does not belong to.
+func withResolvedTenant(payload map[string]interface{}, tenant string) map[string]interface{} {
+	out := make(map[string]interface{}, len(payload)+1)
+	for k, v := range payload {
+		if k == "tenant_path" || k == "owning_tenant" {
+			continue
+		}
+		out[k] = v
+	}
+	out["owning_tenant"] = tenant
+	return out
+}
+
 // fixedWidthRFC3339Nano is time.RFC3339Nano with the fractional-second field
 // written as "0"s instead of "9"s. The "9" pattern is what makes
 // time.RFC3339Nano trim trailing zero fractional digits on Format — e.g.
@@ -76,6 +107,16 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 		return nil
 	}
 
+	// Resolve the authenticated peer's registered tenant once for the whole
+	// batch (Issue #4319). AuthenticatedPeer carries only the caller's
+	// mTLS-verified identity — never a tenant — so this is the sole channel by
+	// which a peer-bound batch's owning_tenant can originate; an unresolved
+	// peer yields "" rather than inventing one (fail closed).
+	peerTenant := ""
+	if batch.AuthenticatedPeer != "" && p.tenantResolver != nil {
+		peerTenant, _ = p.tenantResolver.TenantForDevice(batch.AuthenticatedPeer)
+	}
+
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("entitygraph/sqlite: begin tx: %w", err)
@@ -89,6 +130,14 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 		}
 		if obs.Subject == "" {
 			return fmt.Errorf("entitygraph/sqlite: observation %d has empty subject", i)
+		}
+
+		// A peer-bound batch always overwrites whatever tenant a payload
+		// asserts — the assertion is not merely ignored, it is replaced, so a
+		// re-derived projection (RebuildProjections) sees the same resolved
+		// value rather than the original claim.
+		if batch.AuthenticatedPeer != "" {
+			obs.Payload = withResolvedTenant(obs.Payload, peerTenant)
 		}
 
 		hash, err := payloadHash(obs.Payload)
@@ -127,7 +176,7 @@ func (p *SQLiteEntityGraphProvider) ReportObservations(ctx context.Context, batc
 		}
 
 		sc := resolveSourceClass(obs.Source)
-		tenantPath := extractString(obs.Payload, "tenant_path")
+		tenantPath := tenantPathOf(obs.Payload)
 
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO eg_observation_log
@@ -198,7 +247,7 @@ func updateEntityProjection(ctx context.Context, tx *sql.Tx, obs types.Observati
 		return err
 	}
 	sc := resolveSourceClass(obs.Source)
-	tenantPath := extractString(obs.Payload, "tenant_path")
+	tenantPath := tenantPathOf(obs.Payload)
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO eg_entity_current

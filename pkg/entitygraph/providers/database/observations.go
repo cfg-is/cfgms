@@ -82,6 +82,24 @@ func tenantPathOf(obs types.Observation) string {
 	return ""
 }
 
+// withResolvedTenant returns a copy of payload with owning_tenant set to
+// tenant and tenant_path/owning_tenant stripped of whatever value payload
+// carried, never mutating the caller's map. Used whenever a batch carries
+// AuthenticatedPeer (Issue #4319): the peer-resolved tenant always overwrites
+// whatever a payload asserts, so a compromised or careless writer cannot place
+// (or hide) an observation under a tenant it does not belong to.
+func withResolvedTenant(payload map[string]interface{}, tenant string) map[string]interface{} {
+	out := make(map[string]interface{}, len(payload)+1)
+	for k, v := range payload {
+		if k == "tenant_path" || k == "owning_tenant" {
+			continue
+		}
+		out[k] = v
+	}
+	out["owning_tenant"] = tenant
+	return out
+}
+
 // ReportObservations ingests a batch of observations from one source. Each
 // observation is appended to the immutable observation log, folded into the
 // per-source current-state table, and dispatched to the registered projection
@@ -89,6 +107,16 @@ func tenantPathOf(obs types.Observation) string {
 func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, batch interfaces.ObservationBatch) error {
 	if len(batch.Observations) == 0 && len(batch.ClaimScopes) == 0 {
 		return nil
+	}
+
+	// Resolve the authenticated peer's registered tenant once for the whole
+	// batch (Issue #4319). AuthenticatedPeer carries only the caller's
+	// mTLS-verified identity — never a tenant — so this is the sole channel by
+	// which a peer-bound batch's owning_tenant can originate; an unresolved
+	// peer yields "" rather than inventing one (fail closed).
+	peerTenant := ""
+	if batch.AuthenticatedPeer != "" && p.tenantResolver != nil {
+		peerTenant, _ = p.tenantResolver.TenantForDevice(batch.AuthenticatedPeer)
 	}
 
 	tx, err := p.db.BeginTx(ctx, nil)
@@ -104,6 +132,14 @@ func (p *DatabaseEntityGraphProvider) ReportObservations(ctx context.Context, ba
 		}
 		if obs.Subject == "" {
 			return fmt.Errorf("entitygraph/database: observation %d has empty subject", i)
+		}
+
+		// A peer-bound batch always overwrites whatever tenant a payload
+		// asserts — the assertion is not merely ignored, it is replaced, so a
+		// re-derived projection (RebuildProjections) sees the same resolved
+		// value rather than the original claim.
+		if batch.AuthenticatedPeer != "" {
+			obs.Payload = withResolvedTenant(obs.Payload, peerTenant)
 		}
 
 		sourceClass := string(resolveSourceClass(obs.Source))

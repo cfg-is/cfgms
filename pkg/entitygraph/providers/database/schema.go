@@ -37,12 +37,29 @@ var errNotFound = fmt.Errorf("entitygraph/database: %w", interfaces.ErrNotFound)
 // *sql.DB, and per-observation ingestion is transactional.
 type DatabaseEntityGraphProvider struct {
 	db *sql.DB
+
+	// tenantResolver resolves owning_tenant for a peer-bound batch (Issue
+	// #4319). Nil means no peer-bound batch can ever get a non-empty
+	// owning_tenant — the fail-closed default, matching a nil
+	// dnasync.ClusterMembership verifier.
+	tenantResolver interfaces.TenantResolver
+}
+
+// Option configures a DatabaseEntityGraphProvider at construction time.
+type Option func(*DatabaseEntityGraphProvider)
+
+// WithTenantResolver wires the controller-side tenant resolver used to bind
+// owning_tenant for any ObservationBatch carrying a non-empty
+// AuthenticatedPeer. Without it, such a batch always resolves to an empty
+// owning_tenant rather than trusting a payload-asserted value.
+func WithTenantResolver(r interfaces.TenantResolver) Option {
+	return func(p *DatabaseEntityGraphProvider) { p.tenantResolver = r }
 }
 
 // NewDatabaseEntityGraphProvider opens a PostgreSQL connection using dsn,
 // initializes the entity graph schema, and returns a ready provider. The caller
 // owns the returned provider and must call Close when done.
-func NewDatabaseEntityGraphProvider(dsn string) (*DatabaseEntityGraphProvider, error) {
+func NewDatabaseEntityGraphProvider(dsn string, opts ...Option) (*DatabaseEntityGraphProvider, error) {
 	db, err := openPGDB(dsn)
 	if err != nil {
 		return nil, err
@@ -53,7 +70,13 @@ func NewDatabaseEntityGraphProvider(dsn string) (*DatabaseEntityGraphProvider, e
 		return nil, fmt.Errorf("entitygraph/database: initialize schema: %w", err)
 	}
 
-	return &DatabaseEntityGraphProvider{db: db}, nil
+	p := &DatabaseEntityGraphProvider{db: db}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	return p, nil
 }
 
 // Name returns the provider registry name.
