@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
@@ -19,20 +20,17 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// extractTenantFromContext extracts tenant ID from context, trying both logging and trigger context keys
+// extractTenantFromContext reads the authenticated tenant from ctxkeys.TenantID,
+// the single canonical context key the authentication middleware sets (Issue
+// #4326). Every trigger authorization decision (CreateTrigger, ListTriggers,
+// GetTrigger, UpdateTrigger, DeleteTrigger, ExecuteTrigger) reads the tenant
+// through this helper — never through logging.ExtractTenantFromContext, a
+// logging-only accessor that reads a different context key the middleware never
+// writes and therefore always returned "".
 func extractTenantFromContext(ctx context.Context) string {
-	// First try logging context (for compatibility)
-	if tenantID := logging.ExtractTenantFromContext(ctx); tenantID != "" {
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
 		return tenantID
 	}
-
-	// Then try trigger context key (for API and integration tests)
-	if value := ctx.Value(TenantIDContextKey); value != nil {
-		if tenantID, ok := value.(string); ok {
-			return tenantID
-		}
-	}
-
 	return ""
 }
 
@@ -213,6 +211,9 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 	defer tm.mutex.Unlock()
 
 	tenantID := extractTenantFromContext(ctx)
+	if tenantID == "" {
+		return fmt.Errorf("tenant context required to create a trigger")
+	}
 	logger := tm.logger.WithTenant(tenantID)
 
 	// Generate ID if not provided
@@ -220,10 +221,10 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 		trigger.ID = tm.generateTriggerID()
 	}
 
-	// Set tenant ID from context
-	if trigger.TenantID == "" {
-		trigger.TenantID = tenantID
-	}
+	// The tenant always comes from the authenticated context, never from the
+	// caller-supplied trigger body (Issue #4326) — otherwise a request body could
+	// name any tenant and create a trigger outside the caller's own tenant.
+	trigger.TenantID = tenantID
 
 	// Set timestamps
 	now := time.Now()
@@ -450,12 +451,16 @@ func (tm *TriggerManagerImpl) ListTriggers(ctx context.Context, filter *TriggerF
 	defer tm.mutex.RUnlock()
 
 	tenantID := extractTenantFromContext(ctx)
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant context required to list triggers")
+	}
 
 	triggers := make([]*Trigger, 0)
 
 	for _, trigger := range tm.triggers {
-		// Apply tenant filter (security) - skip tenant filtering if no tenant in context (admin access)
-		if tenantID != "" && trigger.TenantID != tenantID {
+		// Apply tenant filter (security): an absent tenant is refused above, never
+		// treated as admin access to every tenant's triggers (Issue #4326).
+		if trigger.TenantID != tenantID {
 			continue
 		}
 

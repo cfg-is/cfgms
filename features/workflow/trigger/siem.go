@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -80,7 +81,7 @@ func (sp *SIEMProcessor) Start(ctx context.Context) error {
 		return fmt.Errorf("SIEM processor is already running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Starting SIEM processor",
@@ -119,7 +120,7 @@ func (sp *SIEMProcessor) Stop(ctx context.Context) error {
 		return fmt.Errorf("SIEM processor is not running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Stopping SIEM processor")
@@ -157,7 +158,7 @@ func (sp *SIEMProcessor) RegisterSIEMTrigger(ctx context.Context, trigger *Trigg
 		return fmt.Errorf("trigger %s is not a SIEM trigger", trigger.ID)
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Registering SIEM trigger",
@@ -200,7 +201,7 @@ func (sp *SIEMProcessor) UnregisterSIEMTrigger(ctx context.Context, triggerID st
 	sp.mutex.Lock()
 	defer sp.mutex.Unlock()
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	if _, exists := sp.siemTriggers[triggerID]; !exists {
@@ -238,7 +239,7 @@ func (sp *SIEMProcessor) ProcessLogEntry(ctx context.Context, logEntry map[strin
 		return nil
 	default:
 		// Buffer is full, drop the log entry
-		tenantID := logging.ExtractTenantFromContext(ctx)
+		tenantID := extractTenantFromContext(ctx)
 		logger := sp.logger.WithTenant(tenantID)
 		logger.WarnCtx(ctx, "Log buffer full, dropping log entry",
 			"source", entry.Source,
@@ -251,7 +252,7 @@ func (sp *SIEMProcessor) ProcessLogEntry(ctx context.Context, logEntry map[strin
 // channels are passed in by Start rather than read from the receiver so that a subsequent
 // Start reassigning sp.logBuffer / sp.stopChan cannot race with this goroutine.
 func (sp *SIEMProcessor) processLogEntries(ctx context.Context, logBuffer <-chan LogEntry, stopChan <-chan struct{}) {
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Started log entry processing loop")
@@ -678,7 +679,7 @@ func (sp *SIEMProcessor) thresholdMet(triggerID string, siemConfig *SIEMConfig) 
 
 // fireTrigger fires a SIEM trigger
 func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trigger *Trigger) {
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Firing SIEM trigger",
@@ -712,7 +713,11 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 	// #nosec G118 -- SIEM-triggered execution intentionally outlives event
 	// ingestion and applies the trigger's configured timeout when present.
 	go func() {
-		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+		// The triggered execution belongs to the trigger's own tenant, not whatever
+		// (usually absent) tenant the SIEM ingestion request carried — the caller
+		// who owns this trigger is who debug_engine.StartDebugSession must match
+		// against later (Issue #4326).
+		execCtx := context.WithValue(context.Background(), ctxkeys.TenantID, trigger.TenantID)
 		if trigger.Timeout > 0 {
 			var cancel context.CancelFunc
 			execCtx, cancel = context.WithTimeout(execCtx, trigger.Timeout)
@@ -764,7 +769,7 @@ func (sp *SIEMProcessor) cleanupAggregationData(ctx context.Context, stopChan <-
 	ticker := time.NewTicker(sp.cleanupInterval)
 	defer ticker.Stop()
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := sp.logger.WithTenant(tenantID)
 
 	for {

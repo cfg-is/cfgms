@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -57,9 +58,30 @@ func (de *DebugEngineImpl) StartDebugSession(ctx context.Context, executionID st
 		return nil, fmt.Errorf("execution not found: %w", err)
 	}
 
-	// Extract tenant context for security
-	tenantID := logging.ExtractTenantFromContext(ctx)
-	logger := de.logger.WithTenant(tenantID)
+	// Authorize: the caller must be authenticated to a tenant, and that tenant must
+	// be the one the execution belongs to (Issue #4326). logging.ExtractTenantFromContext
+	// is a logging-only accessor and must never gate this decision — it previously
+	// did, and because it read a context key the authentication middleware never
+	// wrote, it always returned "", letting any authenticated caller attach a debug
+	// session to any tenant's workflow execution.
+	//
+	// execution.Context is the context ExecuteWorkflow was called with (propagated
+	// through context.WithTimeout/WithCancel, which preserve Value lookups), so it
+	// carries the ctxkeys.TenantID the execution's own caller was authenticated to —
+	// or the trigger's own tenant, for triggered (webhook/schedule/SIEM) executions.
+	callerTenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	if callerTenantID == "" {
+		return nil, fmt.Errorf("tenant context required to start a debug session")
+	}
+	var executionTenantID string
+	if execution.Context != nil {
+		executionTenantID, _ = execution.Context.Value(ctxkeys.TenantID).(string)
+	}
+	if executionTenantID != callerTenantID {
+		return nil, fmt.Errorf("execution not found")
+	}
+
+	logger := de.logger.WithTenant(callerTenantID)
 
 	// Generate debug session ID
 	sessionID := generateDebugSessionID()

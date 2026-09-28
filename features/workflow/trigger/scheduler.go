@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -104,7 +105,7 @@ func (cs *CronScheduler) Start(ctx context.Context) error {
 		return fmt.Errorf("scheduler is already running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Starting cron scheduler")
@@ -126,7 +127,7 @@ func (cs *CronScheduler) Stop(ctx context.Context) error {
 		return fmt.Errorf("scheduler is not running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Stopping cron scheduler")
@@ -147,7 +148,7 @@ func (cs *CronScheduler) ScheduleWorkflow(ctx context.Context, trigger *Trigger)
 		return fmt.Errorf("trigger %s is not a schedule trigger", trigger.ID)
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Scheduling workflow trigger",
@@ -215,7 +216,7 @@ func (cs *CronScheduler) UnscheduleWorkflow(ctx context.Context, triggerID strin
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	if _, exists := cs.scheduledTriggers[triggerID]; !exists {
@@ -237,7 +238,7 @@ func (cs *CronScheduler) schedulerLoop(ctx context.Context) {
 	ticker := time.NewTicker(cs.tickerInterval)
 	defer ticker.Stop()
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Scheduler loop started",
@@ -275,7 +276,7 @@ func (cs *CronScheduler) checkAndExecuteDueTriggers(ctx context.Context, now tim
 		return
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Found due triggers for execution",
@@ -291,7 +292,7 @@ func (cs *CronScheduler) checkAndExecuteDueTriggers(ctx context.Context, now tim
 func (cs *CronScheduler) executeDueTrigger(ctx context.Context, scheduled *scheduledTrigger, now time.Time) {
 	trigger := scheduled.trigger
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Executing scheduled trigger",
@@ -336,7 +337,11 @@ func (cs *CronScheduler) executeDueTrigger(ctx context.Context, scheduled *sched
 	// #nosec G118 -- scheduled workflow execution intentionally outlives this
 	// scheduler tick and applies the trigger's configured timeout when present.
 	go func() {
-		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+		// The triggered execution belongs to the trigger's own tenant, not whatever
+		// (usually absent) tenant the scheduler's own long-lived Start(ctx) carried —
+		// the caller who owns this trigger is who debug_engine.StartDebugSession
+		// must match against later (Issue #4326).
+		execCtx := context.WithValue(context.Background(), ctxkeys.TenantID, trigger.TenantID)
 		if trigger.Timeout > 0 {
 			var cancel context.CancelFunc
 			execCtx, cancel = context.WithTimeout(execCtx, trigger.Timeout)
@@ -614,7 +619,7 @@ func (cs *CronScheduler) updateTriggerStatistics(triggerID string) {
 
 // handleTriggerError handles errors that occur during trigger execution
 func (cs *CronScheduler) handleTriggerError(ctx context.Context, trigger *Trigger, err error) {
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := cs.logger.WithTenant(tenantID)
 
 	if trigger.ErrorHandling == nil {

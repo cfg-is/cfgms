@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -237,6 +238,18 @@ func (t *TestWorkflowTrigger) SetFailNext(fail bool) {
 	t.failNext = fail
 }
 
+// testTenantHeaderMiddleware sets ctxkeys.TenantID from the X-Tenant-ID header,
+// simulating (for this test suite only) the tenant the real authentication
+// middleware establishes from a verified caller.
+func testTenantHeaderMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tenantID := r.Header.Get("X-Tenant-ID"); tenantID != "" {
+			r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, tenantID))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create components
 	storage := NewTestStorageProvider()
@@ -274,7 +287,13 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 
 	// Set up router — subrouter mirrors server.go: api.PathPrefix("/triggers").Subrouter()
 	router := mux.NewRouter()
-	router.Use(TriggerAPIMiddleware)
+	// testTenantHeaderMiddleware stands in for the real authentication middleware,
+	// which sets ctxkeys.TenantID from a verified principal, not a raw header
+	// (Issue #4326). TriggerAPIMiddleware also exists in api.go but is unused and
+	// out of scope for this story — and it wrote the trigger package's own,
+	// now-removed context key, which this suite's tenant-isolation assertions
+	// depended on before the fix.
+	router.Use(testTenantHeaderMiddleware)
 	sub := router.PathPrefix("/triggers").Subrouter()
 	apiHandler.RegisterRoutes(sub)
 
@@ -338,7 +357,7 @@ func TestTriggerSystem_FullIntegration(t *testing.T) {
 	defer suite.cleanup()
 
 	// Create tenant-aware context for integration tests to work with tenant isolation
-	ctx := context.WithValue(context.Background(), TenantIDContextKey, "integration-tenant")
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "integration-tenant")
 
 	// Start the system
 	err := suite.manager.Start(ctx)
