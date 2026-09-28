@@ -863,6 +863,66 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 		"the CA delivered with the refreshed certificate must be persisted")
 }
 
+// [REQUIRED TEST] TestRefreshAndConnect_CAChanged_RejectsDowngrade verifies Issue
+// #4324 item 5: a registration-refresh handshake whose controller response carries
+// a DIFFERENT CA than the one already pinned in the stored identity must be
+// rejected, not silently re-pinned. Before the fix, refreshAndConnect never ran
+// checkTrustDowngrade and connectWithApprovedRegistration always seeded a fresh,
+// empty CAPinFingerprint — so pinTOFUCA / the install-pinned comparison always took
+// the "first pin" branch and accepted whatever CA the controller (or a MITM on the
+// refresh path) returned.
+func TestRefreshAndConnect_CAChanged_RejectsDowngrade(t *testing.T) {
+	dir := t.TempDir()
+
+	ks, err := identity.NewFileKeyStoreForTesting(dir)
+	require.NoError(t, err)
+	_, _, err = ks.GenerateOrLoad(context.Background())
+	require.NoError(t, err)
+
+	// The refresh controller signs with CA-B (controller.caPEM), but the stored
+	// identity was enrolled (install-pinned) against a different CA-A.
+	controller := newRefreshTestController(t)
+	caA, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "CFGMS Refresh Test CA-A",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+	caAPEM, err := caA.GetCACertificate()
+	require.NoError(t, err)
+	require.NotEqual(t, string(caAPEM), controller.caPEM, "test setup requires two distinct CAs")
+	pinnedFingerprint, err := computeCAPEMFingerprint(string(caAPEM))
+	require.NoError(t, err)
+
+	storedID := &StewardIdentity{
+		StewardID:        "steward-refresh-downgrade",
+		TenantID:         "tenant-1",
+		TransportAddress: controller.server.URL,
+		CACertPEM:        "fake-ca-a",
+		TrustMode:        "install-pinned",
+		CAPinFingerprint: pinnedFingerprint,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	blockTLSCredentialSources(t, dir)
+
+	_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
+		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	require.Error(t, refreshErr, "a refresh whose returned CA does not match the pinned fingerprint must be rejected")
+	assert.Contains(t, refreshErr.Error(), "registration refresh rejected",
+		"rejection must come from the trust-downgrade guard, not a later unrelated failure")
+
+	// The identity file must not exist (or must be unchanged) — the refresh must
+	// fail before persisting a re-pinned CA.
+	savedID, loadErr := loadIdentity(dir)
+	require.NoError(t, loadErr)
+	assert.Nil(t, savedID, "identity must not be persisted when the refresh CA fails the downgrade check")
+}
+
 // TestRefreshAndConnect_SubmitsCSROverFreshKeypair verifies the integration point
 // added by Issue #3781: refreshAndConnect itself builds the /refresh/complete CSR
 // over a keypair it generates locally, names the device in it, and generates a
@@ -1205,7 +1265,7 @@ func TestConnectWithApprovedRegistration_TOFUPinFails_ReturnsError(t *testing.T)
 		CACert:           "not-a-valid-pem", // invalid PEM → computeCAPEMFingerprint fails → pinTOFUCA returns error
 	}
 
-	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", stewardconfig.StewardConfig{}, false, logger)
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceTOFU, "", "", stewardconfig.StewardConfig{}, false, logger)
 	require.Error(t, err, "must return a hard error when TOFU CA pin fails")
 
 	// Identity MUST NOT be saved when pinTOFUCA fails.
@@ -1234,7 +1294,7 @@ func TestConnectWithApprovedRegistration_EmptyClientKey_ReturnsLoudError(t *test
 		// ClientKey intentionally left empty.
 	}
 
-	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logger)
+	_, err := connectWithApprovedRegistration(context.Background(), reg, dir, "tok", trustSourceCompileBaked, "", "", stewardconfig.StewardConfig{}, false, logger)
 	require.Error(t, err, "must return a hard error when the approved registration carries no private key")
 	assert.Contains(t, err.Error(), "no usable steward private key")
 

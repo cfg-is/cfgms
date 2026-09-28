@@ -590,11 +590,15 @@ Child tenants inherit the parent's script signing config. Policy may only be **t
 
 | YAML field | Type | Default | Req | Description |
 |---|---|---|---|---|
-| `mode` | string | `"controller"` | optional | How module bundle signatures are verified: `strict` (the steward verifies publisher signatures itself, using the baked-in CFGMS publisher identity plus `additional_publishers`), `controller` (accept any bundle the controller approved), or `bypass` (no trust enforcement; development only) |
-| `additional_publishers` | list[string] | `[]` | optional | Publisher identifiers trusted in addition to the CFGMS publisher identity baked into the steward binary. Consulted only when `mode: strict`. |
+| `mode` | string | `"controller"` | optional | How module bundle signatures are verified: `strict` (the steward verifies publisher signatures itself, using the baked-in CFGMS publisher identity plus `additional_publishers`), `controller` (accept any bundle the controller approved), or `bypass` (no trust enforcement; unavailable in a release build — see below) |
+| `additional_publishers` | list[string] | `[]` | optional | Publisher identifiers trusted in addition to the CFGMS publisher identity baked into the steward binary. Consulted only when `mode: strict`. The baked-in CFGMS identity can never be displaced by a same-named entry here. |
+| `authorize_downgrade` | bool | `false` | optional | Must be set explicitly, at the same tenant level that weakens `mode` (e.g. `strict`→`controller` or `strict`→`bypass`), for that transition to be accepted. Without it, a weakening transition is refused during config cascade resolution and recorded in the audit log (Issue #4324). |
 
-The CFGMS publisher identity is fixed at build time and cannot be changed by a cfg push. See
-ADR-006 for the end-to-end module signing model.
+`mode: bypass` is gated by a build tag (`cfgms_dev_bypass`), the same mechanism
+`features/controller/api` uses for test-only routes: a release build always rejects it via
+`ValidateModuleTrustConfig`, regardless of what is pushed. The CFGMS publisher identity is fixed
+at build time and cannot be changed by a cfg push. See ADR-006 for the end-to-end module signing
+model.
 
 #### `steward.upgrade`
 
@@ -755,7 +759,7 @@ after `applyDefaults`.
 | `steward.script_signing.trusted_keys` | Must be non-empty when `trust_mode` is `trusted_keys` or `trusted_keys_and_public` |
 | `trusted_keys[i]` | Each entry must have at least one of `thumbprint` or `public_key_ref` |
 | `steward.script_signing.require_signed_adhoc` | Requires `policy` `optional` or `required` |
-| `steward.module_trust.mode` | Must be `strict`, `controller`, `bypass`, or empty |
+| `steward.module_trust.mode` | Must be `strict`, `controller`, `bypass`, or empty — `bypass` is rejected unless the binary was built with the `cfgms_dev_bypass` tag (unavailable in a release build) |
 | `steward.reboot_window` | When set, must pass `pkg/maintenance/schedule` `Validate` |
 | `resources[i].name` | Must not be empty |
 | `resources[i].module` | Must not be empty |

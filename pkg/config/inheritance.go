@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -86,6 +87,7 @@ type InheritanceResolver struct {
 	clusterRegistry   clusterMembership  // optional; nil means no cluster-policies cascade
 	roleProvider      roleConfigProvider // optional; nil means no role-policies cascade
 	logger            logging.Logger     // never nil after construction; see log()
+	auditManager      *audit.Manager     // optional; nil means posture-downgrade refusals are logged but not audited
 }
 
 // log returns the resolver's logger, defaulting to a NoopLogger when the resolver
@@ -107,6 +109,18 @@ func (ir *InheritanceResolver) WithLogger(logger logging.Logger) *InheritanceRes
 		logger = logging.NewLogger("info")
 	}
 	ir.logger = logger
+	return ir
+}
+
+// WithAuditManager installs m as the sink for security-posture-downgrade audit
+// events (Issue #4324): a tenant-hierarchy level that attempts to weaken
+// module_trust.mode or relax script_signing relative to its ancestors. Passing
+// nil disables audit recording — the refusal is still enforced and still
+// logged via WithLogger's sink, only the durable audit trail is skipped. Audit
+// recording is optional because InheritanceResolver runs in contexts (e.g. a
+// steward-side or test caller) that have no durable audit store to write to.
+func (ir *InheritanceResolver) WithAuditManager(m *audit.Manager) *InheritanceResolver {
+	ir.auditManager = m
 	return ir
 }
 
@@ -271,7 +285,7 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 				"error", err.Error())
 		} else {
 			for _, frag := range fragments {
-				ir.applyRoleFragment(effective, tenantID, frag)
+				ir.applyRoleFragment(ctx, effective, tenantID, frag)
 			}
 		}
 	}
@@ -343,7 +357,7 @@ func (ir *InheritanceResolver) applyConfigurationLevel(ctx context.Context, effe
 	}
 
 	// Apply configuration using declarative merging (named resources replace entirely)
-	ir.applyConfigurationWithSource(effective, &levelConfig, inheritSrc)
+	ir.applyConfigurationWithSource(ctx, effective, &levelConfig, inheritSrc)
 
 	return nil
 }
@@ -379,21 +393,21 @@ func (ir *InheritanceResolver) applyClusterConfiguration(ctx context.Context, ef
 		Source:     fmt.Sprintf("Cluster (cluster-policies/%s)", clusterName),
 	}
 
-	ir.applyConfigurationWithSource(effective, &clusterConfig, inheritSrc)
+	ir.applyConfigurationWithSource(ctx, effective, &clusterConfig, inheritSrc)
 	return nil
 }
 
 // applyRoleFragment merges a single role config fragment into effective. The
 // InheritanceSource level (LevelGroup+2) places role fragments between
 // cluster-policies (LevelGroup+1) and device-level (LevelDevice) in source metadata.
-func (ir *InheritanceResolver) applyRoleFragment(effective *EffectiveConfiguration, tenantID string, frag RoleFragment) {
+func (ir *InheritanceResolver) applyRoleFragment(ctx context.Context, effective *EffectiveConfiguration, tenantID string, frag RoleFragment) {
 	inheritSrc := &InheritanceSource{
 		Level:      int(LevelGroup) + 2, // between cluster-policies and device in merge order
 		TenantID:   tenantID,
 		ConfigName: frag.Name,
 		Source:     fmt.Sprintf("Role (role-policies/%s)", frag.Name),
 	}
-	ir.applyConfigurationWithSource(effective, &frag.Config, inheritSrc)
+	ir.applyConfigurationWithSource(ctx, effective, &frag.Config, inheritSrc)
 }
 
 // applyDeviceConfiguration applies device-specific configuration
@@ -427,13 +441,13 @@ func (ir *InheritanceResolver) applyDeviceConfiguration(ctx context.Context, eff
 	}
 
 	// Apply device configuration (highest priority)
-	ir.applyConfigurationWithSource(effective, &deviceConfig, source)
+	ir.applyConfigurationWithSource(ctx, effective, &deviceConfig, source)
 
 	return nil
 }
 
 // applyConfigurationWithSource applies configuration and tracks inheritance sources
-func (ir *InheritanceResolver) applyConfigurationWithSource(effective *EffectiveConfiguration, config *stewardconfig.StewardConfig, source *InheritanceSource) {
+func (ir *InheritanceResolver) applyConfigurationWithSource(ctx context.Context, effective *EffectiveConfiguration, config *stewardconfig.StewardConfig, source *InheritanceSource) {
 	// Initialize effective config if needed
 	if effective.Config == nil {
 		effective.Config = &stewardconfig.StewardConfig{
@@ -546,6 +560,46 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 		effective.Sources["steward.reboot_window"] = source
 	}
 
+	// ScriptSigning and ModuleTrust are steward security posture (Issue #4324,
+	// CLAUDE.md threat model): a descendant tenant may tighten either but never
+	// loosen it. MergeScriptSigningConfig enforces the script_signing
+	// tightening-only rule; module_trust enforces the same for Mode, with an
+	// explicit authorize_downgrade escape hatch (mirroring the more-permissive-
+	// wins precedent of Upgrade.AllowDowngrade above) for an intentional
+	// relaxation. A refused transition keeps the already-accumulated (stronger)
+	// value rather than failing the whole cascade, so the rest of this level's
+	// config still applies — the config push itself is refused, not the entire
+	// resolution.
+	if scriptSigningDeclared(config.Steward.ScriptSigning) {
+		merged, err := stewardconfig.MergeScriptSigningConfig(effective.Config.Steward.ScriptSigning, config.Steward.ScriptSigning)
+		if err != nil {
+			ir.refusePostureDowngrade(ctx, config, source, "script_signing", err)
+		} else {
+			effective.Config.Steward.ScriptSigning = merged
+			effective.Sources["steward.script_signing"] = source
+		}
+	}
+
+	if config.Steward.ModuleTrust.Mode != "" {
+		prevMode := effective.Config.Steward.ModuleTrust.Mode
+		isDowngrade := prevMode != "" && stewardconfig.ModuleTrustModeLevel(config.Steward.ModuleTrust.Mode) < stewardconfig.ModuleTrustModeLevel(prevMode)
+		if isDowngrade && !config.Steward.ModuleTrust.AuthorizeDowngrade {
+			err := fmt.Errorf("module_trust mode downgrade from %q to %q refused: set authorize_downgrade to permit", prevMode, config.Steward.ModuleTrust.Mode)
+			ir.refusePostureDowngrade(ctx, config, source, "module_trust", err)
+		} else {
+			if isDowngrade {
+				ir.recordPostureDowngradeAuthorized(ctx, config, source, "module_trust")
+			}
+			effective.Config.Steward.ModuleTrust.Mode = config.Steward.ModuleTrust.Mode
+			effective.Sources["steward.module_trust.mode"] = source
+		}
+	}
+
+	if len(config.Steward.ModuleTrust.AdditionalPublishers) > 0 {
+		effective.Config.Steward.ModuleTrust.AdditionalPublishers = config.Steward.ModuleTrust.AdditionalPublishers
+		effective.Sources["steward.module_trust.additional_publishers"] = source
+	}
+
 	// Apply module mappings
 	if effective.Config.Modules == nil {
 		effective.Config.Modules = make(map[string]string)
@@ -554,6 +608,76 @@ func (ir *InheritanceResolver) applyConfigurationWithSource(effective *Effective
 	for moduleName, modulePath := range config.Modules {
 		effective.Config.Modules[moduleName] = modulePath
 		effective.Sources[fmt.Sprintf("modules.%s", moduleName)] = source
+	}
+}
+
+// scriptSigningDeclared reports whether a level's config actually sets any
+// script_signing field, so applyConfigurationWithSource does not attribute an
+// inheritance source (or re-run the merge guard) for a level that never
+// mentioned script_signing at all. TrustedKeys makes the type non-comparable
+// with ==, hence the explicit field check.
+func scriptSigningDeclared(c stewardconfig.ScriptSigningConfig) bool {
+	return c.Policy != "" || c.TrustMode != "" || len(c.TrustedKeys) > 0 || c.AllowPublicCA || c.RequireSignedAdhoc
+}
+
+// cfgDeclaredResourceID returns the resource id declared by the configuration
+// itself (steward:<cfg.Steward.ID>), falling back to the inheritance source's
+// config name when the level doesn't declare a steward ID (e.g. an MSP- or
+// client-wide policy fragment). This is deliberately never a live/runtime
+// value such as a reported hostname — see Issue #4324 Implementation Notes.
+func cfgDeclaredResourceID(cfg *stewardconfig.StewardConfig, source *InheritanceSource) string {
+	if cfg.Steward.ID != "" {
+		return "steward:" + cfg.Steward.ID
+	}
+	return "steward:" + source.ConfigName
+}
+
+// refusePostureDowngrade logs and audits a security-posture transition that
+// applyConfigurationWithSource refused because it would weaken module_trust or
+// script_signing without explicit authorization (Issue #4324).
+func (ir *InheritanceResolver) refusePostureDowngrade(ctx context.Context, cfg *stewardconfig.StewardConfig, source *InheritanceSource, setting string, cause error) {
+	resourceID := cfgDeclaredResourceID(cfg, source)
+	// resourceID and source.Source are config-store-derived (the tenant-supplied
+	// steward ID / config name), and cause wraps them back out, so all three are
+	// sanitized before they reach the log line — CLAUDE.md requires
+	// SanitizeLogValue for error values unconditionally.
+	ir.log().WarnCtx(ctx, "security posture downgrade refused",
+		"setting", setting,
+		"resource_id", logging.SanitizeLogValue(resourceID),
+		"source", logging.SanitizeLogValue(source.Source),
+		"error", logging.SanitizeLogValue(cause.Error()))
+	ir.recordPostureAuditEvent(ctx, resourceID, setting, source, business.AuditResultDenied, cause.Error())
+}
+
+// recordPostureDowngradeAuthorized audits a security-posture downgrade that was
+// permitted because the level explicitly set authorize_downgrade (Issue #4324).
+func (ir *InheritanceResolver) recordPostureDowngradeAuthorized(ctx context.Context, cfg *stewardconfig.StewardConfig, source *InheritanceSource, setting string) {
+	resourceID := cfgDeclaredResourceID(cfg, source)
+	ir.recordPostureAuditEvent(ctx, resourceID, setting, source, business.AuditResultSuccess,
+		"downgrade explicitly authorized via authorize_downgrade")
+}
+
+// recordPostureAuditEvent writes a security_event audit entry via the optional
+// auditManager (nil when the resolver was constructed without WithAuditManager,
+// e.g. a steward-side or test caller with no durable audit store — see
+// WithAuditManager's doc comment).
+func (ir *InheritanceResolver) recordPostureAuditEvent(ctx context.Context, resourceID, setting string, source *InheritanceSource, result business.AuditResult, message string) {
+	if ir.auditManager == nil {
+		return
+	}
+	builder := audit.NewEventBuilder().
+		Tenant(source.TenantID).
+		Type(business.AuditEventSecurityEvent).
+		Action("steward_config.security_posture_downgrade").
+		User(audit.SystemUserID, business.AuditUserTypeSystem).
+		Resource("steward_config", resourceID, resourceID).
+		Result(result).
+		Detail("setting", setting).
+		Detail("source", source.Source).
+		Detail("message", message)
+	if err := ir.auditManager.RecordEvent(ctx, builder); err != nil {
+		// err carries the tainted resourceID and tenant back out of RecordEvent.
+		ir.log().WarnCtx(ctx, "failed to record security posture audit event", "setting", setting, "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 

@@ -354,14 +354,20 @@ func TestStewardSettings_ModuleTrust_ControllerMode_Valid(t *testing.T) {
 	assert.NoError(t, ValidateConfiguration(cfg))
 }
 
-func TestStewardSettings_ModuleTrust_BypassMode_Valid(t *testing.T) {
+// [REQUIRED TEST] module_trust mode "bypass" is unavailable in a release build
+// (Issue #4324 item 1): a binary built without the cfgms_dev_bypass tag must
+// reject bypass from pushed configuration, not merely warn about it.
+func TestStewardSettings_ModuleTrust_BypassMode_RejectedInReleaseBuild(t *testing.T) {
 	cfg := StewardConfig{
 		Steward: StewardSettings{
 			ID:          "s1",
 			ModuleTrust: ModuleTrustConfig{Mode: ModuleTrustModeBypass},
 		},
 	}
-	assert.NoError(t, ValidateConfiguration(cfg))
+	err := ValidateConfiguration(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bypass")
+	assert.Contains(t, err.Error(), "release build")
 }
 
 func TestStewardSettings_ModuleTrust_EmptyMode_Valid(t *testing.T) {
@@ -395,7 +401,6 @@ func TestValidateModuleTrustConfig_ValidModes(t *testing.T) {
 	for _, mode := range []ModuleTrustMode{
 		ModuleTrustModeStrict,
 		ModuleTrustModeController,
-		ModuleTrustModeBypass,
 		"",
 	} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -404,8 +409,28 @@ func TestValidateModuleTrustConfig_ValidModes(t *testing.T) {
 	}
 }
 
+// [REQUIRED TEST] bypass is rejected by ValidateModuleTrustConfig in a release
+// build (Issue #4324 item 1). See bypass_allowed_test.go for the mirror
+// assertion under the cfgms_dev_bypass build tag.
+func TestValidateModuleTrustConfig_Bypass_RejectedInReleaseBuild(t *testing.T) {
+	err := ValidateModuleTrustConfig(ModuleTrustConfig{Mode: ModuleTrustModeBypass})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bypass")
+	assert.Contains(t, err.Error(), "release build")
+}
+
 func TestValidateModuleTrustConfig_InvalidMode(t *testing.T) {
 	err := ValidateModuleTrustConfig(ModuleTrustConfig{Mode: "bogus"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "bogus")
+}
+
+// TestModuleTrustModeLevel_Ordering verifies the strictness ordering used by
+// the cascade downgrade guard (Issue #4324): bypass < controller == "" < strict.
+func TestModuleTrustModeLevel_Ordering(t *testing.T) {
+	assert.Less(t, ModuleTrustModeLevel(ModuleTrustModeBypass), ModuleTrustModeLevel(ModuleTrustModeController))
+	assert.Less(t, ModuleTrustModeLevel(ModuleTrustModeController), ModuleTrustModeLevel(ModuleTrustModeStrict))
+	assert.Equal(t, ModuleTrustModeLevel(ModuleTrustModeController), ModuleTrustModeLevel(ModuleTrustMode("")),
+		`an empty mode must compare equal to "controller", its runtime default`)
+	assert.Equal(t, -1, ModuleTrustModeLevel(ModuleTrustMode("bogus")))
 }

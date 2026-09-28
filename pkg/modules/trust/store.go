@@ -4,11 +4,19 @@ package trust
 
 import (
 	"bytes"
+	"errors"
 	"sync"
 )
 
 // algorithmEd25519 is the only signing algorithm supported by v1 bundles.
 const algorithmEd25519 = "ed25519"
+
+// ErrPublisherAlreadyRegistered is returned by AddPublisher when a publisher
+// name is already registered in the store. A trust store is append-only per
+// name — this is what stops a later-registered "additional publisher" from
+// displacing an earlier one (notably the baked-in CFGMS identity) that
+// happens to share its name (Issue #4324).
+var ErrPublisherAlreadyRegistered = errors.New("publisher already registered under this name")
 
 // PublisherIdentity represents a trusted module publisher identified by name and
 // their raw Ed25519 public key.
@@ -49,11 +57,17 @@ func NewInMemoryTrustStore() *InMemoryTrustStore {
 	}
 }
 
-// AddPublisher registers the identity as trusted. Overwrites any existing
-// entry for the same publisher name.
+// AddPublisher registers the identity as trusted. Returns
+// ErrPublisherAlreadyRegistered if a publisher is already registered under
+// the same name — publisher identities are immutable once registered in a
+// store instance, so a later registration can never silently displace an
+// earlier one. Construct a fresh store to replace an identity.
 func (s *InMemoryTrustStore) AddPublisher(id PublisherIdentity) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.publishers[id.Name]; exists {
+		return ErrPublisherAlreadyRegistered
+	}
 	s.publishers[id.Name] = id
 	return nil
 }

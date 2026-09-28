@@ -74,12 +74,24 @@ func (e *StewardTrustEnforcer) VerifyForLoad(b *bundle.Bundle, mode TrustMode, a
 func (e *StewardTrustEnforcer) verifyStrict(b *bundle.Bundle, additionalPublishers []PublisherIdentity) error {
 	store := pkgtrust.NewInMemoryTrustStore()
 
-	// Always include the baked-in CFGMS publisher identity.
-	_ = store.AddPublisher(e.getCFGMSIdentity())
+	// The baked-in CFGMS publisher identity is registered first and can never
+	// be displaced: AddPublisher rejects any later registration under the same
+	// name, so a supplied additional publisher sharing that name is dropped
+	// below rather than silently overwriting the trust anchor (Issue #4324).
+	cfgmsIdentity := e.getCFGMSIdentity()
+	if err := store.AddPublisher(cfgmsIdentity); err != nil {
+		return fmt.Errorf("register baked-in CFGMS publisher identity: %w", err)
+	}
 
 	// TODO: v2 — resolve additional_publishers names to key material from trust store
 	for _, pub := range additionalPublishers {
-		_ = store.AddPublisher(pub)
+		if err := store.AddPublisher(pub); err != nil {
+			// A colliding or duplicate publisher name must not abort strict
+			// verification for every other bundle — the baked-in identity
+			// registered above stays authoritative for that name; only the
+			// colliding entry is dropped.
+			continue
+		}
 	}
 
 	bundleName := ""
