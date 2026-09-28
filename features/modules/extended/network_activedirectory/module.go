@@ -521,7 +521,7 @@ func (m *activeDirectoryModule) queryADObject(ctx context.Context, objectType, o
 	}
 
 	m.logger.Debug("AD query completed successfully",
-		"object_type", objectType,
+		"object_type", logging.SanitizeLogValue(objectType),
 		"object_id", logging.SanitizeLogValue(objectID),
 		"response_time", result.ResponseTime)
 
@@ -683,7 +683,7 @@ func (m *activeDirectoryModule) listADObjects(ctx context.Context, objectType st
 	}
 
 	m.logger.Debug("AD list completed successfully",
-		"object_type", objectType,
+		"object_type", logging.SanitizeLogValue(objectType),
 		"count", result.TotalCount,
 		"response_time", result.ResponseTime)
 
@@ -1092,7 +1092,7 @@ func (m *activeDirectoryModule) queryGlobalCatalog(ctx context.Context, objectTy
 	}
 
 	m.logger.Debug("Forest search completed",
-		"object_type", objectType,
+		"object_type", logging.SanitizeLogValue(objectType),
 		"object_id", logging.SanitizeLogValue(objectID),
 		"results_found", result.TotalCount,
 		"response_time", result.ResponseTime)
