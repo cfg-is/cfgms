@@ -12,6 +12,7 @@ import (
 	"strconv"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/security"
 )
@@ -229,7 +230,7 @@ func extractFileConfig(configMap map[string]interface{}) *FileConfig {
 // setFile writes or removes a regular file.
 func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, fileConfig *FileConfig) error {
 	logger := m.GetEffectiveLogger(logging.ForModule("file"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Starting file configuration",
 		"operation", "file_set",
@@ -323,7 +324,7 @@ func (m *fileModule) setFile(ctx context.Context, resourceID, cleanPath string, 
 // setDirectory creates or updates a directory.
 func (m *fileModule) setDirectory(ctx context.Context, resourceID, cleanPath string, fileConfig *FileConfig) error {
 	logger := m.GetEffectiveLogger(logging.ForModule("file"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Starting directory configuration",
 		"operation", "directory_set",

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
@@ -117,7 +118,7 @@ func (m *Module) Get(ctx context.Context, resourceID string) (modules.ConfigStat
 func (m *Module) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	// Get effective logger (injected or fallback)
 	logger := m.GetEffectiveLogger(logging.ForModule("script"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	logger.InfoCtx(ctx, "Starting script execution",
 		"operation", "script_execute",

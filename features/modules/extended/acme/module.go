@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -120,7 +121,7 @@ func (m *acmeModule) Get(ctx context.Context, resourceID string) (modules.Config
 //   - If state is "absent", remove the certificate
 func (m *acmeModule) Set(ctx context.Context, resourceID string, config modules.ConfigState) error {
 	logger := m.GetEffectiveLogger(logging.ForModule("acme"))
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
 
 	if resourceID == "" {
 		return modules.ErrInvalidResourceID
