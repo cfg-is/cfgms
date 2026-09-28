@@ -158,11 +158,9 @@ func (p *SQLiteEntityGraphProvider) queryNeighborhoodEdges(
 	}
 	if tenantFilter != "" {
 		conds = append(conds,
-			"(fi.owning_tenant = ? OR fi.owning_tenant LIKE ?)",
-			"(ti.owning_tenant = ? OR ti.owning_tenant LIKE ?)",
+			tenantSubtreeCond("fi.owning_tenant", tenantFilter, &args),
+			tenantSubtreeCond("ti.owning_tenant", tenantFilter, &args),
 		)
-		args = append(args, tenantFilter, tenantFilter+"/%")
-		args = append(args, tenantFilter, tenantFilter+"/%")
 	}
 
 	// #nosec G202 -- conds contains only fixed predicates and generated "?"

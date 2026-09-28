@@ -164,10 +164,10 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 	}
 
 	if tenantFilter != "" {
-		tf, tfLike := addArg(tenantFilter), addArg(tenantFilter+"/%")
-		conds = append(conds, "(fi.owning_tenant = "+tf+" OR fi.owning_tenant LIKE "+tfLike+")")
-		tf2, tfLike2 := addArg(tenantFilter), addArg(tenantFilter+"/%")
-		conds = append(conds, "(ti.owning_tenant = "+tf2+" OR ti.owning_tenant LIKE "+tfLike2+")")
+		conds = append(conds,
+			tenantSubtreeCond("fi.owning_tenant", tenantFilter, &n, &args),
+			tenantSubtreeCond("ti.owning_tenant", tenantFilter, &n, &args),
+		)
 	}
 
 	// #nosec G202 -- conds contains only fixed predicates and generated $N

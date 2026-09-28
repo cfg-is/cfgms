@@ -232,8 +232,7 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 				 FROM eg_drift_projection d
 				 JOIN eg_entity_index i ON i.subject = d.subject`
 		if filter.TenantFilter != "" {
-			conds = append(conds, "(i.owning_tenant = ? OR i.owning_tenant LIKE ?)")
-			args = append(args, filter.TenantFilter, filter.TenantFilter+"/%")
+			conds = append(conds, tenantSubtreeCond("i.owning_tenant", filter.TenantFilter, &args))
 		}
 		if filter.Kind != "" {
 			conds = append(conds, "i.entity_kind = ?")

@@ -132,10 +132,10 @@ func (p *DatabaseEntityGraphProvider) GetEdges(ctx context.Context, filter inter
 		conds = append(conds, "ep.source = "+addArg(filter.Source))
 	}
 	if filter.TenantFilter != "" {
-		tf, tfLike := addArg(filter.TenantFilter), addArg(filter.TenantFilter+"/%")
-		conds = append(conds, "(fi.owning_tenant = "+tf+" OR fi.owning_tenant LIKE "+tfLike+")")
-		tf2, tfLike2 := addArg(filter.TenantFilter), addArg(filter.TenantFilter+"/%")
-		conds = append(conds, "(ti.owning_tenant = "+tf2+" OR ti.owning_tenant LIKE "+tfLike2+")")
+		conds = append(conds,
+			tenantSubtreeCond("fi.owning_tenant", filter.TenantFilter, &n, &args),
+			tenantSubtreeCond("ti.owning_tenant", filter.TenantFilter, &n, &args),
+		)
 	}
 
 	where := ""
