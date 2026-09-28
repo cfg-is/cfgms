@@ -1778,7 +1778,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 
 	// Story #416: Wire rollback manager into API server
-	rollbackManager := initializeRollbackManager(storageManager, logger, rbacManager)
+	rollbackManager := initializeRollbackManager(storageManager, logger, rbacManager, controllerService)
 	httpServer.SetRollbackManager(rollbackManager)
 	configService.SetRollbackManager(rollbackManager)
 	logger.Info("Rollback manager wired to HTTP API server and gRPC config service")
@@ -2084,7 +2084,11 @@ func wireClusterModuleApprovalStore(moduleCache *modulecache.ModuleCache, cfg *c
 }
 
 // initializeRollbackManager creates and wires the rollback manager.
-func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger, rbacManager rbac.RBACManager) rollback.RollbackManager {
+//
+// controllerService is the steward registry the rollback manager resolves target
+// ownership against; when it is nil the manager refuses every non-root caller
+// (Issue #4340).
+func initializeRollbackManager(storageManager *interfaces.StorageManager, logger logging.Logger, rbacManager rbac.RBACManager, controllerService *service.ControllerService) rollback.RollbackManager {
 	// Use durable storage for rollback operations
 	rollbackStore := rollback.NewStorageRollbackStore(storageManager.GetConfigStore())
 
@@ -2103,7 +2107,20 @@ func initializeRollbackManager(storageManager *interfaces.StorageManager, logger
 		AutoSync:      false,
 	}, logger)
 
-	manager := rollback.NewRollbackManager(gitManager, rollbackValidator, rollbackStore, rollbackNotifier)
+	// The steward registry is the authority for rollback target ownership
+	// (Issue #4340) — the same authority the reports API uses for device→tenant
+	// questions. A nil resolver is passed explicitly rather than a typed-nil
+	// service so the manager can tell "no ownership authority wired" apart from
+	// "authority says this target is unknown".
+	var tenantResolver rollback.TargetTenantResolver
+	if controllerService != nil {
+		tenantResolver = controllerService
+	} else {
+		logger.Warn("Rollback manager has no steward registry to resolve target ownership; " +
+			"tenant-scoped callers will be refused until one is wired (Issue #4340)")
+	}
+
+	manager := rollback.NewRollbackManager(gitManager, rollbackValidator, rollbackStore, rollbackNotifier, tenantResolver)
 	logger.Info("Rollback manager initialized")
 	return manager
 }

@@ -5,6 +5,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // DefaultGitManager implements the GitManager interface
@@ -112,7 +114,11 @@ func (m *DefaultGitManager) CreateRepository(ctx context.Context, config Reposit
 	}
 
 	// Initialize repository locally
-	localPath := m.getLocalPath(repo.ID)
+	localPath, err := m.getLocalPath(repo.ID)
+	if err != nil {
+		_ = m.provider.DeleteRepository(ctx, config.Owner, config.Name)
+		return nil, fmt.Errorf("invalid repository ID: %w", err)
+	}
 	if err := m.store.Clone(ctx, repo.CloneURL, localPath); err != nil {
 		// Clean up remote repository on failure
 		_ = m.provider.DeleteRepository(ctx, config.Owner, config.Name)
@@ -131,7 +137,7 @@ func (m *DefaultGitManager) CreateRepository(ctx context.Context, config Reposit
 		if err := m.sopsManager.GenerateSOPSConfig(repo.SOPSConfig, localPath); err != nil {
 			m.logger.Warn("failed to generate .sops.yaml",
 				"repo", logging.SanitizeLogValue(repo.Name),
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 		}
 	}
@@ -351,7 +357,7 @@ func (m *DefaultGitManager) SaveConfiguration(ctx context.Context, ref Configura
 	if err := m.storeCommitMetadata(ctx, ref.RepositoryID, sha, config); err != nil {
 		m.logger.Warn("failed to store commit metadata",
 			"repo", logging.SanitizeLogValue(ref.RepositoryID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 
@@ -643,8 +649,23 @@ func (m *DefaultGitManager) generateRepositoryName(config RepositoryConfig) stri
 	}
 }
 
-func (m *DefaultGitManager) getLocalPath(repoID string) string {
-	return filepath.Join(m.cacheDir, repoID)
+// getLocalPath resolves repoID to a local clone path bounded to m.cacheDir
+// (Issue #4340). repoID is derived from caller-supplied identifiers upstream
+// (e.g. a rollback target ID embedded in "device-<targetID>-repo"), so a
+// cleaned, symlink-resolved containment check is required — filepath.Join
+// alone would let a repoID containing "../" escape the cache directory.
+//
+// security.ValidateAndCleanPath requires the base directory itself to exist
+// (only the user-supplied remainder has a non-existent-target fallback), but
+// m.cacheDir may not exist yet on a fresh controller before its first
+// repository is cloned — the previous filepath.Join-only implementation had
+// no such requirement, since git clone creates missing parent directories
+// itself. Create it upfront so this check doesn't regress that.
+func (m *DefaultGitManager) getLocalPath(repoID string) (string, error) {
+	if err := os.MkdirAll(m.cacheDir, 0750); err != nil {
+		return "", fmt.Errorf("failed to create cache directory: %w", err)
+	}
+	return security.ValidateAndCleanPath(m.cacheDir, repoID)
 }
 
 func (m *DefaultGitManager) ensureRepository(ctx context.Context, repoID string) (string, error) {
@@ -655,7 +676,7 @@ func (m *DefaultGitManager) ensureRepository(ctx context.Context, repoID string)
 	if exists {
 		// Pull latest changes
 		if err := m.store.Pull(ctx, localPath); err != nil {
-			m.logger.Warn("failed to pull latest changes, using cached version", "error", err)
+			m.logger.Warn("failed to pull latest changes, using cached version", "error", logging.SanitizeLogValue(err.Error()))
 		}
 		return localPath, nil
 	}
@@ -666,7 +687,10 @@ func (m *DefaultGitManager) ensureRepository(ctx context.Context, repoID string)
 		return "", err
 	}
 
-	localPath = m.getLocalPath(repoID)
+	localPath, err = m.getLocalPath(repoID)
+	if err != nil {
+		return "", fmt.Errorf("invalid repository ID: %w", err)
+	}
 	if err := m.store.Clone(ctx, repo.CloneURL, localPath); err != nil {
 		return "", fmt.Errorf("failed to clone repository: %w", err)
 	}
@@ -733,7 +757,7 @@ func (m *DefaultGitManager) backgroundSync() {
 			Type: RepositoryTypeClient,
 		})
 		if err != nil {
-			m.logger.Error("error listing repositories for sync", "error", err)
+			m.logger.Error("error listing repositories for sync", "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -741,7 +765,7 @@ func (m *DefaultGitManager) backgroundSync() {
 			if err := m.SyncTemplates(context.Background(), repo.ID); err != nil {
 				m.logger.Error("error syncing templates",
 					"repo", logging.SanitizeLogValue(repo.ID),
-					"error", err,
+					"error", logging.SanitizeLogValue(err.Error()),
 				)
 			}
 		}

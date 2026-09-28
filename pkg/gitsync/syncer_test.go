@@ -285,6 +285,52 @@ func TestScopeIsolation(t *testing.T) {
 	assert.Equal(t, "key: value\n", string(entry.Data))
 }
 
+// TestSyncScope_RejectsSymlinkEscapingWorkDir is the REQUIRED path-traversal
+// test for Issue #4340: a symlink pre-planted at the exact scope directory
+// name the syncer would use, pointing outside workDir, must be rejected
+// rather than followed into a clone that writes outside the configured base
+// directory.
+func TestSyncScope_RejectsSymlinkEscapingWorkDir(t *testing.T) {
+	bareDir, _, _ := newTestRepo(t, map[string]string{
+		"policy1.yaml": "key: value\n",
+	})
+
+	root := t.TempDir()
+	workDir := filepath.Join(root, "repos")
+	store := pkgtesting.SetupTestStorage(t).GetConfigStore()
+
+	bindings, err := gitsync.NewBindingStore(t.TempDir())
+	require.NoError(t, err)
+
+	logger := logging.ForComponent("gitsync-test")
+	syncer, err := gitsync.NewSyncer(store, bindings, workDir, logger)
+	require.NoError(t, err)
+
+	binding := gitsync.ScopeBinding{
+		TenantPath: "root/test-tenant",
+		Namespace:  "policies",
+		OriginURL:  bareDir,
+		Branch:     "main",
+	}
+	require.NoError(t, bindings.Add(binding))
+
+	// Pre-create a symlink at the exact scope directory name the syncer
+	// derives from the binding key ("root/test-tenant/policies" with "/"
+	// replaced by "_"), pointing outside workDir.
+	outside := t.TempDir()
+	scopeDir := filepath.Join(workDir, "root_test-tenant_policies")
+	require.NoError(t, os.Symlink(outside, scopeDir))
+
+	err = syncer.TriggerSync(context.Background(), binding)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid scope path")
+
+	// The clone must never have been written through the symlink into outside.
+	entries, readErr := os.ReadDir(outside)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "sync must not write through a symlink that escapes workDir")
+}
+
 // TestPollingInterval verifies that a polling goroutine fires TriggerSync when
 // the ticker fires.
 //

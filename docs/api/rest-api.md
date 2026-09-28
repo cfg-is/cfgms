@@ -1548,6 +1548,8 @@ Receive a git push event from an upstream SCM and trigger a config sync. The rou
 
 Rollback endpoints are registered only when a `RollbackManager` is wired in (`SetRollbackManager()`). They are available in all deployments that include the rollback feature.
 
+Every rollback endpoint is bounded to the caller's tenant subtree by the rollback manager, which resolves the target's owning tenant from the steward registry — the same device→tenant authority the reports endpoints use. A tenant-scoped caller receives `403 Forbidden` for a target owned outside its subtree and for a target the registry does not own at all; the response names no target, so it neither confirms nor denies the existence of another tenant's steward. `GET /api/v1/rollback/history` filters instead of failing: it returns only the operations inside the caller's subtree. A manager wired without an ownership authority fails closed — a tenant-scoped caller receives `503 Service Unavailable`, never unauthorized data. Root-scoped admin certificates are unrestricted.
+
 #### GET /api/v1/rollback/points
 
 List available rollback points.

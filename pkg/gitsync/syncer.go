@@ -18,6 +18,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	"github.com/cfgis/cfgms/pkg/security"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
 
@@ -264,7 +265,7 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 			"tenant_path", logging.SanitizeLogValue(b.TenantPath),
 			"namespace", logging.SanitizeLogValue(b.Namespace),
 			"origin_url", logging.SanitizeLogValue(b.OriginURL),
-			"error", err.Error())
+			"error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		status.State = SyncStateIdle
 		status.LastError = ""
@@ -286,7 +287,15 @@ func (s *Syncer) TriggerSync(ctx context.Context, b ScopeBinding) error {
 // syncScope performs the actual git clone/pull and config import for one
 // binding.
 func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
-	repoDir := filepath.Join(s.workDir, sanitizeKey(b.key()))
+	// sanitizeKey already replaces "/" (TenantPath and Namespace are attacker-
+	// influenceable via the binding API), but a ".."-only segment or a stray
+	// backslash on Windows could otherwise still walk outside workDir — bound
+	// the result against workDir by a cleaned, symlink-resolved containment
+	// check rather than trusting the character replacement alone (Issue #4340).
+	repoDir, err := security.ValidateAndCleanPath(s.workDir, sanitizeKey(b.key()))
+	if err != nil {
+		return fmt.Errorf("gitsync: invalid scope path: %w", err)
+	}
 
 	auth, err := resolveCredentials(ctx, b.CredentialsRef, s.secretStore)
 	if err != nil {
@@ -361,7 +370,7 @@ func (s *Syncer) syncScope(ctx context.Context, b ScopeBinding) error {
 		s.logger.Error("gitsync: failed to update last-synced SHA",
 			"tenant_path", logging.SanitizeLogValue(b.TenantPath),
 			"namespace", logging.SanitizeLogValue(b.Namespace),
-			"error", updateErr.Error())
+			"error", logging.SanitizeLogValue(updateErr.Error()))
 	}
 
 	// Update in-memory status.

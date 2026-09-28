@@ -204,8 +204,12 @@ func TestWriteModuleSpec_WriteError(t *testing.T) {
 		Spec: ModuleSpec{Metadata: ModuleMetadata{Name: "test"}},
 	}
 
-	// specPath descends through "blocker" (a file), so MkdirAll must fail.
+	// specPath descends through "blocker" (a file), so path resolution must fail
+	// before any write is attempted — writeModuleSpec now goes through
+	// pkg/security's bounded write helper (Issue #4340), which validates the
+	// full path (including resolving non-existent ancestors) up front rather
+	// than deferring the failure to a later MkdirAll call.
 	err := mrm.writeModuleSpec(context.Background(), root, filepath.Join("blocker", "sub", "module.yaml"), module)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create directory")
+	assert.Contains(t, err.Error(), "path validation failed")
 }

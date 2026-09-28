@@ -163,6 +163,31 @@ func validateSecretRequest(req *interfaces.SecretRequest) error {
 	if req.TenantID == "" {
 		return fmt.Errorf("TenantID is required: %w", cfgconfig.ErrTenantRequired)
 	}
+	if err := validateNoPathTraversal(req.TenantID, "TenantID"); err != nil {
+		return err
+	}
+	if err := validateNoPathTraversal(req.Key, "secret key"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateNoPathTraversal rejects a KV path component (a tenant ID or a
+// secret key) that contains an empty, ".", or ".." "/"-separated segment.
+// OpenBao KV v2 paths are opaque strings routed hierarchically by segment —
+// unlike a filesystem, there is no directory to Clean or symlink to resolve —
+// so containment here means rejecting any segment that could be interpreted
+// as walking out of the tenant's own subtree once joined into "<tenantID>/<key>".
+// TenantID legitimately contains "/" (CFGMS tenant IDs are hierarchical paths,
+// e.g. "root/msp-a/client-1"), so only individual segments are rejected, not
+// "/" itself.
+func validateNoPathTraversal(component, label string) error {
+	for _, seg := range strings.Split(component, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%s must not contain empty, '.', or '..' path segments: %s",
+				label, logging.SanitizeLogValue(component))
+		}
+	}
 	return nil
 }
 
@@ -267,7 +292,10 @@ func (s *OpenBaoSecretStore) ListSecrets(ctx context.Context, filter *interfaces
 	}
 
 	tenantID := filter.TenantID
-	listPath := s.mountPath + "/metadata/" + logging.SanitizeLogValue(tenantID)
+	if err := validateNoPathTraversal(tenantID, "TenantID"); err != nil {
+		return nil, err
+	}
+	listPath := s.mountPath + "/metadata/" + tenantID
 
 	logicalSecret, err := s.client.Logical().ListWithContext(ctx, listPath)
 	if err != nil {
@@ -609,6 +637,16 @@ func splitKey(key string) (tenantID, keyName string, err error) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("secret key must be in format 'tenantID/key', got: %s",
 			logging.SanitizeLogValue(key))
+	}
+	// A key containing extra "/"-separated segments (Issue #4340) — e.g.
+	// "tenant-a/../../tenant-b/secret" — would otherwise be split into
+	// tenantID="tenant-a", keyName="../../tenant-b/secret" and joined back into
+	// a KV path that walks outside tenant-a's own subtree.
+	if err := validateNoPathTraversal(parts[0], "TenantID"); err != nil {
+		return "", "", err
+	}
+	if err := validateNoPathTraversal(parts[1], "secret key"); err != nil {
+		return "", "", err
 	}
 	return parts[0], parts[1], nil
 }

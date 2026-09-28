@@ -14,6 +14,7 @@ import (
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/config/rollback"
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	fleetStorage "github.com/cfgis/cfgms/features/controller/fleet/storage"
 	"github.com/cfgis/cfgms/features/controller/tagstore"
@@ -749,6 +750,30 @@ func (s *ControllerService) TenantForDevice(deviceID string) (tenantID string, k
 		return "", false
 	}
 	return info.TenantID, true
+}
+
+// The steward registry is the rollback manager's ownership authority; the
+// assertion keeps that wiring a compile-time fact.
+var _ rollback.TargetTenantResolver = (*ControllerService)(nil)
+
+// TenantForTarget returns the tenant that owns a rollback target, satisfying
+// rollback.TargetTenantResolver so the rollback manager bounds every entry point
+// to the caller's tenant subtree against the steward registry rather than
+// against caller-supplied data or Git commit metadata (Issue #4340).
+//
+// Device and steward targets are steward IDs and resolve through the registry.
+// Group, client and MSP-wide targets have no ownership authority here, so they
+// report unknown: a root-scoped caller may still roll them back, a tenant-scoped
+// caller is refused rather than served unchecked. Give one of those target kinds
+// an authority and it resolves here, in the single place target ownership is
+// decided.
+func (s *ControllerService) TenantForTarget(_ context.Context, targetType rollback.TargetType, targetID string) (string, bool) {
+	switch targetType {
+	case rollback.TargetTypeDevice, rollback.TargetTypeSteward:
+		return s.TenantForDevice(targetID)
+	default:
+		return "", false
+	}
 }
 
 // RecordHeartbeat advances the live heartbeat state for a registered steward in

@@ -18,12 +18,30 @@ import (
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
+
+// seedSiblingClients creates root → msp → {client-a, client-b} in the store, so
+// tests can verify a caller scoped to one child cannot reach the other.
+func seedSiblingClients(t *testing.T, ctx context.Context, sm interface{ GetTenantStore() business.TenantStore }) {
+	t.Helper()
+	ts := sm.GetTenantStore()
+	require.NotNil(t, ts)
+
+	for _, td := range []*business.TenantData{
+		{ID: "root", Name: "Root", Status: business.TenantStatusActive},
+		{ID: "msp", Name: "MSP", ParentID: "root", Status: business.TenantStatusActive},
+		{ID: "client-a", Name: "Client A", ParentID: "msp", Status: business.TenantStatusActive},
+		{ID: "client-b", Name: "Client B", ParentID: "msp", Status: business.TenantStatusActive},
+	} {
+		require.NoError(t, ts.CreateTenant(ctx, td))
+	}
+}
 
 // seedThreeLevelTenants creates root → msp → client tenant hierarchy in the store.
 func seedThreeLevelTenants(t *testing.T, ctx context.Context, sm interface{ GetTenantStore() business.TenantStore }) {
@@ -1304,4 +1322,90 @@ func TestResolveConfiguration_PostureDowngradeRefused_RecordsAuditEvent(t *testi
 		}
 	}
 	assert.True(t, found, "expected a denied steward_config.security_posture_downgrade audit entry")
+}
+
+// Tenant-boundary tests (Issue #4340): a caller scoped to one tenant cannot use
+// ResolveConfiguration to read a sibling's configuration, and — because a
+// child-scoped caller cannot resolve any tenantID outside its own subtree at
+// all — cannot reach or influence what an ancestor tenant resolves to either.
+
+func TestResolveConfiguration_ChildCannotReadSiblingConfiguration(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key: &cfgconfig.ConfigKey{TenantID: "client-b", Namespace: "group-policies", Name: "client-b-groups"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{
+			Resources: []stewardconfig.ResourceConfig{{Name: "client-b-secret-resource", Module: "directory"}},
+		}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	// A caller scoped to client-a asks to resolve client-b (a sibling).
+	scopedCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err := ir.ResolveConfiguration(scopedCtx, "client-b", "steward-1")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the caller's authorized scope")
+}
+
+func TestResolveConfiguration_ChildCannotOverrideParentViaResolvedChain(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	cs := sm.GetConfigStore()
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "msp", Namespace: "client-policies", Name: "msp"},
+		Data: marshalStewardConfig(t, stewardconfig.StewardConfig{Steward: stewardconfig.StewardSettings{ConvergeInterval: "45m"}}),
+	}))
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	// A root-scoped resolution of the parent ("msp") is the baseline.
+	rootScoped := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	before, err := ir.ResolveConfiguration(rootScoped, "msp", "steward-parent")
+	require.NoError(t, err)
+	assert.Equal(t, "45m", before.Config.Steward.ConvergeInterval)
+
+	// A caller scoped to the child ("client-a") cannot resolve the parent's
+	// tenantID at all — there is no path through this API for a child to read
+	// or influence the parent's resolution.
+	childScoped := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err = ir.ResolveConfiguration(childScoped, "msp", "steward-parent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside the caller's authorized scope")
+
+	// The parent's own resolution is unaffected by the denied attempt.
+	after, err := ir.ResolveConfiguration(rootScoped, "msp", "steward-parent")
+	require.NoError(t, err)
+	assert.Equal(t, before.Config.Steward.ConvergeInterval, after.Config.Steward.ConvergeInterval)
+}
+
+func TestResolveConfiguration_AllowedForOwnTenantScope(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+
+	scopedCtx := context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-a"))
+	_, err := ir.ResolveConfiguration(scopedCtx, "client-a", "steward-1")
+	require.NoError(t, err)
+}
+
+func TestResolveConfiguration_NoScopeOnContextIsUnaffected(t *testing.T) {
+	// Callers that never set an explicit TenantScope (e.g. the mTLS data-plane
+	// sync path, which does its own server-side tenant resolution) are not
+	// bound by this check — it is out of its jurisdiction, not fail-open.
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+	seedSiblingClients(t, ctx, sm)
+
+	ir := NewInheritanceResolverWithStorageManager(sm)
+	_, err := ir.ResolveConfiguration(ctx, "client-b", "steward-1")
+	require.NoError(t, err)
 }
