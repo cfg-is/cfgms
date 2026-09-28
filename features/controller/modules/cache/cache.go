@@ -34,7 +34,24 @@ var (
 	// ErrContentAddressConflict is returned when a different bundle already exists at the
 	// same (publisher, name, version) with a different content hash.
 	ErrContentAddressConflict = errors.New("content address conflict: different content hash already cached for this publisher/name/version")
+
+	// ErrContentHashIdentityConflict is returned when a bundle's content hash was
+	// previously recorded in this cache under a different (publisher, name, version)
+	// identity. A publisher signature is made over the content hash alone — nothing
+	// in the signing scheme binds the manifest's Name/Version to that hash beyond the
+	// manifest bytes that were originally hashed into it. A second manifest claiming a
+	// different identity for the identical hash means the same (verified) signature
+	// and hash are being replayed under a forged identity: the cache and approval key
+	// must be derived from the verified record (the identity first seen for this hash),
+	// not from whatever the incoming manifest currently claims (Issue #4341).
+	ErrContentHashIdentityConflict = errors.New("content hash identity conflict: this content hash is already recorded under a different publisher/name/version")
 )
+
+// hashIndexDirName is the reserved top-level directory name used to persist the
+// content-hash → identity reverse index (see checkAndRecordHashIdentityLocked).
+// It cannot collide with a real publisher directory: bundleDir refuses any
+// publisher component equal to this name.
+const hashIndexDirName = ".cfgms-hash-index"
 
 // ApprovalStatus represents the approval state of a cached bundle.
 type ApprovalStatus string
@@ -110,6 +127,9 @@ func approvalKey(addr bundle.ContentAddress) string {
 // bundleDir returns the filesystem path for the given content address.
 // The content hash is converted to a filesystem-safe directory name via hashToDir.
 func (c *ModuleCache) bundleDir(addr bundle.ContentAddress) (string, error) {
+	if addr.Publisher == hashIndexDirName {
+		return "", fmt.Errorf("invalid publisher: %q is a reserved name", hashIndexDirName)
+	}
 	if err := validateComponent(addr.Publisher); err != nil {
 		return "", fmt.Errorf("invalid publisher: %w", err)
 	}
@@ -138,6 +158,46 @@ func validateComponent(s string) error {
 		return fmt.Errorf("must not contain path separators or dot sequences: %q", s)
 	}
 	return nil
+}
+
+// hashIdentityIndexPath returns the path of the reverse-index file recording
+// which (publisher, name, version) identity a content hash was first seen
+// under.
+func (c *ModuleCache) hashIdentityIndexPath(contentHash string) string {
+	return filepath.Join(c.rootDir, hashIndexDirName, hashToDir(contentHash)+".txt")
+}
+
+// checkAndRecordHashIdentityLocked enforces a 1:1 binding between a content
+// hash and the (publisher, name, version) identity it is cached under. If
+// addr.ContentHash has never been seen, it records addr's identity as
+// authoritative. If it has been seen, addr's identity must match exactly —
+// otherwise the incoming manifest is claiming an identity that disagrees with
+// the one bound to this hash on first sight, and is refused with
+// ErrContentHashIdentityConflict.
+//
+// c.mu must be held for writing.
+func (c *ModuleCache) checkAndRecordHashIdentityLocked(addr bundle.ContentAddress) error {
+	path := c.hashIdentityIndexPath(addr.ContentHash)
+	want := addr.IdentityKey()
+
+	// #nosec G304 -- path is built from rootDir and a sanitized content hash
+	// (hashToDir), never from an unvalidated path component.
+	existing, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if strings.TrimSpace(string(existing)) != want {
+			return fmt.Errorf("%w: hash %q recorded for %q, manifest now claims %q",
+				ErrContentHashIdentityConflict, addr.ContentHash, strings.TrimSpace(string(existing)), want)
+		}
+		return nil
+	case errors.Is(err, os.ErrNotExist):
+		if mkErr := os.MkdirAll(filepath.Dir(path), 0750); mkErr != nil {
+			return fmt.Errorf("create hash identity index dir: %w", mkErr)
+		}
+		return writeFileAtomic(path, []byte(want), 0640)
+	default:
+		return fmt.Errorf("read hash identity index: %w", err)
+	}
 }
 
 // hashToDir converts a base64 content hash to a filesystem-safe directory name.
@@ -171,6 +231,10 @@ func (c *ModuleCache) Put(b *bundle.Bundle) error {
 	addr := b.ContentAddress()
 	dir, err := c.bundleDir(addr)
 	if err != nil {
+		return err
+	}
+
+	if err := c.checkAndRecordHashIdentityLocked(addr); err != nil {
 		return err
 	}
 

@@ -45,6 +45,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Tracer provides distributed tracing capabilities with correlation ID support.
@@ -196,10 +198,18 @@ func Initialize(ctx context.Context, config *Config) (*Tracer, func(), error) {
 //	    attribute.String("tenant.id", tenantID),
 //	)
 func (t *Tracer) Start(ctx context.Context, operationName string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	// operationName is caller-supplied and becomes both the exported span's
+	// name and the "cfgms.operation" attribute below. Sanitize it before
+	// either use: a control-character payload here would otherwise reach
+	// exported traces (and any log sink that renders them) unsanitized, the
+	// same CWE-117 shape CLAUDE.md's log-sanitization rule targets for
+	// logger calls.
+	sanitizedOperationName := logging.SanitizeLogValue(operationName)
+
 	// Add default CFGMS attributes
 	defaultOpts := []trace.SpanStartOption{
 		trace.WithAttributes(
-			attribute.String("cfgms.operation", operationName),
+			attribute.String("cfgms.operation", sanitizedOperationName),
 		),
 	}
 
@@ -207,7 +217,7 @@ func (t *Tracer) Start(ctx context.Context, operationName string, opts ...trace.
 	allOpts := append(defaultOpts, opts...)
 
 	// Start span with correlation ID injection
-	ctx, span := t.tracer.Start(ctx, operationName, allOpts...)
+	ctx, span := t.tracer.Start(ctx, sanitizedOperationName, allOpts...)
 
 	// Inject correlation ID into context if not present
 	ctx = ensureCorrelationID(ctx, span)
@@ -263,9 +273,13 @@ func getComponentType(serviceName string) string {
 // Attribute creation helpers for common types
 // These provide convenient wrappers around OpenTelemetry attributes
 
-// AttributeString creates a string attribute.
+// AttributeString creates a string attribute. value is sanitized before
+// being handed to the OpenTelemetry API: this helper is the documented way
+// to attach caller/peer-influenced identity values (steward.id, tenant.id)
+// to a span, so an unsanitized value here would carry control characters
+// into exported traces the same way an unsanitized logger argument does.
 func AttributeString(key, value string) attribute.KeyValue {
-	return attribute.String(key, value)
+	return attribute.String(key, logging.SanitizeLogValue(value))
 }
 
 // AttributeInt creates an integer attribute.

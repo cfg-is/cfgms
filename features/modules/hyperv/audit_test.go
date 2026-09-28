@@ -143,6 +143,31 @@ func TestAuditRecordHypervOp_ErrorPath(t *testing.T) {
 		"error message must contain the original error text")
 }
 
+// TestAuditRecordHypervOp_ErrorMessageSanitized verifies that the opErr text
+// persisted as the audit record's ErrorMessage passes through
+// logging.SanitizeLogValue. The text comes back from the Hyper-V host
+// (PowerShell/WinRM output), so it is attacker-influenced: a newline in it must
+// not be able to forge a second line in anything that renders the record.
+// make lint-log-injection cannot see this call site — AuditEventBuilder.Error
+// only shares a logger method's name — so this test is the guard.
+func TestAuditRecordHypervOp_ErrorMessageSanitized(t *testing.T) {
+	mgr, store := newRecordingAuditManager(t)
+	defer func() { _ = mgr.Stop(context.Background()) }()
+
+	opErr := errors.New("Set-VM failed\r\nFAKE audit line: result=success\x1b[2K")
+	recordHypervOp(context.Background(), mgr, "tenant-1", "steward-1", "host-1", "Set-VM", "vm:vm1", nil, nil, opErr)
+
+	require.NoError(t, mgr.Flush(context.Background()))
+	entries := store.captured()
+	require.Len(t, entries, 1)
+
+	msg := entries[0].ErrorMessage
+	assert.NotContains(t, msg, "\n", "ErrorMessage must not carry a raw newline")
+	assert.NotContains(t, msg, "\r", "ErrorMessage must not carry a raw carriage return")
+	assert.NotContains(t, msg, "\x1b", "ErrorMessage must not carry a raw escape character")
+	assert.Contains(t, msg, "Set-VM failed", "the forensic text must survive sanitization")
+}
+
 // TestAuditLog_VMOperation verifies that a New-VM operation produces an audit
 // entry with all required fields correctly populated and result Success.
 func TestAuditLog_VMOperation(t *testing.T) {

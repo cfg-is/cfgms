@@ -24,7 +24,7 @@ type DirectoryDNAMonitoringSystem struct {
 	collector     DirectoryDNACollector
 	driftDetector DirectoryDriftDetector
 	storage       DirectoryDNAStorage
-	logger        *logging.ModuleLogger
+	logger        logging.Logger
 
 	// Monitoring configuration
 	config *MonitoringConfig
@@ -212,14 +212,21 @@ func NewDirectoryDNAMonitoringSystem(
 	storage DirectoryDNAStorage,
 	logger logging.Logger,
 ) *DirectoryDNAMonitoringSystem {
-	// Create structured logger for directory DNA monitoring
-	dnaLogger := logging.ForComponent("directory_dna").WithField("component", "monitoring")
+	// Honour the injected logger — the sibling collector, drift detector and
+	// storage adapter all log through the logger their caller supplied, and
+	// discarding it here made this system's log output unobservable to both
+	// callers and tests. Only when no logger is supplied do we fall back to a
+	// component logger so monitoring output is never silently dropped.
+	monitoringLogger := logger
+	if monitoringLogger == nil {
+		monitoringLogger = logging.ForComponent("directory_dna").WithField("component", "monitoring")
+	}
 
 	return &DirectoryDNAMonitoringSystem{
 		collector:     collector,
 		driftDetector: driftDetector,
 		storage:       storage,
-		logger:        dnaLogger,
+		logger:        monitoringLogger,
 		config:        getDefaultMonitoringConfig(),
 		metrics: &DirectoryMonitoringMetrics{
 			ObjectsMonitored: make(map[interfaces.DirectoryObjectType]int64),
@@ -404,7 +411,7 @@ func (m *DirectoryDNAMonitoringSystem) performDNACollection(ctx context.Context)
 		if err != nil {
 			errors = append(errors, err)
 			m.logger.Warn("DNA collection failed for object type",
-				"object_type", objectType, "error", err)
+				"object_type", objectType, "error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			totalCollected += collected
 
@@ -450,7 +457,7 @@ func (m *DirectoryDNAMonitoringSystem) collectDNAForObjectType(ctx context.Conte
 		// Store collected DNA
 		for _, dna := range userDNA {
 			if err := m.storage.StoreDirectoryDNA(ctx, dna); err != nil {
-				m.logger.Warn("Failed to store user DNA", "user_id", dna.ObjectID, "error", err)
+				m.logger.Warn("Failed to store user DNA", "user_id", logging.SanitizeLogValue(dna.ObjectID), "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
 
@@ -464,7 +471,7 @@ func (m *DirectoryDNAMonitoringSystem) collectDNAForObjectType(ctx context.Conte
 		// Store collected DNA
 		for _, dna := range groupDNA {
 			if err := m.storage.StoreDirectoryDNA(ctx, dna); err != nil {
-				m.logger.Warn("Failed to store group DNA", "group_id", dna.ObjectID, "error", err)
+				m.logger.Warn("Failed to store group DNA", "group_id", logging.SanitizeLogValue(dna.ObjectID), "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
 
@@ -478,7 +485,7 @@ func (m *DirectoryDNAMonitoringSystem) collectDNAForObjectType(ctx context.Conte
 		// Store collected DNA
 		for _, dna := range ouDNA {
 			if err := m.storage.StoreDirectoryDNA(ctx, dna); err != nil {
-				m.logger.Warn("Failed to store OU DNA", "ou_id", dna.ObjectID, "error", err)
+				m.logger.Warn("Failed to store OU DNA", "ou_id", logging.SanitizeLogValue(dna.ObjectID), "error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -46,14 +47,16 @@ func recordHypervOp(ctx context.Context, mgr *audit.Manager, tenantID, stewardID
 	if opErr == nil {
 		builder = builder.Result(business.AuditResultSuccess)
 	} else {
-		builder = builder.Result(business.AuditResultFailure).Error("", opErr.Error())
+		// opErr carries text from the Hyper-V host (PowerShell/WinRM output), so
+		// it is sanitized before it is persisted as the record's ErrorMessage.
+		builder = builder.Result(business.AuditResultFailure).Error("", logging.SanitizeLogValue(opErr.Error()))
 	}
 
 	if err := mgr.RecordEvent(ctx, builder); err != nil {
 		slog.Warn("hyperv: failed to record audit event",
-			"verb", verb,
-			"resource_id", cfgResourceID,
-			"error", err,
+			"verb", logging.SanitizeLogValue(verb),
+			"resource_id", logging.SanitizeLogValue(cfgResourceID),
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 }

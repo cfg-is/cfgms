@@ -181,6 +181,45 @@ func TestApprovalWorkflow_EvaluateAndStore_AutoApprove(t *testing.T) {
 	assert.Equal(t, cache.ApprovalStatusApproved, status)
 }
 
+// [REQUIRED TEST] TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement
+// verifies that a manifest whose Publisher/Name/Version disagrees with the
+// identity actually bound to a previously-verified content hash is refused —
+// not cached or approved under the manifest's claimed identity (Issue #4341).
+// The forged bundle reuses the genuine bundle's ContentHash and Signature
+// verbatim (both verify fine on their own terms) but swaps in a different
+// module name, simulating an attacker replaying a real publisher's signed
+// artifact under a different claimed identity.
+func TestApprovalWorkflow_EvaluateAndStore_RefusesIdentityDisagreement(t *testing.T) {
+	wf, c := makeWorkflow(t)
+	keys := generateKeys(t, "cfgms")
+	store := makeTrustStore(keys)
+
+	genuine := makeSignedBundle(t, keys, "hyperv", "0.2.1")
+	decision, err := wf.EvaluateAndStore(genuine, store)
+	require.NoError(t, err)
+	assert.Equal(t, approval.AutoApprove, decision)
+
+	forged := &bundle.Bundle{
+		Manifest: &modules.ModuleMetadata{
+			Name:      "not-hyperv",
+			Version:   genuine.Manifest.Version,
+			Publisher: genuine.Manifest.Publisher,
+			Executors: []string{"steward"},
+		},
+		Binaries:    genuine.Binaries,
+		Signatures:  genuine.Signatures,
+		ContentHash: genuine.ContentHash,
+	}
+
+	_, err = wf.EvaluateAndStore(forged, store)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cache.ErrContentHashIdentityConflict)
+
+	// The forged identity must never have been recorded as approved.
+	_, statusErr := c.GetApprovalStatus(forged.ContentAddress())
+	assert.ErrorIs(t, statusErr, cache.ErrBundleNotFound)
+}
+
 // TestApprovalWorkflow_EvaluateAndStore_QueueForReview persists pending status correctly.
 func TestApprovalWorkflow_EvaluateAndStore_QueueForReview(t *testing.T) {
 	wf, c := makeWorkflow(t)

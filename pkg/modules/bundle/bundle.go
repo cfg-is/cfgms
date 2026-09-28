@@ -71,3 +71,17 @@ func (b *Bundle) ContentAddress() ContentAddress {
 		ContentHash: b.ContentHash,
 	}
 }
+
+// IdentityKey returns the (publisher, name, version) tuple as a single string,
+// deliberately omitting ContentHash. A publisher signature is made over
+// ContentHash alone (see VerifyBundleSignature) — nothing in the signing scheme
+// binds Name or Version to that hash beyond the manifest bytes that were
+// originally hashed into it. Two different (publisher, name, version) claims
+// for the identical ContentHash therefore cannot both be genuine: SHA-256
+// collision resistance means at most one manifest byte-string produced that
+// hash. Callers that persist bundles (features/controller/modules/cache) use
+// this to detect a manifest replaying a previously-verified ContentHash and
+// Signature under a different claimed identity (Issue #4341).
+func (a ContentAddress) IdentityKey() string {
+	return a.Publisher + "/" + a.Name + "/" + a.Version
+}

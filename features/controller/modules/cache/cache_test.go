@@ -84,6 +84,41 @@ func TestModuleCache_Put_ConflictDifferentHash(t *testing.T) {
 	assert.ErrorIs(t, err, cache.ErrContentAddressConflict)
 }
 
+// [REQUIRED TEST] TestModuleCache_Put_RefusesIdentityDisagreement is the mirror
+// of TestModuleCache_Put_ConflictDifferentHash: the SAME content hash claimed
+// under a DIFFERENT (publisher/name/version) identity. A publisher signature is
+// made over the content hash alone, so replaying a previously-verified hash
+// under a forged Name/Version must be refused rather than cached under the
+// manifest's claimed identity (Issue #4341).
+func TestModuleCache_Put_RefusesIdentityDisagreement(t *testing.T) {
+	c := makeTestCache(t)
+	genuine := makeTestBundle("cfgms", "hyperv", "0.2.1", "shared-hash-value")
+	require.NoError(t, c.Put(genuine))
+
+	// Same publisher and content hash, but a different claimed name — as if an
+	// attacker replayed a genuinely-verified (ContentHash, Signature) pair
+	// underneath a manifest for a different module.
+	forgedName := makeTestBundle("cfgms", "not-hyperv", "0.2.1", "shared-hash-value")
+	err := c.Put(forgedName)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cache.ErrContentHashIdentityConflict)
+
+	// Same publisher and content hash, but a different claimed version.
+	forgedVersion := makeTestBundle("cfgms", "hyperv", "9.9.9", "shared-hash-value")
+	err = c.Put(forgedVersion)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, cache.ErrContentHashIdentityConflict)
+
+	// The forged entries must not have been cached under their claimed identity.
+	_, getErr := c.Get(forgedName.ContentAddress())
+	assert.ErrorIs(t, getErr, cache.ErrBundleNotFound)
+
+	// The genuine entry is unaffected and still retrievable.
+	got, err := c.Get(genuine.ContentAddress())
+	require.NoError(t, err)
+	assert.Equal(t, genuine.Manifest.Name, got.Manifest.Name)
+}
+
 // TestModuleCache_Get_NotFound returns ErrBundleNotFound for unknown addresses.
 func TestModuleCache_Get_NotFound(t *testing.T) {
 	c := makeTestCache(t)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/directory/interfaces"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // Batch Collection Methods (continuation of collector.go)
@@ -258,7 +259,7 @@ func (c *DefaultDirectoryDNACollector) collectOUBatchDNA(ctx context.Context, ou
 // CollectRelationships collects relationships for a specific directory object.
 func (c *DefaultDirectoryDNACollector) CollectRelationships(ctx context.Context, objectID string) (*DirectoryRelationships, error) {
 	startTime := time.Now()
-	c.logger.Debug("Collecting relationships", "object_id", objectID)
+	c.logger.Debug("Collecting relationships", "object_id", logging.SanitizeLogValue(objectID))
 
 	relationships := &DirectoryRelationships{
 		ObjectID:    objectID,
@@ -292,7 +293,7 @@ func (c *DefaultDirectoryDNACollector) CollectRelationships(ctx context.Context,
 	}
 
 	c.logger.Debug("Relationships collected successfully",
-		"object_id", objectID,
+		"object_id", logging.SanitizeLogValue(objectID),
 		"object_type", objectType,
 		"member_of_count", len(relationships.MemberOf),
 		"members_count", len(relationships.Members),
@@ -306,7 +307,7 @@ func (c *DefaultDirectoryDNACollector) collectUserRelationships(ctx context.Cont
 	// Get user groups
 	groups, err := c.provider.GetUserGroups(ctx, userID)
 	if err != nil {
-		c.logger.Warn("Failed to get user groups", "user_id", userID, "error", err)
+		c.logger.Warn("Failed to get user groups", "user_id", logging.SanitizeLogValue(userID), "error", logging.SanitizeLogValue(err.Error()))
 		// Continue with other relationships rather than failing completely
 	} else {
 		for _, group := range groups {
@@ -338,7 +339,7 @@ func (c *DefaultDirectoryDNACollector) collectGroupRelationships(ctx context.Con
 	// Get group members
 	members, err := c.provider.GetGroupMembers(ctx, groupID)
 	if err != nil {
-		c.logger.Warn("Failed to get group members", "group_id", groupID, "error", err)
+		c.logger.Warn("Failed to get group members", "group_id", logging.SanitizeLogValue(groupID), "error", logging.SanitizeLogValue(err.Error()))
 		// Continue with other relationships rather than failing completely
 	} else {
 		for _, member := range members {
@@ -378,7 +379,7 @@ func (c *DefaultDirectoryDNACollector) collectOURelationships(ctx context.Contex
 		Limit: 1000, // Reasonable limit for OU hierarchies
 	})
 	if err != nil {
-		c.logger.Warn("Failed to list OUs for hierarchy", "ou_id", ouID, "error", err)
+		c.logger.Warn("Failed to list OUs for hierarchy", "ou_id", logging.SanitizeLogValue(ouID), "error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		for _, childOU := range ouList.OUs {
 			if childOU.ParentOU == ouID {
@@ -393,7 +394,7 @@ func (c *DefaultDirectoryDNACollector) collectOURelationships(ctx context.Contex
 		Limit: 1000, // Reasonable limit for users in an OU
 	})
 	if err != nil {
-		c.logger.Warn("Failed to list users in OU", "ou_id", ouID, "error", err)
+		c.logger.Warn("Failed to list users in OU", "ou_id", logging.SanitizeLogValue(ouID), "error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		for _, user := range userList.Users {
 			relationships.UsersInOU = append(relationships.UsersInOU, user.ID)
@@ -406,7 +407,7 @@ func (c *DefaultDirectoryDNACollector) collectOURelationships(ctx context.Contex
 		Limit: 1000, // Reasonable limit for groups in an OU
 	})
 	if err != nil {
-		c.logger.Warn("Failed to list groups in OU", "ou_id", ouID, "error", err)
+		c.logger.Warn("Failed to list groups in OU", "ou_id", logging.SanitizeLogValue(ouID), "error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		for _, group := range groupList.Groups {
 			relationships.GroupsInOU = append(relationships.GroupsInOU, group.ID)
@@ -458,7 +459,7 @@ func (c *DefaultDirectoryDNACollector) CollectGroupMemberships(ctx context.Conte
 	for _, group := range groupList.Groups {
 		members, err := c.provider.GetGroupMembers(ctx, group.ID)
 		if err != nil {
-			c.logger.Warn("Failed to get members for group", "group_id", group.ID, "error", err)
+			c.logger.Warn("Failed to get members for group", "group_id", logging.SanitizeLogValue(group.ID), "error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -594,7 +595,7 @@ func (c *DefaultDirectoryDNACollector) countObjectsInOU(ctx context.Context, ouI
 func (c *DefaultDirectoryDNACollector) calculateOUDepth(ouID string, hierarchy map[string]*OUNode, currentDepth int) int {
 	// Prevent infinite recursion with circular references
 	if currentDepth >= 20 {
-		c.logger.Warn("Possible circular reference in OU hierarchy", "ou_id", ouID, "depth", currentDepth)
+		c.logger.Warn("Possible circular reference in OU hierarchy", "ou_id", logging.SanitizeLogValue(ouID), "depth", currentDepth)
 		return 20 // Cap at maximum depth
 	}
 
