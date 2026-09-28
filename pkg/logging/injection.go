@@ -60,10 +60,9 @@ func NewModuleLogger(moduleName, component string) *ModuleLogger {
 
 // derive returns a copy of ml carrying an independent defaultFields map, so that the
 // caller can add fields to the copy without writing to a map the receiver — which may
-// be shared with other goroutines — is still reading from. Sized for one extra entry
-// because every caller is about to add at least one field.
+// be shared with other goroutines — is still reading from.
 func (ml *ModuleLogger) derive() *ModuleLogger {
-	fields := make(map[string]interface{}, len(ml.defaultFields)+1)
+	fields := make(map[string]interface{}, len(ml.defaultFields))
 	for key, value := range ml.defaultFields {
 		fields[key] = value
 	}
