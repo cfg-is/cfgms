@@ -484,7 +484,7 @@ func (m *LoggingManager) batchingRoutine() {
 // This is a logging convenience only — the returned value tags log lines and
 // must never be used for an authorization decision. A caller making an
 // authorization decision must read ctxkeys.TenantID directly and fail closed
-// when it is absent; make check-architecture's TestNoLoggingTenantOutsidePkgLogging
+// when it is absent; make check-architecture's TestNoLoggingTenantForAuthorization
 // fails the build if an authorization-shaped call site reads the tenant from
 // logging.ExtractTenantFromContext instead.
 func extractTenantID(ctx context.Context) string {
