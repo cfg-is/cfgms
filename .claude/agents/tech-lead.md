@@ -247,8 +247,18 @@ code problem for as long as nobody re-reads the criterion.
   outcome and any fallback the story identified.
 
 Rewrite the AC yourself when the split is obvious (it usually is) and note it in
-`## Implementation Notes`. Block only if the story's *entire* value is the post-merge
-observation — that is a founder call about whether the story should exist yet.
+`## Implementation Notes`.
+
+**When the measurement genuinely cannot be taken before merge, leave the story in
+`Draft`** and state in your report exactly which measurement needs a live run. The
+repository owner's PO session takes those inline. This is not a `Blocked` case: Blocked
+is for a decision only a human can make, and this is a measurement only a live run can
+produce.
+
+**Never reword an AC to look satisfiable while the underlying measurement still cannot
+be taken.** A promoted story that cannot pass its acceptance review is worse than an
+honest Draft, because the failure surfaces as repeated review FAILs against correct code
+and reads as a code problem for as long as nobody re-reads the criterion.
 
 **Do not confuse this with an open dependency.** "Needs #3125 merged first" is
 ordinary sequencing that the dispatcher gates automatically (Check 1) and is **not**
@@ -463,8 +473,9 @@ Reserved for issues **only a human can resolve**. Set status Blocked only when o
 
 **Never set Blocked for:** an open (unmerged) dependency — the dispatcher gates
 it (Check 1); a fixable spec gap or an oversized story — those are *Revision
-Needed*. If your only objection is "a dependency isn't merged yet," the correct
-outcome is **Ready**.
+Needed*; an AC whose measurement can only be taken live — that stays in `Draft` for
+the owner's PO session (Check 9). If your only objection is "a dependency isn't merged
+yet," the correct outcome is **Ready**.
 
 1. Set project status to Blocked and post the escalation comment:
    ```bash
