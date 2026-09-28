@@ -37,6 +37,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -736,6 +737,43 @@ func TestHandleApproveRegistration(t *testing.T) {
 	})
 }
 
+// TestHandleApproveRegistration_CrossTenantRefused is the REQUIRED regression test
+// for Issue #4336: a caller scoped to tenant-a cannot approve a pending registration
+// belonging to tenant-b. Calls the handler directly with only ctxkeys.TenantScope set
+// (no ctxkeys.TenantID, no principal) — exactly what the pre-#4336 callerTenantID
+// helper read as "" (unrestricted), so this fails (200 OK, entry approved) before
+// this story's fix.
+func TestHandleApproveRegistration_CrossTenantRefused(t *testing.T) {
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	now := time.Now().UTC()
+	entry := &business.PendingRegistrationEntry{
+		PendingID:    "pending-tenant-b-1",
+		StewardID:    "steward-tenant-b-1",
+		TenantID:     "tenant-b",
+		TokenStr:     "tok-tenant-b-1",
+		SourceIP:     "10.0.0.2",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}
+	require.NoError(t, pendingStore.AddPending(context.Background(), entry))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/pending-tenant-b-1/approve", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "pending-tenant-b-1"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	rec := httptest.NewRecorder()
+	server.handleApproveRegistration(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	got, err := pendingStore.GetPendingByID(context.Background(), "pending-tenant-b-1")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+		"a refused cross-tenant approve must not change status")
+}
+
 // quarantineHookForTest is a test-only RegistrationApprovalHook that always quarantines.
 type quarantineHookForTest struct{}
 
@@ -1188,6 +1226,50 @@ func TestHandleDenyRegistration(t *testing.T) {
 		assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
 			"a rejected deny request must not change the entry status")
 	})
+}
+
+// TestHandleDenyRegistration_CrossTenantRefused is the REQUIRED regression test for
+// Issue #4336: a caller scoped to tenant-a cannot deny a pending registration
+// belonging to tenant-b. registration:deny requires no elevated assurance, so this
+// drives the full router with a real tenant-scoped API key rather than a direct
+// handler call.
+func TestHandleDenyRegistration_CrossTenantRefused(t *testing.T) {
+	server, ts, pendingStore := newRegistrationApprovalServer(t)
+	defer ts.Close()
+
+	server.apiKeys["tenant-a-deny-key"] = &APIKey{
+		ID:          "tenant-a-deny-key-id",
+		Key:         "tenant-a-deny-key",
+		Permissions: []string{"registration:deny"},
+		TenantID:    "tenant-a",
+	}
+
+	now := time.Now().UTC()
+	require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+		PendingID:    "pending-deny-tenant-b",
+		StewardID:    "steward-deny-tenant-b",
+		TenantID:     "tenant-b",
+		TokenStr:     "tok-deny-tenant-b",
+		SourceIP:     "10.0.0.9",
+		RegisteredAt: now,
+		ExpiresAt:    now.Add(5 * 24 * time.Hour),
+		Status:       business.PendingRegistrationStatusPending,
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), "POST",
+		ts.URL+"/api/v1/registration/pending-deny-tenant-b/deny", bytes.NewReader(nil))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer tenant-a-deny-key")
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	got, err := pendingStore.GetPendingByID(context.Background(), "pending-deny-tenant-b")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+		"a refused cross-tenant deny must not change status")
 }
 
 // staleListPendingStore wraps a real business.PendingRegistrationStore and makes
@@ -1894,6 +1976,58 @@ func TestHandleApproveByCIDRPreview_NoPendingStore(t *testing.T) {
 	server.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// TestHandleApproveByCIDR_UnsetScope_Refused is the REQUIRED regression test for
+// Issue #4336 on the bulk CIDR pair. Both handlers resolve their ListPending tenant
+// filter through tenantListFilterForScope, whose default case refuses a scope that is
+// neither root nor a non-empty tenant path. The router-driven tests above all
+// authenticate via API key or admin certificate, and authenticationMiddleware always
+// resolves those to a set scope, so this defensive branch is only reachable by calling
+// the handler directly with no ctxkeys.TenantScope on the request context — the exact
+// signature of an auth-plumbing bug that dropped the scope. Before this story, an
+// unset scope fell through to the root-scoped "" filter and approved (or previewed)
+// every tenant's pending entries.
+func TestHandleApproveByCIDR_UnsetScope_Refused(t *testing.T) {
+	t.Run("approve refuses and approves nothing", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+		addPendingEntry(t, pendingStore, "pending-unset-scope-1", "steward-unset-1", "tenant-a", "192.168.1.10")
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr",
+			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
+		req.Header.Set("Content-Type", "application/json")
+		// Deliberately no ctxkeys.TenantScopeKey on the context.
+		rec := httptest.NewRecorder()
+		server.handleApproveByCIDR(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code,
+			"unset scope must be refused, not fall through to the root-scoped \"\" filter: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant scope required")
+
+		got, err := pendingStore.GetPendingByID(context.Background(), "pending-unset-scope-1")
+		require.NoError(t, err)
+		assert.Equal(t, business.PendingRegistrationStatusPending, got.Status,
+			"no entry may be approved on a 403")
+	})
+
+	t.Run("preview refuses and discloses nothing", func(t *testing.T) {
+		server, ts, pendingStore := newBulkApprovalServer(t)
+		defer ts.Close()
+		addPendingEntry(t, pendingStore, "pending-unset-scope-2", "steward-unset-2", "tenant-a", "192.168.1.11")
+
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/registration/approve-by-cidr/preview?cidr=192.168.1.0/24", nil)
+		// Deliberately no ctxkeys.TenantScopeKey on the context.
+		rec := httptest.NewRecorder()
+		server.handleApproveByCIDRPreview(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code,
+			"unset scope must be refused, not fall through to the root-scoped \"\" filter: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "tenant scope required")
+		assert.NotContains(t, rec.Body.String(), "pending-unset-scope-2",
+			"a refused preview must not disclose any pending entry")
+	})
 }
 
 // TestHandleApproveAll_NoPendingStore verifies 503 when pendingStore is nil.
@@ -2670,6 +2804,11 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 			invoke: func(s *Server, pendingID string) *httptest.ResponseRecorder {
 				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/"+pendingID+"/approve", nil)
 				r = mux.SetURLVars(r, map[string]string{"id": pendingID})
+				// Issue #4336: handleApproveRegistration now reads ctxkeys.TenantScope
+				// directly; this test exercises any-node routing, not tenant scoping, so
+				// it carries a root scope (matching a verified mTLS admin) rather than an
+				// unset one.
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 				rec := httptest.NewRecorder()
 				s.handleApproveRegistration(rec, r)
 				return rec
@@ -2690,6 +2829,9 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 				body := strings.NewReader(`{"cidr":"10.0.0.0/8"}`)
 				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr", body)
 				r.Header.Set("Content-Type", "application/json")
+				// Issue #4336: handleApproveByCIDR now resolves its tenant list filter
+				// from ctxkeys.TenantScope; see the comment on the approve subtest above.
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 				rec := httptest.NewRecorder()
 				s.handleApproveByCIDR(rec, r)
 				return rec

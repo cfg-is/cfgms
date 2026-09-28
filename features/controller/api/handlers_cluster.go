@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/cluster"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -30,11 +31,25 @@ const defaultDecommissionTimeout = 5 * time.Minute
 // cluster:drain-node and cluster:decommission-node are grantable permission IDs
 // (permissions.go), an account confined to a single tenant could otherwise drain or
 // decommission a node serving every tenant. Restrict both operations to principals with
-// no tenant confinement — unscoped admins, and root-scoped SaaS operators, whose
-// TenantID is "" by construction (middleware.go: RootScoped principals keep the unscoped
-// shape) and who own root's own infrastructure.
-func clusterLifecycleScopeAllowed(principal *Principal) bool {
-	return principal.TenantID == ""
+// no tenant confinement — unscoped admins, and root-scoped SaaS operators, who own
+// root's own infrastructure and are therefore exempt from the ADR-025 Decision 1
+// root<->MSP crossing boundary here (that boundary bounds *tenant* subtree access;
+// controller cluster membership has no tenant subtree to bound).
+//
+// Issue #4336: root-scoped operators are identified via subjectToTenantCrossingBoundary
+// (handlers_tenants.go) rather than principal.RootScoped directly, matching every other
+// ADR-025 Amendment 5 call site. Every other unscoped principal is checked against
+// ctxkeys.TenantScope, not principal.TenantID == "" — the two are set from the same
+// source value by authenticationMiddleware, but TenantScope lives in a context value a
+// downstream bug cannot silently clear the way a Principal field can be mutated after
+// the fact, and an unset scope (the zero value: no scope was ever established) is
+// refused rather than read as an empty, unrestricted tenant.
+func clusterLifecycleScopeAllowed(r *http.Request, principal *Principal) bool {
+	if subjectToTenantCrossingBoundary(principal) {
+		return true
+	}
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	return scope.IsRoot()
 }
 
 // clusterNodeDrainResponse is the JSON body for a successful drain request.
@@ -56,7 +71,7 @@ func (s *Server) handleClusterNodeDrain(w http.ResponseWriter, r *http.Request) 
 		s.respondError(w, http.StatusForbidden, "authentication required")
 		return
 	}
-	if !clusterLifecycleScopeAllowed(principal) {
+	if !clusterLifecycleScopeAllowed(r, principal) {
 		s.respondError(w, http.StatusForbidden, "cluster node lifecycle requires an unscoped principal")
 		return
 	}
@@ -149,7 +164,7 @@ func (s *Server) handleClusterNodeDecommission(w http.ResponseWriter, r *http.Re
 		s.respondError(w, http.StatusForbidden, "authentication required")
 		return
 	}
-	if !clusterLifecycleScopeAllowed(principal) {
+	if !clusterLifecycleScopeAllowed(r, principal) {
 		s.respondError(w, http.StatusForbidden, "cluster node lifecycle requires an unscoped principal")
 		return
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 )
@@ -98,14 +99,20 @@ func (l *captureAllLogger) ErrorCtx(_ context.Context, msg string, kvs ...interf
 }
 
 // injectAdminPrincipal returns a copy of r with a Strong-assurance admin Principal set
-// in context (mTLS admin cert — AssuranceStrong, Issue #2780).
+// in context (mTLS admin cert — AssuranceStrong, Issue #2780). Also carries the
+// ctxkeys.TenantScope authenticationMiddleware sets alongside the principal for a
+// verified mTLS admin cert (scopeForVerifiedAdminCert, Issue #4336) — otherwise a
+// handler that reads TenantScope directly sees an unset scope and fails closed even
+// for this helper's unscoped principals.
 func injectAdminPrincipal(r *http.Request, principalID string) *http.Request {
 	p := &Principal{
 		ID:        principalID,
 		Name:      "mtls-admin:" + principalID,
 		Assurance: session.AssuranceStrong,
 	}
-	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+	ctx := context.WithValue(r.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
+	return r.WithContext(ctx)
 }
 
 // injectNonAdminPrincipal returns a copy of r with a Machine-assurance API-key Principal.
@@ -665,7 +672,8 @@ func TestHandleSessionCreate_NoSessionManager(t *testing.T) {
 }
 
 // injectAdminPrincipalWithTenant returns a request with a Strong-assurance admin Principal
-// scoped to a specific tenant (mTLS admin cert — AssuranceStrong, Issue #2780).
+// scoped to a specific tenant (mTLS admin cert — AssuranceStrong, Issue #2780). Also
+// carries the matching ctxkeys.TenantScope (Issue #4336) — see injectAdminPrincipal.
 func injectAdminPrincipalWithTenant(r *http.Request, principalID, tenantID string) *http.Request {
 	p := &Principal{
 		ID:        principalID,
@@ -673,7 +681,9 @@ func injectAdminPrincipalWithTenant(r *http.Request, principalID, tenantID strin
 		Assurance: session.AssuranceStrong,
 		TenantID:  tenantID,
 	}
-	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+	ctx := context.WithValue(r.Context(), principalContextKey, p)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
+	return r.WithContext(ctx)
 }
 
 // TestHandleSessionList_AnyPrincipalCanReachHandler verifies that the in-handler

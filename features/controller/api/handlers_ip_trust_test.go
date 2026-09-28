@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -158,6 +160,109 @@ func TestHandleAddIPTrust(t *testing.T) {
 		rec := makeAdd(t, `{not-json}`)
 
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}
+
+// TestHandleAddIPTrust_CrossTenantRefused is the REQUIRED regression test for
+// Issue #4336: a caller scoped to tenant-a must not be able to add a trusted CIDR
+// range for tenant-b. Calls the handler directly (bypassing requirePermission's
+// AssuranceStrong gate, which registration:manage-ip-trust requires and a Machine-
+// assurance API key cannot clear) so the assertion is attributable to the handler's
+// own tenant guard, not the assurance gate. Fails (204, range written) before this
+// story's fix.
+func TestHandleAddIPTrust_CrossTenantRefused(t *testing.T) {
+	server, ipStore := newIPTrustServer(t)
+
+	principal := &Principal{ID: "tenant-a-admin", TenantID: "tenant-a"}
+	ctx := context.WithValue(context.Background(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(principal.TenantID))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/ip-trust",
+		bytes.NewReader([]byte(`{"tenant_id":"tenant-b","cidr":"10.0.0.0/8"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleAddIPTrust(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	entries, err := ipStore.ListTrustedRanges(context.Background(), "tenant-b")
+	require.NoError(t, err)
+	assert.Empty(t, entries, "a refused cross-tenant add must not have written anything")
+}
+
+// TestHandleRevokeIPTrust_CrossTenantRefused mirrors
+// TestHandleAddIPTrust_CrossTenantRefused for the revoke path: a caller scoped to
+// tenant-a must not be able to revoke a trusted range belonging to tenant-b.
+func TestHandleRevokeIPTrust_CrossTenantRefused(t *testing.T) {
+	server, ipStore := newIPTrustServer(t)
+	require.NoError(t, ipStore.AddTrustedRange(context.Background(), "tenant-b", "10.0.0.0/8", false))
+
+	principal := &Principal{ID: "tenant-a-admin", TenantID: "tenant-a"}
+	ctx := context.WithValue(context.Background(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(principal.TenantID))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registration/ip-trust/tenant-b/10.0.0.0%2F8", nil)
+	req = mux.SetURLVars(req.WithContext(ctx), map[string]string{"tenant_id": "tenant-b", "cidr": "10.0.0.0/8"})
+	rec := httptest.NewRecorder()
+	server.handleRevokeIPTrust(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	entries, err := ipStore.ListTrustedRanges(context.Background(), "tenant-b")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.False(t, entries[0].Revoked, "a refused cross-tenant revoke must not have revoked the range")
+}
+
+// TestHandleListIPTrust covers handleListIPTrust's tenant scoping (Issue #4336):
+// a tenant-scoped caller always sees only its own tenant's ranges (the tenant_id
+// query param is ignored), a root-scoped caller must supply ?tenant_id= to avoid
+// an open-ended scan, and an unset scope is refused outright.
+func TestHandleListIPTrust(t *testing.T) {
+	server, ipStore := newIPTrustServer(t)
+	require.NoError(t, ipStore.AddTrustedRange(context.Background(), "tenant-a", "10.0.0.0/8", false))
+	require.NoError(t, ipStore.AddTrustedRange(context.Background(), "tenant-b", "192.168.0.0/16", false))
+
+	t.Run("tenant-scoped caller sees only its own tenant's ranges", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/registration/ip-trust?tenant_id=tenant-b", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+		rec := httptest.NewRecorder()
+		server.handleListIPTrust(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "10.0.0.0/8")
+		assert.NotContains(t, rec.Body.String(), "192.168.0.0/16",
+			"the tenant_id query param must be ignored for a tenant-scoped caller")
+	})
+
+	t.Run("root-scoped caller without tenant_id gets 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/registration/ip-trust", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+		rec := httptest.NewRecorder()
+		server.handleListIPTrust(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("root-scoped caller with tenant_id sees the named tenant", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/registration/ip-trust?tenant_id=tenant-b", nil)
+		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+		rec := httptest.NewRecorder()
+		server.handleListIPTrust(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "192.168.0.0/16")
+	})
+
+	// REQUIRED regression test for Issue #4336: an unset scope must be refused, not
+	// treated as unrestricted the way an empty callerTenant string previously was.
+	t.Run("unset scope is refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/registration/ip-trust?tenant_id=tenant-b", nil)
+		rec := httptest.NewRecorder()
+		server.handleListIPTrust(rec, req)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
 }
 

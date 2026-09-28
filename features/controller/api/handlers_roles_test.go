@@ -214,15 +214,18 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 	// Create API key for tenant-a.
 	keyA := NewEphemeralTestKey(t, server, []string{"role:write", "role:read"}, "tenant-a", 5*time.Minute)
 
-	// Seed a role for tenant-b by injecting context directly (bypass middleware).
-	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{
-		ID:       "admin",
-		TenantID: "",
-	})
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-b")
+	// Seed a role for tenant-b as a root-scoped admin explicitly targeting tenant-b
+	// via ?tenant= (Issue #4336: roleTenantFromRequest now resolves the target tenant
+	// from ctxkeys.TenantScope, and a root-scoped caller selects it only through the
+	// query parameter — the old divergent-ctxkeys.TenantID fallback this test used to
+	// exploit is not reachable through real authentication, where ctxkeys.TenantID is
+	// always set from the same principal.TenantID).
+	rootPrincipal := &Principal{ID: "admin"}
+	ctx := context.WithValue(context.Background(), principalContextKey, rootPrincipal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(rootPrincipal.TenantID))
 
 	body := validRolePayload("tenant-b-role", "all")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles?tenant=tenant-b", bytes.NewReader(body))
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	server.handleCreateRoleConfig(rec, req)
@@ -230,19 +233,15 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 
 	// A tenant-a caller cannot reach tenant-b's role. A tenant-scoped caller is
 	// PINNED to its own tenant (#2548): roleTenantFromRequest ignores any request-
-	// supplied tenant and uses the principal's tenant, so this delete operates in
+	// supplied tenant and uses the caller's own scope, so this delete operates in
 	// tenant-a — where tenant-b-role does not exist — and returns 404. Even with a
-	// mismatching tenant context injected (which the middleware never produces —
-	// it sets the context tenant FROM the principal), the caller can neither act
-	// on nor learn of another tenant's role. This is stronger isolation than the
-	// prior 403: it discloses nothing about tenant-b's contents.
-	ctxA := context.WithValue(context.Background(), principalContextKey, &Principal{
-		ID:       "caller-a",
-		TenantID: "tenant-a",
-	})
-	ctxA = context.WithValue(ctxA, ctxkeys.TenantID, "tenant-b")
+	// ?tenant=tenant-b override on the request, the caller can neither act on nor
+	// learn of another tenant's role. This discloses nothing about tenant-b's contents.
+	callerA := &Principal{ID: "caller-a", TenantID: "tenant-a"}
+	ctxA := context.WithValue(context.Background(), principalContextKey, callerA)
+	ctxA = context.WithValue(ctxA, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(callerA.TenantID))
 
-	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/roles/tenant-b-role", nil)
+	req2 := httptest.NewRequest(http.MethodDelete, "/api/v1/roles/tenant-b-role?tenant=tenant-b", nil)
 	// Direct handler call: set the {name} path var the router would normally supply.
 	req2 = mux.SetURLVars(req2.WithContext(ctxA), map[string]string{"name": "tenant-b-role"})
 	rec2 := httptest.NewRecorder()
@@ -256,6 +255,42 @@ func TestHandleRoleConfig_TenantScoping(t *testing.T) {
 	rec3 := httptest.NewRecorder()
 	server.router.ServeHTTP(rec3, req3)
 	assert.Equal(t, http.StatusNotFound, rec3.Code)
+}
+
+// TestHandleRoleConfig_UnsetScope_Refused is the REQUIRED regression test for Issue
+// #4336: a caller whose ctxkeys.TenantScope was never established (the exact
+// plumbing-bug signature the type exists to catch — a dropped context, a wrong
+// context key) must be refused outright, not treated as a root admin free to select
+// any tenant via ?tenant=. Before this story's fix, roleTenantFromRequest read
+// principal.TenantID directly: an unscoped principal (TenantID == "") fell straight
+// through to the ?tenant= query-parameter path regardless of whether a genuine root
+// admin certificate had ever been verified — this test fails against that code.
+func TestHandleRoleConfig_UnsetScope_Refused(t *testing.T) {
+	server := setupRoleConfigServer(t)
+
+	// Principal is present (so the handler's own auth-required check passes) but no
+	// ctxkeys.TenantScopeKey was ever set on the context — the unset zero value.
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{ID: "bugged-caller"})
+
+	body := validRolePayload("should-not-be-created", "all")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/roles?tenant=tenant-b", bytes.NewReader(body))
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleCreateRoleConfig(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"unset scope must be refused, not fall through to ?tenant= as if root: %s", rec.Body.String())
+
+	// Confirm nothing was written: list tenant-b as a genuine root admin.
+	rootPrincipal := &Principal{ID: "verify-root"}
+	rootCtx := context.WithValue(context.Background(), principalContextKey, rootPrincipal)
+	rootCtx = context.WithValue(rootCtx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(rootPrincipal.TenantID))
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/roles?tenant=tenant-b", nil)
+	listReq = listReq.WithContext(rootCtx)
+	listRec := httptest.NewRecorder()
+	server.handleListRoleConfigs(listRec, listReq)
+	require.Equal(t, http.StatusOK, listRec.Code)
+	assert.NotContains(t, listRec.Body.String(), "should-not-be-created")
 }
 
 // TestHandleRoleConfig_ServiceUnavailable verifies 503 when no role config store is wired.
@@ -348,7 +383,13 @@ func TestHandleRoleConfig_RootAdminTenantTargeting(t *testing.T) {
 	// resolution logic under test lives in the handler, not the middleware.
 	rootPrincipal := &Principal{ID: "root-admin"}
 	withRoot := func(req *http.Request) *http.Request {
-		return req.WithContext(context.WithValue(req.Context(), principalContextKey, rootPrincipal))
+		ctx := context.WithValue(req.Context(), principalContextKey, rootPrincipal)
+		// Issue #4336: roleTenantFromRequest now resolves from ctxkeys.TenantScope
+		// rather than principal.TenantID directly, mirroring what
+		// authenticationMiddleware sets alongside the principal for a verified mTLS
+		// admin cert (scopeForVerifiedAdminCert).
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(rootPrincipal.TenantID))
+		return req.WithContext(ctx)
 	}
 
 	post := func(url string) *httptest.ResponseRecorder {

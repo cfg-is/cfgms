@@ -112,6 +112,14 @@ func (s *Server) loadRoleForWrite(w http.ResponseWriter, r *http.Request, roleID
 }
 
 // handleListPermissions handles GET /api/v1/rbac/permissions
+//
+// Permissions are a fixed, controller-wide catalog (features/rbac's permission
+// registry), not a tenant-owned resource: no PermissionInfo carries a TenantID and
+// none of the RBAC service's list/get calls take a tenant filter. There is no
+// owning tenant to scope this read against (same reasoning as
+// handlers_modules_list.go's module catalog, Issue #4335).
+//
+//architecture:allow-unscoped-tenant-read -- controller-wide permission catalog, no owning tenant (Issue #4336)
 func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 	if s.rbacService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "RBAC service not available", "SERVICE_UNAVAILABLE")
@@ -150,6 +158,11 @@ func (s *Server) handleListPermissions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetPermission handles GET /api/v1/rbac/permissions/{id}
+//
+// Same controller-wide permission catalog as handleListPermissions above; {id}
+// names a permission definition, not a tenant-owned resource.
+//
+//architecture:allow-unscoped-tenant-read -- controller-wide permission catalog, no owning tenant (Issue #4336)
 func (s *Server) handleGetPermission(w http.ResponseWriter, r *http.Request) {
 	if s.rbacService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "RBAC service not available", "SERVICE_UNAVAILABLE")

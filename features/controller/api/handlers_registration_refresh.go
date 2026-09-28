@@ -98,6 +98,15 @@ type RefreshCompleteResponse struct {
 // handleRefreshChallenge handles POST /api/v1/stewards/{device_id}/refresh/challenge.
 // Revocation is the authoritative pre-nonce gate: revoked devices receive 403 before
 // any nonce is generated (ADR-010 §3 revocation-before-PoP invariant).
+//
+// Pre-authentication credential-refresh handshake (ADR-010 §2): {device_id} is
+// caller-asserted but unauthenticated at this point — there is no principal,
+// session, or API key on this route, and no caller tenant to scope against. The
+// nonce this issues is inert on its own; ownership is established afterward, in
+// handleRefreshComplete, by proof-of-possession against the resolved device's
+// stored Ed25519 public key, not by a request-supplied tenant field.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication handshake, no caller tenant established yet (Issue #4336)
 func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) {
 	deviceID := mux.Vars(r)["device_id"]
 
@@ -223,6 +232,16 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 // gates never take a back seat to format checks). There is no caller-asserted
 // cross-tenant gate: identity is confirmed by PoP verification against the
 // resolved record's IdentityKeyPub, not by a request field (Issue #4350).
+//
+// Pre-authentication credential-refresh handshake (ADR-010 §2/§3): {device_id} is
+// caller-asserted but unauthenticated until gate (7) below verifies
+// proof-of-possession against the resolved device's stored Ed25519 public key.
+// There is no principal, session, or API key on this route and therefore no
+// caller tenant to scope against; record.TenantID (the device's OWN tenant,
+// resolved from the store, never from a request field) is what every downstream
+// audit call and policy lookup uses.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication handshake, no caller tenant established until PoP verifies (Issue #4336)
 func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	deviceID := mux.Vars(r)["device_id"]
 

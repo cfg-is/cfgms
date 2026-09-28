@@ -10,6 +10,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -79,15 +80,14 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may only create tokens for tenants
-	// within their own subtree. Unscoped (mTLS admin) callers have no restriction.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := req.TenantID == callerTenant || strings.HasPrefix(req.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): reads ctxkeys.TenantScope directly
+	// rather than callerTenantID/isWithinTenantScope, so an unset scope (a plumbing
+	// bug that lost the caller's tenant) is refused rather than treated as an
+	// unrestricted mTLS admin.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, req.TenantID, "POST /api/v1/registration/tokens") {
+		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
 	}
 
 	// Check if registration token store is available
@@ -141,12 +141,21 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Tenant scoping: scoped callers always see only their own tenant (query param is ignored).
-	// Unscoped (mTLS admin) callers may supply ?tenant_id= to narrow the result.
-	callerTenant := s.callerTenantID(r)
-	tenantID := callerTenant
-	if tenantID == "" {
+	// Tenant scoping (Issue #4336): scoped callers always see only their own tenant
+	// (query param is ignored). Root-scoped callers may supply ?tenant_id= to narrow
+	// the result (an omitted one lists every tenant, unchanged from before this
+	// story). An unset scope is refused rather than silently resolving to "every
+	// tenant" the way an empty callerTenant string previously did.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	var tenantID string
+	switch {
+	case scope.IsRoot():
 		tenantID = r.URL.Query().Get("tenant_id")
+	case scope.IsTenant() && scope.Path() != "":
+		tenantID = scope.Path()
+	default:
+		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
+		return
 	}
 
 	// List tokens
@@ -206,15 +215,13 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may not read tokens from other tenants.
-	// 404 (not 403) avoids existence disclosure across tenant boundaries.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "Token not found", http.StatusNotFound)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may not read tokens
+	// from other tenants. 404 (not 403) avoids existence disclosure across tenant
+	// boundaries. An unset scope is refused the same way, not treated as unrestricted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, token.TenantID, "GET /api/v1/registration/tokens/{token}") {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
 	}
 
 	// Return redacted response — get callers never receive the full secret.
@@ -263,14 +270,12 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may not delete tokens from other tenants.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "Token not found", http.StatusNotFound)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may not delete tokens
+	// from other tenants; an unset scope is refused rather than treated as unrestricted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}") {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
 	}
 
 	// Delete token from store. Always use token.Token (the full secret string) as the
@@ -332,14 +337,12 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may not revoke tokens from other tenants.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := token.TenantID == callerTenant || strings.HasPrefix(token.TenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "Token not found", http.StatusNotFound)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke tokens
+	// from other tenants; an unset scope is refused rather than treated as unrestricted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, token.TenantID, "POST /api/v1/registration/tokens/{token}/revoke") {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
 	}
 
 	// Revoke the token
@@ -383,15 +386,14 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Tenant subtree enforcement: scoped callers may only rotate tokens for tenants
-	// within their own subtree.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := tenantID == callerTenant || strings.HasPrefix(tenantID, callerTenant+"/")
-		if !inSubtree {
-			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-			return
-		}
+	// Tenant subtree enforcement (Issue #4336): scoped callers may only rotate tokens
+	// for tenants within their own subtree; an unset scope is refused rather than
+	// treated as unrestricted. This runs BEFORE RotateToken is called below, so a
+	// refused caller never causes a new secret to be minted.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/registration/tokens/{tenant_id}/rotate") {
+		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
 	}
 
 	// Parse optional request body for group filter

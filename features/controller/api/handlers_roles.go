@@ -38,37 +38,51 @@ type createRoleConfigRequest struct {
 	Fragment stewardtypes.StewardConfig `json:"fragment"`
 }
 
-// roleTenantFromRequest resolves the target tenant for a role-config request.
-// Role configs are stored per tenant (the selector-driven resolver lists
-// role-policies under each steward's own tenant), so every role operation needs a
-// concrete tenant. A tenant-scoped caller is always pinned to its own tenant
-// (the auth middleware sets ctxkeys.TenantID from the authenticated principal). A
-// root/global admin — whose principal carries no tenant — selects the target
-// tenant explicitly via the ?tenant= query parameter; without it there is no way
-// to author into a named tenant and every store call fails "tenant ID is
-// required" (Issue #2548).
-func roleTenantFromRequest(r *http.Request, principal *Principal) string {
-	if principal.TenantID != "" {
-		return principal.TenantID
+// roleTenantFromRequest resolves the target tenant for a role-config request from
+// the caller's ctxkeys.TenantScope (Issue #4336). Role configs are stored per
+// tenant (the selector-driven resolver lists role-policies under each steward's own
+// tenant), so every role operation needs a concrete tenant.
+//
+//   - A tenant-scoped caller is always pinned to its own tenant subtree — any
+//     ?tenant= the caller supplies is ignored, matching the pre-existing behavior
+//     (Issue #2548).
+//   - A root-scoped caller selects the target tenant explicitly via ?tenant=;
+//     without it there is no way to author into a named tenant and every store call
+//     fails "tenant ID is required".
+//   - An unset scope (a plumbing bug that lost the caller's tenant) is refused
+//     outright (allowed=false), rather than falling through to the root-scoped
+//     ?tenant= path the way comparing an empty principal.TenantID string used to:
+//     that comparison could not tell a genuine root admin apart from a caller whose
+//     scope was never established, letting the latter select an arbitrary tenant's
+//     role configs via ?tenant=.
+func roleTenantFromRequest(r *http.Request, scope ctxkeys.TenantScope) (tenantID string, allowed bool) {
+	switch {
+	case scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), true
+	case scope.IsRoot():
+		return strings.TrimSpace(r.URL.Query().Get("tenant")), true
+	default:
+		return "", false
 	}
-	if q := strings.TrimSpace(r.URL.Query().Get("tenant")); q != "" {
-		return q
-	}
-	ctxTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	return ctxTenant
 }
 
-// resolveRoleTenant resolves the target tenant for a role request, or writes a
-// 400 TENANT_REQUIRED and returns ok=false when none can be determined (a global
-// admin that omitted ?tenant=). Every role operation — create, get, list, delete
-// — needs a concrete tenant: role configs are stored per tenant, and an empty
-// tenant reaching the store is not harmless. On the default flatfile backend a
-// get/delete with an empty tenant 500s (the key validator rejects it, so it never
-// surfaces as a clean not-found), and a list with an empty tenant filter omits
-// the tenant predicate entirely and returns roles across ALL tenants. Guarding
-// here keeps all four handlers consistent and closes that cross-tenant list.
-func (s *Server) resolveRoleTenant(w http.ResponseWriter, r *http.Request, principal *Principal) (string, bool) {
-	tenantID := roleTenantFromRequest(r, principal)
+// resolveRoleTenant resolves the target tenant for a role request, or writes an
+// error response and returns ok=false when none can be determined: 403 for a
+// caller whose tenant scope is unset (Issue #4336), 400 TENANT_REQUIRED for a
+// root-scoped admin that omitted ?tenant=. Every role operation — create, get,
+// list, delete — needs a concrete tenant: role configs are stored per tenant, and
+// an empty tenant reaching the store is not harmless. On the default flatfile
+// backend a get/delete with an empty tenant 500s (the key validator rejects it, so
+// it never surfaces as a clean not-found), and a list with an empty tenant filter
+// omits the tenant predicate entirely and returns roles across ALL tenants.
+// Guarding here keeps all four handlers consistent and closes that cross-tenant list.
+func (s *Server) resolveRoleTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	tenantID, allowed := roleTenantFromRequest(r, scope)
+	if !allowed {
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
+		return "", false
+	}
 	if tenantID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"tenant is required: a global admin must pass ?tenant=<id> (role configs are stored per tenant)", "TENANT_REQUIRED")
@@ -89,7 +103,7 @@ func (s *Server) handleCreateRoleConfig(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r)
 	if !ok {
 		return
 	}
@@ -168,7 +182,7 @@ func (s *Server) handleGetRoleConfig(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r)
 	if !ok {
 		return
 	}
@@ -216,7 +230,7 @@ func (s *Server) handleListRoleConfigs(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r)
 	if !ok {
 		return
 	}
@@ -256,7 +270,7 @@ func (s *Server) handleDeleteRoleConfig(w http.ResponseWriter, r *http.Request) 
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return
 	}
-	tenantID, ok := s.resolveRoleTenant(w, r, principal)
+	tenantID, ok := s.resolveRoleTenant(w, r)
 	if !ok {
 		return
 	}

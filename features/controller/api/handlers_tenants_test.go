@@ -281,13 +281,64 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
 
-		rec := createAs(t, server, &Principal{ID: "superadmin"},
+		// Issue #4336: unrestricted tenant creation now requires the same
+		// certificate-authenticated signal authorizeTenantAccess's own "unrestricted"
+		// branch requires everywhere else in this file (CertSerial != ""), not merely
+		// an unscoped, non-RootScoped Principal — that used to include a nil
+		// principal and any principal whose scope was simply never established.
+		rec := createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial"},
 			map[string]string{"id": "guard-unscoped-root"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 		td, err := server.tenantManager.GetTenant(ctx, "guard-unscoped-root")
 		require.NoError(t, err)
 		assert.Empty(t, td.ParentID)
+	})
+
+	// TestHandleCreateTenant_ScopeGuard/nil_principal_is_refused and
+	// .../unscoped_non-certificate-authenticated_principal_is_refused are the
+	// REQUIRED regression tests for Issue #4336: before this story's fix,
+	// authorizeTenantCreationParent's first branch was
+	// `principal == nil || (principal.TenantID == "" && !principal.RootScoped)` —
+	// true unconditionally for a nil principal, and true for ANY unscoped,
+	// non-RootScoped principal regardless of whether a real mTLS admin certificate
+	// had ever been verified. Both subtests fail (201 Created, tenant grafted
+	// anywhere) against that code.
+	t.Run("nil principal is refused", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-nilprincipal-msp"})
+		require.NoError(t, err)
+
+		raw, err := json.Marshal(map[string]string{"id": "guard-nilprincipal-graft", "parent_id": "guard-nilprincipal-msp"})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.handleCreateTenant(rec, req)
+
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		_, err = server.tenantManager.GetTenant(ctx, "guard-nilprincipal-graft")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
+	})
+
+	t.Run("unscoped non-certificate-authenticated principal is refused", func(t *testing.T) {
+		server := setupTestServer(t)
+		ctx := context.Background()
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-unset-msp"})
+		require.NoError(t, err)
+
+		// TenantID == "" and RootScoped == false, but CertSerial is also empty — the
+		// exact "unset scope" signature a plumbing bug produces (context lost the
+		// caller's tenant, or a non-mTLS auth path left the principal unscoped
+		// without ever verifying an admin certificate). Must be refused, not read
+		// as an unrestricted root admin.
+		rec := createAs(t, server, &Principal{ID: "bugged-caller"},
+			map[string]string{"id": "guard-unset-graft", "parent_id": "guard-unset-msp"})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+		_, err = server.tenantManager.GetTenant(ctx, "guard-unset-graft")
+		assert.ErrorIs(t, err, business.ErrTenantDoesNotExist)
 	})
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	"github.com/cfgis/cfgms/features/controller/modules/cache"
 	modules "github.com/cfgis/cfgms/features/modules"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 	"github.com/cfgis/cfgms/pkg/session"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -176,12 +177,17 @@ func TestHandleListModuleApprovals_ReachableByNonMTLSAdmin(t *testing.T) {
 
 // makeApproveRequest builds a request for POST .../approve with the address as a mux var
 // and injects a fresh single-use presence token (Issue #2784: module:approve requires
-// RequireUserPresence enforcement).
+// RequireUserPresence enforcement). Also carries the ctxkeys.TenantScope
+// authenticationMiddleware sets alongside the principal for a verified mTLS admin cert
+// (scopeForVerifiedAdminCert, Issue #4336) — otherwise handleApproveModuleBundle's scope
+// guard sees an unset scope and refuses even this helper's unscoped principals.
 func makeApproveRequest(t *testing.T, s *Server, addressParam string, principal *Principal) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/"+addressParam+"/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": addressParam})
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(principal.TenantID))
+	req = req.WithContext(ctx)
 	// Inject a presence token so requirePermission's RequireUserPresence check passes.
 	token := mintPresenceToken(t, s, principal.ID)
 	req.Header.Set(presenceTokenHeader, token)
@@ -190,12 +196,15 @@ func makeApproveRequest(t *testing.T, s *Server, addressParam string, principal 
 
 // makeRejectRequest builds a request for POST .../reject with the address as a mux var
 // and injects a fresh single-use presence token (Issue #2784: module:reject requires
-// RequireUserPresence enforcement).
+// RequireUserPresence enforcement). Also carries the matching ctxkeys.TenantScope
+// (Issue #4336) — see makeApproveRequest.
 func makeRejectRequest(t *testing.T, s *Server, addressParam string, principal *Principal) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/"+addressParam+"/reject", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": addressParam})
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(principal.TenantID))
+	req = req.WithContext(ctx)
 	// Inject a presence token so requirePermission's RequireUserPresence check passes.
 	token := mintPresenceToken(t, s, principal.ID)
 	req.Header.Set(presenceTokenHeader, token)
@@ -221,6 +230,69 @@ func TestHandleApproveModuleBundle_Success(t *testing.T) {
 	status, err := mc.GetApprovalStatus(addr)
 	require.NoError(t, err)
 	assert.Equal(t, cache.ApprovalStatusApproved, status)
+}
+
+// TestHandleApproveModuleBundle_TenantScopedPrincipal_Refused is the REQUIRED
+// regression test for Issue #4336: module bundles carry no TenantID (they are a
+// single global catalog shared by the whole fleet), so a tenant-scoped caller
+// holding module:approve must be refused outright rather than being able to
+// approve a bundle that becomes runnable for every other tenant's fleet too. This
+// test fails (200 OK, bundle approved) against the pre-#4336 code, which had no
+// scope check at all beyond the module:approve permission grant.
+func TestHandleApproveModuleBundle_TenantScopedPrincipal_Refused(t *testing.T) {
+	server, mc, _ := setupModuleApprovalServer(t)
+
+	addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+	addressParam := formatModuleAddress(addr)
+
+	tenantPrincipal := &Principal{
+		ID:            "tenant-a-admin",
+		Name:          "mtls-cert:tenant-a-admin",
+		Assurance:     session.AssuranceStrong,
+		TenantID:      "tenant-a",
+		ImplicitAdmin: true,
+	}
+	req := makeApproveRequest(t, server, addressParam, tenantPrincipal)
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("module", "approve")(http.HandlerFunc(server.handleApproveModuleBundle))
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	status, err := mc.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status,
+		"a refused tenant-scoped caller must not have approved the bundle for the whole fleet")
+}
+
+// TestHandleRejectModuleBundle_TenantScopedPrincipal_Refused mirrors
+// TestHandleApproveModuleBundle_TenantScopedPrincipal_Refused for the reject path.
+func TestHandleRejectModuleBundle_TenantScopedPrincipal_Refused(t *testing.T) {
+	server, mc, _ := setupModuleApprovalServer(t)
+
+	addr := makePendingBundle(t, mc, "cfgms", "hyperv", "0.2.1")
+	addressParam := formatModuleAddress(addr)
+
+	tenantPrincipal := &Principal{
+		ID:            "tenant-a-admin",
+		Name:          "mtls-cert:tenant-a-admin",
+		Assurance:     session.AssuranceStrong,
+		TenantID:      "tenant-a",
+		ImplicitAdmin: true,
+	}
+	req := makeRejectRequest(t, server, addressParam, tenantPrincipal)
+	rec := httptest.NewRecorder()
+
+	handler := server.requirePermission("module", "reject")(http.HandlerFunc(server.handleRejectModuleBundle))
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+	status, err := mc.GetApprovalStatus(addr)
+	require.NoError(t, err)
+	assert.Equal(t, cache.ApprovalStatusPending, status,
+		"a refused tenant-scoped caller must not have rejected the bundle")
 }
 
 // TestHandleRejectModuleBundle_Success verifies that rejecting a pending bundle
@@ -332,7 +404,10 @@ func TestHandleApproveModuleBundle_InvalidAddressFormat(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/modules/approvals/not-valid-address/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"address": "not-valid-address"})
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, moduleTestStrongPrincipal()))
+	strongPrincipal := moduleTestStrongPrincipal()
+	ctx := context.WithValue(req.Context(), principalContextKey, strongPrincipal)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(strongPrincipal.TenantID))
+	req = req.WithContext(ctx)
 	// Inject presence token so the RequireUserPresence gate passes (Issue #2784).
 	presToken := mintPresenceToken(t, server, moduleTestStrongPrincipal().ID)
 	req.Header.Set(presenceTokenHeader, presToken)
