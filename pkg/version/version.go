@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package version provides build-time version information for CFGMS components.
+// Package version provides build-time version information for CFGMS components (probe: Issue #4349, never merge).
 //
 // Version information can be injected at build time using ldflags:
 //
