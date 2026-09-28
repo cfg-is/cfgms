@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	eventbusInterfaces "github.com/cfgis/cfgms/pkg/eventbus/interfaces"
 	channelBus "github.com/cfgis/cfgms/pkg/eventbus/providers/channel"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
@@ -478,27 +479,18 @@ func (m *LoggingManager) batchingRoutine() {
 	}
 }
 
-// extractTenantID attempts to extract tenant ID from context
+// extractTenantID reads the tenant ID from ctxkeys.TenantID, the single
+// canonical context key the authentication middleware sets (Issue #4326).
+// This is a logging convenience only — the returned value tags log lines and
+// must never be used for an authorization decision. A caller making an
+// authorization decision must read ctxkeys.TenantID directly and fail closed
+// when it is absent; make check-architecture's TestNoLoggingTenantForAuthorization
+// fails the build if an authorization-shaped call site reads the tenant from
+// logging.ExtractTenantFromContext instead.
 func extractTenantID(ctx context.Context) string {
-	// Try to extract tenant ID using the same key as injection.go
-	if value := ctx.Value(tenantIDKey{}); value != nil {
-		if tenantID, ok := value.(string); ok {
-			return tenantID
-		}
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
+		return tenantID
 	}
-
-	// Alternative context keys for backward compatibility
-	for _, key := range []interface{}{
-		"tenant_id",
-		"cfgms_tenant_id",
-	} {
-		if value := ctx.Value(key); value != nil {
-			if tenantID, ok := value.(string); ok {
-				return tenantID
-			}
-		}
-	}
-
 	return ""
 }
 

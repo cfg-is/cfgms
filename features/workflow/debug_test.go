@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -35,7 +36,7 @@ func TestDebugEngine_StartDebugSession(t *testing.T) {
 	}
 
 	// Start workflow execution
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{
 		"test_var": "initial_value",
 	})
@@ -64,7 +65,7 @@ func TestDebugEngine_SetAndRemoveBreakpoint(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
@@ -103,7 +104,7 @@ func TestDebugEngine_VariableInspection(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{
 		"test_var":   "initial_value",
 		"number_var": 42,
@@ -145,7 +146,7 @@ func TestDebugEngine_VariableWatching(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{
 		"watched_var": "initial",
 	})
@@ -184,7 +185,7 @@ func TestDebugEngine_StepExecution(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
@@ -219,7 +220,7 @@ func TestDebugEngine_APICallHistory(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
@@ -272,7 +273,7 @@ func TestDebugEngine_StepHistory(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{
 		"test_var": "value1",
 	})
@@ -327,7 +328,7 @@ func TestWorkflowEngine_PauseResumeExecution(t *testing.T) {
 	}
 
 	// Start workflow execution
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
@@ -362,7 +363,7 @@ func TestDebugEngine_SessionManagement(t *testing.T) {
 
 	// Create multiple workflows and executions
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 
 	execution1, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
@@ -438,7 +439,7 @@ func TestDebugEngine_SecurityAndTenantIsolation(t *testing.T) {
 
 	// Create workflow and execution
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{
 		"sensitive_data": "secret_value",
 	})
@@ -471,6 +472,51 @@ func TestDebugEngine_SecurityAndTenantIsolation(t *testing.T) {
 	assert.Contains(t, session.VariableInspector.ModifiedVariables, "sensitive_data")
 }
 
+// TestDebugEngine_StartDebugSession_NoTenantContextRefused proves that a caller with
+// no tenant on the context is refused, not granted admin-style access (Issue #4326
+// required test). Before the fix, StartDebugSession read the tenant via
+// logging.ExtractTenantFromContext — a context key the authentication middleware
+// never wrote — so this call always saw an empty tenant and never denied access.
+func TestDebugEngine_StartDebugSession_NoTenantContextRefused(t *testing.T) {
+	engine, _ := createTestEngineWithDebug(t)
+	debugEngine := engine.GetDebugEngine()
+
+	workflow := createTestWorkflow()
+	ownerCtx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-owner")
+	execution, err := engine.ExecuteWorkflow(ownerCtx, workflow, map[string]interface{}{})
+	require.NoError(t, err)
+
+	noTenantCtx := context.Background()
+	session, err := debugEngine.StartDebugSession(noTenantCtx, execution.ID, DebugSettings{MaxHistorySize: 100})
+	require.Error(t, err, "a caller with no tenant on the context must be refused")
+	assert.Nil(t, session)
+}
+
+// TestDebugEngine_StartDebugSession_DeniesCrossTenant proves that a caller
+// authenticated to a different tenant than the one that started the execution
+// cannot attach a debug session to it (Issue #4326 required test). Before the fix,
+// this was a full bypass: any authenticated caller could attach to any tenant's
+// workflow execution.
+func TestDebugEngine_StartDebugSession_DeniesCrossTenant(t *testing.T) {
+	engine, _ := createTestEngineWithDebug(t)
+	debugEngine := engine.GetDebugEngine()
+
+	workflow := createTestWorkflow()
+	ownerCtx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-owner")
+	execution, err := engine.ExecuteWorkflow(ownerCtx, workflow, map[string]interface{}{})
+	require.NoError(t, err)
+
+	attackerCtx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-attacker")
+	session, err := debugEngine.StartDebugSession(attackerCtx, execution.ID, DebugSettings{MaxHistorySize: 100})
+	require.Error(t, err, "a caller from a different tenant must not attach a debug session")
+	assert.Nil(t, session)
+
+	// The rightful owner can still attach.
+	ownerSession, err := debugEngine.StartDebugSession(ownerCtx, execution.ID, DebugSettings{MaxHistorySize: 100})
+	require.NoError(t, err)
+	assert.NotNil(t, ownerSession)
+}
+
 // TestReplayAPICall_MakesRealRequest verifies that ReplayAPICall issues an actual
 // HTTP round-trip and returns the response received from the server.
 func TestReplayAPICall_MakesRealRequest(t *testing.T) {
@@ -489,7 +535,7 @@ func TestReplayAPICall_MakesRealRequest(t *testing.T) {
 	debugEngine := engine.GetDebugEngine()
 
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 
@@ -528,7 +574,7 @@ func TestRollbackToStep_RestoresState(t *testing.T) {
 	debugEngine := engine.GetDebugEngine()
 
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{"x": "initial"})
 	require.NoError(t, err)
 
@@ -597,7 +643,7 @@ func TestBreakpointCondition_RespectedOnHit(t *testing.T) {
 	engine, _ := createTestEngineWithDebug(t)
 
 	workflow := createTestWorkflow()
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "test-tenant")
 	execution, err := engine.ExecuteWorkflow(ctx, workflow, map[string]interface{}{})
 	require.NoError(t, err)
 

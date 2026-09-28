@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 func TestSecurityEdgeCases_WebhookAuthentication(t *testing.T) {
@@ -428,63 +429,75 @@ func TestSecurityEdgeCases_TenantIsolation(t *testing.T) {
 		WorkflowName: "tenant2-workflow",
 	}
 
-	ctx := context.Background()
+	ctx1 := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-1")
+	ctx2 := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-2")
 
-	// Create triggers
-	err := manager.CreateTrigger(ctx, tenant1Trigger)
+	// Create triggers, each through its own tenant's authenticated context.
+	err := manager.CreateTrigger(ctx1, tenant1Trigger)
 	require.NoError(t, err)
 
-	err = manager.CreateTrigger(ctx, tenant2Trigger)
+	err = manager.CreateTrigger(ctx2, tenant2Trigger)
 	require.NoError(t, err)
 
 	// Both triggers must be persisted under their own tenant.
 	for _, trig := range []*Trigger{tenant1Trigger, tenant2Trigger} {
-		record, storeErr := h.triggerStore.GetTrigger(ctx, trig.ID)
+		record, storeErr := h.triggerStore.GetTrigger(ctx1, trig.ID)
 		require.NoError(t, storeErr)
 		assert.Equal(t, trig.TenantID, record.TenantID, "persisted record must keep its tenant")
 	}
 
 	tests := []struct {
 		name        string
+		ctx         context.Context
 		filter      *TriggerFilter
 		expectCount int
+		expectError bool
 		description string
 	}{
 		{
-			name: "Tenant isolation - tenant 1 only",
-			filter: &TriggerFilter{
-				TenantID: "tenant-1",
-			},
+			name:        "Tenant isolation - tenant 1 only",
+			ctx:         ctx1,
+			filter:      &TriggerFilter{},
 			expectCount: 1,
-			description: "Should only return triggers for specified tenant",
+			description: "Should only return triggers for the caller's own tenant",
 		},
 		{
-			name: "Tenant isolation - tenant 2 only",
+			name:        "Tenant isolation - tenant 2 only",
+			ctx:         ctx2,
+			filter:      &TriggerFilter{},
+			expectCount: 1,
+			description: "Should only return triggers for the caller's own tenant",
+		},
+		{
+			// filter.TenantID cannot be used to reach into another tenant: the
+			// ctx-based restriction to tenant-1 and the query filter for tenant-2 AND
+			// together, so this returns nothing rather than tenant-2's trigger.
+			name: "Cross-tenant access attempt via filter is not honored",
+			ctx:  ctx1,
 			filter: &TriggerFilter{
 				TenantID: "tenant-2",
 			},
-			expectCount: 1,
-			description: "Should only return triggers for specified tenant",
-		},
-		{
-			name: "Cross-tenant access attempt",
-			filter: &TriggerFilter{
-				TenantID: "non-existent-tenant",
-			},
 			expectCount: 0,
-			description: "Should not return triggers for non-existent tenant",
+			description: "Should not return another tenant's triggers even if named in the filter",
 		},
 		{
-			name:        "No tenant filter - should get all (admin access)",
+			// Issue #4326: an absent tenant is refused, not treated as admin access
+			// to every tenant's triggers.
+			name:        "No tenant context - refused, not admin access",
+			ctx:         context.Background(),
 			filter:      &TriggerFilter{},
-			expectCount: 2,
-			description: "No tenant filter should return all triggers (admin access)",
+			expectError: true,
+			description: "An unauthenticated caller must be refused, never granted every tenant's triggers",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			triggers, err := manager.ListTriggers(ctx, tt.filter)
+			triggers, err := manager.ListTriggers(tt.ctx, tt.filter)
+			if tt.expectError {
+				require.Error(t, err, tt.description)
+				return
+			}
 			require.NoError(t, err)
 			assert.Len(t, triggers, tt.expectCount, tt.description)
 

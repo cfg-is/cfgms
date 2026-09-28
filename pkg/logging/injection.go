@@ -15,6 +15,19 @@ import (
 
 // ModuleLogger provides a specialized logger interface for CFGMS modules
 // It automatically adds module-specific context and integrates with the global provider system
+//
+// A ModuleLogger is immutable once returned by a constructor or a With* method, which
+// is what makes it safe to share one instance across goroutines. defaultFields is
+// never written after the logger is published: every With* method derives a new
+// ModuleLogger over a copied map (see derive). Before that, WithTenant/WithField wrote
+// straight into the receiver's map, so a component that held one logger and called
+// `sp.logger.WithTenant(id)` from two goroutines — the shape of every Start method that
+// spawns workers, e.g. SIEMProcessor.Start and CronScheduler.Start — performed
+// concurrent map writes against it, while logWithProvider ranged over the same map from
+// a third. That was latent only because the tenant ID was always empty (Issue #4326) and
+// the `tenantID != ""` guard skipped the write; returning a real tenant made it fire
+// under -race. Mutating the shared receiver also leaked tenancy: a tenant_id written by
+// one request stayed on the shared logger and tagged the next tenant's log lines.
 type ModuleLogger struct {
 	moduleName     string
 	component      string
@@ -33,49 +46,79 @@ func NewModuleLogger(moduleName, component string) *ModuleLogger {
 	// Debug records whenever the provider path was unavailable.
 	fallback := NewLoggerWithConfig(configuredLoggerConfig("cfgms", component))
 
-	logger := &ModuleLogger{
-		moduleName:     moduleName,
-		component:      component,
-		defaultFields:  make(map[string]interface{}),
+	return &ModuleLogger{
+		moduleName: moduleName,
+		component:  component,
+		defaultFields: map[string]interface{}{
+			"module":    moduleName,
+			"component": component,
+		},
 		manager:        manager,
 		fallbackLogger: fallback,
 	}
-
-	// Set default fields for the module
-	logger.defaultFields["module"] = moduleName
-	logger.defaultFields["component"] = component
-
-	return logger
 }
 
-// WithField adds a default field that will be included in all log entries from this module
+// derive returns a copy of ml carrying an independent defaultFields map, so that the
+// caller can add fields to the copy without writing to a map the receiver — which may
+// be shared with other goroutines — is still reading from.
+func (ml *ModuleLogger) derive() *ModuleLogger {
+	fields := make(map[string]interface{}, len(ml.defaultFields))
+	for key, value := range ml.defaultFields {
+		fields[key] = value
+	}
+
+	return &ModuleLogger{
+		moduleName:     ml.moduleName,
+		component:      ml.component,
+		defaultFields:  fields,
+		manager:        ml.manager,
+		fallbackLogger: ml.fallbackLogger,
+	}
+}
+
+// WithField returns a derived logger that includes the field in all of its log entries.
+// The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithField(key string, value interface{}) *ModuleLogger {
-	ml.defaultFields[key] = value
-	return ml
+	derived := ml.derive()
+	derived.defaultFields[key] = value
+	return derived
 }
 
-// WithFields adds multiple default fields that will be included in all log entries from this module
+// WithFields returns a derived logger that includes the fields in all of its log
+// entries. The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithFields(fields map[string]interface{}) *ModuleLogger {
+	derived := ml.derive()
 	for key, value := range fields {
-		ml.defaultFields[key] = value
+		derived.defaultFields[key] = value
 	}
-	return ml
+	return derived
 }
 
-// WithTenant adds tenant context to all log entries from this module (for multi-tenant logging)
+// WithTenant returns a derived logger that tags all of its log entries with the tenant
+// (for multi-tenant logging). The receiver is left unchanged; use the returned logger.
+// An empty tenant ID adds no tenancy and returns the receiver, which callers that cannot
+// resolve a tenant rely on — it is not an authorization decision either way, see
+// ExtractTenantFromContext.
 func (ml *ModuleLogger) WithTenant(tenantID string) *ModuleLogger {
-	if tenantID != "" {
-		ml.defaultFields["tenant_id"] = tenantID
+	if tenantID == "" {
+		return ml
 	}
-	return ml
+
+	derived := ml.derive()
+	derived.defaultFields["tenant_id"] = tenantID
+	return derived
 }
 
-// WithSession adds session context to all log entries from this module
+// WithSession returns a derived logger that tags all of its log entries with the
+// session. The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithSession(sessionID string) *ModuleLogger {
-	if sessionID != "" {
-		ml.defaultFields["session_id"] = sessionID
+	if sessionID == "" {
+		return ml
 	}
-	return ml
+
+	derived := ml.derive()
+	derived.defaultFields["session_id"] = sessionID
+	return derived
 }
 
 // logWithProvider logs using the global provider system with module context
@@ -340,14 +383,23 @@ func GetLogger() Logger {
 
 // Context utility functions for structured logging
 
-// ExtractTenantFromContext extracts tenant ID from context for external use
+// ExtractTenantFromContext reads the tenant ID from ctxkeys.TenantID for tagging
+// log lines. It is a logging convenience only — never use its return value for an
+// authorization decision (Issue #4326). A caller making an authorization decision
+// must read ctxkeys.TenantID directly and fail closed when it is absent;
+// make check-architecture's TestNoLoggingTenantForAuthorization fails the build if
+// this accessor's result feeds a tenant-equality check anywhere outside pkg/logging.
 func ExtractTenantFromContext(ctx context.Context) string {
 	return extractTenantID(ctx)
 }
 
-// WithTenant adds tenant ID to context for downstream logging
+// WithTenant adds the tenant ID to context under ctxkeys.TenantID for downstream
+// logging, mirroring WithCorrelation's use of ctxkeys.CorrelationIDKey below — both
+// store under the single canonical key their respective packages share, rather than
+// a package-local key that authentication middleware and consumers could never agree
+// on (Issue #4326).
 func WithTenant(ctx context.Context, tenantID string) context.Context {
-	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+	return context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 }
 
 // WithSession adds session ID to context for downstream logging

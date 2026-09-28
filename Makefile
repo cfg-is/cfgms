@@ -1299,6 +1299,9 @@ check-architecture:
 	@echo "📦 Checking wrapper-registered handlers consume caller tenant scope..."
 	@go test ./features/controller/api/... -run TestHandlersConsumeCallerScope -count=1 -timeout 120s
 	@echo ""
+	@echo "📦 Checking authorization decisions do not read the tenant from logging.ExtractTenantFromContext..."
+	@go test ./pkg/logging/... -run TestNoLoggingTenantForAuthorization -count=1 -timeout 120s
+	@echo ""
 	@echo "📦 Checking for tracked .py files under core product paths..."
 	@bash ./scripts/check-no-python-in-core.sh
 	@echo ""

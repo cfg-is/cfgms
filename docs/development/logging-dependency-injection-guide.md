@@ -9,7 +9,9 @@ CFGMS uses interface-based dependency injection to provide centralized logging t
 - **Preserves Binary Signatures**: No code modification or runtime patching
 - **Maintains EDR Compatibility**: Uses standard Go interfaces, no suspicious patterns
 - **Enables Central Visibility**: Controller receives all steward activity logs
-- **Supports Tenant Isolation**: Automatic context-based tenant extraction
+- **Supports Tenant Tagging**: Automatic context-based tenant extraction for log
+  entries (a logging convenience — see the warning under "Security Best Practices"
+  below; it is not an authorization mechanism)
 
 ## Architecture
 
@@ -126,6 +128,7 @@ func (m *Module) Set(ctx context.Context, resourceID string, config modules.Conf
 - `operation`: High-level operation name (e.g., "mymodule_set", "mymodule_get")
 - `resource_id`: Resource being operated on
 - `tenant_id`: Extracted from context using `logging.ExtractTenantFromContext(ctx)`
+  for log tagging only — see the warning under "Security Best Practices" below
 
 **Additional fields for ERROR level:**
 
@@ -211,18 +214,28 @@ for moduleName, status := range statuses {
 - No process injection or memory manipulation
 - No suspicious runtime behavior patterns
 
-**Tenant Isolation:**
+**Tenant Tagging:**
 
-- Context-based tenant extraction
-- No cross-tenant information leakage
-- Automatic tenant ID inclusion in all logs
+- `logging.ExtractTenantFromContext` / `logging.WithTenant` read and write
+  `ctxkeys.TenantID` — the same canonical context key the authentication
+  middleware sets — so log entries are tagged with the real authenticated tenant
+  when one is present
+- **This is a logging convenience, not an authorization mechanism.** An empty
+  result means only "no `tenant_id` field on this log line," never "caller is
+  unrestricted." A module that needs an actual authorization decision based on
+  the tenant must read `ctxkeys.TenantID` directly and fail closed when absent
+  (Issue #4326). `make check-architecture` fails the build if a file reads the
+  tenant from `ExtractTenantFromContext` and also uses it in a tenant-equality
+  comparison.
 
 ### Security Best Practices
 
 **DO:**
 
 - ✅ Always use `*Ctx()` methods with context
-- ✅ Extract tenant ID from context: `logging.ExtractTenantFromContext(ctx)`
+- ✅ Extract tenant ID from context for log tagging: `logging.ExtractTenantFromContext(ctx)`
+- ✅ Read `ctxkeys.TenantID` directly (never `ExtractTenantFromContext`) for any
+  authorization decision, and fail closed when it is absent
 - ✅ Use `GetEffectiveLogger()` to handle missing injection gracefully
 - ✅ Include structured fields for all operations
 

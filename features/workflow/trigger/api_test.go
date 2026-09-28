@@ -20,9 +20,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file" // registers the "file" provider used by TestAPIHandler_SanitizesTriggerIDInLogFile
 )
+
+// testTenantID is the tenant every request in this file is authenticated as. This
+// test router carries no auth middleware — TriggerAPIMiddleware is defined but
+// intentionally never wired in (Issue #4326) — so withTestTenant injects the tenant
+// directly onto the request context to simulate what production middleware sets.
+const testTenantID = "test-tenant"
+
+// withTestTenant returns req with ctxkeys.TenantID set to testTenantID.
+func withTestTenant(req *http.Request) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, testTenantID))
+}
 
 // newTestTriggerRouter wires handler onto a /triggers-prefixed subrouter, matching
 // how server.go registers it: api.PathPrefix("/triggers").Subrouter().
@@ -49,12 +61,13 @@ func newRealTriggerManagerWithWorkflow() (*TriggerManagerImpl, *TestWorkflowTrig
 }
 
 // seedTrigger creates a trigger through the real manager path (validation,
-// handler registration, storage persistence). The API test router carries no
-// tenant middleware, so triggers are created with the empty-tenant context to
-// match the tenant the handler will extract from inbound requests.
+// handler registration, storage persistence), authenticated as testTenantID to
+// match withTestTenant's requests (Issue #4326: CreateTrigger now requires and
+// takes its tenant from the authenticated context).
 func seedTrigger(t *testing.T, mgr *TriggerManagerImpl, trigger *Trigger) {
 	t.Helper()
-	require.NoError(t, mgr.CreateTrigger(context.Background(), trigger))
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, testTenantID)
+	require.NoError(t, mgr.CreateTrigger(ctx, trigger))
 }
 
 func TestAPIHandler_NewAPIHandler(t *testing.T) {
@@ -154,6 +167,7 @@ func TestAPIHandler_HandleCreateTrigger(t *testing.T) {
 
 			req, err := http.NewRequest("POST", "/triggers", &body)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 			req.Header.Set("Content-Type", "application/json")
 
 			rr := httptest.NewRecorder()
@@ -238,6 +252,7 @@ func TestAPIHandler_HandleListTriggers(t *testing.T) {
 
 			req, err := http.NewRequest("GET", "/triggers"+tt.queryParams, nil)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
@@ -337,6 +352,7 @@ func TestAPIHandler_SanitizesTriggerIDInLogFile(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodPost, "/triggers", &body)
 	require.NoError(t, err)
+	req = withTestTenant(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	rr := httptest.NewRecorder()
@@ -427,6 +443,7 @@ func TestAPIHandler_HandleGetTrigger(t *testing.T) {
 
 			req, err := http.NewRequest("GET", "/triggers/"+tt.triggerID, nil)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
@@ -522,6 +539,7 @@ func TestAPIHandler_HandleUpdateTrigger(t *testing.T) {
 
 			req, err := http.NewRequest("PUT", "/triggers/"+tt.triggerID, &body)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 			req.Header.Set("Content-Type", "application/json")
 
 			rr := httptest.NewRecorder()
@@ -573,6 +591,7 @@ func TestAPIHandler_HandleDeleteTrigger(t *testing.T) {
 
 			req, err := http.NewRequest("DELETE", "/triggers/"+tt.triggerID, nil)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
@@ -641,6 +660,7 @@ func TestAPIHandler_HandleEnableDisableTrigger(t *testing.T) {
 			url := fmt.Sprintf("/triggers/%s/%s", tt.triggerID, tt.endpoint)
 			req, err := http.NewRequest("POST", url, nil)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 
 			rr := httptest.NewRecorder()
 			router.ServeHTTP(rr, req)
@@ -678,6 +698,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{"manual_execution": true, "user_id": "user-123"})
 		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
 		require.NoError(t, err)
+		req = withTestTenant(req)
 		req.Header.Set("Content-Type", "application/json")
 
 		rr := httptest.NewRecorder()
@@ -707,6 +728,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{})
 		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
 		require.NoError(t, err)
+		req = withTestTenant(req)
 		req.Header.Set("Content-Type", "application/json")
 
 		rr := httptest.NewRecorder()
@@ -725,6 +747,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{"test": "data"})
 		req, err := http.NewRequest("POST", "/triggers/non-existent/execute", bytes.NewReader(body))
 		require.NoError(t, err)
+		req = withTestTenant(req)
 		req.Header.Set("Content-Type", "application/json")
 
 		rr := httptest.NewRecorder()
@@ -756,6 +779,7 @@ func TestAPIHandler_HandleExecuteTrigger(t *testing.T) {
 		body := mustJSON(t, map[string]interface{}{"test": "data"})
 		req, err := http.NewRequest("POST", "/triggers/test-1/execute", bytes.NewReader(body))
 		require.NoError(t, err)
+		req = withTestTenant(req)
 		req.Header.Set("Content-Type", "application/json")
 
 		rr := httptest.NewRecorder()
@@ -779,7 +803,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 			Status:       TriggerStatusActive,
 			WorkflowName: "test-workflow",
 		})
-		_, err := mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 1})
+		_, err := mgr.ExecuteTrigger(context.WithValue(context.Background(), ctxkeys.TenantID, testTenantID), "test-1", map[string]interface{}{"run": 1})
 		require.NoError(t, err)
 
 		handler := NewAPIHandler(mgr)
@@ -787,6 +811,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 
 		req, err := http.NewRequest("GET", "/triggers/test-1/executions", nil)
 		require.NoError(t, err)
+		req = withTestTenant(req)
 
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
@@ -806,9 +831,9 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 			Status:       TriggerStatusActive,
 			WorkflowName: "test-workflow",
 		})
-		_, err := mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 1})
+		_, err := mgr.ExecuteTrigger(context.WithValue(context.Background(), ctxkeys.TenantID, testTenantID), "test-1", map[string]interface{}{"run": 1})
 		require.NoError(t, err)
-		_, err = mgr.ExecuteTrigger(context.Background(), "test-1", map[string]interface{}{"run": 2})
+		_, err = mgr.ExecuteTrigger(context.WithValue(context.Background(), ctxkeys.TenantID, testTenantID), "test-1", map[string]interface{}{"run": 2})
 		require.NoError(t, err)
 
 		handler := NewAPIHandler(mgr)
@@ -816,6 +841,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 
 		req, err := http.NewRequest("GET", "/triggers/test-1/executions?limit=1", nil)
 		require.NoError(t, err)
+		req = withTestTenant(req)
 
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
@@ -840,6 +866,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 
 		req, err := http.NewRequest("GET", "/triggers/test-1/executions?limit=invalid", nil)
 		require.NoError(t, err)
+		req = withTestTenant(req)
 
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
@@ -856,6 +883,7 @@ func TestAPIHandler_HandleGetTriggerExecutions(t *testing.T) {
 
 		req, err := http.NewRequest("GET", "/triggers/non-existent/executions", nil)
 		require.NoError(t, err)
+		req = withTestTenant(req)
 
 		rr := httptest.NewRecorder()
 		router.ServeHTTP(rr, req)
@@ -873,6 +901,7 @@ func TestAPIHandler_HandleHealthCheck(t *testing.T) {
 
 	req, err := http.NewRequest("GET", "/triggers/health", nil)
 	require.NoError(t, err)
+	req = withTestTenant(req)
 
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
@@ -980,6 +1009,7 @@ func TestAPIHandler_ParseFilterFromQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req, err := http.NewRequest("GET", "/triggers?"+tt.queryParams, nil)
 			require.NoError(t, err)
+			req = withTestTenant(req)
 
 			filter, err := handler.parseFilterFromQuery(req)
 
@@ -1013,6 +1043,7 @@ func TestAPIHandler_HandleListTriggers_EmptyReturnsArrayNotNull(t *testing.T) {
 
 	req, err := http.NewRequest("GET", "/triggers", nil)
 	require.NoError(t, err)
+	req = withTestTenant(req)
 
 	rr := httptest.NewRecorder()
 	router.ServeHTTP(rr, req)

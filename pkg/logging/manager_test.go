@@ -12,11 +12,39 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 
 	// Import providers for testing
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
 )
+
+// TestExtractTenantID_AgreesWithAuthenticationMiddlewareKey proves the two tenant
+// context namespaces this story unifies now agree (Issue #4326 required test): a
+// tenant set the way the authentication middleware sets it — under ctxkeys.TenantID
+// — is visible to the logging path, and WithTenant's context write round-trips
+// through the same key. Before the fix, pkg/logging read its own package-local
+// tenantIDKey, which the middleware never wrote, so this context would have
+// produced "" no matter what the caller was authenticated as.
+func TestExtractTenantID_AgreesWithAuthenticationMiddlewareKey(t *testing.T) {
+	t.Run("a tenant set under ctxkeys.TenantID is visible via extractTenantID", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-mw")
+		assert.Equal(t, "tenant-mw", extractTenantID(ctx))
+		assert.Equal(t, "tenant-mw", ExtractTenantFromContext(ctx))
+	})
+
+	t.Run("WithTenant writes under ctxkeys.TenantID, not a package-local key", func(t *testing.T) {
+		ctx := WithTenant(context.Background(), "tenant-injected")
+		tenantID, ok := ctx.Value(ctxkeys.TenantID).(string)
+		require.True(t, ok, "WithTenant must store under ctxkeys.TenantID")
+		assert.Equal(t, "tenant-injected", tenantID)
+		assert.Equal(t, "tenant-injected", extractTenantID(ctx))
+	})
+
+	t.Run("a context with no tenant set produces an empty string, not a panic", func(t *testing.T) {
+		assert.Empty(t, extractTenantID(context.Background()))
+	})
+}
 
 // TestLoggingManager_AsyncClose_NoBatchingRoutineRace verifies that Close() waits
 // for the batchingRoutine goroutine to finish before closing shared resources.

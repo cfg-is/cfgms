@@ -25,6 +25,7 @@ import (
 	"github.com/gorilla/mux"
 	"golang.org/x/time/rate"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -87,7 +88,7 @@ func (wh *HTTPWebhookHandler) Start(ctx context.Context) error {
 		return fmt.Errorf("webhook handler is already running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	addr := fmt.Sprintf("%s:%d", wh.address, wh.port)
@@ -126,7 +127,7 @@ func (wh *HTTPWebhookHandler) Stop(ctx context.Context) error {
 		return fmt.Errorf("webhook handler is not running")
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Stopping webhook handler server")
@@ -156,7 +157,7 @@ func (wh *HTTPWebhookHandler) RegisterWebhook(ctx context.Context, trigger *Trig
 		return fmt.Errorf("trigger %s is not a webhook trigger", trigger.ID)
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Registering webhook endpoint",
@@ -192,7 +193,7 @@ func (wh *HTTPWebhookHandler) UnregisterWebhook(ctx context.Context, triggerID s
 	wh.mutex.Lock()
 	defer wh.mutex.Unlock()
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	trigger, exists := wh.webhooks[triggerID]
@@ -226,7 +227,7 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 		return nil, fmt.Errorf("webhook trigger %s not found", triggerID)
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Processing webhook request",
@@ -314,7 +315,11 @@ func (wh *HTTPWebhookHandler) HandleWebhook(ctx context.Context, triggerID strin
 	// #nosec G118 -- the accepted webhook returns an execution handle while the
 	// workflow continues; the configured trigger timeout bounds it when present.
 	go func() {
-		execCtx := context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+		// The triggered execution belongs to the trigger's own tenant, not whatever
+		// (usually absent) tenant the inbound webhook request carried — the caller
+		// who owns this trigger is who debug_engine.StartDebugSession must match
+		// against later (Issue #4326).
+		execCtx := context.WithValue(context.Background(), ctxkeys.TenantID, trigger.TenantID)
 		if trigger.Timeout > 0 {
 			var cancel context.CancelFunc
 			execCtx, cancel = context.WithTimeout(execCtx, trigger.Timeout)
@@ -408,7 +413,7 @@ func (wh *HTTPWebhookHandler) handleWebhookRequest(w http.ResponseWriter, r *htt
 		return
 	}
 
-	tenantID := logging.ExtractTenantFromContext(ctx)
+	tenantID := extractTenantFromContext(ctx)
 	logger := wh.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Received webhook request",

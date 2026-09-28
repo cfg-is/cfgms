@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -150,7 +151,7 @@ func TestTriggerManagerImpl_StartStop(t *testing.T) {
 
 func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-123")
 
 	tests := []struct {
 		name        string
@@ -308,6 +309,47 @@ func TestTriggerManagerImpl_CreateTrigger(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTriggerManagerImpl_CreateTrigger_NoTenantContextRefused proves CreateTrigger
+// refuses a caller with no tenant on the context, rather than creating an
+// unowned trigger (Issue #4326 required test).
+func TestTriggerManagerImpl_CreateTrigger_NoTenantContextRefused(t *testing.T) {
+	h := newTriggerHarness(t)
+
+	trigger := &Trigger{
+		ID:           "no-tenant-1",
+		Name:         "No Tenant Trigger",
+		Type:         TriggerTypeManual,
+		WorkflowName: "test-workflow",
+	}
+
+	err := h.manager.CreateTrigger(context.Background(), trigger)
+	require.Error(t, err)
+	assert.NotContains(t, h.manager.triggers, "no-tenant-1")
+}
+
+// TestTriggerManagerImpl_CreateTrigger_IgnoresBodyTenant proves the trigger's tenant
+// always comes from the authenticated context, never from a caller-supplied body
+// field (Issue #4326 required test). Before the fix, CreateTrigger only defaulted
+// the tenant from context when the body left TenantID empty, so a request body
+// naming a different tenant was accepted as-is.
+func TestTriggerManagerImpl_CreateTrigger_IgnoresBodyTenant(t *testing.T) {
+	h := newTriggerHarness(t)
+	ctx := contextWithTenant("tenant-real")
+
+	trigger := &Trigger{
+		ID:           "spoofed-tenant-1",
+		Name:         "Spoofed Tenant Trigger",
+		Type:         TriggerTypeManual,
+		TenantID:     "tenant-attacker-supplied",
+		WorkflowName: "test-workflow",
+	}
+
+	require.NoError(t, h.manager.CreateTrigger(ctx, trigger))
+	assert.Equal(t, "tenant-real", trigger.TenantID,
+		"the stored trigger must carry the authenticated context's tenant, not the body-supplied one")
+	assert.Equal(t, "tenant-real", h.manager.triggers["spoofed-tenant-1"].TenantID)
 }
 
 func TestTriggerManagerImpl_UpdateTrigger(t *testing.T) {
@@ -531,7 +573,7 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 
 func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 
 	trigger := &Trigger{
 		ID:           "test-1",
@@ -624,36 +666,40 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 	}
 
 	for _, trigger := range triggers {
-		tenantCtx := logging.WithTenant(context.Background(), trigger.TenantID)
+		tenantCtx := contextWithTenant(trigger.TenantID)
 		require.NoError(t, h.manager.CreateTrigger(tenantCtx, trigger))
 	}
 
-	// Use background context (no tenant = admin access to see all triggers)
-	ctx := context.Background()
+	ctx123 := contextWithTenant("tenant-123")
+	ctx456 := contextWithTenant("tenant-456")
 
 	tests := []struct {
 		name        string
+		ctx         context.Context
 		filter      *TriggerFilter
 		expectedLen int
 		expectedIDs []string
 		expectError bool
 	}{
 		{
-			name:        "list all triggers",
+			// Issue #4326 required test: a caller authenticated to tenant-123 lists
+			// triggers and sees only tenant-123's, never tenant-456's siem-1.
+			name:        "caller sees only their own tenant's triggers",
+			ctx:         ctx123,
 			filter:      &TriggerFilter{},
-			expectedLen: 3,
-			expectedIDs: []string{"schedule-1", "webhook-1", "siem-1"},
-		},
-		{
-			name: "filter by tenant",
-			filter: &TriggerFilter{
-				TenantID: "tenant-123",
-			},
 			expectedLen: 2,
 			expectedIDs: []string{"schedule-1", "webhook-1"},
 		},
 		{
-			name: "filter by type",
+			name:        "a different tenant sees only their own trigger",
+			ctx:         ctx456,
+			filter:      &TriggerFilter{},
+			expectedLen: 1,
+			expectedIDs: []string{"siem-1"},
+		},
+		{
+			name: "filter by type within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
 				Type: TriggerTypeWebhook,
 			},
@@ -661,7 +707,8 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"webhook-1"},
 		},
 		{
-			name: "filter by status",
+			name: "filter by status within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
 				Status: TriggerStatusActive,
 			},
@@ -669,7 +716,8 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"schedule-1", "webhook-1"},
 		},
 		{
-			name: "filter by tags",
+			name: "filter by tags within own tenant",
+			ctx:  ctx456,
 			filter: &TriggerFilter{
 				Tags: []string{"security"},
 			},
@@ -677,25 +725,39 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 			expectedIDs: []string{"siem-1"},
 		},
 		{
-			name: "filter with limit",
+			name: "filter with limit within own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
-				Limit: 2,
+				Limit: 1,
 			},
-			expectedLen: 2,
+			expectedLen: 1,
 		},
 		{
-			name: "filter with no matches",
+			// filter.TenantID cannot be used to escalate beyond the authenticated
+			// caller's own tenant: the ctx-based restriction and the query filter
+			// AND together, so naming another tenant in the filter narrows to nothing
+			// rather than reaching across tenants.
+			name: "filter.TenantID cannot escalate beyond the caller's own tenant",
+			ctx:  ctx123,
 			filter: &TriggerFilter{
-				TenantID: "non-existent-tenant",
+				TenantID: "tenant-456",
 			},
 			expectedLen: 0,
 			expectedIDs: []string{},
+		},
+		{
+			// Issue #4326 required test: an absent tenant is refused, not treated as
+			// admin access to every tenant's triggers.
+			name:        "no tenant context is refused",
+			ctx:         context.Background(),
+			filter:      &TriggerFilter{},
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := h.manager.ListTriggers(ctx, tt.filter)
+			result, err := h.manager.ListTriggers(tt.ctx, tt.filter)
 
 			if tt.expectError {
 				require.Error(t, err)
@@ -718,7 +780,7 @@ func TestTriggerManagerImpl_ListTriggers(t *testing.T) {
 
 func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 
 	trigger := &Trigger{
 		ID:           "test-1",
@@ -765,7 +827,7 @@ func TestTriggerManagerImpl_EnableDisableTrigger(t *testing.T) {
 
 func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 
 	trigger := &Trigger{
 		ID:           "test-1",
@@ -801,7 +863,7 @@ func TestTriggerManagerImpl_ExecuteTrigger(t *testing.T) {
 
 func TestTriggerManagerImpl_ExecuteTriggerFailure(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 
 	trigger := &Trigger{
 		ID:           "test-fail",
@@ -833,7 +895,7 @@ func TestTriggerManagerImpl_NilStoragePersistence(t *testing.T) {
 		logger:     logging.ForModule("workflow.trigger.manager.test"),
 	}
 
-	ctx := context.Background()
+	ctx := contextWithTenant("tenant-test")
 	trigger := &Trigger{ID: "t-nil-storage", Name: "nil-storage-trigger"}
 
 	t.Run("saveTriggerToStorage returns nil when storage is nil", func(t *testing.T) {
@@ -1068,9 +1130,11 @@ func newManagerWithPersistence(tenantID string) (*TriggerManagerImpl, *inMemoryT
 	return mgr, ts, ss
 }
 
-// contextWithTenant returns a context carrying the given tenant ID via the trigger package key.
+// contextWithTenant returns a context carrying the given tenant ID under
+// ctxkeys.TenantID, the same key the authentication middleware sets in production
+// (Issue #4326).
 func contextWithTenant(tenantID string) context.Context {
-	return context.WithValue(context.Background(), TenantIDContextKey, tenantID)
+	return context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
 }
 
 // ---------------------------------------------------------------------------
