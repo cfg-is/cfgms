@@ -340,6 +340,64 @@ func TestDatabaseStewardStore_GetByDeviceID(t *testing.T) {
 	assert.Equal(t, "sw-dev", got.ID)
 }
 
+// TestDatabaseStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision is
+// the database leg of the [REQUIRED TEST] from Issue #4350: two stewards in
+// different tenants share one device_id (allowed by design — only same-tenant
+// device_id is unique). An authenticated caller in tenant A must resolve only
+// tenant A's record via the scoped lookup, never tenant B's, even though both
+// share device_id.
+func TestDatabaseStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	const deviceID = "collide00000000000000000000000000000000000000000000000000000000"
+
+	a := makeSampleSteward("sw-collide-a", "tenant-collide-a")
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	b := makeSampleSteward("sw-collide-b", "tenant-collide-b")
+	b.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, b))
+
+	got, err := store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-collide-a")
+	require.NoError(t, err)
+	assert.Equal(t, "sw-collide-a", got.ID)
+	assert.Equal(t, "tenant-collide-a", got.TenantID)
+
+	got, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-collide-b")
+	require.NoError(t, err)
+	assert.Equal(t, "sw-collide-b", got.ID)
+	assert.Equal(t, "tenant-collide-b", got.TenantID)
+
+	_, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-collide-c")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound,
+		"a device_id match in a different tenant must not be returned")
+}
+
+// TestDatabaseStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision
+// verifies the unscoped lookup used by the pre-authentication refresh
+// handshake is deterministic under a cross-tenant collision (explicit
+// ORDER BY id ASC), not a bare LIMIT 1.
+func TestDatabaseStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision(t *testing.T) {
+	store := newTestStewardStore(t)
+	ctx := context.Background()
+	const deviceID = "collide11111111111111111111111111111111111111111111111111111111"
+
+	z := makeSampleSteward("sw-z-collide", "tenant-z-collide")
+	z.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, z))
+
+	a := makeSampleSteward("sw-a-collide", "tenant-a-collide")
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	for i := 0; i < 5; i++ {
+		got, err := store.GetStewardByDeviceID(ctx, deviceID)
+		require.NoError(t, err)
+		assert.Equal(t, "sw-a-collide", got.ID, "must deterministically resolve to the smallest ID")
+	}
+}
+
 func TestDatabaseStewardStore_ListByStatus(t *testing.T) {
 	store := newTestStewardStore(t)
 	ctx := context.Background()

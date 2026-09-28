@@ -278,6 +278,73 @@ func TestFlatFileStewardStore_GetStewardByDeviceID_EmptyID(t *testing.T) {
 	require.Error(t, err, "empty device ID must return an error")
 }
 
+// TestFlatFileStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision is
+// the flatfile leg of the [REQUIRED TEST] from Issue #4350: two stewards in
+// different tenants share one device_id (allowed by design). An authenticated
+// caller in tenant A must resolve only tenant A's record via the scoped lookup,
+// never tenant B's, even though both share device_id.
+func TestFlatFileStewardStore_GetStewardByDeviceIDForTenant_CrossTenantCollision(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "collide00000000000000000000000000000000000000000000000000000000"
+
+	a := testStewardRecord("steward-a")
+	a.TenantID = "tenant-a"
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	b := testStewardRecord("steward-b")
+	b.TenantID = "tenant-b"
+	b.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, b))
+
+	got, err := store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-a")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-a", got.ID)
+	assert.Equal(t, "tenant-a", got.TenantID)
+
+	got, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-b")
+	require.NoError(t, err)
+	assert.Equal(t, "steward-b", got.ID)
+	assert.Equal(t, "tenant-b", got.TenantID)
+
+	_, err = store.GetStewardByDeviceIDForTenant(ctx, deviceID, "tenant-c")
+	assert.ErrorIs(t, err, business.ErrStewardNotFound,
+		"a device_id match in a different tenant must not be returned")
+}
+
+// TestFlatFileStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision
+// verifies the unscoped lookup used by the pre-authentication refresh handshake
+// is deterministic under a cross-tenant collision (lexicographically smallest
+// ID), not dependent on incidental file-listing order.
+func TestFlatFileStewardStore_GetStewardByDeviceID_DeterministicAcrossCollision(t *testing.T) {
+	store, err := NewFlatFileStewardStore(t.TempDir())
+	require.NoError(t, err)
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "collide11111111111111111111111111111111111111111111111111111111"
+
+	z := testStewardRecord("steward-z")
+	z.TenantID = "tenant-z"
+	z.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, z))
+
+	a := testStewardRecord("steward-a")
+	a.TenantID = "tenant-a"
+	a.DeviceID = deviceID
+	require.NoError(t, store.RegisterSteward(ctx, a))
+
+	for i := 0; i < 5; i++ {
+		got, err := store.GetStewardByDeviceID(ctx, deviceID)
+		require.NoError(t, err)
+		assert.Equal(t, "steward-a", got.ID, "must deterministically resolve to the smallest ID")
+	}
+}
+
 func TestFlatFileStewardStore_UpdateStewardTenant(t *testing.T) {
 	store, err := NewFlatFileStewardStore(t.TempDir())
 	require.NoError(t, err)

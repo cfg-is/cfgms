@@ -142,16 +142,10 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Cross-tenant isolation: request tenant must match the steward's registered tenant.
-	if req.TenantID != "" && req.TenantID != record.TenantID {
-		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
-			business.AuditEventSecurityEvent, "refresh_challenge_rejected",
-			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
-		http.Error(w, "tenant mismatch", http.StatusForbidden)
-		return
-	}
-
+	// req.TenantID is unauthenticated (caller-asserted, optional body field on a
+	// pre-authentication endpoint) and is never used for a security decision —
+	// see the package doc on GetStewardByDeviceID. It is retained only for audit
+	// context on the emitRefreshAudit calls in this handler.
 	if s.nonceStore == nil {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSystemEvent, "refresh_challenge_error",
@@ -219,14 +213,16 @@ func (s *Server) handleRefreshChallenge(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleRefreshComplete handles POST /api/v1/stewards/{device_id}/refresh/complete.
-// Gate order (ADR-010 §3): (1) lookup, (2) revocation, (3) cross-tenant,
-// (4) CSR validation, (5) nonce, (6) IssuedAt, (7) consume nonce, (8) PoP verify,
-// (9) lifecycle policy, (10) issue cert or queue. Audit is emitted before
-// WriteHeader on every outcome. CSR validation (Issue #3781) is a pure request-
-// format check — device-independent — but runs after revocation and cross-tenant
-// so a rejection for either of those never depends on whether the caller also
-// bothered to send a well-formed CSR (mirrors the existing revoked-before-PoP
-// invariant: the security-relevant gates never take a back seat to format checks).
+// Gate order (ADR-010 §3): (1) lookup, (2) revocation, (3) CSR validation,
+// (4) nonce, (5) IssuedAt, (6) consume nonce, (7) PoP verify, (8) lifecycle
+// policy, (9) issue cert or queue. Audit is emitted before WriteHeader on every
+// outcome. CSR validation (Issue #3781) is a pure request-format check —
+// device-independent — but runs after revocation so a rejection there never
+// depends on whether the caller also bothered to send a well-formed CSR
+// (mirrors the existing revoked-before-PoP invariant: the security-relevant
+// gates never take a back seat to format checks). There is no caller-asserted
+// cross-tenant gate: identity is confirmed by PoP verification against the
+// resolved record's IdentityKeyPub, not by a request field (Issue #4350).
 func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 	deviceID := mux.Vars(r)["device_id"]
 
@@ -271,20 +267,16 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Cross-tenant isolation before any nonce operations.
-	if req.TenantID != "" && req.TenantID != record.TenantID {
-		s.emitRefreshAudit(r.Context(), deviceID, req.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultDenied, business.AuditSeverityCritical,
-			map[string]interface{}{"decision": "denied", "reason": "cross_tenant"})
-		http.Error(w, "tenant mismatch", http.StatusForbidden)
-		return
-	}
+	// req.TenantID is unauthenticated (caller-asserted, optional body field on a
+	// pre-authentication endpoint) and is never used for a security decision —
+	// see the package doc on GetStewardByDeviceID. It is retained only for audit
+	// context on the emitRefreshAudit calls in this handler. Identity is instead
+	// confirmed below by proof-of-possession against record.IdentityKeyPub.
 
-	// CSR validation (Issue #3781) — the steward generates its renewed mTLS
-	// keypair locally and submits only the public half. Rejected before any nonce
-	// operation or certificate is signed, mirroring the registration handler's
-	// same two checks (handlers_registration.go handleRegister).
+	// Gate (3): CSR validation (Issue #3781) — the steward generates its renewed
+	// mTLS keypair locally and submits only the public half. Rejected before any
+	// nonce operation or certificate is signed, mirroring the registration
+	// handler's same two checks (handlers_registration.go handleRegister).
 	if req.CSRPEM == "" {
 		http.Error(w, "csr_pem is required", http.StatusBadRequest)
 		return
@@ -309,7 +301,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gates (3) and (5): nonce absent/expired → 401; found → consumed atomically
+	// Gates (4) and (6): nonce absent/expired → 401; found → consumed atomically
 	// in the same store call (Issue #3755, ADR-031). A separate peek-then-delete
 	// would reopen the cross-node race this store exists to close, so lookup and
 	// consume collapse into one GetAndConsumeNonce call — deleted regardless of
@@ -343,7 +335,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gate (4): IssuedAt > 60s → 401
+	// Gate (5): IssuedAt > 60s → 401
 	issuedAtTime := time.Unix(0, req.IssuedAt)
 	if time.Since(issuedAtTime) > nonceMaxAge {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -375,7 +367,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gate (6): PoP verify — message = sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64)
+	// Gate (7): PoP verify — message = sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64)
 	if len(record.IdentityKeyPub) != ed25519.PublicKeySize {
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
 			business.AuditEventSecurityEvent, "refresh_rejected",
@@ -402,7 +394,7 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gate (7): lifecycle gate
+	// Gate (8): lifecycle gate
 	switch record.Status {
 	case business.StewardStatusArchived:
 		// Archived: add pending refresh and return 202 — policy is skipped.
@@ -778,7 +770,11 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), entry.DeviceID)
+	// entry.TenantID is authorized above (same-tenant/ancestor check and, for a
+	// root-scoped caller, authorizeTenantAccess), so the lookup is tenant-scoped —
+	// a device_id collision with a different tenant's steward can never be
+	// returned here (Issue #4350).
+	record, err := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), entry.DeviceID, entry.TenantID)
 	if err != nil {
 		if err == business.ErrStewardNotFound {
 			s.emitRefreshAudit(r.Context(), entry.DeviceID, entry.TenantID,

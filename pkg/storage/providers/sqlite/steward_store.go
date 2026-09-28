@@ -139,7 +139,13 @@ func (s *SQLiteStewardStore) GetSteward(ctx context.Context, stewardID string) (
 	return scanStewardRow(row)
 }
 
-// GetStewardByDeviceID retrieves the record whose device_id matches the given fingerprint.
+// GetStewardByDeviceID retrieves the record whose device_id matches the given
+// fingerprint, with NO tenant predicate. Device identifiers are allowed to
+// collide across tenants by design, so when more than one row matches, the row
+// with the lexicographically smallest id is returned — ORDER BY id ASC makes
+// this deterministic instead of leaving the choice to whichever row SQLite
+// visits first. See the interface doc comment (business.StewardStore) for who
+// may call this unscoped form.
 // Returns ErrStewardNotFound when no matching record exists.
 func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID string) (*business.StewardRecord, error) {
 	if deviceID == "" {
@@ -150,7 +156,25 @@ func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID 
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
 		       tenant_id, hidden
-		FROM stewards WHERE device_id = ? LIMIT 1`, deviceID)
+		FROM stewards WHERE device_id = ? ORDER BY id ASC LIMIT 1`, deviceID)
+	return scanStewardRow(row)
+}
+
+// GetStewardByDeviceIDForTenant retrieves the record whose device_id matches
+// the given fingerprint AND whose tenant_id matches tenantID. Returns
+// ErrStewardNotFound when no matching record exists in the given tenant, even
+// if deviceID matches a record belonging to a different tenant.
+func (s *SQLiteStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context, deviceID, tenantID string) (*business.StewardRecord, error) {
+	if deviceID == "" {
+		return nil, fmt.Errorf("sqlite: device ID cannot be empty")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, hostname, platform, arch, version, ip_address, status,
+		       registered_at, last_seen, last_heartbeat_at,
+		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
+		       tenant_id, hidden
+		FROM stewards WHERE device_id = ? AND tenant_id = ? ORDER BY id ASC LIMIT 1`,
+		deviceID, tenantID)
 	return scanStewardRow(row)
 }
 

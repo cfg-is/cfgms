@@ -422,15 +422,15 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 	// hashes the token together with the device identity — and neither the
 	// non-unique device_id index nor RegisterSteward (which reports only a primary
 	// key collision) rejects the second record. Two records sharing a device_id
-	// break GetStewardByDeviceID, the single lookup feeding the revocation gate in
-	// handlers_registration_refresh.go: a record still in "registered" state
-	// alongside a revoked sibling lets the revoked holder pass that gate. Run the
-	// check before the certificate is minted so a colliding claim gets no
-	// credential either.
+	// within one tenant break the revocation gate in handlers_registration_refresh.go:
+	// a record still in "registered" state alongside a revoked sibling lets the
+	// revoked holder pass that gate. entry.TenantID is authenticated here (derived
+	// from the registration token), so the lookup is tenant-scoped — it can never
+	// match a different tenant's collision, only this one's. Run the check before
+	// the certificate is minted so a colliding claim gets no credential either.
 	if s.stewardStore != nil && entry.DeviceID != "" {
-		existing, lookupErr := s.stewardStore.GetStewardByDeviceID(ctx, entry.DeviceID)
-		if lookupErr == nil && existing != nil &&
-			existing.TenantID == entry.TenantID && existing.ID != entry.StewardID {
+		existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(ctx, entry.DeviceID, entry.TenantID)
+		if lookupErr == nil && existing != nil && existing.ID != entry.StewardID {
 			s.logger.Warn("Duplicate DeviceID at registration claim within tenant",
 				"pending_id", logging.SanitizeLogValue(entry.PendingID),
 				"steward_id", logging.SanitizeLogValue(entry.StewardID),
@@ -909,8 +909,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Reject duplicate DeviceID within the same tenant. Cross-tenant collision is allowed —
 	// each tenant namespace is independent (matching the tenant-isolation pattern at line ~221).
+	// token.TenantID is authenticated (derived from the registration token), so the
+	// lookup is tenant-scoped and cannot match a different tenant's collision.
 	if s.stewardStore != nil {
-		if existing, lookupErr := s.stewardStore.GetStewardByDeviceID(r.Context(), req.DeviceID); lookupErr == nil && existing.TenantID == token.TenantID {
+		if existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID); lookupErr == nil && existing != nil {
 			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
 				"device_id", logging.SanitizeLogValue(req.DeviceID),
 				"tenant_id", logging.SanitizeLogValue(token.TenantID))
