@@ -842,6 +842,104 @@ func TestWORMAuditStore_ReconciliationDiscoversTenantAcrossRestart(t *testing.T)
 	assert.Equal(t, e.ID, shipped.ID)
 }
 
+// TestWORMAuditStore_RegisterTenant_HierarchicalTenantIDDurable is a REQUIRED
+// test (Issue #4348): registerTenant must durably store a hierarchical tenant
+// ID containing a path separator — CFGMS's recursive parent-child tenant
+// model (CLAUDE.md "Multi-Tenancy") makes this the common case, not an edge
+// case. Before the fix, the raw tenant ID was placed in blob.BlobKey.Name,
+// which every BlobStore implementation's own key validation rejects for
+// containing "/" — so registration deterministically failed (logged as a
+// Warn and swallowed) for every hierarchical tenant, and reconciliation could
+// never discover such a tenant's pending markers after a restart.
+func TestWORMAuditStore_RegisterTenant_HierarchicalTenantIDDurable(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newTestBlobStore(t)
+	store, _ := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+
+	const tenantID = "root/msp-a/client-1"
+
+	store.registerTenant(ctx, tenantID)
+
+	tenants, err := store.listKnownTenants(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tenants, tenantID, "registerTenant must durably record a hierarchical tenant ID, not silently drop it")
+}
+
+// TestWORMAuditStore_ListKnownTenants_LegacyRawNameBackCompat is a regression
+// test (security-review finding, Issue #4348): the tenant registry (#4039,
+// already on develop before this fix) originally stored the raw tenant ID
+// directly as the blob Name. A slash-free legacy tenant ID like "tenant1" is
+// itself syntactically valid base64, so a naive "always base64-decode"
+// listKnownTenants would silently turn it into decoded garbage bytes instead
+// of the real tenant ID, and reconciliation would never find that tenant's
+// pending markers again after upgrading to the encoded scheme. This proves a
+// pre-existing raw-Name registry entry is still read back as the correct
+// tenant ID.
+func TestWORMAuditStore_ListKnownTenants_LegacyRawNameBackCompat(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newTestBlobStore(t)
+	store, markerStore := newTestWORMStore(t, ctx, local, blobStore, logging.NewNoopLogger())
+
+	const legacyTenantID = "tenant1" // slash-free — syntactically valid base64
+
+	// Simulate a pre-existing registry entry written before this fix, in the
+	// original raw-Name format (bypassing registerTenant/encodeTenantRegistryName).
+	require.NoError(t, markerStore.PutBlob(ctx,
+		blob.BlobKey{TenantID: tenantRegistryTenantID, Namespace: tenantRegistryNamespace, Name: legacyTenantID},
+		bytes.NewReader(nil), blob.BlobMeta{ContentType: "application/octet-stream"}))
+
+	tenants, err := store.listKnownTenants(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tenants, legacyTenantID,
+		"a pre-existing raw-Name registry entry must still be read back as the correct tenant ID, not decoded into garbage")
+
+	// A newly registered tenant in the same registry must still round-trip
+	// correctly alongside the legacy entry.
+	store.registerTenant(ctx, "root/msp-a/client-1")
+	tenants, err = store.listKnownTenants(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tenants, legacyTenantID)
+	assert.Contains(t, tenants, "root/msp-a/client-1")
+}
+
+// TestWORMAuditStore_ReconciliationDiscoversHierarchicalTenantAcrossRestart
+// extends TestWORMAuditStore_ReconciliationDiscoversTenantAcrossRestart with a
+// hierarchical tenant ID, proving the durable registry — not just the
+// in-memory knownTenants cache — carries a real "/"-bearing tenant ID across
+// a process restart end to end (register, crash, fresh instance,
+// reconcile, ship).
+func TestWORMAuditStore_ReconciliationDiscoversHierarchicalTenantAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	local := newTestLocalStore(t)
+	blobStore := newFailingBlobStore(t)
+	markerStore := newTestMarkerStore(t)
+
+	storeBeforeRestart, err := NewWORMAuditStore(ctx, local, blobStore, markerStore, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	const tenantID = "root/msp-a/client-1"
+	e := newTestEntry(tenantID, "id-1", "action-1")
+
+	blobStore.setFailing(true)
+	require.NoError(t, storeBeforeRestart.AppendChainedEntry(ctx, tenantID, e, testChecksum(testChecksumKey)))
+	require.True(t, markerExists(t, markerStore, tenantID, e.ID))
+
+	storeAfterRestart, err := NewWORMAuditStore(ctx, local, blobStore, markerStore, logging.NewNoopLogger())
+	require.NoError(t, err)
+
+	blobStore.setFailing(false)
+	storeAfterRestart.reconcileOnce(ctx)
+
+	assert.False(t, markerExists(t, markerStore, tenantID, e.ID),
+		"the post-restart store must discover and ship the pending marker for a hierarchical tenant ID via the durable tenant registry")
+	data := readBlob(t, blobStore, wormBlobKey(tenantID, e.SequenceNumber))
+	var shipped business.AuditEntry
+	require.NoError(t, json.Unmarshal(data, &shipped))
+	assert.Equal(t, e.ID, shipped.ID)
+}
+
 // TestWORMAuditStore_StartAndCloseReconciliationLoop is a REQUIRED test
 // (Issue #4039 AC): the reconciliation loop starts and stops cleanly with no
 // goroutine leak, and while running actually ships a pending entry on its own

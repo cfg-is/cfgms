@@ -206,7 +206,9 @@ func runStorageMigrate(cmd *cobra.Command, args []string) error {
 // the flatfile+sqlite OSS composite target using step-based execution.
 // When dryRun is true each step reads from source and counts records without writing.
 func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, dryRun bool) ([]migrate.Report, error) {
-	// Ensure target directories exist
+	// Ensure target directories exist, owner-only: this tree receives migrated
+	// business data (tenant records, registration tokens, config), and
+	// whoever can read the destination gets that content.
 	if err := os.MkdirAll(migrateFlatfileRoot, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create flatfile root directory: %w", err)
 	}
@@ -216,10 +218,31 @@ func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvid
 		sqlitePath = filepath.Join(filepath.Dir(migrateFlatfileRoot), "cfgms.db")
 		fmt.Printf("  SQLite path not specified, using: %s\n", sqlitePath)
 	}
+	// Normalize once, so the path the database is opened at, the directory that
+	// is created for it, and the paths whose permissions are tightened below are
+	// all the same string.
+	sqlitePath = filepath.Clean(sqlitePath)
+	// sqlitePath's directory may differ from migrateFlatfileRoot (an explicit
+	// --sqlite-path can point anywhere); ensure it is owner-only too, same as
+	// the flatfile root above.
+	if err := os.MkdirAll(filepath.Dir(sqlitePath), 0700); err != nil {
+		return nil, fmt.Errorf("failed to create sqlite directory: %w", err)
+	}
 
 	targetManager, err := interfaces.CreateOSSStorageManager(migrateFlatfileRoot, sqlitePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize target storage: %w", err)
+	}
+
+	// The SQLite driver creates the database file (and, once WAL mode
+	// activates, its -wal/-shm sidecars) with the OS-default permissions,
+	// which are not owner-only. Unlike the flatfile provider's own writes
+	// (0600 files under 0700 directories — pkg/storage/providers/flatfile),
+	// nothing in the SQLite open path restricts this, so it is done here
+	// explicitly, both right after open and again after migration writes
+	// (which is what actually creates the -wal/-shm sidecars).
+	if err := restrictSQLiteFilePerms(sqlitePath); err != nil {
+		return nil, fmt.Errorf("failed to restrict sqlite file permissions: %w", err)
 	}
 
 	steps := []migrate.Step{
@@ -243,7 +266,40 @@ func migrateToFlatfile(ctx context.Context, gitProvider interfaces.StorageProvid
 		},
 	}
 
-	return migrate.RunSteps(ctx, dryRun, steps), nil
+	reports := migrate.RunSteps(ctx, dryRun, steps)
+
+	if err := restrictSQLiteFilePerms(sqlitePath); err != nil {
+		return nil, fmt.Errorf("failed to restrict sqlite file permissions after migration: %w", err)
+	}
+
+	return reports, nil
+}
+
+// restrictSQLiteFilePerms chmods sqlitePath and its WAL-mode sidecar files
+// (-wal, -shm) and rollback journal (-journal) to owner-only (0600), for
+// whichever of them currently exist. A sidecar that does not exist yet
+// (e.g. -wal before any write has occurred) is not an error.
+//
+// sqlitePath is cleaned first, so every path touched here is either the
+// database file this migration just opened or a sidecar SQLite derives from
+// that exact filename — all in the database's own directory, never a new one.
+func restrictSQLiteFilePerms(sqlitePath string) error {
+	base := filepath.Clean(sqlitePath)
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		path := base + suffix
+		// #nosec G703 -- path is the operator's explicit --sqlite-path (cleaned
+		// above), or a SQLite sidecar of that same filename. This local
+		// administrative CLI runs at the invoking operator's privilege, the
+		// database was just opened at this path, and the only effect here is to
+		// tighten permissions to owner-only.
+		if err := os.Chmod(path, 0600); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("chmod %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func migrateConfigStore(ctx context.Context, gitProvider interfaces.StorageProvider, gitConfig map[string]interface{}, target *interfaces.StorageManager, dryRun bool) (int, error) {

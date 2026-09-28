@@ -4,6 +4,9 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -227,4 +230,59 @@ func TestStorageMigrateDryRun_FlatfileSQLiteTargetRemainsEmpty(t *testing.T) {
 	tokens, err := dstRTS.ListTokens(ctx, &business.RegistrationTokenFilter{})
 	require.NoError(t, err)
 	assert.Empty(t, tokens, "dry-run must not write registration token records to target")
+}
+
+// TestMigrateToFlatfile_OwnerOnlyPermissions is a REQUIRED test (Issue
+// #4348): migrateToFlatfile must create the flatfile root directory and the
+// SQLite database file with owner-only permissions, so whoever else can read
+// the destination host cannot read the migrated business data. The
+// already-registered "flatfile" provider stands in for the source
+// (migrateToFlatfile only needs an interfaces.StorageProvider — it is not
+// specific to git), avoiding the need for the removed git provider.
+func TestMigrateToFlatfile_OwnerOnlyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not meaningful on Windows")
+	}
+
+	srcProvider, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+	srcDir := t.TempDir()
+	srcConfig := map[string]interface{}{"root": srcDir}
+
+	// Seed one record in the source so migration performs a real write.
+	srcConfigStore, err := srcProvider.CreateConfigStore(srcConfig)
+	require.NoError(t, err)
+	require.NoError(t, srcConfigStore.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{
+		Key:       &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "cfg"},
+		Data:      []byte("key: val"),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}))
+
+	dstDir := t.TempDir()
+	origFlatfileRoot, origSQLitePath := migrateFlatfileRoot, migrateSQLitePath
+	t.Cleanup(func() { migrateFlatfileRoot, migrateSQLitePath = origFlatfileRoot, origSQLitePath })
+	migrateFlatfileRoot = filepath.Join(dstDir, "flat")
+	migrateSQLitePath = filepath.Join(dstDir, "cfgms.db")
+
+	_, err = migrateToFlatfile(context.Background(), srcProvider, srcConfig, false)
+	require.NoError(t, err)
+
+	rootInfo, err := os.Stat(migrateFlatfileRoot)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), rootInfo.Mode().Perm(),
+		"flatfile root directory must be owner-only (0700)")
+
+	dbInfo, err := os.Stat(migrateSQLitePath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), dbInfo.Mode().Perm(),
+		"migrated sqlite database file must be owner-only (0600)")
+
+	// WAL-mode sidecars, when present, must be owner-only too.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, statErr := os.Stat(migrateSQLitePath + suffix); statErr == nil {
+			assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+				"sqlite sidecar %s must be owner-only (0600)", suffix)
+		}
+	}
 }

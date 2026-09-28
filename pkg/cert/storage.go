@@ -7,11 +7,85 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// serialNumberPattern bounds the accepted shape of a certificate serial number
+// before it is ever joined into a filesystem path. Certificate serials are
+// generated internally (pkg/cert issuance, (*big.Int).String()) as base-10
+// digit strings, and test/fixture serials additionally use hyphenated
+// alphanumeric labels — this is intentionally conservative: alphanumeric,
+// starting with an alphanumeric character, with only internal hyphens
+// allowed, 1-128 chars. No path separator, ".", or other filesystem
+// metacharacter is in the accepted set, so no traversal sequence can ever
+// reach filepath.Join.
+var serialNumberPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,127}$`)
+
+// resolveCertDir validates serialNumber against serialNumberPattern and joins
+// it onto basePath, then confirms — after symlink resolution — that the
+// result is still contained within basePath. filepath.Clean alone does not
+// satisfy this: it collapses ".." segments lexically but does not detect a
+// symlink inside basePath that points outside of it. GetCertificate and
+// DeleteCertificate take a serial number from an HTTP path parameter, so an
+// unvalidated value here is an arbitrary-path read/delete primitive for any
+// caller holding certificate-read permission.
+func resolveCertDir(basePath, serialNumber string) (string, error) {
+	if !serialNumberPattern.MatchString(serialNumber) {
+		return "", fmt.Errorf("invalid certificate serial number")
+	}
+
+	certDir := filepath.Join(basePath, serialNumber)
+
+	resolvedBase, err := filepath.EvalSymlinks(basePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve storage base path: %w", err)
+	}
+
+	// The certificate directory may not exist yet (StoreCertificate) or may
+	// exist (GetCertificate/DeleteCertificate). Resolve symlinks on whichever
+	// deepest existing ancestor there is, then re-append the unresolved tail,
+	// so a not-yet-created directory doesn't fail EvalSymlinks outright.
+	resolvedDir, err := resolveExistingAncestorSymlinks(certDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve certificate path: %w", err)
+	}
+
+	if resolvedDir != resolvedBase &&
+		!strings.HasPrefix(resolvedDir, resolvedBase+string(os.PathSeparator)) {
+		return "", fmt.Errorf("certificate path escapes storage root")
+	}
+
+	return certDir, nil
+}
+
+// resolveExistingAncestorSymlinks resolves symlinks on the deepest existing
+// ancestor of path and re-joins the remaining (possibly nonexistent) suffix,
+// so a path containment check can be performed before the target directory
+// has necessarily been created.
+func resolveExistingAncestorSymlinks(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	suffix := ""
+	current := cleaned
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			return filepath.Join(resolved, suffix), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", err
+		}
+		suffix = filepath.Join(filepath.Base(current), suffix)
+		current = parent
+	}
+}
 
 // FileStore provides filesystem-based certificate storage
 type FileStore struct {
@@ -54,8 +128,18 @@ func (fs *FileStore) StoreCertificate(cert *Certificate) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	// Create certificate-specific directory
-	certDir := filepath.Join(fs.basePath, cert.SerialNumber)
+	// Create certificate-specific directory. Routed through the same
+	// resolveCertDir validation as GetCertificate/DeleteCertificate so a
+	// serial this function accepts is always one those two can later reach:
+	// SerialNumber is normally an internally generated (*big.Int).String()
+	// decimal digit string, but a parsed certificate's DER serial can have
+	// its high bit set and stringify with a leading '-' (pkg/cert/manager.go's
+	// x509Cert.SerialNumber.String()) — without this check that would store
+	// successfully here and then be permanently unreadable/undeletable.
+	certDir, err := resolveCertDir(fs.basePath, cert.SerialNumber)
+	if err != nil {
+		return fmt.Errorf("invalid certificate serial number: %w", err)
+	}
 	if err := os.MkdirAll(certDir, 0750); err != nil {
 		return fmt.Errorf("failed to create certificate directory: %w", err)
 	}
@@ -124,7 +208,14 @@ func (fs *FileStore) GetCertificate(serialNumber string) (*Certificate, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	certDir := filepath.Join(fs.basePath, serialNumber)
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		// serialNumber failed format/containment validation here — it is
+		// known malformed or hostile input (an HTTP path parameter), unlike
+		// the not-found branch below where it already matched
+		// serialNumberPattern. Do not echo it back.
+		return nil, fmt.Errorf("certificate not found")
+	}
 
 	// Check if certificate directory exists
 	if _, err := os.Stat(certDir); os.IsNotExist(err) {
@@ -292,7 +383,12 @@ func (fs *FileStore) DeleteCertificate(serialNumber string) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 
-	certDir := filepath.Join(fs.basePath, serialNumber)
+	certDir, err := resolveCertDir(fs.basePath, serialNumber)
+	if err != nil {
+		// See the identical comment in GetCertificate: serialNumber here is
+		// known malformed/hostile, so it is not echoed back.
+		return fmt.Errorf("certificate not found")
+	}
 
 	// Check if certificate directory exists
 	if _, err := os.Stat(certDir); os.IsNotExist(err) {

@@ -143,6 +143,21 @@ type sessionStub struct {
 	sessions map[string]string // sessionID → token
 	revoked  map[string]bool   // sessionID → revoked
 	requests []string          // method+path log for assertions
+
+	// failRevoke, when true, makes DELETE /api/v1/sessions/{id} return 500
+	// without touching sessions/revoked — simulating a genuine server-side
+	// revoke failure (network blip, transient 5xx) rather than a successful
+	// revoke or an already-gone (404) session.
+	failRevoke bool
+}
+
+// setFailRevoke sets failRevoke under s.mu — the ServeHTTP handler runs on the
+// httptest server's own goroutine and reads failRevoke under the same lock, so
+// setting the field directly from a test goroutine would be a data race.
+func (s *sessionStub) setFailRevoke(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failRevoke = v
 }
 
 func (s *sessionStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +184,14 @@ func (s *sessionStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/sessions/"):
+		s.mu.Lock()
+		failing := s.failRevoke
+		s.mu.Unlock()
+		if failing {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "SIMULATED_REVOKE_FAILURE"})
+			return
+		}
 		id := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
 		s.mu.Lock()
 		s.revoked[id] = true
@@ -600,6 +623,94 @@ func TestRequireHTTPS_AllowsHTTPSNonLoopback(t *testing.T) {
 func TestRequireHTTPS_AllowsHTTPLoopback(t *testing.T) {
 	assert.NoError(t, requireHTTPS("http://localhost:9080"))
 	assert.NoError(t, requireHTTPS("http://127.0.0.1:9080"))
+}
+
+// ── TestDisconnect_ServerSideRevokeFailure ────────────────────────────────────
+
+// TestDisconnect_ServerSideRevokeFailure is a REQUIRED test (Issue #4348):
+// when the controller's session-revoke call fails, runDisconnect must return
+// an error and must NOT delete the local session token — a "Disconnected"
+// success message paired with a server-side session that was never actually
+// revoked would leave a retained copy of the pre-disconnect token valid
+// indefinitely, with the operator wrongly believing it was invalidated.
+//
+// It also proves the positive case once connectivity is restored: retrying
+// `cfg disconnect` succeeds, and only THEN does a copy of the pre-disconnect
+// token fail against the controller.
+func TestDisconnect_ServerSideRevokeFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	certs := generateConnectTestCerts(t, "")
+
+	stub := &sessionStub{
+		sessions: make(map[string]string),
+		revoked:  make(map[string]bool),
+	}
+	srv := startSessionServer(t, certs, stub)
+
+	certs.clientCert.ControllerURL = srv.URL
+	bundleFile := filepath.Join(tmpDir, "admin.bundle.yaml")
+	require.NoError(t, certbundle.Write(bundleFile, certs.clientCert))
+
+	store := newTestSessionStore()
+	overrideSessionStore(t, store)
+	withTempConfigDir(t)
+	credDir := t.TempDir()
+	origCredDir := credentialsDirFn
+	credentialsDirFn = func() (string, error) { return credDir, nil }
+	t.Cleanup(func() { credentialsDirFn = origCredDir })
+
+	overrideConnectFlags(t)
+
+	connectBundlePath = bundleFile
+	connectURL = srv.URL
+	connectName = "test-ctrl-revoke-fail"
+	bundlePath = ""
+	noBundle = false
+
+	require.NoError(t, runConnect(connectCmd, nil))
+
+	preDisconnect, err := loadSessionToken()
+	require.NoError(t, err)
+	require.NotNil(t, preDisconnect)
+	tokenCopy := preDisconnect.Token
+
+	checkToken := func(tok string) int {
+		client, cErr := NewAPIClient(&APIClientConfig{
+			BaseURL:     srv.URL,
+			BearerToken: tok,
+			TLSInsecure: true,
+		})
+		require.NoError(t, cErr)
+		resp, rErr := client.doRequestWithContentType(context.Background(), http.MethodGet, "/api/v1/status", nil, "")
+		require.NoError(t, rErr)
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+
+	// Server-side revoke fails: disconnect must fail, and the local token
+	// must survive so the command remains retryable.
+	stub.setFailRevoke(true)
+	err = runDisconnect(disconnectCmd, nil)
+	require.Error(t, err, "runDisconnect must fail when the server-side revoke call fails")
+
+	rec, err := loadSessionToken()
+	require.NoError(t, err)
+	require.NotNil(t, rec, "the local session token must not be deleted when server-side revoke failed")
+
+	assert.Equal(t, http.StatusOK, checkToken(tokenCopy),
+		"a copy of the pre-disconnect token must still be valid while the server-side revoke has never succeeded")
+
+	// Connectivity restored: retrying disconnect must succeed, and only now
+	// does a copy of the pre-disconnect token fail.
+	stub.setFailRevoke(false)
+	require.NoError(t, runDisconnect(disconnectCmd, nil))
+
+	rec, err = loadSessionToken()
+	require.NoError(t, err)
+	assert.Nil(t, rec, "session token must be removed once server-side revoke succeeds")
+
+	assert.Equal(t, http.StatusUnauthorized, checkToken(tokenCopy),
+		"a copy of the pre-disconnect token must fail once the server-side revoke has actually succeeded")
 }
 
 // ── TestDisconnect_NoActiveSession ────────────────────────────────────────────

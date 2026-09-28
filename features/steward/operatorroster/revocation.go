@@ -230,7 +230,22 @@ func (v *RevocationVerifier) VerifyManifest(raw []byte, mode stewardtrust.TrustM
 		return fmt.Errorf("manifest version %d is older than last-verified version %d (anti-rollback)",
 			manifest.Manifest.Version, v.lastVersion)
 	}
-	revoked := make(map[string]struct{}, len(manifest.Manifest.RevokedSerials))
+	// Union with whatever this verifier already believed revoked, never a
+	// wholesale replacement. RevokedSerials only ever grows on the controller
+	// side (Manager.Revoke has no un-revoke primitive — see the doc comment
+	// above), so a legitimate newer manifest is always a superset of the last
+	// one accepted; the anti-rollback check above only catches a *version*
+	// number going backwards. A manifest that carries a higher version but an
+	// incomplete RevokedSerials list — a controller-side bug, a buggy relay,
+	// or (in "controller" mode, which never chain-verifies the signer) a
+	// compromised controller briefly serving bad data — must not be allowed
+	// to silently un-revoke a certificate this verifier already knew was bad.
+	// Binding to current revocation state means the accepted state can only
+	// expand.
+	revoked := make(map[string]struct{}, len(v.revoked)+len(manifest.Manifest.RevokedSerials))
+	for serial := range v.revoked {
+		revoked[serial] = struct{}{}
+	}
 	for _, serial := range manifest.Manifest.RevokedSerials {
 		revoked[serial] = struct{}{}
 	}

@@ -368,9 +368,18 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("build client: %w", err)
 	}
 
-	// Revoke server-side (best-effort: proceed even on error).
+	// Revoke server-side. This must succeed for disconnect to mean anything: a
+	// session token is a replayable bearer credential, so a "Disconnected"
+	// that only deletes the local copy while the server-side session stays
+	// live would tell the operator the credential is dead when a retained
+	// copy of it (process memory, a log, a captured request) still works.
+	// RevokeSession already treats 404 as success (session already gone), so
+	// this only fails on a genuine revoke failure — network error, 5xx, etc.
+	// The local token is deliberately left in place on failure so `cfg
+	// disconnect` remains retryable instead of losing track of an active
+	// session it never actually revoked.
 	if err := client.RevokeSession(ctx, rec.SessionID); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: server-side revoke failed: %v\n", err)
+		return fmt.Errorf("revoke session server-side: %w", err)
 	}
 
 	// Remove token from OS keychain.

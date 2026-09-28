@@ -979,9 +979,15 @@ func (s *SOPSSecretStore) Close() error {
 
 // Helper methods
 
-// getCacheKey generates a cache key for a secret
+// getCacheKey generates a cache key for a secret. Length-prefixing each
+// component (rather than joining with a plain separator) is what makes the
+// mapping collision-free: tenantID="a/b", key="c" and tenantID="a",
+// key="b/c" both join to "a/b/c" under a bare "%s/%s" format, which would let
+// one tenant's cache entry be served for another tenant/key scope entirely.
+// Neither component's length can be forged from within the string itself, so
+// two distinct (tenantID, key) pairs can never encode to the same key.
 func (s *SOPSSecretStore) getCacheKey(tenantID, key string) string {
-	return fmt.Sprintf("%s/%s", tenantID, key)
+	return fmt.Sprintf("%d:%s/%d:%s", len(tenantID), tenantID, len(key), key)
 }
 
 // isExpired checks if a secret is expired

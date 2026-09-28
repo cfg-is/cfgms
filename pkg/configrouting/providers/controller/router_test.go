@@ -185,6 +185,52 @@ func TestConfigSourceRouter_CrossTenantRejected(t *testing.T) {
 	assert.Equal(t, int64(0), cs.calls(), "underlying store must never be called on cross-tenant rejection")
 }
 
+// TestConfigSourceRouter_DefaultTenantCallerStillCrossTenantChecked is a
+// REQUIRED test (Issue #4348): a caller authenticated as the "default" tenant
+// (a genuine, reserved tenant ID — features/tenant/manager.go's
+// ErrCannotSuspendDefault — not a sentinel for "unauthenticated") must still
+// be subject to the same same-tenant/ancestor rule as any other tenant.
+// Before the fix, checkCrossTenant treated ctxTenant == "default" as an
+// unconditional bypass, so a "default"-tenant caller could read any other
+// tenant's config regardless of ancestry.
+func TestConfigSourceRouter_DefaultTenantCallerStillCrossTenantChecked(t *testing.T) {
+	cs := &recordingConfigStore{}
+	ts := newTenantStore(t)
+	addTenant(t, ts, "default", "", nil)
+	addTenant(t, ts, "unrelated-tenant", "", nil) // no ancestry relationship with "default"
+
+	router := NewControllerRouter(cs, ts)
+	ctx := ctxWithTenant("default")
+
+	key := &cfgconfig.ConfigKey{TenantID: "unrelated-tenant", Namespace: "ns", Name: "cfg"}
+	_, err := router.GetConfig(ctx, key)
+	require.Error(t, err, "a 'default'-tenant caller must not bypass the cross-tenant check")
+	assert.Contains(t, err.Error(), "cross-tenant access denied")
+	assert.Equal(t, int64(0), cs.calls(), "underlying store must never be called on cross-tenant rejection")
+}
+
+// TestConfigSourceRouter_DefaultTenantCallerCanReadOwnAncestor verifies the
+// fix does not over-correct: a "default"-tenant caller can still read its own
+// tenant's config and any genuine ancestor's config, exactly like any other
+// tenant.
+func TestConfigSourceRouter_DefaultTenantCallerCanReadOwnAncestor(t *testing.T) {
+	cs := &recordingConfigStore{}
+	ts := newTenantStore(t)
+	addTenant(t, ts, "root", "", nil)
+	addTenant(t, ts, "default", "root", nil)
+
+	router := NewControllerRouter(cs, ts)
+	ctx := ctxWithTenant("default")
+
+	// Same tenant.
+	_, err := router.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "default", Namespace: "ns", Name: "cfg"})
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound, "same-tenant read must reach the store")
+
+	// Ancestor tenant.
+	_, err = router.GetConfig(ctx, &cfgconfig.ConfigKey{TenantID: "root", Namespace: "ns", Name: "cfg"})
+	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound, "ancestor read must reach the store")
+}
+
 func TestConfigSourceRouter_CacheInvalidatedOnTenantUpdate(t *testing.T) {
 	ts := newTenantStore(t)
 	addTenant(t, ts, "root", "", nil)

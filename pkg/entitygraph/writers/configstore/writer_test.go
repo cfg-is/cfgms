@@ -210,3 +210,93 @@ func TestNewWriterNilProvider(t *testing.T) {
 	_, err := configstore.New(nil)
 	require.Error(t, err)
 }
+
+// TestIngest_BindsOwningTenantItself is a REQUIRED test (Issue #4348):
+// Ingest must stamp owning_tenant onto every observation itself from
+// rev.TenantID, even when the caller's DesiredState carries no tenant key at
+// all. Before the fix, Ingest never referenced rev.TenantID, so an
+// observation written this way had no owning_tenant — invisible to every
+// tenant-scoped read (ADR-023 §7) — unless the caller happened to stuff the
+// key into DesiredState manually (no production caller did).
+func TestIngest_BindsOwningTenantItself(t *testing.T) {
+	p := newTestProvider(t)
+	w, err := configstore.New(p)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	eid := mustEID(t, "cfgms:controller/steward-tenant-bind")
+	rev := baseRev() // DesiredState has no owning_tenant/tenant_path key
+
+	require.NoError(t, w.Ingest(ctx, rev, []types.EID{eid}))
+
+	wide := interfaces.TimeRange{
+		From: time.Unix(0, 0).UTC(),
+		To:   time.Now().UTC().Add(time.Hour),
+	}
+	records, err := p.GetHistory(ctx, eid, wide)
+	require.NoError(t, err)
+
+	var found bool
+	for _, rec := range records {
+		if rec.Observation.Kind != types.ObservationKindDesiredState {
+			continue
+		}
+		found = true
+		require.Equal(t, rev.TenantID, rec.Observation.Payload["owning_tenant"],
+			"Ingest must bind rev.TenantID as owning_tenant on the observation itself")
+	}
+	require.True(t, found, "expected a desired-state observation to inspect")
+}
+
+// TestIngest_OverridesCallerSuppliedTenant verifies that Ingest's own
+// owning_tenant binding always wins over anything the caller placed in
+// DesiredState — a caller must not be able to assert a different tenant than
+// rev.TenantID by populating owning_tenant/tenant_path itself.
+func TestIngest_OverridesCallerSuppliedTenant(t *testing.T) {
+	p := newTestProvider(t)
+	w, err := configstore.New(p)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	eid := mustEID(t, "cfgms:controller/steward-tenant-override")
+	rev := baseRev()
+	rev.DesiredState["owning_tenant"] = "some-other-tenant"
+	rev.DesiredState["tenant_path"] = "some-other-tenant"
+
+	require.NoError(t, w.Ingest(ctx, rev, []types.EID{eid}))
+
+	ds, err := p.GetDesiredState(ctx, eid)
+	require.NoError(t, err)
+	require.NotNil(t, ds)
+
+	wide := interfaces.TimeRange{
+		From: time.Unix(0, 0).UTC(),
+		To:   time.Now().UTC().Add(time.Hour),
+	}
+	records, err := p.GetHistory(ctx, eid, wide)
+	require.NoError(t, err)
+	for _, rec := range records {
+		if rec.Observation.Kind != types.ObservationKindDesiredState {
+			continue
+		}
+		require.Equal(t, rev.TenantID, rec.Observation.Payload["owning_tenant"],
+			"rev.TenantID must win over a caller-supplied owning_tenant")
+	}
+}
+
+// TestIngest_RejectsEmptyTenantID verifies that Ingest refuses to write an
+// observation for a ConfigRevision with no TenantID, rather than silently
+// producing an untenanted record.
+func TestIngest_RejectsEmptyTenantID(t *testing.T) {
+	p := newTestProvider(t)
+	w, err := configstore.New(p)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	eid := mustEID(t, "cfgms:controller/steward-no-tenant")
+	rev := baseRev()
+	rev.TenantID = ""
+
+	err = w.Ingest(ctx, rev, []types.EID{eid})
+	require.Error(t, err)
+}

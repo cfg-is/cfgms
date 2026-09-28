@@ -6,6 +6,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -86,10 +89,49 @@ func resolveBootstrapPackageSource(chocoSource, bootstrapPackage string) string 
 	return joinSourcePath(chocoSource, chocoDefaultBootstrapFile)
 }
 
+// sha256HexPattern matches a lowercase or uppercase 64-character hex SHA-256,
+// mirroring features/modules/extended/github_runner/config.go's identical
+// pattern for the same operator-pinned-checksum shape.
+var sha256HexPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
+
+// verifyBootstrapChecksum computes the SHA-256 of data and compares it
+// (case-insensitive hex) against expectedHex, which must itself already be a
+// well-formed 64-character hex string. A missing or malformed expectedHex is
+// refused rather than silently skipping verification — the bootstrap payload
+// is executed as chocolateyInstall.ps1 with elevated privileges on a customer
+// endpoint, so an unverifiable payload must be a fatal error, not a warning.
+func verifyBootstrapChecksum(data []byte, expectedHex string) error {
+	if !sha256HexPattern.MatchString(expectedHex) {
+		return fmt.Errorf("chocolatey bootstrap integrity check requires choco_bootstrap_sha256 to be configured as a 64-character hex SHA-256")
+	}
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(got, expectedHex) {
+		return fmt.Errorf("chocolatey bootstrap package sha256 mismatch: expected %s, got %s", strings.ToLower(expectedHex), got)
+	}
+	return nil
+}
+
 // fetchBytes returns the raw bytes of src, which may be a local filesystem
-// path or an http(s) URL. This is the only OS/network interaction in package
-// acquisition — everything downstream (extractZip) is pure.
-func fetchBytes(ctx context.Context, src string) ([]byte, error) {
+// path or an http(s) URL, after verifying them against expectedSHA256 (see
+// verifyBootstrapChecksum). This is the only OS/network interaction in
+// package acquisition — everything downstream (extractZip) is pure, and
+// nothing downstream ever sees unverified bytes.
+func fetchBytes(ctx context.Context, src string, expectedSHA256 string) ([]byte, error) {
+	data, err := fetchRawBytes(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyBootstrapChecksum(data, expectedSHA256); err != nil {
+		return nil, fmt.Errorf("chocolatey bootstrap package from %s failed integrity verification: %w", src, err)
+	}
+	return data, nil
+}
+
+// fetchRawBytes performs the actual acquisition (local read or HTTP GET)
+// without any integrity verification — callers must go through fetchBytes,
+// never this directly, so a verification step can never be silently skipped.
+func fetchRawBytes(ctx context.Context, src string) ([]byte, error) {
 	if isURL(src) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 		if err != nil {
@@ -338,7 +380,7 @@ func (m *PackageModule) bootstrapChocoReal(ctx context.Context) error {
 		logger.Info("bootstrapping chocolatey", "bootstrap_package", pkgSrc)
 	}
 
-	data, err := fetchBytes(ctx, pkgSrc)
+	data, err := fetchBytes(ctx, pkgSrc, m.chocoBootstrapSHA256)
 	if err != nil {
 		return fmt.Errorf("failed to fetch chocolatey bootstrap package: %w", err)
 	}

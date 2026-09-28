@@ -331,6 +331,33 @@ func TestRevocationVerifier_VerifyManifest_AntiRollback_Rejected(t *testing.T) {
 	assert.True(t, v.IsRevoked("222"))
 }
 
+// TestRevocationVerifier_VerifyManifest_NeverUnrevokes is a REQUIRED test
+// (Issue #4348): a later manifest — higher version, so it passes the
+// anti-rollback check — that omits a serial a prior manifest revoked must
+// still leave that serial revoked. VerifyManifest previously replaced
+// v.revoked wholesale with the new manifest's list; this proves the accepted
+// revocation state only ever grows, binding IsRevoked to the union of every
+// manifest this verifier has accepted rather than only the most recent one.
+func TestRevocationVerifier_VerifyManifest_NeverUnrevokes(t *testing.T) {
+	ca, caPool := revTestCA(t)
+	signingCert := revTestSigningCert(t, ca)
+	v := NewRevocationVerifier(caPool)
+
+	first := revTestSignManifest(t, signingCert, 1, []string{"111", "222"})
+	require.NoError(t, v.VerifyManifest(first, stewardtypes.ModuleTrustModeStrict))
+	assert.True(t, v.IsRevoked("111"))
+	assert.True(t, v.IsRevoked("222"))
+
+	// A higher-version manifest that (incorrectly, but validly signed and
+	// version-monotonic) omits "111" must not un-revoke it.
+	second := revTestSignManifest(t, signingCert, 2, []string{"222", "333"})
+	require.NoError(t, v.VerifyManifest(second, stewardtypes.ModuleTrustModeStrict))
+
+	assert.True(t, v.IsRevoked("111"), "a serial revoked by an earlier accepted manifest must remain revoked")
+	assert.True(t, v.IsRevoked("222"))
+	assert.True(t, v.IsRevoked("333"), "a newly revoked serial must also be recognized")
+}
+
 func TestRevocationVerifier_VerifyManifest_ControllerMode_SkipsChainVerification(t *testing.T) {
 	_, pinnedCAPool := revTestCA(t)
 	foreignCA, _ := revTestCA(t)

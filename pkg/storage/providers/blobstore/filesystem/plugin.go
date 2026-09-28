@@ -396,21 +396,34 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 			return fmt.Errorf("list blobs: failed to parse metadata: %w", err)
 		}
 
-		// Reconstruct the key from the relative path: <tenantID>/<namespace>/<name>.meta.json
-		rel, err := filepath.Rel(s.root, path)
-		if err != nil {
-			return err
-		}
-		rel = strings.TrimSuffix(rel, ".meta.json")
-		parts := strings.SplitN(filepath.ToSlash(rel), "/", 3)
-		if len(parts) != 3 {
-			return nil
+		// Reconstruct the key from relativePath (relative to searchDir, which
+		// is already rooted at <root>/<TenantID>[/<Namespace>]). This must not
+		// re-derive TenantID by splitting the full path on "/": TenantID
+		// itself legitimately contains "/" for a hierarchical tenant (e.g.
+		// "root/msp-a/client-1" — CLAUDE.md's recursive parent-child tenant
+		// model), and a fixed SplitN(rel, "/", 3) silently misassigns segments
+		// of the tenant path into Namespace/Name for any TenantID with more
+		// than one segment. Using searchDir — which was built from the
+		// already-known prefix.TenantID — as the split point sidesteps that
+		// entirely, since nothing downstream needs to reparse TenantID out of
+		// the full path.
+		name := strings.TrimSuffix(filepath.ToSlash(relativePath), ".meta.json")
+		namespace := prefix.Namespace
+		if namespace == "" {
+			// searchDir omitted Namespace, so relativePath is
+			// "<namespace>/<name>" — split off exactly the first segment.
+			idx := strings.Index(name, "/")
+			if idx < 0 {
+				return nil
+			}
+			namespace = name[:idx]
+			name = name[idx+1:]
 		}
 
 		key := blob.BlobKey{
-			TenantID:  parts[0],
-			Namespace: parts[1],
-			Name:      parts[2],
+			TenantID:  prefix.TenantID,
+			Namespace: namespace,
+			Name:      name,
 		}
 
 		if prefix.Name != "" && !strings.HasPrefix(key.Name, prefix.Name) {
