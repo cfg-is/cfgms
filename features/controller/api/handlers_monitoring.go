@@ -186,6 +186,14 @@ func (s *Server) handleMonitoringAnomalies(w http.ResponseWriter, r *http.Reques
 }
 
 // handleMonitoringComponentHealth handles GET /api/v1/monitoring/components/{component}/health
+//
+// component is a controller-level infrastructure name (e.g. "grpc_server", "storage"),
+// not a tenant-scoped resource; there is no per-tenant component data and no owning
+// tenant to check the caller against. Currently a stub that always returns 503
+// regardless of component, matching handleMonitoringConfig/handleMonitoringAnomalies
+// (same file, no tenant concept either).
+//
+//architecture:allow-unscoped-tenant-read -- controller-level infrastructure name, no owning tenant (Issue #4335)
 func (s *Server) handleMonitoringComponentHealth(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	component := vars["component"]
@@ -199,6 +207,11 @@ func (s *Server) handleMonitoringComponentHealth(w http.ResponseWriter, r *http.
 }
 
 // handleMonitoringComponentMetrics handles GET /api/v1/monitoring/components/{component}/metrics
+//
+// component is a controller-level infrastructure name, not a tenant-scoped resource;
+// see handleMonitoringComponentHealth (same file) for the full rationale.
+//
+//architecture:allow-unscoped-tenant-read -- controller-level infrastructure name, no owning tenant (Issue #4335)
 func (s *Server) handleMonitoringComponentMetrics(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	component := vars["component"]

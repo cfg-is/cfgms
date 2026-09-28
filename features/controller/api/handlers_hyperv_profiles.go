@@ -12,6 +12,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -79,32 +80,35 @@ func hypervProfileResponseFrom(p *hyperv.UnattendProfile) hypervProfileResponse 
 	}
 }
 
-// hypervProfileTenantFromRequest resolves the target tenant for a hyperv-profile
-// request. A tenant-scoped caller is PINNED to its own tenant — the write
-// surface is root-code-execution-equivalent (a stored profile is rendered and
-// executed as root by cloud-init/preseed at guest first boot), so a caller must
-// never be able to redirect a write into another tenant's namespace via a
-// mismatched ?tenant= value. A root/global admin (empty principal tenant)
-// selects the target tenant explicitly via ?tenant=. Mirrors
-// roleTenantFromRequest (Issue #2548) exactly.
-func hypervProfileTenantFromRequest(r *http.Request, principal *Principal) string {
-	if principal.TenantID != "" {
-		return principal.TenantID
-	}
-	return strings.TrimSpace(r.URL.Query().Get("tenant"))
-}
-
 // resolveHypervProfileTenant resolves the target tenant for a hyperv-profile
-// request, or writes a 400 TENANT_REQUIRED and returns ok=false when none can
-// be determined (a global admin that omitted ?tenant=).
+// request from the caller's ctxkeys.TenantScope (Issue #4335). A tenant-scoped
+// caller is PINNED to its own tenant — the write surface is
+// root-code-execution-equivalent (a stored profile is rendered and executed as
+// root by cloud-init/preseed at guest first boot), so a caller must never be able
+// to redirect a write into another tenant's namespace via a mismatched ?tenant=
+// value; the query param is never consulted while the scope is tenant-bound.
+// A root-scoped admin selects the target tenant explicitly via ?tenant=, writing
+// a 400 TENANT_REQUIRED and returning ok=false when omitted. An unset scope (the
+// plumbing-bug signature — a dropped context, or a wrong context key) is refused
+// with 403 rather than silently falling through to either branch. Mirrors
+// roleTenantFromRequest (Issue #2548).
 func (s *Server) resolveHypervProfileTenant(w http.ResponseWriter, r *http.Request, principal *Principal) (string, bool) {
-	tenantID := hypervProfileTenantFromRequest(r, principal)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"tenant is required: a global admin must pass ?tenant=<id> (hyperv profiles are stored per tenant)", "TENANT_REQUIRED")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	switch {
+	case scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), true
+	case scope.IsRoot():
+		tenantID := strings.TrimSpace(r.URL.Query().Get("tenant"))
+		if tenantID == "" {
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"tenant is required: a global admin must pass ?tenant=<id> (hyperv profiles are stored per tenant)", "TENANT_REQUIRED")
+			return "", false
+		}
+		return tenantID, true
+	default:
+		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")
 		return "", false
 	}
-	return tenantID, true
 }
 
 // handleCreateHypervProfile handles POST /api/v1/hyperv/profiles.

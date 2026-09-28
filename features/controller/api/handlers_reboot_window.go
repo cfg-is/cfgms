@@ -17,6 +17,7 @@ import (
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	schedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -489,20 +490,14 @@ func (s *Server) authorizeStewardRebootWindowTenant(w http.ResponseWriter, r *ht
 		return "", false
 	}
 
-	// API-key, session and relay principals carry a non-empty TenantID; unscoped mTLS
-	// admin principals carry "" and isWithinTenantScope allows them through.
+	// Migrated to ctxkeys.TenantScope (Issue #4335): an unset scope is refused, not
+	// silently treated as unrestricted the way a raw callerTenant=="" comparison would.
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	var callerTenant string
-	if principal != nil {
-		callerTenant = principal.TenantID
-	} else {
-		callerTenant = s.callerTenantID(r)
-	}
-	if !isWithinTenantScope(callerTenant, stewardTenant) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, stewardTenant, "/api/v1/stewards/{id}/reboot-window") {
 		s.logger.Info("Cross-tenant steward reboot_window access refused",
 			"steward_id", logging.SanitizeLogValue(stewardID),
-			"steward_tenant", logging.SanitizeLogValue(stewardTenant),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			"steward_tenant", logging.SanitizeLogValue(stewardTenant))
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return "", false
 	}

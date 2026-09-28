@@ -68,10 +68,12 @@ func (s *testBlastRadiusPolicyStore) SetPolicy(_ context.Context, p *business.Bl
 
 // withPrincipal injects a principal + its tenant into the request context exactly
 // as authenticationMiddleware does for an mTLS admin cert (Issue #1990), including
-// the TenantScope authenticationMiddleware sets alongside it (Issue #4316/#4334) —
-// an empty TenantID is treated as root scope, mirroring scopeForVerifiedAdminCert,
-// so a handler that switched from the legacy TenantID string to isAuthorizedForTenant
-// does not see every test caller as unset-scope (fail-closed denied).
+// the TenantScope authenticationMiddleware sets alongside it (Issue #4316/#4334,
+// #4335) — an empty TenantID is treated as root scope, mirroring
+// scopeForVerifiedAdminCert, tenant scope otherwise. Without this, a handler
+// that switched from the legacy TenantID string to isAuthorizedForTenant (or to
+// reading TenantScope directly) sees every test caller as unset-scope and fails
+// closed, even though p.TenantID says the caller is authorized.
 func withPrincipal(req *http.Request, p *Principal) *http.Request {
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
@@ -91,6 +93,7 @@ func postRunWithPrincipal(t *testing.T, handler http.HandlerFunc, path string, p
 	req.Header.Set("Content-Type", "application/json")
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
 	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -369,6 +372,24 @@ func TestPostRunScript_TwoStewardFanout(t *testing.T) {
 			"queued execution must carry workflow_run_id")
 		assert.NotEmpty(t, e.Metadata["job_id"], "queued execution must carry job_id")
 	}
+}
+
+// TestPostRunScript_CrossTenantExplicitID_Forbidden is the [REQUIRED TEST] for
+// Issue #4335: a tenant A caller cannot re-run a script against a tenant B
+// steward by naming it explicitly via an id: selector.
+func TestPostRunScript_CrossTenantExplicitID_Forbidden(t *testing.T) {
+	stewards := []fleet.StewardResult{
+		{ID: "steward-tenant-b", TenantID: "tenant-b"},
+	}
+	server, _, _ := setupRunServer(t, stewards)
+	execPrincipal := runPrincipal("exec-caller-a", []string{"steward:execute-scripts"}, "tenant-a")
+
+	rec := postRunScript(t, server, execPrincipal, map[string]interface{}{
+		"target":    "id:steward-tenant-b",
+		"script_id": "scripts/deploy.sh",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"tenant-a caller must not be able to run a script against tenant-b's steward: %s", rec.Body.String())
 }
 
 // ---- [REQUIRED TEST] admin mTLS (empty-tenant) run dispatch (Issue #1990) ---
@@ -1080,62 +1101,61 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 }
 
 // TestRunVisibleTo_AssuranceBoundary is a table-driven regression test for the
-// runVisibleTo helper (handlers_runs.go) confirming that the Assurance-based
-// isolation gate is byte-for-byte equivalent to the deleted IsAdmin check:
+// runVisibleTo helper (handlers_runs.go), migrated to ctxkeys.TenantScope
+// (Issue #4335) confirming that the Assurance-based isolation gate is
+// byte-for-byte equivalent to the deleted IsAdmin check:
 //   - AssuranceBasic (admin) principal always sees the run regardless of tenant.
 //   - AssuranceMachine (API key / relay-grant) principal sees only same-tenant runs.
 //   - Relay-grant principals (AssuranceMachine) cannot see another tenant's run.
 func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
+	server := setupTestServer(t)
 	run := &controllerrun.RunRecord{RunID: "r1", TenantID: "tenant-a"}
 
 	cases := []struct {
-		name      string
-		principal *Principal
-		tenantID  string
-		wantVis   bool
+		name    string
+		scope   ctxkeys.TenantScope
+		wantVis bool
 	}{
 		{
-			// Admin callers (mTLS, empty TenantID) have unrestricted access.
-			// In real requests, tenantID comes from ctxkeys.TenantID which equals
-			// principal.TenantID — for admins that is "" (unrestricted).
-			name:      "AssuranceBasic_admin_any_tenant",
-			principal: &Principal{ID: "admin", Assurance: session.AssuranceBasic, GlobalScope: true, TenantID: ""},
-			tenantID:  "",
-			wantVis:   true,
+			// Admin callers (mTLS, root scope) have unrestricted access. In real
+			// requests, scope comes from ctxkeys.TenantScopeKey — for admins that
+			// is ctxkeys.NewRootScope() (unrestricted).
+			name:    "AssuranceBasic_admin_any_tenant",
+			scope:   ctxkeys.NewRootScope(),
+			wantVis: true,
 		},
 		{
-			name:      "AssuranceMachine_same_tenant",
-			principal: &Principal{ID: "key-a", Assurance: session.AssuranceMachine, TenantID: "tenant-a"},
-			tenantID:  "tenant-a",
-			wantVis:   true,
+			name:    "AssuranceMachine_same_tenant",
+			scope:   ctxkeys.NewTenantScope("tenant-a"),
+			wantVis: true,
 		},
 		{
-			name:      "AssuranceMachine_cross_tenant_hidden",
-			principal: &Principal{ID: "key-b", Assurance: session.AssuranceMachine, TenantID: "tenant-b"},
-			tenantID:  "tenant-b",
-			wantVis:   false,
+			name:    "AssuranceMachine_cross_tenant_hidden",
+			scope:   ctxkeys.NewTenantScope("tenant-b"),
+			wantVis: false,
 		},
 		{
-			// Defense-in-depth: relay-grant principal (AssuranceMachine, tenant-a scoped)
-			// must not see a tenant-b run even if the grant's tenantID were somehow wrong.
-			name: "relay_grant_cross_tenant_hidden",
-			principal: &Principal{
-				ID:        "relay:device-1:exec-001",
-				Assurance: session.AssuranceMachine,
-				TenantID:  "tenant-b", // mis-scoped grant scenario
-			},
-			tenantID: "tenant-b",
-			wantVis:  false, // run.TenantID=tenant-a ≠ tenantID=tenant-b
+			// Defense-in-depth: relay-grant scope (tenant-b scoped) must not see a
+			// tenant-a run even if the grant's tenant were somehow wrong.
+			name:    "relay_grant_cross_tenant_hidden",
+			scope:   ctxkeys.NewTenantScope("tenant-b"),
+			wantVis: false, // run.TenantID=tenant-a ≠ scope.Path()=tenant-b
+		},
+		{
+			// Unset scope (plumbing bug — no explicit scope was ever established)
+			// must be refused, never treated as unrestricted (Issue #4316/#4335).
+			name:    "unset_scope_refused",
+			scope:   ctxkeys.TenantScope{},
+			wantVis: false,
 		},
 	}
 
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			got := runVisibleTo(tc.principal, run, tc.tenantID)
+			got := server.runVisibleTo(tc.scope, run, "GET /api/v1/runs/{run_id}")
 			assert.Equal(t, tc.wantVis, got,
-				"runVisibleTo(%+v, run{TenantID=%q}, tenantID=%q)",
-				tc.principal, run.TenantID, tc.tenantID)
+				"runVisibleTo(scope=%+v, run{TenantID=%q})", tc.scope, run.TenantID)
 		})
 	}
 }
@@ -1144,24 +1164,20 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 // #3143: a session-authenticated principal has GlobalScope=true (set by middleware)
 // even when scoped to a specific tenant. Before the fix, the GlobalScope flag caused
 // runVisibleTo to return true for any run regardless of the caller's tenant. After
-// the fix, only callerTenant (from ctxkeys.TenantID) governs access.
+// the fix, only the caller's ctxkeys.TenantScope (Issue #4335) governs access.
 func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
-	// Simulate a web-session principal as middleware.go builds it: GlobalScope=true
-	// because it is hardcoded, but TenantID correctly set from the session.
-	sessionPrincipal := &Principal{
-		ID:          "web-acct-abc",
-		GlobalScope: true, // the middleware bug — this flag must no longer gate cross-tenant access
-		TenantID:    "tenant-a",
-		Assurance:   session.AssuranceBasic,
-	}
+	server := setupTestServer(t)
+
+	// A web-session principal's scope, as middleware.go builds it (tenant-a scoped) —
+	// GlobalScope is a permission-breadth flag, not a tenant-scope override.
+	scope := ctxkeys.NewTenantScope("tenant-a")
 
 	runOwnTenant := &controllerrun.RunRecord{RunID: "r-own", TenantID: "tenant-a"}
 	runOtherTenant := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
 
-	// tenantID = "tenant-a" (as set by withPrincipal via ctxkeys.TenantID in real requests).
-	assert.True(t, runVisibleTo(sessionPrincipal, runOwnTenant, "tenant-a"),
+	assert.True(t, server.runVisibleTo(scope, runOwnTenant, "GET /api/v1/runs/{run_id}"),
 		"session principal must see runs belonging to their own tenant")
-	assert.False(t, runVisibleTo(sessionPrincipal, runOtherTenant, "tenant-a"),
+	assert.False(t, server.runVisibleTo(scope, runOtherTenant, "GET /api/v1/runs/{run_id}"),
 		"session principal must NOT see runs belonging to a different tenant (Issue #3143)")
 }
 
@@ -1192,14 +1208,15 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 	}
 
 	// Tenant-scope sites: GlobalScope=false confines the principal regardless of Assurance.
+	server := setupTestServer(t)
+	scope := ctxkeys.NewTenantScope("tenant-a")
 	run := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
-	assert.False(t, runVisibleTo(strongScoped, run, "tenant-a"),
+	assert.False(t, server.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}"),
 		"AssuranceStrong+GlobalScope:false principal must be tenant-confined by runVisibleTo (cross-tenant run must be invisible)")
-	assert.True(t, runVisibleTo(strongScoped, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "tenant-a"),
+	assert.True(t, server.runVisibleTo(scope, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "GET /api/v1/runs/{run_id}"),
 		"AssuranceStrong+GlobalScope:false principal must see same-tenant runs")
 
 	// Permission breadth: ImplicitAdmin passes regardless of GlobalScope.
-	server := setupTestServer(t)
 	assert.True(t, server.hasPermission(strongScoped, "certificate:provision"),
 		"ImplicitAdmin principal must pass hasPermission for any permission regardless of GlobalScope")
 	assert.True(t, server.hasPermission(strongScoped, "rbac:create-role"),

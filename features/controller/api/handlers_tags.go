@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"sort"
-	"strings"
 
 	"github.com/gorilla/mux"
 
@@ -143,7 +142,11 @@ func (s *Server) handleDeleteStewardTags(w http.ResponseWriter, r *http.Request)
 }
 
 // resolveStewardForTags validates the steward ID, looks up the steward, and enforces
-// tenant scoping. On any error it writes the response and returns false.
+// tenant scoping via ctxkeys.TenantScope (Issue #4335). On any error it writes the
+// response and returns false. Out-of-scope and not-found both return 404
+// STEWARD_NOT_FOUND (authorizeStewardScope) so a cross-tenant caller cannot use the
+// response code as an existence oracle for steward IDs — replaces the prior 403
+// FORBIDDEN on cross-tenant, which let the two responses be told apart.
 func (s *Server) resolveStewardForTags(w http.ResponseWriter, r *http.Request) (string, bool) {
 	vars := mux.Vars(r)
 	stewardID := vars["id"]
@@ -153,26 +156,8 @@ func (s *Server) resolveStewardForTags(w http.ResponseWriter, r *http.Request) (
 		return "", false
 	}
 
-	stewardInfo, exists := s.controllerService.GetStewardInfo(stewardID)
-	if !exists {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	if !s.authorizeStewardScope(w, r, stewardID, "/api/v1/stewards/{id}/tags") {
 		return "", false
-	}
-
-	// Enforce tenant scoping: a scoped caller may only operate on stewards in its
-	// own subtree. mTLS admin principals (empty TenantID) have global access.
-	// Returns 403 (not 404) to match the handleConfigPush cross-tenant guard pattern
-	// and the explicit requirement in issue #2545 AC.
-	callerTenantID := s.callerTenantID(r)
-	if callerTenantID != "" {
-		inSubtree := stewardInfo.TenantID == callerTenantID ||
-			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
-		if !inSubtree {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"caller may only manage tags for stewards in its own tenant subtree",
-				"FORBIDDEN")
-			return "", false
-		}
 	}
 
 	return stewardID, true

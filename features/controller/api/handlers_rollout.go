@@ -15,6 +15,7 @@ import (
 
 	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -188,7 +189,7 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -212,9 +213,13 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation: non-admin callers may only view their own tenant's rollouts.
-	if callerTenantID != "" && record.TenantID != callerTenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+	// Tenant isolation (Issue #4335): migrated to ctxkeys.TenantScope, and the
+	// response now matches the not-found case (ROLLOUT_NOT_FOUND) rather than a
+	// distinguishable 403 FORBIDDEN, so a cross-tenant caller cannot use the
+	// response to tell "does not exist" apart from "exists in another tenant".
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, record.TenantID, "GET /api/v1/rollout/{rollout_id}") {
+		s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
 		return
 	}
 
@@ -269,7 +274,7 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, callerTenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -293,9 +298,13 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant isolation.
-	if callerTenantID != "" && record.TenantID != callerTenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+	// Tenant isolation (Issue #4335): migrated to ctxkeys.TenantScope, and the
+	// response now matches the not-found case (ROLLOUT_NOT_FOUND) rather than a
+	// distinguishable 403 FORBIDDEN, so a cross-tenant caller cannot use the
+	// response to tell "does not exist" apart from "exists in another tenant".
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/rollout/{rollout_id}/halt") {
+		s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
 		return
 	}
 

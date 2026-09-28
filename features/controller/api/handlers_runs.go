@@ -236,12 +236,13 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 	return principal, tenantID, true
 }
 
-// runVisibleTo reports whether the caller may read/cancel the given run.
-// Callers scoped to a tenant see only runs within their authorized subtree; an
-// empty tenantID (mTLS admin) has unrestricted access. Callers return 404 (not
-// 403) on false to avoid leaking cross-tenant run existence (Issue #1990).
-func runVisibleTo(_ *Principal, run *controllerrun.RunRecord, tenantID string) bool {
-	return isWithinTenantScope(tenantID, run.TenantID)
+// runVisibleTo reports whether the caller may read/cancel the given run, using the
+// caller's ctxkeys.TenantScope (Issue #4335) rather than the raw tenantID string:
+// an unset scope is refused (not treated as root), root always passes, and a tenant
+// scope is checked via subtree containment. Callers return 404 (not 403) on false to
+// avoid leaking cross-tenant run existence (Issue #1990).
+func (s *Server) runVisibleTo(scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) bool {
+	return s.isAuthorizedForTenant(scope, run.TenantID, route)
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.
@@ -276,6 +277,37 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	if s.fleetQuery == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
 		return
+	}
+
+	// Tenant scope check for explicit id: targets (Issue #4335), mirroring
+	// handlePostRunCommand's enforceExecTenantScope gate — a root-scoped caller
+	// (mTLS admin) is unrestricted; a tenant-scoped caller may only target stewards
+	// within its own subtree. selector.Parse populates filter.IDs (comma-OR list);
+	// filter.DeviceID is the legacy query-param path only.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() {
+		for _, targetID := range filter.IDs {
+			switch s.enforceExecTenantScopeForCallerScope(r.Context(), targetID, scope) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
+		}
+		if filter.DeviceID != "" {
+			switch s.enforceExecTenantScopeForCallerScope(r.Context(), filter.DeviceID, scope) {
+			case execScopeForbidden:
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"access denied: steward is not in your tenant scope", "FORBIDDEN")
+				return
+			case execScopeIndeterminate:
+				s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+				return
+			}
+		}
 	}
 
 	// Look up script metadata for per-steward parameter resolution. Non-fatal if
@@ -549,7 +581,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -573,7 +605,8 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant isolation: return 404 (not 403) to avoid leaking existence across tenants.
-	if !runVisibleTo(principal, run, tenantID) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
@@ -588,7 +621,7 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -611,7 +644,8 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list jobs", "INTERNAL_ERROR")
 		return
 	}
-	if !runVisibleTo(principal, run, tenantID) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}/jobs") {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
@@ -637,7 +671,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, tenantID, ok := s.authRunAccess(w, r)
+	_, _, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -661,7 +695,8 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to cancel run", "INTERNAL_ERROR")
 		return
 	}
-	if !runVisibleTo(principal, run, tenantID) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.runVisibleTo(scope, run, "DELETE /api/v1/runs/{run_id}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
 		return
 	}
@@ -725,6 +760,23 @@ const (
 	// deny rather than permit.
 	execScopeIndeterminate
 )
+
+// enforceExecTenantScopeForCallerScope is the ctxkeys.TenantScope-based counterpart to
+// enforceExecTenantScope (Issue #4335): root scope always allows; an unset scope (or a
+// tenant scope with an empty path) always denies — fail closed, unlike a raw
+// principalTenantID=="" comparison, which cannot distinguish a genuine root caller from
+// a plumbing bug that lost the caller's tenant; a tenant scope defers to the same
+// fleet-lookup/prefix logic as enforceExecTenantScope.
+func (s *Server) enforceExecTenantScopeForCallerScope(ctx context.Context, deviceID string, scope ctxkeys.TenantScope) execTenantScopeDecision {
+	switch {
+	case scope.IsRoot():
+		return execScopeAllowed
+	case scope.IsTenant() && scope.Path() != "":
+		return s.enforceExecTenantScope(ctx, deviceID, scope.Path())
+	default:
+		return execScopeForbidden
+	}
+}
 
 // enforceExecTenantScope checks whether the principal's tenantID is a path-prefix
 // (or exact match) of the target steward's tenantID. See execTenantScopeDecision

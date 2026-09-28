@@ -57,6 +57,11 @@ func requestAsPrincipal(t *testing.T, method, path string, targetID string, prin
 	req = mux.SetURLVars(req, map[string]string{"id": targetID})
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, principal.TenantID)
 	ctx = context.WithValue(ctx, principalContextKey, principal)
+	// Issue #4335: also carry the ctxkeys.TenantScope authenticationMiddleware sets
+	// alongside ctxkeys.TenantID, mirroring scopeForVerifiedAdminCert — otherwise a
+	// handler migrated to read TenantScope sees an unset scope and fails closed even
+	// for this helper's root-scoped principals.
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(principal.TenantID))
 	return req.WithContext(ctx)
 }
 

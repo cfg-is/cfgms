@@ -51,11 +51,16 @@ type selectorResolveError struct {
 // resolveSelectorFilter parses selectorExpr and enforces the caller's tenant subtree scope,
 // returning a filter ready for fleetQuery.Search. An explicit tenant prefix in the selector
 // must be at or below the caller's own node; an absent prefix defaults to the caller's entire
-// subtree. Admin callers (empty tid, from ctxkeys.TenantID) are unrestricted.
+// subtree. Root-scoped callers (ctxkeys.TenantScope) are unrestricted.
 //
 // This is the sole tenant-scoping enforcement path for selector-driven target resolution —
 // shared rather than duplicated so every caller (handleResolveSelector,
 // handleOperatorPayloadSignBegin) enforces identical cross-tenant boundaries.
+//
+// Migrated to ctxkeys.TenantScope (Issue #4335): an unset scope is refused rather than
+// silently treated as unrestricted the way a raw ctxkeys.TenantID=="" comparison would —
+// that ambiguity is exactly what let a plumbing bug (a dropped context, or a wrong
+// context key) resolve every selector fleet-wide instead of denying the request.
 func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string) (fleet.Filter, *selectorResolveError) {
 	if selectorExpr == "" {
 		return fleet.Filter{}, &selectorResolveError{
@@ -73,7 +78,21 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 		}
 	}
 
-	tid, _ := ctx.Value(ctxkeys.TenantID).(string)
+	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	var tid string
+	switch {
+	case scope.IsRoot():
+		// Unrestricted: tid stays "".
+	case scope.IsTenant() && scope.Path() != "":
+		tid = scope.Path()
+	default:
+		s.logger.Info("Selector resolution refused: caller tenant scope is unset")
+		return fleet.Filter{}, &selectorResolveError{
+			status: http.StatusForbidden, code: "FORBIDDEN",
+			message: "tenant scope required",
+		}
+	}
+
 	if parsedTenantPath != "" {
 		if tid != "" && parsedTenantPath != tid && !strings.HasPrefix(parsedTenantPath, tid+"/") {
 			s.logger.Info("Selector tenant outside caller subtree",

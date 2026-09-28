@@ -17,7 +17,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
@@ -48,10 +47,12 @@ type configPushRequest struct {
 // (never the caller's tenant), records an audit event, triggers a fire-and-forget
 // fan-out to matched stewards via commandPublisher, and returns 202 Accepted.
 func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
-	// Require an authenticated principal.
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.respondError(w, http.StatusUnauthorized, "authentication required")
+	// Require an authenticated principal, routed through the same assurance and
+	// empty-tenant guard as handleGetJob/handleCreateJob/handlePostRunScript/
+	// handlePostRunCommand (Issue #4335), rather than a separate ad hoc check: a
+	// machine principal with no tenant is rejected here too.
+	principal, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -77,7 +78,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Authorize caller: tenant-scoped callers may only push configs labelled with
 	// their own tenant. Admin callers (TenantID == "") may push any cfg.TenantID,
 	// but the fan-out is still scoped to that specific tenant — never left empty.
-	if principal.TenantID != "" && principal.TenantID != cfg.TenantID {
+	if tenantID != "" && tenantID != cfg.TenantID {
 		s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
 		return
 	}
@@ -340,9 +341,11 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.respondError(w, http.StatusUnauthorized, "authentication required")
+	// Routed through the same assurance and empty-tenant guard as
+	// handleGetJob/handleCreateJob/handlePostRunScript/handlePostRunCommand
+	// (Issue #4335), rather than a separate ad hoc check.
+	_, tenantID, ok := s.authRunAccess(w, r)
+	if !ok {
 		return
 	}
 
@@ -363,8 +366,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, record.TenantID) {
+	if !isWithinTenantScope(tenantID, record.TenantID) {
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

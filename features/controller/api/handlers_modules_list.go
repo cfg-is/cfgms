@@ -40,6 +40,14 @@ var moduleStatusFilterValues = map[string]cache.ApprovalStatus{
 // the read-only catalog view backing `cfg module list`. Distinct in purpose
 // from GET /api/v1/modules/approvals, which is the pending-only human review
 // queue feeding the web UI's useModuleQueue.ts and must keep that shape.
+//
+// The module cache is a controller-wide catalog, not a per-tenant resource:
+// cache.CacheEntry (Publisher/Name/Version/ContentHash/Status) carries no
+// TenantID, modules are packaged, verified and staged once per controller
+// (CLAUDE.md Modules/ADR-006) and reused by every tenant that controller
+// serves. There is no owning tenant to check the caller against.
+//
+//architecture:allow-unscoped-tenant-read -- controller-wide module catalog, no owning tenant (Issue #4335)
 func (s *Server) handleListModules(w http.ResponseWriter, r *http.Request) {
 	if s.moduleCacheLister == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Module cache not configured", "SERVICE_UNAVAILABLE")

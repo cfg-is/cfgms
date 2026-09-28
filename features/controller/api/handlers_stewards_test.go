@@ -4447,3 +4447,376 @@ func TestStewardHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.StewardStatusDeregistered, got.Status)
 }
+
+// ---- DNA attribute denylist redaction on list/get/dna bodies (Issue #4335) ----
+
+// sensitiveDNAAttrs returns a DNA attribute set carrying one key per
+// dnaAttributeDenylist pattern alongside benign keys. Every sensitive value embeds
+// the marker "must-not-leak" so a body-wide assertion can catch it surfacing under
+// any key, in any response shape.
+func sensitiveDNAAttrs() map[string]string {
+	return map[string]string{
+		"hostname":        "denylist-host",
+		"os":              "linux",
+		"arch":            "amd64",
+		"auth_token":      "token-must-not-leak",
+		"api_secret":      "secret-must-not-leak",
+		"user_password":   "password-must-not-leak",
+		"user_credential": "credential-must-not-leak",
+		"service_api_key": "apikey-must-not-leak",
+	}
+}
+
+// denylistedDNAKeys are the sensitiveDNAAttrs keys filteredDNAAttrs must drop.
+var denylistedDNAKeys = []string{
+	"auth_token",      // matches *token*
+	"api_secret",      // matches *secret*
+	"user_password",   // matches *password*
+	"user_credential", // matches *credential*
+	"service_api_key", // matches *api_key*
+}
+
+// assertDNAAttrsRedacted asserts every denylisted key is gone from attrs AND that a
+// benign key survived — dropping the whole map would satisfy the first half alone —
+// AND that no sensitive value appears anywhere in the raw body under another key.
+func assertDNAAttrsRedacted(t *testing.T, attrs map[string]string, body string) {
+	t.Helper()
+	assert.Equal(t, "denylist-host", attrs["hostname"],
+		"benign attributes must survive the denylist filter")
+	for _, key := range denylistedDNAKeys {
+		assert.NotContains(t, attrs, key,
+			"denylisted attribute %q must not appear in the response", key)
+	}
+	assert.NotContains(t, body, "must-not-leak",
+		"no denylisted attribute value may appear anywhere in the response body")
+}
+
+// TestHandleListStewards_UnfilteredPath_DenylistedDNAAttributesRedacted covers the
+// no-query-param list path: a steward whose DNA carries tokens/credentials must be
+// listed with those attributes stripped.
+func TestHandleListStewards_UnfilteredPath_DenylistedDNAAttributesRedacted(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+	registerTestStewardWithDNA(t, server, sensitiveDNAAttrs(), "test-tenant")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.NotNil(t, resp.Data[0].DNA)
+	assertDNAAttrsRedacted(t, resp.Data[0].DNA.Attributes, rec.Body.String())
+}
+
+// TestHandleListStewards_FilteredPath_DenylistedDNAAttributesRedacted covers the
+// FleetQuery-backed list path selected by ?os= and friends, which builds DNA
+// attributes from fleet.StewardData rather than from fragments.
+func TestHandleListStewards_FilteredPath_DenylistedDNAAttributesRedacted(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{{
+			ID:            "s-filtered-denylist",
+			TenantID:      "test-tenant",
+			Status:        "online",
+			LastHeartbeat: time.Now(),
+			DNAAttributes: sensitiveDNAAttrs(),
+		}},
+	})
+	apiKey := NewTestKey(t, server, []string{"steward:list"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards?os=linux", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.NotNil(t, resp.Data[0].DNA)
+	assertDNAAttrsRedacted(t, resp.Data[0].DNA.Attributes, rec.Body.String())
+}
+
+// TestHandleListStewards_SelectorPath_DenylistedDNAAttributesRedacted covers the
+// third list path, ?q=<selector>, which has its own attribute-copy site.
+func TestHandleListStewards_SelectorPath_DenylistedDNAAttributesRedacted(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
+		stewards: []fleet.StewardData{{
+			ID:            "s-selector-denylist",
+			TenantID:      "test-tenant",
+			Status:        "online",
+			LastHeartbeat: time.Now(),
+			DNAAttributes: sensitiveDNAAttrs(),
+		}},
+	})
+
+	rec := listStewardsWithSelector(server, "all", "test-tenant")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 1)
+	require.NotNil(t, resp.Data[0].DNA)
+	assertDNAAttrsRedacted(t, resp.Data[0].DNA.Attributes, rec.Body.String())
+}
+
+// TestHandleGetSteward_DenylistedDNAAttributesRedacted covers GET /stewards/{id},
+// which copied DNAFromProto's attribute map into the response verbatim.
+func TestHandleGetSteward_DenylistedDNAAttributesRedacted(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read"})
+	stewardID := registerTestStewardWithDNA(t, server, sensitiveDNAAttrs(), "test-tenant")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Data.DNA)
+	assertDNAAttrsRedacted(t, resp.Data.DNA.Attributes, rec.Body.String())
+}
+
+// TestHandleGetStewardDNA_BulkResponse_DenylistedAttributesRedacted closes the
+// bypass beside the hardened single-key lookup: omitting ?attribute= must not dump
+// the very values ?attribute=<denylisted key> refuses with DNA_ATTRIBUTE_REDACTED.
+func TestHandleGetStewardDNA_BulkResponse_DenylistedAttributesRedacted(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:read-dna"})
+	stewardID := registerTestStewardWithDNA(t, server, sensitiveDNAAttrs(), "test-tenant")
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/dna", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data DNAInfo `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assertDNAAttrsRedacted(t, resp.Data.Attributes, rec.Body.String())
+}
+
+// ---- Tenant-scope gates on steward-keyed routes (Issue #4335) ----
+
+// TestHandleStewardAuthRefresh_CrossTenant_Returns404 is the regression test for the
+// authorization gate added to POST /stewards/{id}/auth/refresh, which previously
+// checked existence only: a tenant-a caller must not act on tenant-b's steward, and
+// must not learn it exists.
+func TestHandleStewardAuthRefresh_CrossTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "auth-refresh-cross-host", "os": "linux",
+	}, "tenant-b")
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:auth-refresh"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-a caller must not refresh auth on a tenant-b steward: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code,
+		"the cross-tenant answer must be indistinguishable from a genuine miss")
+}
+
+// TestHandleStewardAuthRefresh_OwningTenantScopedCaller_Returns200 is the
+// over-denial control for the gate above: the steward's own tenant still succeeds.
+func TestHandleStewardAuthRefresh_OwningTenantScopedCaller_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "auth-refresh-owned-host", "os": "linux",
+	}, "tenant-b")
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:auth-refresh"}, "tenant-b", 5*time.Minute)
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/auth/refresh", strings.NewReader("{}"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "the owning tenant must not be denied: %s", rec.Body.String())
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, "refresh_requested", body["status"])
+}
+
+// TestHandleGetStewardConfig_CrossTenant_Returns404 covers the gate added to
+// GET /stewards/{id}/config: another tenant's stored configuration must not be
+// readable, and the refusal must not disclose the steward's existence.
+func TestHandleGetStewardConfig_CrossTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "cfg-cross-tenant-host", "os": "linux",
+	}, "tenant-b")
+	storeTestConfig(t, server, "tenant-b", stewardID)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-config"}, "tenant-a", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID+"/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-a caller must not read tenant-b's steward config: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+	assert.NotContains(t, rec.Body.String(), "modules", "no configuration content may leak in the refusal")
+}
+
+// TestHandleGetStewardConfig_OfflineStewardOwnedByOtherTenant_Returns404 is the
+// regression test for the lenient gate's durable-store fallback. The connection
+// registry is per-node (Issue #3480), so a steward owned by tenant-b that is offline
+// or attached to a peer controller is absent from GetStewardInfo. Without the
+// fallback the gate resolved such a steward to the CALLER'S own tenant, which is
+// always self-authorized — a bypass of the very boundary the gate adds.
+func TestHandleGetStewardConfig_OfflineStewardOwnedByOtherTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+
+	// Durable store only: never registered with this node's controller service,
+	// which is exactly the offline / peer-attached shape.
+	require.NoError(t, st.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "s-offline-tenant-b",
+		TenantID: "tenant-b",
+		Status:   business.StewardStatusActive,
+		LastSeen: time.Now().UTC(),
+	}))
+	storeTestConfig(t, server, "tenant-b", "s-offline-tenant-b")
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:read-config"}, "tenant-a", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/stewards/s-offline-tenant-b/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"an offline steward's durable owner must still gate the caller: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetStewardConfig_UnknownStewardStaysLenient pins the other half of the
+// fallback: a steward absent from both the registry and the durable store must still
+// pass the gate, leaving the downstream lookup to answer. A durable store is wired
+// here so the test proves the fallback added leniency-preserving behaviour rather
+// than turning every unknown ID into a 404 at the gate.
+func TestHandleGetStewardConfig_UnknownStewardStaysLenient(t *testing.T) {
+	server := setupTestServer(t)
+	st, _ := newTestStewardDurableStore(t)
+	server.SetStewardStore(st)
+	apiKey := NewTestKey(t, server, []string{"steward:read-config"})
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards/never-registered-steward/config", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"the gate must not 404 an unknown steward; the config lookup answers: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "CONFIG_ERROR", errResp.Error.Code)
+}
+
+// validateConfigBody is a minimal POST /stewards/{id}/config/validate payload.
+func validateConfigBody(stewardID string) string {
+	return `{"config":{"steward":{"id":"` + stewardID + `","logging":{"level":"info"}},` +
+		`"modules":{"file":"file"},"resources":[]},"version":"1.0"}`
+}
+
+// TestHandleValidateConfig_OwningTenant_Returns200 gives POST
+// /stewards/{id}/config/validate its first functional test: the owning tenant's
+// caller reaches the validation service and receives a ConfigValidationResult.
+func TestHandleValidateConfig_OwningTenant_Returns200(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "validate-host", "os": "linux",
+	}, "test-tenant")
+	apiKey := NewTestKey(t, server, []string{"steward:validate-config"})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/config/validate",
+		strings.NewReader(validateConfigBody(stewardID)))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "validation must run for the owning tenant: %s", rec.Body.String())
+	var resp struct {
+		Data ConfigValidationResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Data.Valid, "a well-formed steward config must validate: %+v", resp.Data.Errors)
+}
+
+// TestHandleValidateConfig_MalformedBody_Returns400 pins the handler's input
+// validation alongside the happy path above.
+func TestHandleValidateConfig_MalformedBody_Returns400(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"steward:validate-config"})
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/some-steward/config/validate",
+		strings.NewReader("{not json"))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "INVALID_JSON", errResp.Error.Code)
+}
+
+// TestHandleValidateConfig_CrossTenant_Returns404 covers the gate added to
+// POST /stewards/{id}/config/validate.
+func TestHandleValidateConfig_CrossTenant_Returns404(t *testing.T) {
+	server := setupTestServer(t)
+	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+		"hostname": "validate-cross-host", "os": "linux",
+	}, "tenant-b")
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:validate-config"}, "tenant-a", 5*time.Minute)
+
+	req := httptest.NewRequest("POST", "/api/v1/stewards/"+stewardID+"/config/validate",
+		strings.NewReader(validateConfigBody(stewardID)))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"a tenant-a caller must not validate config against a tenant-b steward: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.NotNil(t, errResp.Error)
+	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}

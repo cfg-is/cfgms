@@ -86,6 +86,19 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Tenant scope check (Issue #4335): the target IS the tenant named by {id}, so
+	// its "owning tenant" is itself. requirePermission's isolation-engine boundary
+	// check (middleware.go, resourceType=="tenant") already enforces this at the
+	// route layer; this handler-local check adds the explicit ctxkeys.TenantScope
+	// read and the fail-closed IsUnset() refusal AC1 requires, as defense in depth
+	// rather than relying solely on the gate. Same 404 as a genuinely unknown
+	// tenant, so the response cannot be used as an existence oracle.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/tenants/{id}/config-source/test") {
+		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		return
+	}
+
 	// Rate limit: max configTestMaxPerTenant requests per tenant per hour.
 	val, _ := s.configSourceRateLimits.LoadOrStore(tenantID, &configTestRecord{
 		windowStart: time.Now(),

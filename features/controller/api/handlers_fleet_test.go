@@ -245,22 +245,29 @@ func seededFleetQuery(stewards ...fleet.StewardData) fleet.FleetQuery {
 	return fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: stewards})
 }
 
+// postResolveSelector simulates an unrestricted (root-scoped, mTLS admin) caller —
+// carries ctxkeys.TenantScope as root (Issue #4335) so tests that don't care about
+// tenant scoping aren't refused by the unset-scope fail-closed check.
 func postResolveSelector(server *Server, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
 		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 	rec := httptest.NewRecorder()
 	server.handleResolveSelector(rec, req)
 	return rec
 }
 
+// postResolveSelectorWithTenant carries both ctxkeys.TenantID and the corresponding
+// ctxkeys.TenantScope (Issue #4335): an empty tenantID means root (mirrors
+// scopeForVerifiedAdminCert), a non-empty one means a tenant scope.
 func postResolveSelectorWithTenant(server *Server, body, tenantID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
 		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	if tenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
-	}
+	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, tenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(tenantID))
+	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 	server.handleResolveSelector(rec, req)
 	return rec
@@ -541,8 +548,10 @@ func postResolveSelectorWithPrincipal(server *Server, body, tenantID string, isA
 	}
 	if isAdmin {
 		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceBasic, TenantID: ""})
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
 	} else {
 		ctx = context.WithValue(ctx, principalContextKey, &Principal{Assurance: session.AssuranceMachine, TenantID: tenantID})
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(tenantID))
 	}
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -691,6 +700,25 @@ func TestHandleResolveSelector_SubtreeBoundary_ExplicitOwnTenantAllowed(t *testi
 // TestHandleResolveSelector_TenantIsolation verifies that a caller authenticated
 // as tenant-a cannot see tenant-b stewards even when the selector would otherwise
 // match them (e.g. "all"). The authenticated tenant is always AND-ed onto the filter.
+// TestHandleResolveSelector_UnsetTenantScope_Refused is the [REQUIRED TEST] for Issue
+// #4335: a request whose ctxkeys.TenantScope was never established (the plumbing-bug
+// signature) must be refused, not silently resolved fleet-wide the way a raw
+// ctxkeys.TenantID=="" comparison would treat it.
+func TestHandleResolveSelector_UnsetTenantScope_Refused(t *testing.T) {
+	server := setupTestServer(t)
+	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{stewards: multiTenantFleet()})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/fleet/resolve",
+		bytes.NewBufferString(`{"selector":"all"}`))
+	req.Header.Set("Content-Type", "application/json")
+	// Deliberately no ctxkeys.TenantScopeKey in context.
+	rec := httptest.NewRecorder()
+	server.handleResolveSelector(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"an unset tenant scope must be refused, not resolved fleet-wide: %s", rec.Body.String())
+}
+
 func TestHandleResolveSelector_TenantIsolation(t *testing.T) {
 	server := setupTestServer(t)
 	server.fleetQuery = fleet.NewMemoryQuery(&fleetTestStewardProvider{
