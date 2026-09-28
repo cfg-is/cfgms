@@ -8,7 +8,7 @@
 # This is not a place to silence the gate. Every entry needs a written
 # reason: either a genuine contract that intentionally has no implementation
 # yet, a package that is unreachable from `main` by design (a test suite
-# entry point, never imported), or a tracked baseline entry pending its own
+# entry point, never imported), or a tracked entry pending its own
 # removal-or-wiring-in follow-up story. It is not a home for abandoned code.
 #
 # Format: each entry is a list item with a `path` (import path relative to
@@ -21,6 +21,20 @@
 # removed should have its entry deleted in the same change — a stale entry
 # (allowlisting a package the gate no longer finds unreachable) fails the
 # gate just like an unlisted unreachable package does.
+#
+# Issue #4345 classified every package that Issue #4317 had parked under a
+# generic "baseline" placeholder reason as CONTRACT, WIRE, or DELETE, with
+# specific evidence for each. The full classification, including the exact
+# follow-up issue titles/bodies drafted for the PO to file, is recorded as a
+# comment on Issue #4345 — this file carries only the one-line reason each
+# entry needs to justify its place in the allowlist. Three packages this
+# story classified (pkg/controlplane/providers/memory,
+# pkg/maintenance/providers/steward, features/controller/modules/sources/git)
+# do NOT have entries here: check-dead-packages.sh already buckets them as
+# "reachable only from _test.go files" (test-support, informational), which
+# is not the same set as `dead.txt` this file guards — adding them here would
+# fail the gate's own stale-entry check. Their classification is recorded on
+# Issue #4345 only.
 
 packages:
   # --- Confirmed contracts with no implementation yet -----------------------
@@ -41,10 +55,39 @@ packages:
       Confirmed contract with no implementation yet. Reachable only through
       features/controller/directory, which is reachable only through
       features/controller — and neither of those is reachable from any
-      main package either (see the features/controller entry below). An
+      main package either (see Issue #4345's WIRE entries below). An
       importer-walking check would follow that chain and wrongly conclude
       this package is live; the dependency-closure-from-main computation in
       check-dead-packages.sh does not make that mistake.
+
+  - path: pkg/directory/types
+    reason: >
+      Confirmed contract, Issue #4345: type definitions for the directory
+      abstraction (Computer/Group/User/errors), consumed only by
+      pkg/directory/interfaces (contract, no implementation), by
+      features/controller/directory (unreachable, see the WIRE entry
+      below), and by features/workflow/modules/m365 (out of scope for
+      #4345 — its own module-wiring story). No reachable consumer exists
+      yet; this is the types half of the same contract as
+      pkg/directory/interfaces above, not abandoned code.
+
+  # --- Confirmed contracts delivered through a non-Go-import mechanism -------
+  - path: features/workflow/templates
+    reason: >
+      Confirmed contract, Issue #4345: promote-hv-role.yaml here is the
+      documented "authoritative" copy, live in production via a manual
+      dual-copy pattern (Issue #2669/#2670) — cmd/cfg/cmd/workflow.go
+      `//go:embed`s a byte-identical copy at cmd/cfg/cmd/templates/, because
+      go:embed cannot reference paths outside its own package directory.
+      Both files' headers cross-reference each other and instruct keeping
+      them in sync; features/controller/api/handlers_workflows_promote_hv_role_test.go
+      also parses this copy directly by path, calling it authoritative. The
+      Go-import reachability model cannot see this YAML-level dependency, so
+      the package reads as dead when it is not. rollout_steward.yaml in the
+      same directory has no such copy and no reference anywhere in the repo;
+      Issue #4345 filed a narrow follow-up to confirm it is live or delete
+      it (see the #4345 classification comment) rather than resolving that
+      question by fiat here.
 
   # --- Test suite entry points: never imported by design ---------------------
   # These packages ARE the integration/E2E/unit test suites (Test File
@@ -82,36 +125,15 @@ packages:
   - path: test/unit/steward
     reason: test suite entry point (test/unit/steward), run via `go test`, never imported.
 
-  # --- Baseline (Issue #4317): tracked for removal or wiring-in -------------
-  # These are the packages check-dead-packages.sh found unreachable when the
-  # gate was introduced and that are neither a confirmed contract nor a test
-  # suite entry point. Removing or wiring in any of these is explicitly out
-  # of scope for Issue #4317 (see its "Out of Scope" section) and is
-  # follow-up work; this baseline exists only so the gate can go live without
-  # blocking on that follow-up landing first. NEW unreachable packages must
-  # not be added here — they must be wired in, removed, or justified on their
-  # own merits.
-  - path: api/proto
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: api/proto/steward
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/config/git/providers
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/controller
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/controller/cirunner
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/controller/directory
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+  # --- Out of scope for Issue #4345: module-kind work with its own wiring ---
+  # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
+  # --- section to avoid double-covering the same packages. Reasons below ----
+  # --- are unchanged from Issue #4317's original baseline entries. ----------
   - path: features/modules/extended/activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/modules/extended/activedirectory/tests
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/modules/extended/network_activedirectory
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/saas
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/steward/modules/runtime
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
@@ -135,25 +157,196 @@ packages:
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365/intune_policy
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/templates
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/transform
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/transform/builtin
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: internal/cli/commands
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: internal/controller
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: pkg/configrouting
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: pkg/directory/dna
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: pkg/directory/providers/network_activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: pkg/directory/types
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+
+  # --- WIRE (Issue #4345): real, tested implementations missing only a ------
+  # --- caller/registration point. Follow-up issues drafted in the #4345 -----
+  # --- classification comment, pending PO creation. Wiring or deleting any --
+  # --- of these is explicitly out of scope for #4345 — see its Out of Scope.
+  - path: features/controller/directory
+    reason: >
+      WIRE (Issue #4345): DirectoryService facade, real implementation
+      (service.go, interfaces.go). Its only non-excluded consumer,
+      features/controller (root), is itself DELETE-classified below — the
+      wiring gap is a caller one level up: features/controller/server or
+      cmd/controller/main.go needs to construct this service directly (the
+      way it already constructs other features/controller/* subpackages),
+      then register a pkg/directory/interfaces provider. Tightly coupled to
+      pkg/directory/dna below (its sole consumer). Wiring must coordinate
+      with the separate M365/AD module-wiring story and include a security
+      review — pkg/directory/providers/network_activedirectory/provider.go
+      (out of #4345's package list, owned by that story) carries a
+      confirmed finding that would go live the moment a provider is
+      registered here.
+
+  - path: pkg/directory/dna
+    reason: >
+      WIRE (Issue #4345): directory-object DNA drift/monitoring extension,
+      10k+ lines, under active maintenance (touched in the current develop
+      tip, Issue #4341, alongside a log-sanitization pass) — not abandoned.
+      Reachable only through features/controller/directory (WIRE, above),
+      whose own caller is missing. Same follow-up as
+      features/controller/directory; the fix is a caller two levels up in
+      features/controller/server / cmd/controller, not in this package.
+
+  - path: pkg/configrouting
+    reason: >
+      WIRE (Issue #4345): SyncService (root package only — the
+      interfaces/providers subpackages are already live). Fully
+      implemented and tested background config-source polling; its trigger
+      interface is implemented by exactly one production type,
+      controllerRouter in pkg/configrouting/providers/controller, built
+      specifically to satisfy it per that file's own doc comment. Never
+      constructed by features/controller/service/config_service_v2.go or
+      features/controller/server/server.go — a "Phase 3" wiring the
+      original PR (#1410) deferred and nothing since has picked up.
+
+  - path: features/saas
+    reason: >
+      WIRE (Issue #4345): multi-tenant SaaS provider/JWT/OAuth2
+      infrastructure with real security-hardening history (mock OAuth2/JWT
+      replaced with real implementations, cross-tenant token-mismatch
+      rejection). Its only consumer, features/workflow/modules/m365/gdap,
+      is itself unreachable — out of scope for #4345 (M365 module-wiring is
+      its own story). docs/product/roadmap.md still lists "SaaS Steward
+      using workflow engine foundation" and "Advanced multi-tenant SaaS
+      management" as open (unchecked) items. Wiring this package is
+      sequenced after, and should be decided jointly with, the M365
+      module-wiring story — deleting it would strand that tree's only
+      tenant-auth layer.
+
+  - path: features/steward/modules/runtime
+    reason: >
+      WIRE (Issue #4345): steward-kind out-of-process module runtime
+      (fork/exec, gRPC handshake, publisher-trust enforcement). Recently
+      security-hardened (Issue #1905, socket dir mode 0700), with real
+      integration tests against a compiled test module binary — not
+      abandoned. docs/architecture/decisions/019-third-party-module-inclusion-and-trust.md
+      names this exact gap explicitly: "Today it cannot [fork/exec signed
+      bundles] (compiled-in built-ins). Wiring the bundle runtime ... is a
+      prerequisite owned by the module-foundation epic (ADR-016)." Missing
+      only a call site in cmd/steward's startup path.
+
   - path: pkg/entitygraph/writers/correlator
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+    reason: >
+      WIRE (Issue #4345): MAC-identity correlator (ADR-022 §3, Issue
+      #3369), complete and tested, no stub markers. Its own package README
+      states it is "a standalone-invokable writer pending controller-startup
+      wiring (#3253)" — #3253 wired the sibling configstore writer and
+      explicitly deferred this one. Needs a construct-and-set call in
+      features/controller/server/server.go plus new periodic-sweep
+      scheduling (no existing job-scheduler to piggyback on), and a
+      pre-wiring security review of its deliberately cross-tenant sweep
+      given the repo's recent tenant-containment hardening (Issue #4335).
+
   - path: pkg/entitygraph/writers/tenantsync
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
+    reason: >
+      WIRE (Issue #4345): tenant-hierarchy mirror writer (ADR-022 §7, Issue
+      #3370), complete and tested, no stub markers. Same deferred-wiring
+      shape as pkg/entitygraph/writers/correlator (epic #2853); needs a
+      construct-and-Ingest call in features/controller/server/server.go —
+      both its dependencies (the entity-graph provider and
+      storageManager.GetTenantStore()) are already local variables at the
+      sibling configstore writer's wiring point, so no new plumbing is
+      needed, only the call and a decision on sync cadence/trigger. Needs
+      the same pre-wiring security review as correlator: it does not set
+      owning_tenant (by design, per its own doc — authorization never uses
+      graph traversal per ADR-022 §7), but mirrors tenant topology and
+      shares the same reserved-delimiter injection class recent
+      tenant-containment work has been closing.
+
+  # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
+  # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
+  # --- classification comment, pending PO creation. Deleting any of these ---
+  # --- is explicitly out of scope for #4345 — see its Out of Scope section.
+  - path: api/proto
+    reason: >
+      DELETE (Issue #4345): mechanically "Code generated by protoc-gen-go"
+      but a stale duplicate of the live api/proto/common package — same
+      package name, generated from the same common/common.proto, but an
+      older go_package option and pre-AGPL license header, with no .proto
+      source file present in this directory to regenerate it. Commit
+      75f9c342 (Issue #3331) hand-edited this file to match
+      api/proto/common.pb.go's schema and calls it "the legacy
+      api/proto/common.pb.go" in its own commit message. Two divergent
+      copies of the same schema, manually kept in sync, is the rot this
+      story exists to surface — not a genuine generated contract.
+
+  - path: api/proto/steward
+    reason: >
+      DELETE (Issue #4345): mechanically "Code generated by protoc-gen-go"
+      but the source .proto still carries the pre-AGPL-migration
+      Apache-2.0/"CFGMS Contributors" header (missed by the 2026-05-25
+      license sweep because nothing since has touched this file) —
+      confirming it predates and was superseded by the current proto
+      layout. Its RegisterRequest/RegisterResponse/HeartbeatRequest
+      messages are superseded by the live, actually-used definitions in
+      api/proto/controller and api/proto/transport; pkg/registration
+      implements real registration logic without referencing this package.
+      Zero importers anywhere.
+
+  - path: features/config/git/providers
+    reason: >
+      DELETE (Issue #4345): GitHubProvider implementation for the git
+      config-storage backend that docs/architecture/git-backend-design.md
+      explicitly marks "DEPRECATED: The git storage backend has been
+      removed as of CFGMS v0.10" (CLAUDE.md: "Git is not a storage
+      backend — the git provider was removed"). Zero importers, zero
+      tests, makes outbound GitHub API calls with a token for a backend
+      the project has already decided does not exist.
+
+  - path: features/controller
+    reason: >
+      DELETE (Issue #4345): Controller wrapper struct, superseded by
+      cmd/controller/main.go's direct use of features/controller/server +
+      features/controller/initialization — its own GetAPIServer() doc
+      comment says so explicitly ("cmd/controller/main.go does the
+      equivalent wiring ... through features/controller/server.Server
+      directly, one layer below this wrapper"). Kept compiling only because
+      7 test files (test/integration, test/e2e, test/unit/controller)
+      still construct against it; migrating those to construct
+      server.Server directly (as main.go already does) is part of the
+      capability-map-then-delete follow-up, not a trivial delete.
+
+  - path: features/controller/cirunner
+    reason: >
+      DELETE (Issue #4345): CI-runner provisioning measurement helpers for
+      a one-off de-risking spike (epic #565) — the package's own doc
+      comment disclaims provider/module status. Zero importers anywhere,
+      including tests.
+
+  - path: features/workflow/transform
+    reason: >
+      DELETE (Issue #4345): complete, well-tested generic transform engine
+      with zero callers anywhere (its only importer is its own
+      transform/builtin subpackage, itself equally orphaned) and no
+      roadmap/architecture doc reference. Carries a confirmed log-injection
+      finding — executor.go:170 splices caller-supplied transformName
+      directly into a free-text log message, and executor.go:192 logs err
+      raw instead of through logging.SanitizeLogValue(), CLAUDE.md's
+      required pattern. Deletion closes this exposure outright rather than
+      requiring a fix-then-wire sequence for code with no caller and no
+      planned one.
+
+  - path: features/workflow/transform/builtin
+    reason: >
+      DELETE (Issue #4345): concrete transform implementations that exist
+      solely to register against features/workflow/transform's registry
+      (DELETE, above) — zero independent callers anywhere. Delete together
+      with features/workflow/transform as one orphaned subtree.
+
+  - path: internal/cli/commands
+    reason: >
+      DELETE (Issue #4345): minimal Cobra root-command scaffold, superseded
+      by the real CLI at cmd/cfg/cmd (confirmed by this repo's own git
+      history of cfgctl → cfgcli → cfg renames, all of which moved forward
+      without ever touching this package). Zero importers anywhere.
+
+  - path: internal/controller
+    reason: >
+      DELETE (Issue #4345): placeholder Controller stub — Start()'s body is
+      literally "// Placeholder for future implementation; return nil".
+      Zero importers, zero tests, untouched by feature work since the
+      repository's earliest commits (pre-dates features/controller, which
+      superseded it and is itself DELETE-classified above).
