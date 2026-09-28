@@ -876,6 +876,10 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create TLS config: %w", err)
 	}
+	if tlsConfig == nil {
+		return fmt.Errorf("failed to create TLS config: no TLS configuration was produced " +
+			"and no error was reported; refusing to connect without mutual TLS")
+	}
 
 	// Initialize gRPC control plane provider if not already set
 	if controlPlane == nil {
@@ -893,9 +897,10 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		if tenantID != "" {
 			providerCfg["tenant_id"] = tenantID
 		}
-		if tlsConfig != nil {
-			providerCfg["tls_config"] = tlsConfig
+		if tlsConfig == nil {
+			return fmt.Errorf("refusing to initialize gRPC control plane provider without a TLS configuration; mutual TLS is mandatory")
 		}
+		providerCfg["tls_config"] = tlsConfig
 
 		if err := provider.Initialize(ctx, providerCfg); err != nil {
 			return fmt.Errorf("failed to initialize gRPC control plane provider: %w", err)
@@ -928,9 +933,10 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		"server_addr": transportAddress,
 		"steward_id":  stewardID,
 	}
-	if tlsConfig != nil {
-		dpCfg["tls_config"] = tlsConfig
+	if tlsConfig == nil {
+		return fmt.Errorf("refusing to initialize gRPC data plane provider without a TLS configuration; mutual TLS is mandatory")
 	}
+	dpCfg["tls_config"] = tlsConfig
 
 	if err := dpProvider.Initialize(ctx, dpCfg); err != nil {
 		return fmt.Errorf("failed to initialize gRPC data plane provider: %w", err)
@@ -2704,9 +2710,22 @@ func (c *TransportClient) createTLSConfig() (*tls.Config, error) {
 		keyFile := os.Getenv("CFGMS_TLS_KEY_PATH")
 		caFile := os.Getenv("CFGMS_TLS_CA_PATH")
 
-		if certFile == "" || keyFile == "" || caFile == "" {
-			// No TLS config available — provider will connect without mTLS.
-			return nil, nil
+		var missing []string
+		if certFile == "" {
+			missing = append(missing, "CFGMS_TLS_CERT_PATH")
+		}
+		if keyFile == "" {
+			missing = append(missing, "CFGMS_TLS_KEY_PATH")
+		}
+		if caFile == "" {
+			missing = append(missing, "CFGMS_TLS_CA_PATH")
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf(
+				"no TLS certificate material configured: no certificate manager, no on-disk "+
+					"certificate path, and environment variable(s) %s are unset; mutual TLS is "+
+					"mandatory for all internal communication",
+				strings.Join(missing, ", "))
 		}
 
 		// #nosec G304 G703 -- certificate paths come only from the steward's
