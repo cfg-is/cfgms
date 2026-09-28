@@ -29,6 +29,15 @@ Also read `CLAUDE.md` for architecture rules, central providers, and anti-patter
 
 ## Validation Checklist
 
+> **Before check 1, sync the working tree.** Run `git fetch origin develop` and confirm
+> `git rev-list --count HEAD..origin/develop` is `0`; if it is not, the tree you are
+> validating against is not the tree the dev agent will branch from. Stories are written
+> ahead of the queue and merges land while they wait, so a story's claims can be
+> accurate when written and stale by the time you read them — and a claim you "verify"
+> against a stale checkout is worse than an unverified one, because it carries false
+> confidence. If a story describes a defect that a merge has already fixed, that is a
+> finding: say so rather than promoting it.
+
 For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
@@ -47,12 +56,21 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
 
 - Read the story's `## Dependencies` section
 - Cross-check against other stories in the same epic — does this story require interfaces, types, or changes from a sibling story?
+  - **A standalone fix issue has no epic** (created by `pipeline-helper.sh create-fix-issue`: `bug` + `internal`, no parent). Its missing epic is correct by design, never a defect. Cross-check it against the batch you were given plus the full `Ready` / `In Progress` lists instead.
 - **Each dependency must name an issue number AND a PR number (when known).** Bare `#NNN — depends on story-state` is insufficient because the dev agent uses `git merge-base --is-ancestor` against the named PR's head to verify the dependency is actually merged. If the BA wrote `## Dependencies: #NNN` without a PR reference, fill it in by querying:
   ```bash
   gh pr list --repo cfg-is/cfgms --search "#NNN in:body" --state all --json number,title,state
   ```
-  If multiple PRs match, list all candidates with their state and let the dev agent pick the merged one.
+
+  > A correct `## Dependencies` holds exactly one `#NNN` per dependency and nothing
+  > else shaped like one. Write a PR as `PR 4104`, no `#` — every `#NNNN` in that
+  > section becomes a dependency edge, and issues and PRs share one number sequence,
+  > so a `#` on a PR aims the edge at an unrelated issue. Several matching PRs go in
+  > `## Implementation Notes`; the gate-bearing section keeps one issue reference.
 - If a dependency is missing, add it to the story body
+- Before adding `A depends on B`, confirm B does not already depend on A, directly or
+  through a chain, then run the post-edit checks below. A cycle makes two stories each
+  hold for the other forever, and nothing warns you.
 - If a *circular* dependency exists (a true cycle a human must break), set the offending story to Blocked (see "Outcomes" → Blocked) and describe the cycle in the comment — do NOT create a parallel tracking issue. Note: a normal *open* dependency is not a cycle and is never blocked (see the principle above).
 
 **File overlap check (required when reviewing multiple stories in the same epic):**
@@ -64,6 +82,17 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
   bash ./scripts/project-queue.sh list-by-status "Ready"
   bash ./scripts/project-queue.sh list-by-status "In Progress"
   ```
+- **And every `Draft` story, not just your batch** — a Draft story becomes Ready later and
+  the overlap lands then, with no one watching for it.
+  ```bash
+  bash ./scripts/project-queue.sh list-by-status "Draft"
+  ```
+- Widening a scope creates overlaps that did not exist when you started, and Check 2 often
+  requires widening. Re-run the overlap check after every scope edit (post-edit checks below).
+- **When two stories genuinely describe the same defect, say so rather than serialising them.** An
+  overlap is sometimes duplication, not sequencing: the same fix written into two stories by
+  mistake. A dependency edge makes the duplicate run second and do nothing. Report it as
+  `PO ACTION REQUIRED: #A and #B describe the same defect in <file> — pick an owner`.
 - Cross-reference files across all stories. If two stories edit the same file, they **cannot run in parallel** — the second to merge will hit conflicts
 - When overlap is found: add an explicit `## Dependencies` entry on the story that should run second (the one that builds on the other's changes, or the less foundational one)
 - Mark the dependency reason as `file-conflict` so the PO knows it's a serialization constraint, not a functional dependency:
@@ -71,10 +100,26 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
   ## Dependencies
   - #NNN — file-conflict: both stories edit `path/to/file.go`
   ```
+- **Two stories MAY share a file when one already depends on the other.** The preflight
+  evaluates the dependency gate *before* the file-overlap gate and returns early, so one
+  edge already serialises them. One edge, in one direction, is the correct state.
+- A file the story declares but that does not appear in the parsed scope set is
+  usually a **parser limitation, not a story defect** — see "Editing a gate-bearing
+  section" below. Do not delete the path to make a warning go away.
 
 ### 2. Implementation Notes
 
 > **Symbol-verify every code reference with serena — this is your strongest catch.** Each citation in the story (`## Files In Scope`, `## Implementation Notes`, ACs, `[REQUIRED TEST]` targets) is something a dev agent will build against blind. Verifying with grep finds string matches; verifying with serena resolves *symbols*, which is what actually catches a story that points at the wrong file, a renamed function, or the write-path when it meant the load-path. Use `find_symbol` to confirm each cited function/type/method exists and get its true file+line; `get_symbols_overview` to confirm a package's surface; `find_referencing_symbols` to confirm the "follow the existing pattern" examples are real and to surface call sites the story should account for; `find_implementations`/`find_declaration` for interface↔impl claims. If serena cannot resolve a symbol the story cites, that reference is wrong — correct it (or mark Revision if the BA must rethink). Fall back to Grep/Read only for non-symbol targets.
+
+> **A factual correction carries the command that proves it.** Write "`go list -deps`
+> over all `main` packages does not contain X", not "X is unreachable". The next reader
+> can re-run it, and writing the command is what makes you run it.
+>
+> **Reachability is a build-graph question.** The authoritative check is the dependency
+> closure of every `main` package:
+> `go list -deps $(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)`.
+> Match on the exact package directory: a dead parent does not make a live child dead,
+> and an importer that is itself unreachable does not make its import reachable.
 
 - Read every file listed in `## Files In Scope` — verify they exist
 - Check that referenced functions, interfaces, and types exist — resolve each with `find_symbol`, don't trust the string
@@ -94,7 +139,7 @@ For each story, run all 10 checks. A story must pass ALL checks to be promoted.
   - Note is missing, or the note fails the seam test below → **Revision Needed** with concrete split boundaries
 - **Known valid over-threshold shape**: a central-provider interface change (e.g. a field added in `pkg/storage/interfaces`) legitimately spans the interface + every provider implementation + in-memory mirror structs — 6-7 packages, one unit (verified on #2944). Do not return it for a package-count split; the valid split is plumbing story → dependent feature story.
 - **The seam test**: a split is only valid where each half compiles on its own and has a testable contract at the boundary. A split whose second story must re-edit the first story's files is wrong — reject the split, not the story.
-- **Out of Scope section required**: every story must have a `## Out of Scope` section. Return any story missing it for revision. Issue #957 shipped a WIP because the agent refactored `examples/` which was implicitly out of scope but never explicitly excluded
+- **Out of Scope section required**: every story must have a `## Out of Scope` section naming what a reasonable dev agent might touch but should not. Implicit exclusions do not hold — an adjacent directory the story never mentions reads as fair game. Return any story missing it for revision
 - For story-too-broad cases (size trigger with a missing or failed Size Note), this is a **Revision Needed** outcome, not Blocked — splitting is a planning/decomposition task an agent resolves, not a founder decision. Set the story to Draft (see "Outcomes" section) and put the suggested split boundaries in the comment — do NOT create a parallel tracking issue
 
 ### 4. Constraint Flagging
@@ -119,10 +164,9 @@ Flag and block if the story implies any of these:
 
 ### 6. Required-Test Markers
 
-Acceptance criteria that name a specific test that MUST exist for the story to
-be accepted should be prefixed `[REQUIRED TEST]`. Without this marker, dev
-agents have been observed treating test ACs as nice-to-have (issue #899 shipped
-without the cross-tenant isolation test that AC#3 implied).
+An acceptance criterion naming a test that MUST exist is prefixed `[REQUIRED TEST]`.
+That bracketed form is the only one the acceptance reviewer treats as a hard gate;
+an unmarked test criterion reads as nice-to-have and ships unimplemented.
 
 For each AC that names a specific test (file path, function name, or assertion
 behavior), verify the marker is present. If absent, add it. If the AC is vague
@@ -166,7 +210,7 @@ When you find the docs list is obviously incomplete (e.g., story changes a stora
 
 A story whose Goal or Implementation Notes describes **replacing, retiring, or migrating off** an existing path — "instead of the flat attribute map," "retire password web-login," "replace the old X with Y" — must include an explicit **removal-verification AC** naming the specific old symbol/field/handler being retired, not just an AC for the new behavior.
 
-Dev agents observed adding the new path alongside the old one ("dual-published") rather than removing it, because nothing in the AC list checked for absence — Issues #2908 and #2993 both burned a full extra review→fix round on exactly this (the old path/field was still present at first review).
+Without an AC that checks for *absence*, the new path gets added alongside the old one and "dual-published" passes review — every positive criterion is satisfied, and nothing asks whether the thing being retired is gone.
 
 **Failure modes to block on**:
 - Story describes a replace/retire/migrate shape but has no AC requiring the old path's removal — Revision Needed, request the BA add one naming the specific symbol/field/route.
@@ -185,16 +229,13 @@ notices the criterion — not the code — was the problem.
 
 **The shape to catch:** an AC requiring the change be "demonstrated in production",
 "verified through an actual merge-queue rebase", "observed under real traffic",
-"confirmed after deployment", or otherwise validated by a system that will not see
+"confirmed after deployment", or otherwise validated by a system that does not see
 the change until it merges.
 
-Issue #3042 shipped exactly this: *"The behaviour is demonstrated through an actual
-merge-queue rebase, not only a local merge."* The `.gitattributes` merge driver it
-declared does not exist on `develop` until the PR merges, so the merge queue cannot
-possibly exercise it while the PR is open. PR #3117 failed three consecutive
-acceptance reviews on that single criterion — every reviewer correct, no fix
-possible — and sat two days before the AC was amended. It then passed with **zero
-code changes**.
+This one is worth slowing down for, because each of those phrasings reads as extra
+rigour. A criterion can be specific, well-written, and still impossible — and the
+failure surfaces as repeated review FAILs against correct code, which looks like a
+code problem for as long as nobody re-reads the criterion.
 
 **How to fix it rather than block on it.** Split the criterion at the merge boundary:
 
@@ -252,6 +293,74 @@ and principles the tokens encode.
   surfaces as founder-owned work on the PO ladder. Do not invent a "no new
   visual" statement to force such a story to Ready.
 
+## Editing a gate-bearing section
+
+`## Dependencies` and `## Files In Scope` are **machine-read**. The dispatch preflight
+parses them with `parse_story` in `.claude/scripts/po-cycle-preflight.py`, and what it
+extracts decides whether a story dispatches, holds, or collides with another agent.
+Everything else in the body is for a human and a dev agent to read. So an edit that
+would be harmless prose anywhere else changes real behaviour in these two sections.
+
+### After any body edit, run all three of these before promoting
+
+Every edit you make can break something you already checked, so these run after the LAST
+edit to a story, against the **live** body — not the file you wrote:
+
+1. **Parse it.** `parse_ok` true with no warnings; `deps_parsed` exactly the issues you
+   intended, with no number that arrived from a PR reference or a quoted example;
+   `files_parsed` containing every path the story declares.
+2. **Walk the dependency graph for cycles**, across your batch plus every story you touched.
+   An edge you added can close a loop through a chain you did not look at.
+3. **Re-run the file-overlap check**, including against `Draft` stories outside your batch.
+   A scope you widened can now collide with something you never opened.
+
+Command for step 1:
+
+```bash
+python3 - <<'EOF'
+import json, subprocess, importlib.util
+spec = importlib.util.spec_from_file_location("pre", ".claude/scripts/po-cycle-preflight.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+issue = json.loads(subprocess.run(
+    ['gh','issue','view','<NUM>','--json','number,title,body,labels,state'],
+    capture_output=True, text=True).stdout)
+r = m.parse_story(issue)
+print('parse_ok:', r['parse_ok'], '| warnings:', r['parse_warnings'])
+print('deps    :', r['deps_parsed'])
+print('files   :', r['files_parsed'])
+EOF
+```
+
+Check three things in that output:
+
+1. `parse_ok` is `True` with no warnings.
+2. `deps_parsed` contains **exactly** the issues you intended — no extra number that
+   arrived from a PR reference or a quoted example.
+3. `files_parsed` contains every path the story declares. If one is missing, see the
+   extension note below before changing the body.
+
+**Rules for these two sections:**
+
+- **Use only `##` headings in a story body. Never `###`.** A section runs from its
+  heading to the next `##`, so an `###` subsection inside `## Dependencies` or
+  `## Files In Scope` is swallowed into that section — which both leaks its contents
+  into the parsed set and collapses everything after it. If you need structure, use a
+  bold line or a list, not a deeper heading.
+- **`## Files In Scope` lists only paths the story will edit.** A path mentioned as
+  context, a precedent to copy, or an example belongs in `## Implementation Notes`. A
+  commentary path here is captured as a claimed file and causes a false conflict hold
+  against an unrelated story — with no visible reason, because the story never
+  intended to touch it.
+- **`## Dependencies` holds `#NNN` issue references or the literal `None`.** Prose
+  with no `#NNN` produces a malformed-body warning. See the PR-reference rule in
+  Check 1.
+- **A declared path can be silently dropped.** `parse_story` matches paths against a
+  fixed extension allowlist — currently `go`, `md`, `proto`, `sh`, `yaml`, `yml`,
+  `json`, `toml`, `ts`, `tsx`, `ps1`, `wxs`, `py`, `mod`, `sum`. Anything else,
+  including `.sql` and `.txt`, does not parse even when correctly written. That is a
+  tooling gap, not a story defect: leave the path in the body, note in your report
+  that it will not be conflict-gated, and do not send the story back to Draft over it.
+
 ## Outcomes
 
 Every reviewed story resolves to **exactly one** of three outcomes. Choose
@@ -294,6 +403,23 @@ goes back to the BA / Planning Team for rework.
 
 First try to fix it yourself by editing the body (the Rules already require
 this for obvious gaps). Only when the gap needs BA judgment:
+
+> **Anything you cannot resolve yourself goes in your report as a `PO ACTION REQUIRED:`
+> line.** That is the only channel that reaches someone who can act. Two cases reach it
+> most often:
+>
+> - **A defect in a story outside your batch.** Nobody else is scanning for it — that
+>   story has either been reviewed already or sits in a later batch that will not
+>   re-check what you saw. Report it with the same weight as one in your own batch.
+> - **A story that must become two stories.** You cannot run `gh issue create`, so write
+>   `PO ACTION REQUIRED: split #NNNN into <A> and <B>` with the exact file list for each
+>   half.
+>
+> **For a standalone fix issue (`bug`-labelled, no epic parent), fix the body yourself
+> wherever you possibly can.** Draft is a terminal state for these: no BA watches it and
+> the PO cron does not promote Draft fix issues, so returning one to Draft parks it until
+> a human notices. When you genuinely cannot fix it, say in your report that it needs a
+> human to re-run this review.
 
 1. Leave/return project status to Draft and post a revision comment carrying the
    `<!-- tl-revision -->` marker:
