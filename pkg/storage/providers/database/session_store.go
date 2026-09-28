@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -78,6 +78,19 @@ func (s *DatabaseSessionStore) hashToken(token string) string {
 // setTenantLocal sets app.current_tenant scoped to the current transaction.
 func setTenantLocal(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	_, err := tx.ExecContext(ctx, "SELECT set_config('app.current_tenant', $1, true)", tenantID)
+	return err
+}
+
+// setTenantMoveTarget sets the transaction-local app.tenant_move_target that
+// steward_records' rls_read and rls_update policies read to permit a cross-tenant
+// move to exactly targetTenantID (Issue #4321). rls_update's WITH CHECK accepts the
+// moved row only when its tenant_id equals this target, and rls_read must admit the
+// target too, because Postgres applies SELECT policies to the new row of an UPDATE
+// whose WHERE reads the table. Callers other than UpdateStewardTenant must never set
+// this: it exists to narrow that one method's exception to itself and to one
+// destination.
+func setTenantMoveTarget(ctx context.Context, tx *sql.Tx, targetTenantID string) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('app.tenant_move_target', $1, true)", targetTenantID)
 	return err
 }
 
@@ -237,7 +250,28 @@ func (s *DatabaseSessionStore) UpdateSession(ctx context.Context, sessionID stri
 // DeleteSession removes a session by its original bearer token.
 func (s *DatabaseSessionStore) DeleteSession(ctx context.Context, sessionID string) error {
 	hash := s.hashToken(sessionID)
-	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE session_id_hash = $1`, hash)
+
+	// Determine the tenant from the existing record first (needed for RLS on the DELETE).
+	var tenantID string
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id FROM sessions WHERE session_id_hash = $1`, hash).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("database: session not found")
+	}
+	if err != nil {
+		return fmt.Errorf("database: failed to fetch session tenant: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin delete session tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE session_id_hash = $1`, hash)
 	if err != nil {
 		return fmt.Errorf("database: failed to delete session: %w", err)
 	}
@@ -245,7 +279,7 @@ func (s *DatabaseSessionStore) DeleteSession(ctx context.Context, sessionID stri
 	if n == 0 {
 		return fmt.Errorf("database: session not found")
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListSessions returns sessions matching the filter.
@@ -285,7 +319,28 @@ func (s *DatabaseSessionStore) ListSessions(ctx context.Context, filter *busines
 func (s *DatabaseSessionStore) SetSessionTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
 	hash := s.hashToken(sessionID)
 	newExpiry := time.Now().UTC().Add(ttl)
-	res, err := s.db.ExecContext(ctx, `
+
+	// Determine the tenant from the existing record first (needed for RLS on the UPDATE).
+	var tenantID string
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id FROM sessions WHERE session_id_hash = $1`, hash).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("database: session not found")
+	}
+	if err != nil {
+		return fmt.Errorf("database: failed to fetch session tenant: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin set session ttl tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE sessions SET expires_at = $2, modified_at = $3 WHERE session_id_hash = $1`,
 		hash, newExpiry, time.Now().UTC())
 	if err != nil {
@@ -295,17 +350,56 @@ func (s *DatabaseSessionStore) SetSessionTTL(ctx context.Context, sessionID stri
 	if n == 0 {
 		return fmt.Errorf("database: session not found")
 	}
-	return nil
+	return tx.Commit()
 }
 
 // CleanupExpiredSessions removes sessions whose expires_at is in the past.
+//
+// Deliberately cross-tenant: this is a maintenance sweep, not a request handled on
+// behalf of one tenant, so there is no single app.current_tenant to set for a plain
+// DELETE. Issue #4321 made rls_delete tenant-scoped (fail closed on an unset
+// tenant), so this now groups expired sessions by tenant_id and issues one
+// tenant-scoped DELETE per tenant inside a single transaction, cycling
+// app.current_tenant with set_config between them.
 func (s *DatabaseSessionStore) CleanupExpiredSessions(ctx context.Context) (int, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < $1`, time.Now().UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("database: failed to cleanup expired sessions: %w", err)
+		return 0, fmt.Errorf("database: failed to begin cleanup tx: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT session_id_hash, tenant_id FROM sessions WHERE expires_at < $1`, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("database: failed to query expired sessions: %w", err)
+	}
+	byTenant := make(map[string][]string)
+	for rows.Next() {
+		var hash, tenantID string
+		if err := rows.Scan(&hash, &tenantID); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("database: failed to scan expired session: %w", err)
+		}
+		byTenant[tenantID] = append(byTenant[tenantID], hash)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("database: rows close: %w", err)
+	}
+
+	var total int
+	for tenantID, hashes := range byTenant {
+		if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+			return 0, fmt.Errorf("database: failed to set tenant context: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM sessions WHERE session_id_hash = ANY($1)`, pq.Array(hashes))
+		if err != nil {
+			return 0, fmt.Errorf("database: failed to cleanup expired sessions: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		total += int(n)
+	}
+	return total, tx.Commit()
 }
 
 // GetSessionsByUser returns all sessions for a user.

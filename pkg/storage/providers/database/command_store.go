@@ -8,10 +8,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -346,7 +345,27 @@ func (s *DatabaseCommandStore) UpdateDeliveryStatus(
 		return business.ErrCommandIDRequired
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	// Determine the tenant from the existing record first (needed for RLS on the UPDATE).
+	var tenantID string
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id FROM command_records WHERE id = $1`, id).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return business.ErrCommandNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("database: failed to fetch command tenant: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("database: failed to begin update delivery status tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE command_records SET delivery_status = $2, delivery_detail = $3
 		WHERE id = $1`,
 		id, string(status), detail)
@@ -360,7 +379,7 @@ func (s *DatabaseCommandStore) UpdateDeliveryStatus(
 	if n == 0 {
 		return business.ErrCommandNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListPendingDeliveries returns every command record targeting stewardID whose
@@ -535,6 +554,13 @@ func (s *DatabaseCommandStore) GetCommandAuditTrail(ctx context.Context, command
 
 // PurgeExpiredRecords deletes completed/failed/cancelled commands older than olderThan.
 // Executing and pending records are never purged.
+//
+// Deliberately cross-tenant: this is a retention sweep, not a request handled on
+// behalf of one tenant, so there is no single app.current_tenant to set for a plain
+// DELETE. Issue #4321 made rls_delete tenant-scoped (fail closed on an unset
+// tenant), so this groups expired commands by tenant_id and issues one
+// tenant-scoped delete per tenant inside a single transaction, cycling
+// app.current_tenant with set_config between them.
 func (s *DatabaseCommandStore) PurgeExpiredRecords(ctx context.Context, olderThan time.Time) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -543,54 +569,51 @@ func (s *DatabaseCommandStore) PurgeExpiredRecords(ctx context.Context, olderTha
 	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id FROM command_records
+		SELECT id, tenant_id FROM command_records
 		WHERE status = ANY($1) AND issued_at < $2`,
 		[]string{"completed", "failed", "cancelled"}, olderThan)
 	if err != nil {
 		return 0, fmt.Errorf("database: failed to query expired commands: %w", err)
 	}
 
-	var ids []string
+	byTenant := make(map[string][]string)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, tenantID string
+		if err := rows.Scan(&id, &tenantID); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("database: failed to scan expired command id: %w", err)
 		}
-		ids = append(ids, id)
+		byTenant[tenantID] = append(byTenant[tenantID], id)
 	}
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("database: rows close: %w", err)
 	}
 
-	if len(ids) == 0 {
-		return 0, tx.Commit()
-	}
+	var total int64
+	for tenantID, ids := range byTenant {
+		if err := setTenantLocal(ctx, tx, tenantID); err != nil {
+			return 0, fmt.Errorf("database: failed to set tenant context: %w", err)
+		}
 
-	// Delete transitions first.
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-	inClause := strings.Join(placeholders, ",")
+		// command_transitions carries no tenant_id column and no RLS (it inherits
+		// isolation from its parent command_records), so this delete needs no
+		// tenant context of its own -- it just needs to run inside the same loop
+		// iteration as the id subset it targets.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM command_transitions WHERE command_id = ANY($1)`, pq.Array(ids)); err != nil {
+			return 0, fmt.Errorf("database: failed to delete transitions: %w", err)
+		}
 
-	if _, err := tx.ExecContext(ctx,
-		fmt.Sprintf("DELETE FROM command_transitions WHERE command_id IN (%s)", inClause), args...); err != nil {
-		return 0, fmt.Errorf("database: failed to delete transitions: %w", err)
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM command_records
+			WHERE id = ANY($1)`, pq.Array(ids))
+		if err != nil {
+			return 0, fmt.Errorf("database: failed to purge command records: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
 	}
-
-	res, err := tx.ExecContext(ctx, `
-		DELETE FROM command_records
-		WHERE status = ANY($1) AND issued_at < $2`,
-		[]string{"completed", "failed", "cancelled"}, olderThan)
-	if err != nil {
-		return 0, fmt.Errorf("database: failed to purge command records: %w", err)
-	}
-
-	n, _ := res.RowsAffected()
-	return n, tx.Commit()
+	return total, tx.Commit()
 }
 
 // HealthCheck verifies the store is operational.

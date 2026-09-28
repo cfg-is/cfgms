@@ -16,7 +16,9 @@
 -- RLS policy mirrors the `sessions` table:
 --   SELECT: permissive when app.current_tenant is unset (auth-path lookups), filtered when set.
 --   INSERT: tenant must be set in transaction (Set() calls setTenantLocal).
---   UPDATE/DELETE: unrestricted — keyed by globally-unique token_hash or session_id.
+--   UPDATE/DELETE (Issue #4321): the target row must belong to the caller's current
+--   tenant, and an UPDATE may not move a row to a different tenant -- an unset
+--   tenant matches nothing (fail closed), not every row.
 
 CREATE TABLE IF NOT EXISTS session_token_store (
     token_hash          TEXT NOT NULL PRIMARY KEY,
@@ -54,6 +56,11 @@ CREATE POLICY rls_write ON session_token_store FOR INSERT WITH CHECK (
     tenant_id = current_setting('app.current_tenant', true)
 );
 
--- UPDATE/DELETE: unrestricted at DB level; keyed by globally-unique token_hash / session_id.
-CREATE POLICY rls_update ON session_token_store FOR UPDATE USING (TRUE);
-CREATE POLICY rls_delete ON session_token_store FOR DELETE USING (TRUE);
+-- UPDATE/DELETE (Issue #4321): the target row must belong to the caller's current
+-- tenant, and an UPDATE may not move a row to a different tenant -- an unset
+-- tenant matches nothing (fail closed), not every row.
+CREATE POLICY rls_update ON session_token_store FOR UPDATE
+    USING (tenant_id = current_setting('app.current_tenant', true))
+    WITH CHECK (tenant_id = current_setting('app.current_tenant', true));
+CREATE POLICY rls_delete ON session_token_store FOR DELETE
+    USING (tenant_id = current_setting('app.current_tenant', true));
