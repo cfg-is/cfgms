@@ -784,6 +784,10 @@ components:
         validity_days:
           type: integer
           default: 365
+          maximum: 825
+          description: >-
+            A request exceeding the maximum is refused with 400 Bad Request
+            (VALIDITY_DAYS_EXCEEDS_MAXIMUM), never silently clamped.
 
     CertificateResponse:
       type: object

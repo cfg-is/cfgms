@@ -2327,14 +2327,16 @@ func (s *Server) Start() error {
 			return fmt.Errorf("CP provider ServerHandler() returned nil")
 		}
 
-		// Issue #3759: the DNA and bulk handlers take the wire-keyed admission
-		// queue, which is a different instance from the one gating
-		// Register/ControlChannel. The DNA bucket key is the first chunk's
-		// tenant_id — caller-controlled — so sharing one instance would let a
-		// compromised steward name a victim tenant's bucket and starve that
-		// tenant's connects and heartbeats. See ingest_admission.go.
+		// Issue #3759: the DNA and bulk handlers take a dedicated admission queue
+		// instance, separate from the one gating Register/ControlChannel, so a
+		// bucket exhausted here cannot starve a tenant's connects and heartbeats.
+		// See ingest_admission.go.
 		tenantQueue := s.admissionQueues.dnaBulkQueue()
 		dnaHandler := controllerTransport.NewDNAHandler(s.logger, tenantQueue, s.controllerService)
+		// Issue #4346: bind the queue key to the peer's registered tenant rather
+		// than the first chunk's wire-supplied tenant_id, which is steward-supplied
+		// and could otherwise be used to name a victim tenant's bucket.
+		dnaHandler.WithTenantResolver(s.controllerService)
 
 		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
 		// compares the steward-claimed aggregate root against the stored manifest root

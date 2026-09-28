@@ -371,6 +371,73 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 		"valid sibling role resource must still apply despite the malformed sibling")
 }
 
+// TestGetEffectiveConfiguration_CrossTenantDenied is the required test for
+// Issue #4346: GetEffectiveConfiguration must resolve stewardID's owning
+// tenant from authoritative controller state and refuse a caller whose
+// context tenant disagrees, rather than trusting the tenantID parameter a
+// caller supplies. Before the fix this method was a bare passthrough with no
+// check at all, so this call would proceed straight into ResolveConfiguration
+// under the caller-asserted tenant.
+func TestGetEffectiveConfiguration_CrossTenantDenied(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	controllerSvc := NewControllerService(logger)
+	require.NoError(t, controllerSvc.RegisterStewardWithAttributes("steward-b", "tenant-b", "", "active", nil))
+
+	svc := NewConfigurationServiceV2(logger, sm, controllerSvc)
+
+	// A caller authenticated to tenant-a, asserting tenant-a as the (wrong)
+	// tenant for a steward that actually belongs to tenant-b.
+	tenantACtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	_, err := svc.GetEffectiveConfiguration(tenantACtx, "tenant-a", "steward-b")
+	require.Error(t, err, "a tenant-a caller must be refused on a tenant-b steward")
+	assert.Contains(t, err.Error(), "cross-tenant")
+}
+
+// TestGetEffectiveConfiguration_ResolvesOwningTenantNotCallerSupplied proves
+// the inverted-comparison bug is fixed: the method must resolve stewardID's
+// REAL owning tenant from controller state and use it for the cascade lookup,
+// not the (here, deliberately wrong) tenantID parameter supplied by the
+// caller — mirroring handleGetEffectiveConfig's prior behaviour of passing
+// its own session tenant straight through.
+func TestGetEffectiveConfiguration_ResolvesOwningTenantNotCallerSupplied(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewNoopLogger()
+	sm := pkgtesting.SetupTestStorage(t)
+
+	require.NoError(t, sm.GetTenantStore().CreateTenant(ctx,
+		&business.TenantData{ID: "tenant-real", Name: "Tenant Real", Status: business.TenantStatusActive}))
+
+	controllerSvc := NewControllerService(logger)
+	require.NoError(t, controllerSvc.RegisterStewardWithAttributes("steward-real", "tenant-real", "", "active", nil))
+
+	svc := NewConfigurationServiceV2(logger, sm, controllerSvc)
+	require.NoError(t, svc.SetConfiguration(ctx, "tenant-real", "steward-real", &stewardtypes.StewardConfig{
+		Steward: stewardtypes.StewardSettings{ID: "steward-real"},
+		Resources: []stewardtypes.ResourceConfig{
+			{Name: "device-resource", Module: "file", Config: map[string]interface{}{"path": "/tmp/x"}},
+		},
+	}))
+
+	// Same-tenant caller: the caller's own context tenant matches the
+	// steward's real tenant, so the request must succeed and resolve using
+	// the steward's real tenant (tenant-real) even though a wrong tenantID
+	// argument is passed in.
+	sameTenantCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-real")
+	eff, err := svc.GetEffectiveConfiguration(sameTenantCtx, "wrong-tenant-argument", "steward-real")
+	require.NoError(t, err)
+	require.NotNil(t, eff.Config)
+
+	names := make(map[string]bool)
+	for _, r := range eff.Config.Resources {
+		names[r.Name] = true
+	}
+	assert.True(t, names["device-resource"],
+		"the steward's real tenant (not the wrong tenantID argument) must be used for the cascade lookup")
+}
+
 // TestFlattenDNAFragments_SelectorRelevantKeys verifies that the selector-relevant
 // keys used by MatchingRoleFragments (os, arch, runtime_os) are correctly extracted
 // from DNA fragments. This is the required AC test for the FlattenDNAFragments helper

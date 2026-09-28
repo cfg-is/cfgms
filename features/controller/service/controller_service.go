@@ -339,11 +339,26 @@ func (s *ControllerService) AcceptRegistration(ctx context.Context, req *control
 	if req.IsReconnection {
 		// For reconnections, try to find existing steward by DNA ID
 		if existingSteward := s.findStewardByDNAId(req.InitialDna.Id); existingSteward != nil {
-			stewardID = existingSteward.ID
-			s.logger.Info("Reconnection detected", "steward_id", stewardID)
+			// Tenant gate (Issue #4346): findStewardByDNAId matches a caller-asserted
+			// DNA ID against every in-memory steward regardless of tenant, so without
+			// this check a caller in tenant A could claim a tenant-B steward's DNA ID
+			// and be handed that steward's identity — the same risk the durable
+			// branch below already guards against with its own tenant comparison.
+			// The two branches must not disagree, so this mirrors that check exactly:
+			// a mismatch falls through to a fresh registration rather than adopting
+			// the foreign steward.
+			if existingSteward.TenantID != tenantID {
+				s.logger.Warn("Reconnection refused: steward belongs to a different tenant",
+					"dna_id", logging.SanitizeLogValue(req.InitialDna.Id),
+					"request_tenant_id", logging.SanitizeLogValue(tenantID))
+				req.IsReconnection = false
+			} else {
+				stewardID = existingSteward.ID
+				s.logger.Info("Reconnection detected", "steward_id", stewardID)
 
-			// Verify sync status
-			syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
+				// Verify sync status
+				syncStatus, requiresDNAResync, requiresConfigResync = s.verifySyncStatus(existingSteward, req)
+			}
 		} else {
 			// Not in the in-memory registry. Check the durable StewardStore before
 			// treating as a new registration and minting a fresh ID (Issue #3403).

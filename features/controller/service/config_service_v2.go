@@ -549,8 +549,32 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	return nil
 }
 
-// GetEffectiveConfiguration returns the effective configuration with inheritance metadata
+// GetEffectiveConfiguration returns the effective configuration with inheritance metadata.
+//
+// tenantID is trusted as given only when stewardID is empty (a tenant-only
+// cascade, e.g. GET /api/v1/tenants/{id}/reboot-window, where there is no
+// steward resource to resolve an owner for) or when the steward is not known to
+// the live registry. When stewardID names a live steward, its tenant is
+// resolved authoritatively here — mirroring GetConfiguration's GetStewardInfo
+// guard (Issue #1572) — rather than trusting the tenantID a caller supplies.
+//
+// Before Issue #4346 this was a bare passthrough with no check at all: its
+// caller, handleGetEffectiveConfig, set tenantID from the caller's OWN session
+// context and passed it straight through as if it were the target steward's
+// tenant, without ever looking up which tenant stewardID actually belongs to.
 func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
+	if stewardID != "" && s.controllerSvc != nil {
+		if stewardInfo, exists := s.controllerSvc.GetStewardInfo(stewardID); exists {
+			if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+				s.logger.Warn("Effective configuration request cross-tenant access denied",
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
+					"request_tenant", logging.SanitizeLogValue(reqTenant))
+				return nil, fmt.Errorf("cross-tenant access denied for steward %s", logging.SanitizeLogValue(stewardID))
+			}
+			tenantID = stewardInfo.TenantID
+		}
+	}
 	return s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
 }
 

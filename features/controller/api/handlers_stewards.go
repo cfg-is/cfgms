@@ -705,8 +705,12 @@ func (s *Server) handleGetStewardConfig(w http.ResponseWriter, r *http.Request) 
 		Modules:   modules,
 	}
 
-	// Call gRPC service
-	configResp, err := s.configService.GetConfiguration(context.Background(), req)
+	// Call gRPC service. Threading r.Context() (not context.Background()) lets
+	// GetConfiguration's own cross-tenant guard (Issue #1572) see the caller's
+	// tenant — defense-in-depth alongside authorizeStewardScopeLenient above,
+	// and load-bearing for any future caller of this service method that does
+	// not go through that handler-level check (Issue #4346).
+	configResp, err := s.configService.GetConfiguration(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to get steward configuration", "steward_id", stewardIDForLog, "error", err)
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get configuration", "INTERNAL_ERROR")

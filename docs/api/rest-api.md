@@ -716,6 +716,10 @@ peers authenticate on, so a request-supplied subject would let a caller pass the
 containment check with one steward and receive a certificate naming another.
 Root/unscoped callers may set both fields freely.
 
+**Validity ceiling:** `validity_days` may not exceed 825. A request above the ceiling
+is refused with `400 BAD_REQUEST` — the requested period is never silently clamped
+down to the maximum.
+
 **Request Body:**
 
 ```json

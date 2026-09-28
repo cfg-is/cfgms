@@ -99,9 +99,9 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 		if _, had := e.timers[key]; had {
 			delete(e.timers, key)
 			e.logger.Debug("IP trust timer reset — steward offline",
-				"tenant_id", tenantID,
-				"steward_id", stewardID,
-				"ip", ip)
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"ip", logging.SanitizeLogValue(ip))
 		}
 		return nil
 	}
@@ -111,9 +111,9 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 	if !exists {
 		e.timers[key] = time.Now()
 		e.logger.Debug("IP trust timer started",
-			"tenant_id", tenantID,
-			"steward_id", stewardID,
-			"ip", ip,
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"ip", logging.SanitizeLogValue(ip),
 			"threshold", e.threshold)
 		return nil
 	}
@@ -123,22 +123,66 @@ func (e *IPTrustEvaluator) RecordLiveness(ctx context.Context, tenantID, steward
 		return nil
 	}
 
-	// Threshold reached — promote to trusted.
+	// Threshold reached — but re-check current revocation state before promoting.
+	// The in-memory timer only measures elapsed wall-clock time since it was
+	// started; it knows nothing about a revocation an operator may have recorded
+	// against this exact CIDR in the meantime (compromised host, incident
+	// response). Re-arming trust from a stale liveness signal would silently
+	// undo that decision — revocation must only be reversed by an explicit
+	// re-trust action, never by the same kind of signal it was meant to stop
+	// trusting.
 	cidr := ip + "/32"
+	revoked, err := e.isRevoked(ctx, tenantID, cidr)
+	if err != nil {
+		e.logger.Error("Failed to check IP trust revocation state before promotion",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"cidr", logging.SanitizeLogValue(cidr),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return err
+	}
+	if revoked {
+		delete(e.timers, key)
+		e.logger.Warn("IP trust promotion refused — CIDR is currently revoked",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"cidr", logging.SanitizeLogValue(cidr))
+		return nil
+	}
+
+	// Promote to trusted.
 	if err := e.store.AddTrustedRange(ctx, tenantID, cidr, false); err != nil {
 		e.logger.Error("Failed to add trusted IP range",
-			"tenant_id", tenantID,
-			"steward_id", stewardID,
-			"cidr", cidr,
-			"error", err)
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"cidr", logging.SanitizeLogValue(cidr),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return err
 	}
 
 	delete(e.timers, key)
 	e.logger.Info("IP promoted to trusted status",
-		"tenant_id", tenantID,
-		"steward_id", stewardID,
-		"cidr", cidr,
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"steward_id", logging.SanitizeLogValue(stewardID),
+		"cidr", logging.SanitizeLogValue(cidr),
 		"elapsed", elapsed)
 	return nil
+}
+
+// isRevoked reports whether tenantID already has a revoked trust entry for the
+// exact CIDR. ListTrustedRanges is used rather than IsTrusted because IsTrusted
+// only answers "is this IP currently trusted" — it cannot distinguish "no entry
+// ever existed" from "an entry exists but was revoked", and that distinction is
+// exactly what a re-promotion decision needs.
+func (e *IPTrustEvaluator) isRevoked(ctx context.Context, tenantID, cidr string) (bool, error) {
+	entries, err := e.store.ListTrustedRanges(ctx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.CIDR == cidr && entry.Revoked {
+			return true, nil
+		}
+	}
+	return false, nil
 }

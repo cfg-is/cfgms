@@ -1557,6 +1557,37 @@ func TestAcceptRegistration_ReconnectionRejectsCrossTenantID(t *testing.T) {
 		"the refused reconnection must not write a device_tenant mapping for the foreign ID (got %q)", mappedTenant)
 }
 
+// TestAcceptRegistration_InMemoryReconnectionRejectsCrossTenantID is the
+// required test for Issue #4346: the IN-MEMORY reconnection branch
+// (findStewardByDNAId) must perform the same tenant comparison the durable
+// branch already does. Before the fix, findStewardByDNAId matches a
+// caller-asserted DNA ID against every in-memory steward regardless of
+// tenant, so a caller in tenant-a could adopt a tenant-b steward's identity
+// merely by asserting its DNA ID — with no durable store involved at all.
+func TestAcceptRegistration_InMemoryReconnectionRejectsCrossTenantID(t *testing.T) {
+	ctx := context.Background()
+	svc := NewControllerService(logging.NewNoopLogger())
+
+	// Seed an in-memory steward for tenant-b directly (no durable store), as
+	// RegisterStewardWithAttributes does on a live HTTP registration. The
+	// seeded DNA carries Id == stewardID, matching what findStewardByDNAId keys on.
+	require.NoError(t, svc.RegisterStewardWithAttributes("dev-of-tenant-b", "tenant-b", "", "active", nil))
+
+	attackerCtx := context.WithValue(ctx, ctxkeys.TenantID, "tenant-a")
+	resp, err := svc.AcceptRegistration(attackerCtx, &controllerpb.RegisterRequest{
+		IsReconnection: true,
+		InitialDna:     &commonpb.DNA{Id: "dev-of-tenant-b"},
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, "dev-of-tenant-b", resp.StewardId,
+		"a caller in tenant-a must not adopt a tenant-b steward's in-memory identity")
+
+	info, ok := svc.GetStewardInfo("dev-of-tenant-b")
+	require.True(t, ok, "the original tenant-b entry must be untouched")
+	assert.Equal(t, "tenant-b", info.TenantID,
+		"the in-memory entry must remain owned by tenant-b after the refused reconnection")
+}
+
 // ---------------------------------------------------------------------------
 // ListFleetStewards tests (Issue #3494, ADR-031 Decision 3 / Issue #3764)
 //

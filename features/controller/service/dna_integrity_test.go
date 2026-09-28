@@ -900,27 +900,28 @@ func TestAcceptRegistration_RejectsNilInitialDNA(t *testing.T) {
 }
 
 // TestAcceptRegistration_DegenerateSnapshotDoesNotCarryForwardOtherTenantDNA
-// pins the tenant scope of the degenerate-snapshot carry-forward. The
-// in-memory reconnection lookup (findStewardByDNAId) matches a caller-asserted
-// DNA ID across the whole registry with no tenant scoping, so a caller in
-// tenant B can land on a tenant-A steward's ID. The entry rewritten below is
-// stamped with the CALLER's tenant, so carrying tenant A's last-known-good DNA
-// forward into it would publish tenant A's host facts (hostname, os) under
-// tenant B — and the next heartbeat, whose durable write is guarded by
-// steward.DNA != nil, would persist them under tenant B in the fleet store
-// that backs GET /api/v1/stewards. Only a same-tenant prior may be carried
-// forward.
+// pins the tenant scope of the degenerate-snapshot carry-forward.
+//
+// Before Issue #4346, the in-memory reconnection lookup (findStewardByDNAId)
+// matched a caller-asserted DNA ID across the whole registry with no tenant
+// scoping, so a caller in tenant B could land on — and overwrite — a tenant-A
+// steward's entry. That upstream gap is now closed (AcceptRegistration
+// compares existingSteward.TenantID against the caller's tenant before
+// adopting the match), so the cross-tenant claim here is rejected before the
+// DNA carry-forward step is ever reached: a fresh ID is minted and tenant A's
+// entry is left completely untouched, not merely stripped of its DNA.
 func TestAcceptRegistration_DegenerateSnapshotDoesNotCarryForwardOtherTenantDNA(t *testing.T) {
 	storage := newTestFleetStorage(t)
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 	ctx := context.Background()
 
 	// Tenant A's steward is live in the registry with a complete DNA snapshot.
+	tenantADNA := realGathererInitialDNA(t, "dev-tenant-a", "tenant-a-host", "linux")
 	svc.mu.Lock()
 	svc.stewards["dev-tenant-a"] = &StewardInfo{
 		ID:       "dev-tenant-a",
 		TenantID: "tenant-a",
-		DNA:      realGathererInitialDNA(t, "dev-tenant-a", "tenant-a-host", "linux"),
+		DNA:      tenantADNA,
 		Status:   "active",
 		Metrics:  make(map[string]string),
 	}
@@ -934,26 +935,24 @@ func TestAcceptRegistration_DegenerateSnapshotDoesNotCarryForwardOtherTenantDNA(
 		IsReconnection: true,
 	})
 	require.NoError(t, err)
-	require.Equal(t, "dev-tenant-a", resp.StewardId,
-		"precondition: the in-memory reconnection lookup is not tenant-scoped, so the cross-tenant ID resolves")
+	assert.NotEqual(t, "dev-tenant-a", resp.StewardId,
+		"a cross-tenant DNA ID claim must be refused and treated as a new registration")
 
+	// Tenant A's original entry must be completely untouched — not merely
+	// stripped of its DNA, but never rewritten at all.
 	info, ok := svc.GetStewardInfo("dev-tenant-a")
 	require.True(t, ok)
-	assert.Nil(t, info.DNA,
-		"another tenant's DNA must never be carried forward into an entry stamped with the caller's tenant")
+	assert.Equal(t, "tenant-a", info.TenantID,
+		"tenant A's entry must still belong to tenant A after the refused cross-tenant claim")
+	assert.Equal(t, tenantADNA.GetId(), info.DNA.GetId(),
+		"tenant A's DNA must be untouched by the refused cross-tenant claim")
 
-	// The heartbeat durable-write guard therefore still suppresses the write:
-	// tenant A's host facts are not persisted under tenant B.
-	status, err := svc.ProcessHeartbeat(tenantBCtx, &controllerpb.HeartbeatRequest{
-		StewardId: "dev-tenant-a",
-		Status:    "active",
-	})
-	require.NoError(t, err)
-	require.Equal(t, commonpb.Status_OK, status.Code)
-
-	_, err = storage.GetLatestByDeviceID(ctx, "dev-tenant-a")
-	assert.Error(t, err,
-		"no durable DNA record may be written for a cross-tenant registration carrying a degenerate snapshot")
+	// The freshly-minted steward's own entry must not have carried forward any
+	// prior DNA (there is none for a brand-new random ID).
+	newInfo, ok := svc.GetStewardInfo(resp.StewardId)
+	require.True(t, ok)
+	assert.Nil(t, newInfo.DNA,
+		"the new registration must not carry forward another tenant's DNA")
 }
 
 // TestAcceptRegistration_DegenerateSnapshotCarriesForwardSameTenantDNA is the

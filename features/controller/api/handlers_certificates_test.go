@@ -1385,6 +1385,23 @@ func TestHandleProvisionCertificate_Success_Returns201(t *testing.T) {
 	assert.Equal(t, "steward-prov-01", stored[0].ClientID)
 }
 
+// TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400 is the
+// required test for Issue #4346: a validity_days request above the ceiling is
+// refused with 400, not silently clamped down to the maximum.
+func TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer,
+		`{"steward_id":"steward-prov-ceiling","validity_days":826}`)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+	stored, err := certMgr.GetCertificateByCommonName("steward-prov-ceiling")
+	require.NoError(t, err)
+	assert.Empty(t, stored, "no certificate must be issued for a refused over-ceiling request")
+}
+
 // TestHandleProvisionCertificate_ExplicitCommonName_Returns201 verifies an explicit
 // common_name is used instead of the steward_id default.
 func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) {

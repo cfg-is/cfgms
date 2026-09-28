@@ -82,6 +82,21 @@ func (s *SigningRotationService) SetControllerService(cs *ControllerService) {
 // overlap that has not yet expired. When force is false, the primitive's
 // in-progress guard is enforced (used to validate the crash-mid-rotation path).
 func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial string, overlapDays int, force bool) (*RotationResult, error) {
+	// Root-scope gate (Issue #4346). The signing CA is a single fleet-wide
+	// resource (see the fan-out comment below), so rotating it is a root-only
+	// operation — the same rule handleRotateSigningCert already enforces via
+	// scope.IsRoot() before calling here. That handler-side check verifies
+	// strong authentication (AssuranceStrong) separately; neither implies the
+	// other; conflating them would let any AssuranceStrong-authenticated
+	// tenant-scoped admin rotate the fleet-wide signing CA. Re-checking the
+	// authoritative root-scope primitive here — rather than trusting that every
+	// current and future caller re-derives it correctly — is the
+	// service-layer defense-in-depth this story exists to add.
+	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() {
+		return nil, fmt.Errorf("signing rotation: unscoped (root) caller required")
+	}
+
 	// Capture the old serial before rotating. Prefer the cursor (set after the
 	// first rotation); fall back to the active signing cert for fresh controllers
 	// where no rotation cursor exists yet.

@@ -647,7 +647,11 @@ func TestRotate_FanOutIgnoresCallerTenantScope(t *testing.T) {
 	svc.SetControllerService(controllerSvc)
 
 	// A tenant-scoped admin context, exactly as the API middleware builds it.
+	// Root scope is set separately (Issue #4346 gate): this test is about the
+	// fan-out ignoring the caller's ctxkeys.TenantID for TARGET selection, not
+	// about caller authorization, which is exercised by TestRotate_RequiresRootScope.
 	scopedCtx := context.WithValue(ctx, ctxkeys.TenantID, "root/tenant-a")
+	scopedCtx = context.WithValue(scopedCtx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
 
 	result, err := svc.Rotate(scopedCtx, "operator-serial-scoped", 7, false)
 	require.NoError(t, err)
@@ -680,7 +684,8 @@ func TestRotateAuditLogNoPEMBody(t *testing.T) {
 	// Inject a controller service with no stewards so fan-out is a no-op.
 	svc.SetControllerService(service.NewControllerService(logging.NewNoopLogger()))
 
-	result, err := svc.Rotate(context.Background(), "operator-serial-test", 7, false)
+	rootCtx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	result, err := svc.Rotate(rootCtx, "operator-serial-test", 7, false)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.NotEmpty(t, result.NewSerial)
@@ -689,4 +694,32 @@ func TestRotateAuditLogNoPEMBody(t *testing.T) {
 	allLog := rl.allText()
 	assert.NotContains(t, allLog, "-----BEGIN",
 		"audit log must not contain PEM body data; full log:\n%s", allLog)
+}
+
+// TestRotate_RequiresRootScope is the required test for Issue #4346:
+// SigningRotationService.Rotate must refuse a caller whose context does not
+// carry root scope, rather than treating a valid credential (strong
+// authentication, enforced separately by handleRotateSigningCert) as
+// equivalent to root scope. Both an unset scope and an explicit tenant scope
+// must be refused.
+func TestRotate_RequiresRootScope(t *testing.T) {
+	t.Parallel()
+	certMgr := newTestCertManager(t, t.TempDir())
+	logger := logging.NewNoopLogger()
+
+	svc := service.NewSigningRotationService(certMgr, logger)
+	svc.SetControllerService(service.NewControllerService(logging.NewNoopLogger()))
+
+	t.Run("unset scope", func(t *testing.T) {
+		result, err := svc.Rotate(context.Background(), "operator-serial-unset", 7, false)
+		require.Error(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("tenant scope", func(t *testing.T) {
+		tenantCtx := context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/tenant-a"))
+		result, err := svc.Rotate(tenantCtx, "operator-serial-tenant", 7, false)
+		require.Error(t, err)
+		assert.Nil(t, result)
+	})
 }
