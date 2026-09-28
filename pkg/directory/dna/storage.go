@@ -270,7 +270,8 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 
 	var allResults []*DirectoryDNA
 
-	// Simplified query - in a full implementation, this would handle complex filtering
+	// Deferred: tracked in #4368 -- Providers/TenantIDs/Domains/ChangedSince/MinChangeCount
+	// filters are not yet applied here; only ObjectIDs/ObjectTypes/TimeRange are.
 	for _, objectID := range query.ObjectIDs {
 		options := &storage.QueryOptions{
 			Limit:       query.Limit,
@@ -311,7 +312,8 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 				continue
 			}
 
-			// Apply filtering based on query criteria (simplified)
+			// Apply ObjectTypes filtering; see the Deferred note above for the
+			// remaining unapplied query criteria.
 			if len(query.ObjectTypes) > 0 {
 				found := false
 				for _, queryType := range query.ObjectTypes {
