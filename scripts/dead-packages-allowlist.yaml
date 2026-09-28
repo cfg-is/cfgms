@@ -111,8 +111,6 @@ packages:
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/rbac/jit
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/reports
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/saas
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/siem

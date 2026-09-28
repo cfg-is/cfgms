@@ -2,28 +2,31 @@
 
 ## Overview
 
-The Advanced Reporting Framework (Story #173) extends CFGMS reporting capabilities by integrating audit data with existing DNA monitoring reports. This provides comprehensive multi-tenant reporting with compliance, security, and executive analytics.
+The Advanced Reporting Framework extends CFGMS reporting capabilities by integrating
+audit data with existing DNA monitoring reports. This provides comprehensive
+multi-tenant reporting with compliance, security, and executive analytics.
+
+`AdvancedDataProvider` and `AdvancedReportEngine` are fully implemented and tested, but
+are not yet constructed by any server wiring or reachable through `features/reports/api`
+— see Issue #4333, which reaches the report-generation capability this framework doesn't
+yet expose (scheduled reports, custom report building, custom template management)
+through the live `features/reports/api` → `engine` → `interfaces` path.
 
 ## Architecture
 
 ### Components
 
-1. **AdvancedService** (`advanced.go`)
-   - Main service orchestrating advanced reporting capabilities
-   - Extends existing Service for backward compatibility
-   - Integrates DNA monitoring with audit data
-
-2. **AdvancedDataProvider** (`provider/advanced.go`)
+1. **AdvancedDataProvider** (`provider/advanced.go`)
    - Provides unified data access across DNA and audit systems
    - Implements comprehensive querying with multi-tenant support
    - Handles data correlation and cross-system metrics
 
-3. **AdvancedReportEngine** (`engine/advanced.go`)
+2. **AdvancedReportEngine** (`engine/advanced.go`)
    - Generates advanced reports with RBAC validation
    - Supports compliance frameworks (CIS, HIPAA, PCI-DSS)
    - Implements security analysis and anomaly detection
 
-4. **Advanced Interfaces** (`interfaces/advanced.go`)
+3. **Advanced Interfaces** (`interfaces/advanced.go`)
    - Extended type definitions for audit integration
    - Compliance, security, and cross-system metric types
    - Multi-tenant aggregation structures
@@ -70,12 +73,16 @@ The Advanced Reporting Framework (Story #173) extends CFGMS reporting capabiliti
 
 ## Usage Examples
 
-### Basic Service Creation
+These construct `engine.AdvancedEngine`/`provider.AdvancedProvider` directly — the
+package that constructed and exposed them as a service (`reports.AdvancedService`) was
+deleted as an orphan (Issue #4332); nothing wires these into `features/reports/api` yet
+(Issue #4333).
+
+### Basic Construction
 ```go
-// Create advanced service
-advancedService := reports.NewAdvancedService(
-    storageManager, driftDetector, auditManager, auditStore,
-    rbacManager, cache, logger,
+advancedProvider := provider.NewAdvancedProvider(egProvider, auditManager, auditStore, logger)
+advancedEngine := engine.NewAdvancedEngine(
+    advancedProvider, templateProcessor, exporter, cache, rbacManager, logger,
 )
 ```
 
@@ -88,7 +95,7 @@ complianceReq := interfaces.ComplianceReportRequest{
     Format:     interfaces.FormatHTML,
 }
 
-report, err := advancedService.GenerateComplianceReport(ctx, complianceReq)
+report, err := advancedEngine.GenerateComplianceReport(ctx, complianceReq)
 ```
 
 ### Security Analysis
@@ -99,7 +106,7 @@ securityReq := interfaces.SecurityReportRequest{
     AnalysisType: "comprehensive",
 }
 
-securityReport, err := advancedService.GenerateSecurityReport(ctx, securityReq)
+securityReport, err := advancedEngine.GenerateSecurityReport(ctx, securityReq)
 ```
 
 ### Executive Dashboard
@@ -112,26 +119,24 @@ execReq := interfaces.ExecutiveReportRequest{
     IncludeTrends: true,
 }
 
-dashboard, err := advancedService.GenerateExecutiveReport(ctx, execReq)
+dashboard, err := advancedEngine.GenerateExecutiveReport(ctx, execReq)
 ```
 
 ## Configuration
 
-### Service Configuration
+### Engine Configuration
 ```go
-config := AdvancedServiceConfig{
-    EnableAuditIntegration:    true,
-    EnableRBACValidation:      true,
-    EnableCrossSystemMetrics:  true,
-    MaxTenantsPerReport:       50,
-    ComplianceFrameworks:      []string{"CIS", "HIPAA", "PCI-DSS"},
-    SecurityEventRetention:    90 * 24 * time.Hour,
+config := engine.AdvancedConfig{
+    Config:                   engine.DefaultConfig(),
+    EnableAuditIntegration:   true,
+    EnableRBACValidation:     true,
+    EnableCrossSystemMetrics: true,
+    MaxTenantsPerReport:      50,
+    ComplianceFrameworks:     []string{"CIS", "HIPAA", "PCI-DSS"},
+    SecurityEventRetention:   90 * 24 * time.Hour,
 }
 
-service := NewAdvancedServiceWithConfig(
-    storageManager, driftDetector, auditManager, auditStore,
-    rbacManager, cache, config, logger,
-)
+advancedEngine = advancedEngine.WithAdvancedConfig(config)
 ```
 
 ### Caching Configuration
