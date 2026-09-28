@@ -7,9 +7,9 @@
 -- RLS write policy: always requires the tenant to be set -- an unset tenant is an error
 -- condition (matches no row), never a wildcard. INSERT and UPDATE/DELETE all carry a
 -- tenant predicate (Issue #4321); UPDATE additionally refuses to move a row to a
--- different tenant via WITH CHECK, except on steward_records, where WITH CHECK (TRUE)
--- is a deliberate, documented exception for UpdateStewardTenant (see that table's policy
--- comment below).
+-- different tenant via WITH CHECK, except on steward_records, where a transaction-local
+-- authorization flag (app.tenant_move_authorized) narrows that exception to exactly one
+-- caller, UpdateStewardTenant (see that table's policy comment below).
 --   INSERT WITH CHECK / UPDATE USING / DELETE USING: tenant_id = current_setting('app.current_tenant', true)
 --
 -- The Go store layer is responsible for calling set_config('app.current_tenant', $tenantID, true)
@@ -119,16 +119,22 @@ CREATE POLICY rls_write ON steward_records FOR INSERT WITH CHECK (
 );
 
 -- UPDATE (Issue #4321): the target row must belong to the caller's current tenant --
--- an unset tenant matches nothing (fail closed), not every row. WITH CHECK is
--- deliberately TRUE, not tenant-scoped: UpdateStewardTenant (steward_store.go) is a
--- real product feature that moves a steward to a different tenant, gated at the
--- Go/API layer (handlers_stewards.go's handleMoveSteward requires a root caller or
--- a scoped admin whose scope covers both tenants). USING and WITH CHECK read the
--- same current_setting('app.current_tenant') value within one statement, so a
--- tenant-scoped WITH CHECK here would make that move impossible for any caller.
+-- an unset tenant matches nothing (fail closed), not every row. WITH CHECK allows a
+-- row to keep its own tenant OR move to a different one when app.tenant_move_authorized
+-- is set to 'true' in the same transaction. That flag is set by exactly one caller,
+-- UpdateStewardTenant (steward_store.go) -- a real product feature that moves a
+-- steward to a different tenant, gated at the Go/API layer (handlers_stewards.go's
+-- handleMoveSteward requires a root caller or a scoped admin whose scope covers both
+-- tenants). USING and a plain tenant-scoped WITH CHECK read the same
+-- current_setting('app.current_tenant') value within one statement, so without this
+-- flag a tenant-scoped WITH CHECK would make that move impossible for any caller; a
+-- raw-SQL session that never sets the flag still cannot move a row cross-tenant.
 CREATE POLICY rls_update ON steward_records FOR UPDATE
     USING (tenant_id = current_setting('app.current_tenant', true))
-    WITH CHECK (TRUE);
+    WITH CHECK (
+        tenant_id = current_setting('app.current_tenant', true)
+        OR coalesce(current_setting('app.tenant_move_authorized', true), '') = 'true'
+    );
 CREATE POLICY rls_delete ON steward_records FOR DELETE
     USING (tenant_id = current_setting('app.current_tenant', true));
 

@@ -1435,17 +1435,25 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		);`,
 		// UPDATE (Issue #4321): the target row must belong to the caller's current
 		// tenant -- an unset tenant matches nothing (fail closed), not every row.
-		// WITH CHECK is deliberately TRUE, not tenant-scoped: UpdateStewardTenant
-		// (steward_store.go) is a real product feature that moves a steward to a
+		// WITH CHECK allows a row to keep its own tenant OR move to a different one
+		// when app.tenant_move_authorized is set to 'true' in the same transaction.
+		// That flag is set by exactly one caller, UpdateStewardTenant
+		// (steward_store.go) -- a real product feature that moves a steward to a
 		// different tenant, gated at the Go/API layer (handlers_stewards.go's
 		// handleMoveSteward requires a root caller or a scoped admin whose scope
-		// covers both tenants). USING and WITH CHECK read the same
-		// current_setting('app.current_tenant') value within one statement, so a
-		// tenant-scoped WITH CHECK here would make that move impossible for any
-		// caller. See TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed.
+		// covers both tenants). USING and a plain tenant-scoped WITH CHECK read the
+		// same current_setting('app.current_tenant') value within one statement, so
+		// without this flag a tenant-scoped WITH CHECK would make that move
+		// impossible for any caller; a bare raw-SQL session that never sets the flag
+		// still cannot move a row cross-tenant. See
+		// TestRLSWritePolicy_StewardRecordsTenantMove_IntentionallyAllowed and
+		// TestRLSWritePolicy_StewardRecordsTenantMove_UnauthorizedRefused.
 		`CREATE POLICY rls_update ON steward_records FOR UPDATE
 			USING (tenant_id = current_setting('app.current_tenant', true))
-			WITH CHECK (TRUE);`,
+			WITH CHECK (
+				tenant_id = current_setting('app.current_tenant', true)
+				OR coalesce(current_setting('app.tenant_move_authorized', true), '') = 'true'
+			);`,
 		`CREATE POLICY rls_delete ON steward_records FOR DELETE
 			USING (tenant_id = current_setting('app.current_tenant', true));`,
 	}

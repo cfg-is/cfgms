@@ -81,6 +81,16 @@ func setTenantLocal(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	return err
 }
 
+// setTenantMoveAuthorized sets the transaction-local flag steward_records' rls_update
+// WITH CHECK reads to permit a cross-tenant move (Issue #4321 acceptance follow-up).
+// Callers other than UpdateStewardTenant must never set this: it exists specifically
+// to narrow that one method's exception to itself, rather than leaving WITH CHECK
+// unconditionally TRUE for every tenant-scoped session.
+func setTenantMoveAuthorized(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, "SELECT set_config('app.tenant_move_authorized', 'true', true)")
+	return err
+}
+
 // CreateSession inserts a new durable session.  Only Persistent=true sessions are accepted.
 func (s *DatabaseSessionStore) CreateSession(ctx context.Context, session *business.Session) error {
 	if session == nil {

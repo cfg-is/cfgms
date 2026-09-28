@@ -308,13 +308,16 @@ func (s *DatabaseStewardStore) DeregisterSteward(ctx context.Context, stewardID 
 //
 // steward_records' rls_update policy (Issue #4321) requires the row targeted by
 // UPDATE to belong to app.current_tenant -- set here to expectedTenantID, the
-// source tenant -- but deliberately leaves WITH CHECK unconstrained so the
-// resulting row can carry newTenantID. That asymmetry exists specifically for this
-// method: USING and WITH CHECK read the same current_setting() value within one
-// statement, so a tenant-scoped WITH CHECK would make any cross-tenant move
-// impossible for every caller, not just an unauthorized one. Authorization for the
-// move itself happens above this layer (handlers_stewards.go's handleMoveSteward
-// requires a root caller or a scoped admin whose scope covers both tenants).
+// source tenant -- and its WITH CHECK additionally requires either the same tenant
+// or the transaction-local app.tenant_move_authorized flag, which only this method
+// sets, before it will accept a row carrying newTenantID. That narrow exception
+// exists specifically for this method: USING and a plain tenant-scoped WITH CHECK
+// read the same current_setting() value within one statement, so without the flag a
+// tenant-scoped WITH CHECK would make any cross-tenant move impossible for every
+// caller, not just an unauthorized one. Authorization for the move itself happens
+// above this layer (handlers_stewards.go's handleMoveSteward requires a root caller
+// or a scoped admin whose scope covers both tenants); the flag only ensures a raw
+// SQL session that skips that layer can't perform the move either.
 func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardID, expectedTenantID, newTenantID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -324,6 +327,9 @@ func (s *DatabaseStewardStore) UpdateStewardTenant(ctx context.Context, stewardI
 
 	if err := setTenantLocal(ctx, tx, expectedTenantID); err != nil {
 		return fmt.Errorf("database: failed to set tenant context: %w", err)
+	}
+	if err := setTenantMoveAuthorized(ctx, tx); err != nil {
+		return fmt.Errorf("database: failed to authorize tenant move: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,
