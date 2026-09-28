@@ -86,25 +86,32 @@ Verified against `develop` (2026-07-16):
 - ADR-014 already provides `IdleTimeout: 15m`, `AbsoluteTimeout: 8h`
   (`pkg/session/contract.go:53`) — the "admin walked away" case is covered.
 
-**One adjacent system does exist, and is unwired.** `features/rbac/jit` is a
-complete, tested Just-In-Time access implementation — time-bounded grants
-(`JITAccessGrant`), approval workflows, an approver registry, notifications, audit
-integration, an optional durable `business.SessionStore` backing, and a
-`WorkflowProvider` hook documented as supporting "risk-based" policy. It has **zero
-production callers**: only its own tests import the package.
+**One adjacent system existed, was unwired, and has since been deleted.**
+`features/rbac/jit` was a complete, tested Just-In-Time access implementation —
+time-bounded grants (`JITAccessGrant`), approval workflows, an approver registry,
+notifications, audit integration, an optional durable `business.SessionStore`
+backing, and a `WorkflowProvider` hook documented as supporting "risk-based"
+policy. It had **zero production callers**: only its own tests imported the
+package.
 
-JIT is **complementary to this ADR, not overlapping**, and the distinction matters:
+JIT was **complementary to this ADR, not overlapping**, and the distinction
+mattered:
 
 | | Question answered |
 |---|---|
-| **JIT access** (`features/rbac/jit`) | "You do not normally hold this permission — may you borrow it, for a while, with approval?" |
+| **JIT access** (formerly `features/rbac/jit`) | "You do not normally hold this permission — may you borrow it, for a while, with approval?" |
 | **Assurance** (this ADR) | "You hold this permission — are you really you, on the same device, and did you mean to do this?" |
 
-They compose (a JIT grant could itself carry an assurance requirement), but neither
-subsumes the other, and this ADR does **not** depend on JIT. Whether to wire, keep,
-or delete `features/rbac/jit` is a separate decision. **This ADR's implementation
-must neither half-wire it nor reinvent it** — if temporary elevation is wanted, that
-is a deliberate follow-on, not an accident of this work.
+They would have composed (a JIT grant could itself carry an assurance
+requirement), but neither subsumed the other, and this ADR does **not** depend on
+JIT. This ADR left the wire/keep/delete decision to a future story; that story
+was Issue #4328, which recorded a capability map on Issue #4330 — for the
+request-and-approve workflow, staged approval, and grant lifecycle behavior worth
+keeping — and then deleted `features/rbac/jit`, `features/rbac/delegation.go`,
+and the conditional-permission path as unreachable. Any temporary-elevation work
+that follows from the capability map extends the live tenant-crossing grant path
+(`features/controller/api/handlers_tenant_crossing.go`), not a revived or
+reinvented sibling package.
 
 ### What is actually needed
 
@@ -492,7 +499,8 @@ hard dependent of #2736** and must not begin implementation until it merges.
 
 Note this is distinct from `pkg/storage/interfaces/business.SessionStore` (durable,
 with `database` and `sqlite` providers), which is a different type for a different
-purpose — used by `features/rbac/jit` (unwired) and `cmd/cfg/cmd/session_token.go`.
+purpose — used by `cmd/cfg/cmd/session_token.go` (and, until Issue #4328 deleted
+it, by the unwired `features/rbac/jit`).
 Whether the `pkg/session` durable store reuses it or defines its own is an
 implementation question for that story.
 

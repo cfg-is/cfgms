@@ -38,7 +38,6 @@ type Manager struct {
 
 	advancedEngine          *AdvancedAuthEngine
 	hierarchyEngine         *HierarchyEngine
-	delegationManager       *DelegationManager
 	templateManager         *TemplateManager
 	escalationPreventionMgr *EscalationPreventionManager
 }
@@ -98,16 +97,11 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 
 	// Initialize advanced components
 	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
-	delegationManager := NewDelegationManager(manager)                          // Pass manager for RBAC operations
 	templateManager := NewTemplateManager(manager)                              // Pass manager for template operations
 	escalationPreventionMgr := NewEscalationPreventionManager(manager, manager) // manager satisfies both RBACManager and RBACStoreAccessor
 
-	// Set circular references
-	advancedEngine.SetRBACManager(manager)
-
 	// Update manager with advanced components
 	manager.advancedEngine = advancedEngine
-	manager.delegationManager = delegationManager
 	manager.templateManager = templateManager
 	manager.escalationPreventionMgr = escalationPreventionMgr
 
@@ -116,7 +110,6 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	advancedEngine.SetHierarchyEngine(hierarchyEngine)
 
 	// Wire the durable audit manager into the advanced engine
-	advancedEngine.SetDelegationManager(delegationManager)
 	advancedEngine.SetAuditManager(manager.auditManager)
 
 	return manager
@@ -1180,26 +1173,6 @@ func (m *Manager) CheckPermissionWithContext(ctx context.Context, request *commo
 	return m.advancedEngine.CheckPermission(ctx, request)
 }
 
-// CheckConditionalPermission checks a conditional permission with full context evaluation
-func (m *Manager) CheckConditionalPermission(ctx context.Context, request *common.AccessRequest, conditionalPerm *common.ConditionalPermission, authContext *common.AuthorizationContext) (*common.AccessResponse, error) {
-	return m.advancedEngine.CheckConditionalPermission(ctx, request, conditionalPerm, authContext)
-}
-
-// CreateDelegation creates a new permission delegation
-func (m *Manager) CreateDelegation(ctx context.Context, req *DelegationRequest) (*common.PermissionDelegation, error) {
-	return m.delegationManager.CreateDelegation(ctx, req)
-}
-
-// RevokeDelegation revokes an existing permission delegation
-func (m *Manager) RevokeDelegation(ctx context.Context, delegationID string, revokerID string) error {
-	return m.delegationManager.RevokeDelegation(ctx, delegationID, revokerID)
-}
-
-// GetActiveDelegations returns active delegations for a delegatee
-func (m *Manager) GetActiveDelegations(ctx context.Context, delegateeID string, tenantID string) ([]*common.PermissionDelegation, error) {
-	return m.delegationManager.GetActiveDelegations(ctx, delegateeID, tenantID)
-}
-
 // CreateTemporaryPermission creates a temporary permission grant with conditions
 func (m *Manager) CreateTemporaryPermission(ctx context.Context, req *TemporaryPermissionRequest) (*common.ConditionalPermission, error) {
 	return m.advancedEngine.CreateTemporaryPermission(ctx, req)
@@ -1235,16 +1208,6 @@ func (m *Manager) ListTemplates(ctx context.Context, tenantID, category string) 
 // GetTemplatesByCategory returns templates grouped by category
 func (m *Manager) GetTemplatesByCategory(ctx context.Context, tenantID string) (map[string][]*common.PermissionTemplate, error) {
 	return m.templateManager.GetTemplatesByCategory(ctx, tenantID)
-}
-
-// GetDelegationStats returns delegation statistics for a tenant
-func (m *Manager) GetDelegationStats(ctx context.Context, tenantID string) (*DelegationStats, error) {
-	return m.delegationManager.GetDelegationStats(ctx, tenantID)
-}
-
-// CleanupExpiredDelegations removes expired delegations
-func (m *Manager) CleanupExpiredDelegations(ctx context.Context) error {
-	return m.delegationManager.CleanupExpiredDelegations(ctx)
 }
 
 // Privilege Escalation Prevention Methods
