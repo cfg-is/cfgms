@@ -13,6 +13,7 @@ import (
 
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -212,6 +213,10 @@ const (
 // hierarchy uses the same generation of source routing decisions — preventing a
 // mid-cascade source redirect from causing partial data from two different stores.
 func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantID, stewardID string) (*EffectiveConfiguration, error) {
+	if err := ir.authorizeTenant(ctx, tenantID); err != nil {
+		return nil, err
+	}
+
 	// Get tenant hierarchy path
 	tenantPath, err := ir.getTenantPath(ctx, tenantID)
 	if err != nil {
@@ -262,7 +267,7 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 					"steward_id", stewardID,
 					"tenant_id", tenantID,
 					"cluster", clusterName,
-					"error", err.Error())
+					"error", logging.SanitizeLogValue(err.Error()))
 			}
 		}
 	}
@@ -282,7 +287,7 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 			ir.log().WarnCtx(ctx, "skipping role-policies; treating as no roles",
 				"steward_id", stewardID,
 				"tenant_id", tenantID,
-				"error", err.Error())
+				"error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			for _, frag := range fragments {
 				ir.applyRoleFragment(ctx, effective, tenantID, frag)
@@ -301,6 +306,35 @@ func (ir *InheritanceResolver) ResolveConfiguration(ctx context.Context, tenantI
 // getTenantPath returns the tenant hierarchy path from root to the specified tenant
 func (ir *InheritanceResolver) getTenantPath(ctx context.Context, tenantID string) ([]string, error) {
 	return ir.tenantStore.GetTenantPath(ctx, tenantID)
+}
+
+// authorizeTenant answers "may this caller resolve configuration for tenantID"
+// (Issue #4340). Configuration inheritance walks only tenantID's own ancestor
+// chain (getTenantPath), so nothing here ever reads a sibling's data by
+// construction — but without this check, any caller could still pass an
+// arbitrary tenantID (a sibling, or an ancestor outside its own subtree) and
+// have this resolver walk and return that tenant's effective configuration.
+//
+// This check only fires when ctx carries an explicit ctxkeys.TenantScope — set
+// by the HTTP API's authentication middleware. Internal/data-plane callers
+// (e.g. the steward gRPC sync path) do not set it and perform their own
+// tenant-containment check upstream against a server-resolved tenant, so an
+// absent scope here is not fail-open for those paths — it is simply out of
+// this check's jurisdiction. A present tenant scope is fail-closed: it must
+// equal or be an ancestor of tenantID's subtree. Root scope always allows.
+func (ir *InheritanceResolver) authorizeTenant(ctx context.Context, tenantID string) error {
+	scope, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !ok || scope.IsUnset() {
+		return nil
+	}
+	if scope.IsRoot() {
+		return nil
+	}
+	if scope.IsTenant() && scope.Path() != "" &&
+		(tenantID == scope.Path() || strings.HasPrefix(tenantID, scope.Path()+"/")) {
+		return nil
+	}
+	return fmt.Errorf("tenant %q is outside the caller's authorized scope", tenantID)
 }
 
 // applyConfigurationLevel applies configuration from a specific hierarchy level.

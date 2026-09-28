@@ -5,6 +5,7 @@ package stewardtypes
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
@@ -50,12 +51,39 @@ func ValidateScriptSigningConfig(cfg ScriptSigningConfig) error {
 		if key.Thumbprint == "" && key.PublicKeyRef == "" {
 			return fmt.Errorf("script_signing trusted_keys[%d] (%q): must provide thumbprint or public_key_ref", i, key.Name)
 		}
+		// PublicKeyRef is reserved for a future secrets-provider reference; validated
+		// here (rather than left to the consumer that eventually resolves it) so a
+		// value that could escape a permitted base directory or tenant subtree is
+		// rejected at config-write time (Issue #4340).
+		if err := validateNoPathTraversal(key.PublicKeyRef); err != nil {
+			return fmt.Errorf("script_signing trusted_keys[%d] (%q): public_key_ref %w", i, key.Name, err)
+		}
 	}
 
 	if cfg.RequireSignedAdhoc && (cfg.Policy == ScriptSigningPolicyNone || cfg.Policy == "") {
 		return fmt.Errorf("script_signing require_signed_adhoc requires policy optional or required, got %q", cfg.Policy)
 	}
 
+	return nil
+}
+
+// validateNoPathTraversal rejects a reference string that could escape a
+// permitted base directory when later resolved as a path or secret-store key:
+// an absolute path, or any "/"-separated segment that is empty, ".", or "..".
+// An empty ref is not this function's concern (callers decide whether empty is
+// valid) and always passes.
+func validateNoPathTraversal(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "\\") {
+		return fmt.Errorf("must not be an absolute path: %q", ref)
+	}
+	for _, seg := range strings.FieldsFunc(ref, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("must not contain '.' or '..' path segments: %q", ref)
+		}
+	}
 	return nil
 }
 

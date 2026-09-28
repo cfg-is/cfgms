@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // DefaultHookManager implements the HookManager interface
@@ -64,10 +66,9 @@ func (m *DefaultHookManager) RunPreCommitHooks(ctx context.Context, repoPath str
 	// Validate each configuration file
 	for _, file := range files {
 		if m.isConfigurationFile(file) {
-			// Read the file
-			fullPath := filepath.Join(repoPath, file)
-			// #nosec G304 - Git hook validation requires reading committed files within repository
-			content, err := os.ReadFile(fullPath)
+			// Read the file, bounded to repoPath (Issue #4340): file is caller-supplied
+			// and must not be able to escape the repository via "../" or a symlink.
+			content, err := security.SecureReadFile(repoPath, file)
 			if err != nil {
 				return fmt.Errorf("failed to read file %s: %w", file, err)
 			}

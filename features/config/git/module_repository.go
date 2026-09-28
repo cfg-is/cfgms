@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/security"
 )
 
 // ModuleRepositoryManager manages script and module repositories
@@ -149,7 +150,7 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 		if err != nil {
 			mrm.logger.Warn("failed to load module",
 				"spec", logging.SanitizeLogValue(spec),
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			continue
 		}
@@ -158,7 +159,7 @@ func (mrm *ModuleRepositoryManager) LoadModulesFromRepository(ctx context.Contex
 		if err := mrm.secValidator.ValidateModule(ctx, module); err != nil {
 			mrm.logger.Warn("module failed security validation",
 				"module", logging.SanitizeLogValue(module.Name),
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 			module.SecurityStatus.Status = SecurityStatusRejected
 			module.SecurityStatus.Issues = []SecurityIssue{{
@@ -329,7 +330,14 @@ func (mrm *ModuleRepositoryManager) ensureModuleRepository(ctx context.Context, 
 		return "", fmt.Errorf("invalid repository ID (must not contain path separators or dot sequences): %s", logging.SanitizeLogValue(repo.ID))
 	}
 
-	clonePath := filepath.Join(mrm.cacheDir, repo.ID)
+	// Belt-and-suspenders containment check (Issue #4340): the character
+	// blacklist above already rejects any repo.ID that could produce a
+	// multi-segment path, but this confirms containment against the cleaned,
+	// symlink-resolved cache directory rather than relying on the blacklist alone.
+	clonePath, err := security.ValidateAndCleanPath(mrm.cacheDir, repo.ID)
+	if err != nil {
+		return "", fmt.Errorf("invalid repository ID: %w", err)
+	}
 
 	// Idempotent: skip if the clone already exists
 	if _, err := os.Stat(filepath.Join(clonePath, ".git")); err == nil {
@@ -413,13 +421,10 @@ func (mrm *ModuleRepositoryManager) writeModuleSpec(ctx context.Context, localPa
 		return fmt.Errorf("failed to marshal module spec: %w", err)
 	}
 
-	fullPath := filepath.Join(localPath, specPath)
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0750); err != nil {
-		return fmt.Errorf("failed to create directory for module spec: %w", err)
-	}
-
-	// #nosec G306 - module spec is configuration data, not executable code
-	return os.WriteFile(fullPath, data, 0600)
+	// specPath is built from module.Path (caller-supplied, Issue #4340), so the
+	// write must be bounded to localPath by a cleaned, symlink-resolved
+	// containment check rather than a plain filepath.Join.
+	return security.SecureWriteFile(localPath, specPath, data)
 }
 
 func (mrm *ModuleRepositoryManager) validateSecurityPolicy(policy ModuleSecurityPolicy) error {

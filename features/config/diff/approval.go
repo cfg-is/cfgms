@@ -8,15 +8,21 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// ErrApprovalOutsideTenant is returned when the approving principal's tenant
+// scope does not contain the approval request's tenant (Issue #4340).
+var ErrApprovalOutsideTenant = errors.New("approving principal is outside the request's tenant scope")
 
 // ApprovalWebhookConfig holds configuration for the webhook delivery channel.
 type ApprovalWebhookConfig struct {
@@ -80,7 +86,7 @@ func (s *approvalWebhookSender) sendWebhook(ctx context.Context, payload interfa
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		if err := resp.Body.Close(); err != nil {
-			s.logger.Warn("failed to close webhook response body", "error", err)
+			s.logger.Warn("failed to close webhook response body", "error", logging.SanitizeLogValue(err.Error()))
 		}
 
 		if resp.StatusCode >= 500 {
@@ -188,6 +194,7 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 		Changes:           result,
 		RiskAssessment:    assessment,
 		Requester:         requester,
+		TenantID:          tenantPathFromContext(ctx),
 		RequiredApprovers: requiredApprovers,
 		Status: ApprovalStatus{
 			Status:           "pending",
@@ -207,7 +214,7 @@ func (ai *DefaultApprovalIntegration) CreateApprovalRequest(ctx context.Context,
 	if err := ai.notifyApprovers(ctx, request); err != nil {
 		ai.logger.Warn("failed to notify approvers",
 			"request_id", logging.SanitizeLogValue(request.ID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 
@@ -235,7 +242,7 @@ func (ai *DefaultApprovalIntegration) UpdateApprovalRequest(ctx context.Context,
 	if err := ai.notifyApproversOfUpdate(ctx, request); err != nil {
 		ai.logger.Warn("failed to notify approvers of update",
 			"request_id", logging.SanitizeLogValue(requestID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 
@@ -278,18 +285,30 @@ func (ai *DefaultApprovalIntegration) CancelApprovalRequest(ctx context.Context,
 	if err := ai.notifyApproversOfCancellation(ctx, request); err != nil {
 		ai.logger.Warn("failed to notify approvers of cancellation",
 			"request_id", logging.SanitizeLogValue(requestID),
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 		)
 	}
 
 	return nil
 }
 
-// AddApproval adds an approval to a request
+// AddApproval adds an approval to a request. The approving principal is taken
+// from ctx (Issue #4340) — never from a caller-supplied field — and recorded
+// on the Approval entry; a principal outside the request's tenant scope is
+// refused before the decision is recorded.
 func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID, approver, decision, comment string) error {
 	request, exists := ai.requests[requestID]
 	if !exists {
 		return fmt.Errorf("approval request %s not found", requestID)
+	}
+
+	principal, err := ai.getCurrentUser(ctx)
+	if err != nil {
+		return fmt.Errorf("cannot record approval: %w", err)
+	}
+
+	if err := authorizeApprovalTenant(ctx, request.TenantID); err != nil {
+		return err
 	}
 
 	// Check if request is still pending
@@ -312,6 +331,7 @@ func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID
 	// Add the approval
 	approval := Approval{
 		Approver:   approver,
+		Principal:  principal,
 		Decision:   decision,
 		Comment:    comment,
 		ApprovedAt: time.Now(),
@@ -336,7 +356,7 @@ func (ai *DefaultApprovalIntegration) AddApproval(ctx context.Context, requestID
 		if err := ai.notifyApprovalDecision(ctx, request); err != nil {
 			ai.logger.Warn("failed to notify approvers of decision",
 				"request_id", logging.SanitizeLogValue(requestID),
-				"error", err,
+				"error", logging.SanitizeLogValue(err.Error()),
 			)
 		}
 	}
@@ -427,6 +447,41 @@ func (ai *DefaultApprovalIntegration) generateDescription(result *ComparisonResu
 	}
 
 	return description
+}
+
+// tenantPathFromContext returns the tenant subtree ctx's caller is scoped to,
+// or "" when the caller holds root scope or no explicit scope at all (Issue
+// #4340). Used to record the tenant an approval request belongs to at creation
+// time.
+func tenantPathFromContext(ctx context.Context) string {
+	scope, ok := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !ok || !scope.IsTenant() {
+		return ""
+	}
+	return scope.Path()
+}
+
+// authorizeApprovalTenant answers "may this caller record a decision on a
+// request belonging to resourceTenant" (Issue #4340). An empty resourceTenant
+// means the request carries no tenant boundary (created by a root-scoped
+// principal) and nothing is enforced. A non-empty resourceTenant is
+// fail-closed: an unset caller scope, or a tenant scope whose subtree does not
+// contain resourceTenant, is refused. Root scope always allows.
+func authorizeApprovalTenant(ctx context.Context, resourceTenant string) error {
+	if resourceTenant == "" {
+		return nil
+	}
+
+	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsRoot() {
+		return nil
+	}
+	if scope.IsTenant() && scope.Path() != "" &&
+		(resourceTenant == scope.Path() || strings.HasPrefix(resourceTenant, scope.Path()+"/")) {
+		return nil
+	}
+
+	return ErrApprovalOutsideTenant
 }
 
 // getCurrentUser gets the current user from context

@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -154,7 +155,7 @@ func (h *RollbackHandler) ListRollbackPoints(w http.ResponseWriter, r *http.Requ
 	// Get rollback points
 	points, err := h.rollbackManager.ListRollbackPoints(ctx, targetType, targetID, limit)
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, err.Error())
+		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -191,7 +192,7 @@ func (h *RollbackHandler) PreviewRollback(w http.ResponseWriter, r *http.Request
 	// Preview rollback
 	preview, err := h.rollbackManager.PreviewRollback(ctx, request)
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, err.Error())
+		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -253,7 +254,8 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	operation, err := h.rollbackManager.ExecuteRollback(ctx, req.RollbackRequest)
 	if err != nil {
 		// Check for specific error types
-		if rollbackErr, ok := err.(*rollback.RollbackError); ok {
+		var rollbackErr *rollback.RollbackError
+		if errors.As(err, &rollbackErr) {
 			switch rollbackErr.Code {
 			case "APPROVAL_REQUIRED":
 				h.sendError(w, http.StatusPreconditionFailed, rollbackErr.Message)
@@ -266,6 +268,9 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 				return
 			case "ROLLBACK_IN_PROGRESS":
 				h.sendError(w, http.StatusConflict, rollbackErr.Message)
+				return
+			case "ROLLBACK_TENANT_UNVERIFIABLE":
+				h.sendError(w, http.StatusServiceUnavailable, rollbackErr.Message)
 				return
 			}
 		}
@@ -336,11 +341,15 @@ func (h *RollbackHandler) GetRollbackStatus(w http.ResponseWriter, r *http.Reque
 	// Get rollback status
 	operation, err := h.rollbackManager.GetRollbackStatus(ctx, rollbackID)
 	if err != nil {
-		if err == rollback.ErrRollbackNotFound {
+		if errors.Is(err, rollback.ErrRollbackNotFound) || errors.Is(err, rollback.ErrRollbackOutsideTenantScope) {
+			// A tenant-scope refusal from the manager must read exactly like an
+			// unknown ID (Issue #4335/#4340) — reusing the manager's own message
+			// here would let a scoped caller distinguish "wrong tenant" from
+			// "no such rollback".
 			h.sendError(w, http.StatusNotFound, "Rollback operation not found")
 			return
 		}
-		h.sendError(w, http.StatusInternalServerError, err.Error())
+		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -380,7 +389,9 @@ func (h *RollbackHandler) CancelRollback(w http.ResponseWriter, r *http.Request)
 	// letting a tenant-scoped caller cancel another tenant's in-progress rollback.
 	operation, err := h.rollbackManager.GetRollbackStatus(ctx, rollbackID)
 	if err != nil {
-		if err == rollback.ErrRollbackNotFound {
+		if errors.Is(err, rollback.ErrRollbackNotFound) || errors.Is(err, rollback.ErrRollbackOutsideTenantScope) {
+			// Same indistinguishable-from-unknown-ID treatment as GetRollbackStatus
+			// above (Issue #4335/#4340).
 			h.sendError(w, http.StatusNotFound, "Rollback operation not found")
 			return
 		}
@@ -394,17 +405,18 @@ func (h *RollbackHandler) CancelRollback(w http.ResponseWriter, r *http.Request)
 
 	// Cancel rollback
 	if err := h.rollbackManager.CancelRollback(ctx, rollbackID, cancelRequest.Reason); err != nil {
-		if err == rollback.ErrRollbackNotFound {
+		if errors.Is(err, rollback.ErrRollbackNotFound) {
 			h.sendError(w, http.StatusNotFound, "Rollback operation not found")
 			return
 		}
 
-		if rollbackErr, ok := err.(*rollback.RollbackError); ok && rollbackErr.Code == "CANNOT_CANCEL" {
+		var rollbackErr *rollback.RollbackError
+		if errors.As(err, &rollbackErr) && rollbackErr.Code == "CANNOT_CANCEL" {
 			h.sendError(w, http.StatusConflict, rollbackErr.Message)
 			return
 		}
 
-		h.sendError(w, http.StatusInternalServerError, err.Error())
+		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -449,7 +461,7 @@ func (h *RollbackHandler) ListRollbackHistory(w http.ResponseWriter, r *http.Req
 	// Get rollback history
 	operations, err := h.rollbackManager.ListRollbackHistory(ctx, targetType, targetID, limit)
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, err.Error())
+		h.sendManagerError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -473,4 +485,29 @@ func (h *RollbackHandler) sendError(w http.ResponseWriter, status int, message s
 	h.sendJSON(w, status, map[string]interface{}{
 		"error": message,
 	})
+}
+
+// sendManagerError maps an error from the rollback manager onto an HTTP status.
+//
+// The manager holds the tenant boundary for every rollback endpoint (Issue
+// #4340), so its refusals must reach the caller as refusals: a denial answered
+// with the endpoint's generic failure status reads as a server fault and hides
+// the fact that access was refused. The manager's own message is used for those
+// two codes — both are deliberately free of the target's identity, so neither
+// confirms nor denies the existence of another tenant's steward. Any other error
+// keeps the endpoint's fallback status.
+func (h *RollbackHandler) sendManagerError(w http.ResponseWriter, err error, fallbackStatus int) {
+	var rollbackErr *rollback.RollbackError
+	if errors.As(err, &rollbackErr) {
+		switch rollbackErr.Code {
+		case "ROLLBACK_PERMISSION_DENIED":
+			h.sendError(w, http.StatusForbidden, rollbackErr.Message)
+			return
+		case "ROLLBACK_TENANT_UNVERIFIABLE":
+			h.sendError(w, http.StatusServiceUnavailable, rollbackErr.Message)
+			return
+		}
+	}
+
+	h.sendError(w, fallbackStatus, err.Error())
 }

@@ -165,3 +165,84 @@ func TestDefaultApprovalIntegration_CreateApprovalRequest_ErrorWithoutUserInCont
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unauthenticated")
 }
+
+// Tenant-boundary tests (Issue #4340): an approval decision is refused when the
+// approving principal is outside the request's tenant, and a successful
+// approval records the approving principal.
+
+func newHighRiskResult() (*ComparisonResult, *RiskAssessment) {
+	result := &ComparisonResult{
+		FromRef: ConfigurationReference{Commit: "abc12345"},
+		ToRef:   ConfigurationReference{Commit: "def67890"},
+		Summary: DiffSummary{TotalChanges: 1},
+	}
+	assessment := &RiskAssessment{OverallRisk: ImpactLevelHigh}
+	return result, assessment
+}
+
+func TestDefaultApprovalIntegration_AddApproval_DeniedOutsideTenant(t *testing.T) {
+	ai := NewDefaultApprovalIntegration(nil)
+
+	createCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "alice@example.com")
+	createCtx = context.WithValue(createCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a/client-1"))
+
+	result, assessment := newHighRiskResult()
+	req, err := ai.CreateApprovalRequest(createCtx, result, assessment)
+	require.NoError(t, err)
+	require.Equal(t, "root/msp-a/client-1", req.TenantID)
+	require.Contains(t, req.RequiredApprovers, "tech-lead")
+
+	// A principal scoped to a sibling tenant must be refused.
+	approveCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "mallory@example.com")
+	approveCtx = context.WithValue(approveCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a/client-2"))
+
+	err = ai.AddApproval(approveCtx, req.ID, "tech-lead", "approved", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrApprovalOutsideTenant)
+
+	status, err := ai.GetApprovalStatus(context.Background(), req.ID)
+	require.NoError(t, err)
+	assert.Empty(t, status.Approvals)
+}
+
+func TestDefaultApprovalIntegration_AddApproval_RecordsPrincipalWithinTenant(t *testing.T) {
+	ai := NewDefaultApprovalIntegration(nil)
+
+	createCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "alice@example.com")
+	createCtx = context.WithValue(createCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a/client-1"))
+
+	result, assessment := newHighRiskResult()
+	req, err := ai.CreateApprovalRequest(createCtx, result, assessment)
+	require.NoError(t, err)
+
+	// A principal within (or equal to) the request's tenant subtree succeeds and
+	// is recorded as the approval's Principal, independent of the approver slot.
+	approveCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "bob@example.com")
+	approveCtx = context.WithValue(approveCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a/client-1"))
+
+	require.NoError(t, ai.AddApproval(approveCtx, req.ID, "tech-lead", "approved", "looks good"))
+
+	status, err := ai.GetApprovalStatus(context.Background(), req.ID)
+	require.NoError(t, err)
+	require.Len(t, status.Approvals, 1)
+	assert.Equal(t, "tech-lead", status.Approvals[0].Approver)
+	assert.Equal(t, "bob@example.com", status.Approvals[0].Principal)
+}
+
+func TestDefaultApprovalIntegration_AddApproval_DeniedWithoutTenantScope(t *testing.T) {
+	ai := NewDefaultApprovalIntegration(nil)
+
+	createCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "alice@example.com")
+	createCtx = context.WithValue(createCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("root/msp-a/client-1"))
+
+	result, assessment := newHighRiskResult()
+	req, err := ai.CreateApprovalRequest(createCtx, result, assessment)
+	require.NoError(t, err)
+
+	// No tenant scope on the approving context at all — fail closed.
+	approveCtx := context.WithValue(context.Background(), ctxkeys.UserIDKey, "mallory@example.com")
+
+	err = ai.AddApproval(approveCtx, req.ID, "tech-lead", "approved", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrApprovalOutsideTenant)
+}
