@@ -10,6 +10,10 @@ are not paths — and is replaced with an `IsTenantAncestor`-based check.
 **Amended:** 2026-08-09 — [Amendment 2](#amendment-2-2026-08-09--a13-resolved-approach-a-decision-123-implemented):
 A1.3 resolved (explicit root-scope marker, never inferred from an empty tenant); Decisions
 1-3 implemented (`authorizeTenantAccess`, `TenantCrossingStore`, step-up challenge).
+**Amended:** 2026-09-28 — [Amendment 5](#amendment-5-2026-09-28--globalscope-is-the-crossing-boundary-marker-for-account-bound-principals):
+for a principal resolved from a durable account record, the boundary now binds on
+`GlobalScope` (`acct.RootScope`), not the assurance-gated `RootScoped` marker — reversing
+A2.2's rejection of `GlobalScope`, whose reasoning no longer matches the code.
 
 **Deciders:** Founder, Architecture
 
@@ -852,3 +856,119 @@ authority.
   per A4.4, and for first-boot bootstrap.
 - Self-approval, permitted by epic #3711's D9, stays bounded by A4.4: a session-derived root scope
   cannot approve itself into a stronger credential class.
+
+## Amendment 5 (2026-09-28) — GlobalScope is the crossing-boundary marker for account-bound principals
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** A2.2, A4.1-A4.3 ·
+**Related:** Issue [#4337](https://github.com/cfg-is/cfgms/issues/4337)
+
+### A5.1 — Decision
+
+For a principal resolved from a durable account record (`Principal.AccountBound`), the
+Decision 1 boundary now binds on `GlobalScope`, not `RootScoped`. A root-scope account
+(`acct.RootScope == true`) is subject to the boundary, produces the crossing challenge or
+grant decision, and emits the crossing audit record on **every** request that names a
+tenant outside `root`'s own scope — unconditionally, regardless of the current session's
+assurance level.
+
+`subjectToTenantCrossingBoundary(principal)` (`handlers_tenants.go`) is the single function
+this decision lives in: `principal.GlobalScope` when `AccountBound`, else
+`principal.RootScoped`. `authorizeTenantAccess`, `requirePermission`'s boundary gate,
+`tenantScopedTerminalWrapper`, and `handleUpdateStewardConfig` all call it instead of
+reading `RootScoped` directly — one decision function, not four independent copies of it.
+
+### A5.2 — Why this reverses A2.2, not just narrows it
+
+A2.2 rejected `GlobalScope` as the A1.3 marker for two reasons, both about code that has
+since changed:
+
+1. "Post-Issue #3194 (PR #3240), the bearer path computes `globalScope := sess.TenantID ==
+   ""`" — deriving it from tenant emptiness, A1.3's own ambiguity. This is still true, but
+   only for a Bearer session with **no bound account** (`middleware.go`, the
+   `acct == nil` fallback before the account-lookup override). The moment Issue #3576 (cited
+   by A2.3 itself) landed, an account-bound Bearer session stopped using that expression:
+   `globalScope = acct.RootScope`, read from the account record on every request, is what a
+   bound session has actually carried since. The web-cookie path was never on the
+   tenant-emptiness expression at all: `globalScope = acct.RootScope` when a web account
+   resolves (`middleware.go`).
+2. "`extractAdminPrincipal` hardcodes `GlobalScope: true` unconditionally" — true only for
+   its no-bound-account bootstrap-fallback branch. Its bound-account branch, added by A2.3's
+   own subject (ADR-025 Amendment 3 / Issue #3715's cert-serial account binding), sets
+   `GlobalScope: acct.RootScope` — the identical durable-account-field shape as the two
+   session paths.
+
+A2.2 was correct when it was written: at that point every principal construction site really
+did derive `GlobalScope` from tenant emptiness or hardcode it. It is no longer correct
+because the code it reasoned about is not the code that exists now. This amendment does not
+relitigate A2.2's caution about re-collapsing `RootScoped` and `GlobalScope` into one
+signal — it narrows *which principals* that caution applies to.
+
+### A5.3 — What this closes
+
+Before this amendment, `RootScoped` was the only signal `subjectToTenantCrossingBoundary`'s
+predecessor checks read, and for a session it is re-derived every request from
+`rootScopeFromAssertion(acct, sess.Assurance)` (A4.1/A4.3): `acct.RootScope && assurance >=
+AssuranceStrong`. An account whose `RootScope` has not changed presents `RootScoped ==
+false` the instant its current session's assurance drops below phishing-resistant (an
+ADR-021 Decision 5 downgrade, or simply a session that never stepped up). Three call sites
+keyed the *entire* boundary check on that single, assurance-gated bit:
+
+- `tenantScopedTerminalWrapper` (`routes_terminal.go`): its root-scope branch was an
+  `else if principal.RootScoped` with **no final `else`** — a low-assurance root-scope
+  session matched no branch at all and reached the remote-shell handler unconditionally,
+  no crossing check, no challenge, no audit.
+- `requirePermission`'s Decision 1 gate (`middleware.go`, A2.3's "Enforcement point"): gated
+  identically on `principal.RootScoped`. Below it, the ordinary tenant-isolation check
+  (`!principal.GlobalScope && principal.TenantID != ""`) is also unreachable for this
+  principal shape (`GlobalScope == true`, `TenantID == ""`), so a low-assurance root-scope
+  session skipped *both* checks and reached the handler with no isolation applied at all —
+  the general-purpose version of the same gap.
+- `handleUpdateStewardConfig` (`handlers_stewards.go`) had no Decision 1 check of any kind
+  for `callerTenant == ""` — every unscoped caller, including a root-scope account at any
+  assurance level, retained the unconditional legacy access A2.3 documents for the
+  non-`RootScoped`, certificate-authenticated case, even though this route pushes a steward's
+  entire configuration and is the most powerful write class in the API.
+
+All three are the same bug wearing different clothes: a check gated on the wrong bit,
+because the right bit (the account's actual, durable scope) was available as `GlobalScope`
+and not used. Binding on `GlobalScope` for account-bound principals mechanically closes all
+three from a single function change.
+
+### A5.4 — What this does not change
+
+- **Unbound principals keep `RootScoped` as authoritative.** A principal not resolved from
+  an account — the mTLS bootstrap fallback with no bound cert-serial account
+  (`extractAdminPrincipal`'s "no binding found" branch, `GlobalScope: true` unconditionally)
+  and a Bearer session with no resolvable account (`middleware.go`'s `acct == nil` path,
+  `globalScope := sess.TenantID == ""`) — is exactly the case A2.2 warned about: `GlobalScope`
+  there carries no account-level root-scope signal, and reading it as one would re-collapse
+  the ambiguity A1.3 was written to resolve, for the population A2.2 already correctly
+  identified. `subjectToTenantCrossingBoundary` falls back to `RootScoped` for these
+  principals, unchanged from A2.1/A4.1. The 31-branch legacy-access invariant A2.2 and A2.3
+  measured is therefore still intact: it was always about this same unbound, non-`RootScoped`,
+  certificate-authenticated population, and this amendment does not touch it.
+- **A4.3's re-derivation rule for `RootScoped` itself is untouched.** `RootScoped` still goes
+  false on an assurance downgrade for a session — that is by design, and other code (e.g.
+  break-glass eligibility, `handleTenantBreakGlass`) still reads it directly for questions
+  this amendment does not reassign. Only the Decision 1 boundary-entry question moves to
+  `GlobalScope`, and only for account-bound principals.
+- **The assurance level is not lost — it moves to the audit record.** Binding on `GlobalScope`
+  means the boundary can no longer be read as "assurance was insufficient" by its outcome
+  alone: it now engages the same way regardless of assurance. `auditAuthorizationDecision`
+  (`middleware.go`) therefore records the principal's current `Assurance` on every
+  authorization-decision audit entry, so a crossing made from a lower-assurance session
+  remains visible after the fact instead of being inferred from whether the gate fired.
+
+### Consequences
+
+- A root-scope account's session meets the crossing gate strictly more often than before this
+  amendment — including at assurance levels where it previously bypassed the gate entirely.
+  That is the fix, not a regression: the gap was a caller silently escaping both the boundary
+  and its audit trail, not a caller being denied something it should have had.
+- `tenantScopedTerminalWrapper`'s fall-through (A5.3) is closed as a side effect of routing
+  every `callerTenant == ""` principal through `authorizeTenantAccess` uniformly, rather than
+  by adding a bespoke default-deny branch beside the existing ones — the same function that
+  already had a defined answer for "unscoped, not boundary-subject, not certificate-
+  authenticated" (Amendment 4 A4.2: deny) now supplies it here too.
+- `handleUpdateStewardConfig` gains a Decision 1 check for `callerTenant == ""` for the first
+  time, matching the guard every other tenant-targeting route already carries.

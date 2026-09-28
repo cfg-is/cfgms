@@ -18,6 +18,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -100,7 +101,21 @@ func TestTenantBoundaryRouteTable_MatchesRouter(t *testing.T) {
 // "msp-a" child of it — the exact shape ADR-025 Decision 1 governs.
 func boundaryTestServer(t *testing.T) *Server {
 	t.Helper()
-	server := setupCrossingTestServer(t)
+	return boundaryTestTenants(t, setupCrossingTestServer(t))
+}
+
+// boundaryTestServerWithLogger is boundaryTestServer with the logger injected at
+// construction, for tests asserting on the authorization audit record. The logger must
+// never be assigned onto an already-running server: New() starts background sweeps that
+// read s.logger concurrently, which makes a later assignment a data race under -race.
+func boundaryTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
+	t.Helper()
+	return boundaryTestTenants(t, setupCrossingTestServerWithLogger(t, logger))
+}
+
+// boundaryTestTenants creates the "root" tenant and its "msp-a" child on server.
+func boundaryTestTenants(t *testing.T, server *Server) *Server {
+	t.Helper()
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
 	require.NoError(t, err)
@@ -254,6 +269,46 @@ func TestRootScopedPrincipal_RootTenantItselfAlwaysAllowed(t *testing.T) {
 				"a root-scoped caller must reach %s for the root tenant itself", entry.permission)
 		})
 	}
+}
+
+// TestAccountBoundLowAssuranceCaller_CrossingGatesAndAudits is the REQUIRED TEST for
+// Issue #4337's GlobalScope-binding decision, exercised end-to-end through
+// requirePermission (not authorizeTenantAccess directly): a root-scope account's
+// session, currently below phishing-resistant assurance, must still pass through the
+// ADR-025 crossing gate — and the resulting audit record must capture the actual
+// assurance level, so a crossing made from a lower-assurance session stays visible
+// after the fact even though binding moved off the assurance-gated RootScoped marker.
+func TestAccountBoundLowAssuranceCaller_CrossingGatesAndAudits(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := boundaryTestServerWithLogger(t, capLog)
+
+	// Discard anything logged during construction and tenant setup so kvValue("assurance")
+	// can only match the authorization record produced by the request below.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	caller := accountBoundLowAssuranceRootPrincipal("low-assurance-op-1")
+	require.Empty(t, caller.CertSerial, "this principal must be session-shaped, not cert-authenticated")
+
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID:          "grant-audit-1",
+		TenantID:    "msp-a",
+		PrincipalID: caller.ID,
+		Kind:        business.TenantCrossingKindGrant,
+		GrantedBy:   "msp-a-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}))
+
+	entry := tenantBoundaryRouteTable[0] // GET /api/v1/tenants/{id}, tenant:read
+	rec, reached := serveBoundaryRoute(t, server, entry, caller, "msp-a")
+
+	require.True(t, reached,
+		"an active grant must admit the low-assurance account-bound caller: %s", rec.Body.String())
+	assert.Equal(t, session.AssuranceBasic.String(), capLog.kvValue("assurance"),
+		"the authorization audit record must capture the caller's actual (low) assurance level")
 }
 
 // TestUnscopedAdmin_UnaffectedOnEveryTenantRoute pins that the new boundary applies only

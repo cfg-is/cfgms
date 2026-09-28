@@ -141,6 +141,17 @@ type Principal struct {
 	// permission by construction. Previously, Permissions==nil served as the implicit-admin
 	// marker; that sentinel made a zero-valued principal unintentionally privileged.
 	ImplicitAdmin bool
+	// AccountBound is true when this principal was resolved from a durable account record
+	// (extractAdminPrincipal's bound-cert branch, or a Bearer/web session with a resolvable
+	// account) rather than the no-binding bootstrap fallback (Issue #4337, ADR-025
+	// Amendment 5). It is the signal subjectToTenantCrossingBoundary uses to decide whether
+	// GlobalScope (acct.RootScope, durable) or RootScoped (per-credential, and for sessions
+	// re-derived from the current request's assurance) governs the ADR-025 root<->MSP
+	// crossing boundary for this principal: GlobalScope only when AccountBound, because for
+	// an unbound principal GlobalScope carries no account-level root-scope signal at all
+	// (it is unconditionally true for the mTLS bootstrap fallback, and merely mirrors tenant
+	// emptiness for an unbound session) — see authorizeTenantAccess's doc comment.
+	AccountBound bool
 }
 
 // rootScopeFromAssertion derives the ADR-025 Amendment 4 A4.1 explicit root-scope
@@ -396,6 +407,11 @@ func (s *Server) extractAdminPrincipal(r *http.Request) *Principal {
 			RootScoped:    cert.HasRootScopeMarker(peerCert),
 			Permissions:   permissions,
 			ImplicitAdmin: implicitAdmin,
+			// AccountBound: resolved from a durable account record (Issue #4337) — makes
+			// GlobalScope (acct.RootScope) the authoritative ADR-025 crossing-boundary signal
+			// for this principal, even if the bound certificate itself predates the
+			// RootScoped extension or the two ever diverge.
+			AccountBound: true,
 		}
 	}
 
@@ -917,6 +933,12 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						Permissions:   permissions,
 						TenantID:      tenantID,
 						ImplicitAdmin: implicitAdmin,
+						// AccountBound: true only when a live account was resolved for
+						// sess.PrincipalID (Issue #4337) — the no-account fallback above keeps
+						// globalScope's sess.TenantID=="" default, which is not an account-level
+						// root-scope signal and must not be read as one by
+						// subjectToTenantCrossingBoundary.
+						AccountBound: acct != nil,
 						// RootScoped is true when either the session's own explicit marker
 						// (ADR-025 Amendment 1 A1.3, set only by session.Manager.IssueRootScoped
 						// and immutable thereafter) is set, or this request's phishing-resistant
@@ -1055,6 +1077,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// never carried the marker at all and was therefore unconfined by the
 					// Decision 1 root<->MSP boundary (A4.2).
 					RootScoped: rootScopeFromAssertion(webAcct, webSess.Assurance),
+					// AccountBound: true only when webAcct actually resolved (Issue #4337) —
+					// mirrors the Bearer-session branch's acct != nil signal.
+					AccountBound: webAcct != nil,
 				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
@@ -1525,11 +1550,11 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 				)
 			}
 
-			// ADR-025 Decision 1 root<->MSP boundary for root-scoped principals.
+			// ADR-025 Decision 1 root<->MSP boundary for principals subject to it.
 			//
-			// This must sit outside the tenant-scoped block below: a RootScoped principal
-			// presents GlobalScope == true and TenantID == "" (extractAdminPrincipal and
-			// the Bearer/session path both keep the unscoped shape), so that block is
+			// This must sit outside the tenant-scoped block below: a boundary-subject
+			// principal presents GlobalScope == true and TenantID == "" (extractAdminPrincipal
+			// and the Bearer/session path both keep the unscoped shape), so that block is
 			// structurally unreachable for it. Enforcing the boundary only inside the
 			// handlers that happen to call authorizeTenantAccess left every other
 			// tenant-targeting route open — tenant:manage's suspend and config-source/test,
@@ -1538,7 +1563,14 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// against that tenant's git credential with no active grant and no break-glass
 			// record. Checking here covers every current and future tenant-targeting route
 			// by construction rather than by handler-by-handler discipline.
-			if principal.RootScoped && !tenantCrossingRemedyPermissions[permissionID] {
+			//
+			// subjectToTenantCrossingBoundary (not principal.RootScoped directly, Issue
+			// #4337): RootScoped alone would let a bound root-scope account's session
+			// silently skip this entire block — and the GlobalScope-gated tenant-isolation
+			// check below — the moment its current assurance drops below phishing-resistant,
+			// since RootScoped's session-path derivation is re-evaluated against that
+			// assurance on every request while the account's actual scope has not changed.
+			if subjectToTenantCrossingBoundary(principal) && !tenantCrossingRemedyPermissions[permissionID] {
 				if targetTenant := s.extractBoundaryTenantFromRequest(r, resourceType); targetTenant != "" {
 					switch s.authorizeTenantAccess(r.Context(), principal, targetTenant) {
 					case tenantAuthAllowed:
@@ -1788,6 +1820,14 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		auditFields["cert_not_after"] = principal.CertNotAfter.UTC().Format(time.RFC3339)
 	} else {
 		auditFields["auth_method"] = "api_key"
+	}
+	// Issue #4337: the ADR-025 crossing boundary now binds on the account's durable
+	// GlobalScope rather than the assurance-gated RootScoped marker, so a crossing made
+	// from a lower-assurance session no longer shows up as a difference in *whether* the
+	// boundary engaged. Recording the assurance level here is what keeps that fact visible
+	// after the fact instead of losing it.
+	if principal != nil {
+		auditFields["assurance"] = principal.Assurance.String()
 	}
 
 	if decision.ConditionalVars != nil {

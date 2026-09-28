@@ -808,6 +808,23 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
 		}
+	} else if principal, _ := r.Context().Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) {
+		// ADR-025 Decision 1 root<->MSP boundary (Issue #4337): this is the most
+		// powerful write class in the API — an unscoped caller pushing steward
+		// config — so a principal subject to the crossing boundary must pass it here
+		// exactly as it would on any other tenant-targeting route, rather than
+		// inheriting the "unscoped caller retains global authority" branch above,
+		// which is reserved for callers that are not subject to the boundary at all.
+		switch s.authorizeTenantAccess(r.Context(), principal, tenantID) {
+		case tenantAuthAllowed:
+			// Active crossing grant, or the steward's tenant is "root" itself.
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, tenantID)
+			return
+		default:
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return
+		}
 	}
 
 	tenantIDForLog := logging.SanitizeLogValue(tenantID)

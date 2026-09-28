@@ -9,8 +9,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -202,6 +202,15 @@ type SessionToken struct {
 	IssuedAt    time.Time `json:"issued_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
 	LastRotated time.Time `json:"last_rotated"`
+
+	// StewardID and TenantID name the scope this token was minted for — the target
+	// steward and its tenant, taken from the SessionRequest that authenticated this
+	// session (Issue #4337). Recording them on the token itself lets later validation
+	// re-confirm the session is still being used against the steward and tenant it was
+	// granted for, without re-deriving that scope from whatever request happens to
+	// present the token.
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
 
 	// Security Properties
 	ClientIP        string `json:"client_ip"`
@@ -395,7 +404,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	}
 
 	// Generate session token with anti-hijacking properties
-	sessionToken, err := atm.generateSessionToken(session.ID, userID, r, clientCert)
+	sessionToken, err := atm.generateSessionToken(session.ID, userID, req.StewardID, tenantID, r, clientCert)
 	if err != nil {
 		return &AuthenticationResult{
 			Success:      false,
@@ -691,7 +700,7 @@ func (atm *AuthenticatedTerminalManager) getActiveSessionCount(userID string) in
 	return count
 }
 
-func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID string, r *http.Request, cert *x509.Certificate) (*SessionToken, error) {
+func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID, stewardID, tenantID string, r *http.Request, cert *x509.Certificate) (*SessionToken, error) {
 	tokenStr, err := generateSecureToken()
 	if err != nil {
 		return nil, err
@@ -702,6 +711,8 @@ func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID 
 		Token:         tokenStr,
 		SessionID:     sessionID,
 		UserID:        userID,
+		StewardID:     stewardID,
+		TenantID:      tenantID,
 		IssuedAt:      now,
 		ExpiresAt:     now.Add(atm.config.SessionTimeout),
 		LastRotated:   now,
@@ -723,25 +734,18 @@ func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID 
 	return token, nil
 }
 
+// getClientIP resolves the client IP recorded on the session token and in audit
+// events — a record meant to be forensic. It intentionally never consults
+// X-Forwarded-For or X-Real-IP (Issue #4337): AuthenticatedTerminalManager has no
+// configured set of trusted reverse proxies (unlike terminalClientIP in
+// features/controller/transport, which only trusts those headers from a configured
+// proxy CIDR), so a client can set either header to any value it likes. r.RemoteAddr
+// is the TCP peer address, which the client cannot forge.
 func (atm *AuthenticatedTerminalManager) getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		return strings.TrimSpace(ips[0])
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	// Fall back to RemoteAddr
-	addr := r.RemoteAddr
-	if colon := strings.LastIndex(addr, ":"); colon != -1 {
-		addr = addr[:colon]
-	}
-
-	return addr
+	return r.RemoteAddr
 }
 
 func (atm *AuthenticatedTerminalManager) generateTLSFingerprint(connState *tls.ConnectionState) string {
@@ -937,6 +941,13 @@ func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Contex
 
 // extractTenantID extracts tenant ID from session token
 func extractTenantID(token *SessionToken) string {
+	// token.TenantID (Issue #4337) is set by generateSessionToken from the
+	// SessionRequest that authenticated the session — the authoritative scope.
+	// Metadata["tenant_id"] and the "default" fallback remain for any token built
+	// before that field existed (or directly, outside generateSessionToken).
+	if token.TenantID != "" {
+		return token.TenantID
+	}
 	if tenantID, exists := token.Metadata["tenant_id"]; exists {
 		return tenantID
 	}

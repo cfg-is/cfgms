@@ -4423,6 +4423,72 @@ func TestStewardHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 	})
 }
 
+// putStewardConfigAsPrincipal is putStewardConfig's generalization: same route, same
+// valid YAML body, but with an arbitrary principal in context, so boundary tests can
+// drive an account-bound / root-scoped caller through the handler.
+func putStewardConfigAsPrincipal(server *Server, stewardID string, principal *Principal) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/stewards/"+stewardID+"/config",
+		strings.NewReader(stewardConfigYAML(stewardID)))
+	req.Header.Set("Content-Type", "application/yaml")
+	req = withPrincipal(req, principal)
+	req = withVars(req, map[string]string{"id": stewardID})
+	rec := httptest.NewRecorder()
+	server.handleUpdateStewardConfig(rec, req)
+	return rec
+}
+
+// TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challenge is the
+// REQUIRED TEST for handleUpdateStewardConfig's share of Issue #4337: the steward-config
+// write is the most powerful write class in the API, so a caller subject to the ADR-025
+// root<->MSP crossing boundary must pass it here exactly as on any other tenant-targeting
+// route — including a root-scope account's session below phishing-resistant assurance
+// (AccountBound + GlobalScope, RootScoped == false), which is the shape that used to
+// carry no boundary check on this handler at all.
+func TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+	require.NoError(t, server.controllerService.RegisterSteward("s-config-boundary-1", "msp-a", "addr", "active"))
+
+	principal := accountBoundLowAssuranceRootPrincipal("root-op-config-1")
+	rec := putStewardConfigAsPrincipal(server, "s-config-boundary-1", principal)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"a boundary-subject caller without a crossing must get a step-up-shaped challenge, not access: %s", rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}
+
+// TestUpdateStewardConfig_AccountBoundRootScoped_WithCrossing_Allowed is the positive
+// counterpart: an active grant lets the same caller push config to the steward.
+func TestUpdateStewardConfig_AccountBoundRootScoped_WithCrossing_Allowed(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+	require.NoError(t, server.controllerService.RegisterSteward("s-config-boundary-2", "msp-a", "addr", "active"))
+
+	principal := accountBoundLowAssuranceRootPrincipal("root-op-config-2")
+	now := time.Now().UTC()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:          "grant-config-1",
+		TenantID:    "msp-a",
+		PrincipalID: principal.ID,
+		Kind:        business.TenantCrossingKindGrant,
+		GrantedBy:   "msp-a-admin",
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(time.Hour),
+	}))
+
+	rec := putStewardConfigAsPrincipal(server, "s-config-boundary-2", principal)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"an active crossing grant must admit the caller: %s", rec.Body.String())
+}
+
 // TestStewardHandlers_SucceedOnAuthoritativeNode is the mirror case: a real,
 // deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
 // existing decommission logic unchanged — removing the gate must not have broken

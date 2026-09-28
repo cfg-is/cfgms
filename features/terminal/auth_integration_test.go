@@ -3,6 +3,8 @@
 package terminal
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -160,6 +162,65 @@ func TestRotateTokensIfNeeded_TokenNotYetDue(t *testing.T) {
 	_, exists := atm.sessionTokens[tokenStr]
 	atm.tokenMutex.RUnlock()
 	assert.True(t, exists, "token must remain in the map when rotation is not yet due")
+}
+
+// TestGenerateSessionToken_RecordsStewardAndTenant is the REQUIRED-shape test for
+// Issue #4337's first auth_integration.go finding: generateSessionToken did not record
+// the target steward or tenant on the SessionToken, so nothing on the token itself let
+// later validation re-confirm scope without re-deriving it from the original request.
+func TestGenerateSessionToken_RecordsStewardAndTenant(t *testing.T) {
+	atm := &AuthenticatedTerminalManager{
+		config: &AuthConfig{SessionTimeout: time.Hour},
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	token, err := atm.generateSessionToken("session-1", "user-1", "steward-42", "tenant-a", r, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "steward-42", token.StewardID,
+		"the token must record its target steward")
+	assert.Equal(t, "tenant-a", token.TenantID,
+		"the token must record its target tenant")
+}
+
+// TestGetClientIP_IgnoresForwardedHeaders is the REQUIRED-shape test for Issue #4337's
+// second auth_integration.go finding: getClientIP used to trust X-Forwarded-For and
+// X-Real-IP unconditionally for a record meant to be forensic, even though
+// AuthenticatedTerminalManager has no configured set of trusted reverse proxies.
+func TestGetClientIP_IgnoresForwardedHeaders(t *testing.T) {
+	atm := &AuthenticatedTerminalManager{}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "203.0.113.9:54321"
+	r.Header.Set("X-Forwarded-For", "10.0.0.1")
+	r.Header.Set("X-Real-IP", "10.0.0.2")
+
+	got := atm.getClientIP(r)
+	assert.Equal(t, "203.0.113.9", got,
+		"getClientIP must record the un-forgeable TCP peer address, not a client-supplied header")
+}
+
+// TestGetClientIP_FallsBackToRawRemoteAddrWhenUnparseable verifies getClientIP degrades
+// gracefully (rather than returning an empty string) when RemoteAddr has no port.
+func TestGetClientIP_FallsBackToRawRemoteAddrWhenUnparseable(t *testing.T) {
+	atm := &AuthenticatedTerminalManager{}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "not-a-host-port"
+
+	assert.Equal(t, "not-a-host-port", atm.getClientIP(r))
+}
+
+// TestExtractTenantID_PrefersTokenField verifies extractTenantID reads the durable
+// TenantID field (Issue #4337) ahead of the legacy Metadata fallback.
+func TestExtractTenantID_PrefersTokenField(t *testing.T) {
+	token := &SessionToken{TenantID: "tenant-a", Metadata: map[string]string{"tenant_id": "tenant-b"}}
+	assert.Equal(t, "tenant-a", extractTenantID(token))
+}
+
+// TestExtractTenantID_FallsBackWhenFieldEmpty verifies extractTenantID's legacy
+// fallback chain (Metadata, then "default") still applies to a token that predates the
+// TenantID field.
+func TestExtractTenantID_FallsBackWhenFieldEmpty(t *testing.T) {
+	assert.Equal(t, "tenant-b", extractTenantID(&SessionToken{Metadata: map[string]string{"tenant_id": "tenant-b"}}))
+	assert.Equal(t, "default", extractTenantID(&SessionToken{Metadata: map[string]string{}}))
 }
 
 func TestRegisterUnregisterTokenRefreshChannel(t *testing.T) {
