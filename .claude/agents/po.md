@@ -410,6 +410,10 @@ Remove stale agent containers and clones. Run:
 ```
 This finds containers whose stories are closed, have project status `Failed`, or project status `Blocked` and removes them. Runs before dispatch so re-dispatched stories start with a clean environment. Safe to run every cycle — idempotent, skips containers whose stories are still active.
 
+It also reaps **orphaned clones**: a `story-<N>`, `review-pr-<N>`, `pr-fix-<N>` or `resolve-conflict-<N>` directory under the worktrees base whose container no longer exists. A clone is removed only when it is past a 30-minute grace window and holds nothing unsaved. A clone with uncommitted, untracked, stashed or unpushed work is reported as `ORPHAN_KEPT:<dir>:dirty` for salvage and is never deleted. If `docker ps` fails, the pass prints `ORPHAN_CLONES_SKIPPED:docker_ps_failed` and deletes nothing.
+
+**Clone and container removal goes through these helpers only** (`cleanup-stale`, `cleanup-stale-reviews`, `cleanup-container`). Never run a raw `rm` on the worktrees base, and never run `cd <dir> && rm ...` compounds. They need a human's approval, so a backgrounded PO sits on the permission prompt with no report. If a clone survives the helpers, report it by path and leave it.
+
 **Step 1.6 — Lock sweep:**
 Keep the public tracker's injection surface closed. Run:
 ```bash
