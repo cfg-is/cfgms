@@ -113,8 +113,6 @@ packages:
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/saas
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/siem
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/steward/modules/runtime
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365

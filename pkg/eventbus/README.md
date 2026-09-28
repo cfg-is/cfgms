@@ -64,6 +64,7 @@ change — the swap is one implementation, not a refactor of 39+ callers.
 
 Attach via `LoggingManager.AddSubscriber` or by extending `LoggingConfig.Subscribers`:
 
-- `features/siem` correlation engine (dead code today — #2135 §9)
+- SIEM correlation engine, if implemented per the capability map in #4329 (the unreachable
+  `features/siem` package this map was drawn from was deleted in #4327)
 - `features/workflow/trigger.SIEMProcessor` (starved today — #2135 §9)
 - OpenTelemetry OTLP exporter (export path, not internal wire schema — ADR-005)
