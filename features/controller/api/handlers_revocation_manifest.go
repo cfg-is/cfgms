@@ -343,3 +343,170 @@ func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Requ
 		SignerCertificatePEM: string(signingCert.CertificatePEM),
 	})
 }
+
+// stewardTenantFromPeerCertificate resolves the tenant path of the steward whose mTLS
+// certificate authenticated this request (handleGetStewardRevocationManifest), the
+// non-admin counterpart to extractAdminPrincipal. By the time this runs, the TLS layer
+// (VerifyClientCertIfGiven + ClientCAs, server.go) has already chain-verified
+// r.TLS.PeerCertificates[0] against the controller's own CA — but chain trust alone is
+// not identity: an admin certificate, or a steward certificate for a different,
+// unregistered or decommissioned device, would also chain-verify. The additional bar
+// applied here is a REGISTERED steward: the certificate's CommonName must resolve via
+// the steward registry (controllerService.TenantForDevice) to a known device, the same
+// "known identity, not just a valid chain" bar pkg/transport/quic.PeerStewardID applies
+// on the gRPC control plane. An unknown CommonName is refused even though its
+// certificate chain is genuine — a never-registered or decommissioned device has no
+// legitimate call to see any part of this manifest.
+func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID string, ok bool) {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return "", false
+	}
+	stewardID := r.TLS.PeerCertificates[0].Subject.CommonName
+	if stewardID == "" || s.controllerService == nil {
+		return "", false
+	}
+	return s.controllerService.TenantForDevice(stewardID)
+}
+
+// filterWebAuthnCredentialsForSteward narrows creds to the entries a requesting steward
+// in stewardTenant is allowed to see (Issue #4400). This mirrors, byte for byte, the
+// rule the steward itself applies once it has independently verified the manifest
+// (commands.entryAuthorizedForTenant) and that
+// docs/architecture/steward-operating-model.md documents; applying it server-side here
+// means a compromised steward never receives another tenant's operator credentials in
+// the first place.
+//
+// The rule is fail-closed on every unset tenant, deliberately: an entry with
+// TenantID == "" and RootScope == false is a reachable account state
+// (handleCreateAccount accepts root_scope:false with no tenant_id), and treating that
+// unset tenant as "unrestricted" — which is what the general-purpose
+// isWithinTenantScope("") does for an *mTLS admin caller* — would disclose that entry's
+// credential ID, public key and existence to every steward in the fleet. The unset
+// state here is a roster entry with no declared authority, not an unrestricted caller,
+// so it authorizes nothing. This is the same fail-closed direction isAuthorizedForTenant
+// (middleware.go, Issue #4316) takes for the request-scoped three-state TenantScope.
+//
+// RevokedSerials is deliberately never filtered this way — see
+// handleGetStewardRevocationManifest's doc comment for why a narrower WebAuthn roster
+// is safe where a narrower revocation list would not be.
+func filterWebAuthnCredentialsForSteward(creds []AuthorizedWebAuthnCredential, stewardTenant string) []AuthorizedWebAuthnCredential {
+	if len(creds) == 0 {
+		return creds
+	}
+	filtered := make([]AuthorizedWebAuthnCredential, 0, len(creds))
+	for _, credential := range creds {
+		if webauthnCredentialAuthorizedForSteward(credential, stewardTenant) {
+			filtered = append(filtered, credential)
+		}
+	}
+	return filtered
+}
+
+// webauthnCredentialAuthorizedForSteward reports whether credential's owning tenant
+// covers a steward at stewardTenant. A root-scope entry is a fleet-wide platform
+// administrator and covers every steward, but only when it carries no tenant path —
+// a root-scope entry that also names a tenant is self-contradictory and authorizes
+// nothing. Any other entry covers only its own tenant path and that path's
+// descendants, and an entry or steward with no tenant path at all covers nothing.
+//
+// Kept identical to the steward-side entryAuthorizedForTenant
+// (features/steward/commands/webauthn_credential_verifier.go): the steward re-checks
+// this after verifying the manifest signature, and a server filter that admitted more
+// than the steward accepts would be a disclosure with no corresponding capability.
+func webauthnCredentialAuthorizedForSteward(credential AuthorizedWebAuthnCredential, stewardTenant string) bool {
+	if credential.RootScope {
+		return credential.TenantID == ""
+	}
+	if credential.TenantID == "" || stewardTenant == "" {
+		return false
+	}
+	return isWithinTenantScope(credential.TenantID, stewardTenant)
+}
+
+// handleGetStewardRevocationManifest handles GET /api/v1/public/steward-revocation-manifest
+// (Issue #4400). Registered on the base router (server.go), like the public
+// steward-binary download, because a steward's mTLS certificate carries no CFGMS admin
+// marker and therefore produces no principal via extractAdminPrincipal/
+// authenticationMiddleware — the fleet-wide GET /api/v1/certificates/revocation-manifest
+// above is simply unreachable by a steward. Authorization here is the steward's own
+// peer certificate, resolved to a registered device by stewardTenantFromPeerCertificate;
+// certificate:list is never widened to steward principals, and stewards are never
+// issued the admin marker.
+//
+// The response is filtered per steward, unlike the fleet-wide admin manifest:
+//   - RevokedSerials is served in full. Serials are opaque and non-identifying, and a
+//     steward's RevocationVerifier only ever unions RevokedSerials into what it already
+//     believed revoked (never replaces it), so a narrower list could only reduce
+//     coverage — the opposite of what a per-steward-filtered response must do here.
+//   - AuthorizedWebAuthnCredentials is narrowed to operators whose tenant scope covers
+//     this steward's tenant path (filterWebAuthnCredentialsForSteward) — the fleet
+//     admin inventory a steward, which the threat model treats as a host that may be
+//     compromised, has no legitimate need to see beyond its own chain of tenants.
+//   - WebAuthnRelyingParty is served unchanged; rp_id and origins are not sensitive.
+//
+// Each response is signed fresh with the controller's current PurposeSigning
+// certificate (signRevocationManifest) rather than reusing a previously-signed
+// fleet-wide manifest, because the filtered content differs per caller — an unsigned or
+// re-signed-by-a-relay payload would defeat the steward's own chain verification
+// (operatorroster.RevocationVerifier.VerifyManifest, strict mode).
+func (s *Server) handleGetStewardRevocationManifest(w http.ResponseWriter, r *http.Request) {
+	stewardTenant, ok := s.stewardTenantFromPeerCertificate(r)
+	if !ok {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"A registered steward mTLS certificate is required", "FORBIDDEN")
+		return
+	}
+
+	if s.certManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	manifest, err := buildRevocationManifest(s.certManager)
+	if err != nil {
+		s.logger.Error("Failed to build steward revocation manifest", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+
+	webauthnCreds, err := s.buildAuthorizedWebAuthnCredentials(r.Context())
+	if err != nil {
+		s.logger.Error("Failed to build authorized WebAuthn credentials", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to build revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+	manifest.AuthorizedWebAuthnCredentials = filterWebAuthnCredentialsForSteward(webauthnCreds, stewardTenant)
+	manifest.WebAuthnRelyingParty = s.webAuthnRelyingPartyBinding()
+
+	sig, err := signRevocationManifest(s.certManager, manifest)
+	if err != nil {
+		s.logger.Error("Failed to sign steward revocation manifest", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to sign revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+
+	// Issue #3697: fetched a second time (cheap in-memory store lookup, not the signing
+	// path) solely to embed the PEM a caller with no other side channel to the current
+	// signing certificate needs to independently chain-verify Signature.
+	signingCert, err := s.certManager.GetCurrentCertForPurpose(cert.PurposeSigning)
+	if err != nil {
+		s.logger.Error("Failed to load signing certificate for steward manifest response", "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to sign revocation manifest", "INTERNAL_ERROR")
+		return
+	}
+
+	// Written raw, not via writeSuccessResponse's {"data": ...} envelope: the consumer
+	// is operatorroster.FetchAndVerify (features/steward/operatorroster/revocation.go),
+	// which unmarshals the response body directly as signedRevocationManifest — the
+	// same un-enveloped, steward-consumed wire-contract pattern used by the
+	// registration and registration-status endpoints (handlers_registration.go), not
+	// the admin-API envelope convention the fleet-wide manifest above uses.
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(SignedRevocationManifest{
+		Manifest:             *manifest,
+		Signature:            sig,
+		SignerCertificatePEM: string(signingCert.CertificatePEM),
+	}); err != nil {
+		s.logger.Error("Failed to encode steward revocation manifest response", "error", logging.SanitizeLogValue(err.Error()))
+	}
+}

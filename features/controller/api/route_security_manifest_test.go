@@ -44,6 +44,12 @@ var publicRouteSecurityPolicies = map[string]routeSecurityPolicy{
 	"POST /api/v1/web/logout":                                         publicWritePolicy("web session plus session CSRF", "web.logout"),
 	"GET /api/v1/installer/download/{platform}/{arch}":                publicReadPolicy("none", "signed installer download"),
 	"GET /api/v1/public/steward-binaries/{version}/{platform}/{arch}": publicReadPolicy("none", "signed binary download"),
+	// Issue #4400: authenticated by the caller's own mTLS certificate resolved to a
+	// registered device (stewardTenantFromPeerCertificate), not by API key, admin
+	// cert, or session — hence "public" exposure (outside the api subrouter) despite
+	// requiring a real credential. See handleGetStewardRevocationManifest.
+	"GET /api/v1/public/steward-revocation-manifest": publicReadPolicy(
+		"steward mTLS certificate resolved to a registered device", "steward_revocation_manifest.fetched"),
 	// The webhook handler enforces the signature for every matched binding and
 	// fails closed: a binding without a webhook secret is rejected with 401 rather
 	// than synced unauthenticated (pkg/gitsync/webhook.go).

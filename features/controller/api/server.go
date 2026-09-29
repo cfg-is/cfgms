@@ -853,6 +853,19 @@ func (s *Server) setupRouter() {
 		s.publicDownloadGuard.middleware(s.trustedProxies, http.HandlerFunc(s.handleGetStewardBinaryPublic)),
 	).Methods("GET")
 
+	// Steward-scoped revocation manifest — no API key/admin-cert/session auth; the
+	// steward's own mTLS certificate authenticates it (Issue #4400). Registered on the
+	// base router for the same reason as the steward-binary download immediately
+	// above: a steward certificate carries no CFGMS admin marker, so it produces no
+	// principal via authenticationMiddleware and can never reach the api subrouter.
+	// The handler itself resolves and authorizes the caller from r.TLS.PeerCertificates
+	// (see handleGetStewardRevocationManifest's doc comment) — this is not an
+	// unauthenticated route, just one authenticated outside the admin-principal system.
+	s.router.HandleFunc(
+		"/api/v1/public/steward-revocation-manifest",
+		s.handleGetStewardRevocationManifest,
+	).Methods("GET")
+
 	// Git-sync webhook (Issue #666, #3263): pre-registered here so gorilla/mux can
 	// match it before the SPA PathPrefix("/") catch-all below (routes are matched in
 	// registration order).  The handler is resolved lazily at request time so it can

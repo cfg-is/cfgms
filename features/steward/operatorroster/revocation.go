@@ -19,14 +19,18 @@
 // uses — and answers IsRevoked from the last manifest it verified for itself, never
 // from an unsigned, live controller claim.
 //
-// Delivery is not yet wired. FetchAndVerify and RunPeriodicRefresh have no production
-// caller: the manifest endpoint is gated on certificate:list, and the controller only
-// derives a REST principal from an mTLS certificate carrying the CFGMS admin marker,
-// which a steward certificate does not carry. IsRevoked therefore answers false on every
-// deployed steward today. The full reasoning, and why pointing RunPeriodicRefresh at that
-// URL anyway would be worse than leaving it uncalled, is at the verifier's construction
-// site (features/steward/client/client_transport.go).
-// Deferred: tracked in #3571 — steward-reachable delivery of the signed revocation manifest.
+// Delivery (Issue #4400): features/steward/client/client_transport.go's
+// setupCommandHandler builds the manifest URL (fetch.go's BuildManifestURL) and starts
+// FetchAndVerify/RunPeriodicRefresh against the controller's steward-authenticated,
+// per-steward-filtered manifest endpoint (features/controller/api/
+// handlers_revocation_manifest.go's handleGetStewardRevocationManifest,
+// GET /api/v1/public/steward-revocation-manifest) — a separate route from the
+// fleet-wide, certificate:list-gated GET /api/v1/certificates/revocation-manifest a
+// steward certificate cannot reach, since the controller only derives a REST principal
+// from an mTLS certificate carrying the CFGMS admin marker, which a steward certificate
+// never carries. Epic #3571, previously cited here as the tracker for this gap, is
+// closed with all sub-issues complete and did not add this delivery path; #4400 is the
+// issue that did.
 //
 // This package cannot import features/controller/api (controller-only), so the wire
 // shapes it verifies are duplicated here field-for-field, matching json tag and

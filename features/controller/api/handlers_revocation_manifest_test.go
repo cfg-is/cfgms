@@ -450,6 +450,243 @@ func TestHandleGetRevocationManifest_NoWebAuthnCredentials_EmptyRoster(t *testin
 	assert.Empty(t, body.Manifest.AuthorizedWebAuthnCredentials)
 }
 
+// stewardManifestRequest builds a GET /api/v1/public/steward-revocation-manifest request
+// authenticated as stewardID's own mTLS certificate — no admin marker, matching a real
+// steward's certificate shape. The certificate's chain-verification is not exercised by
+// this in-process request construction (real chain verification happens at the TLS
+// handshake layer, server.go), so any certMgr-issued certificate suffices; what the
+// handler actually authorizes on is the CommonName resolving via
+// controllerService.TenantForDevice to a registered device (Issue #4400).
+func stewardManifestRequest(t *testing.T, certMgr *cert.Manager, stewardID string) *http.Request {
+	t.Helper()
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   stewardID,
+		Organization: "Test CFGMS",
+		ClientID:     stewardID,
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/public/steward-revocation-manifest", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	return req
+}
+
+// getStewardRevocationManifest requests the steward-scoped manifest as stewardID and
+// decodes the RAW response body — unlike serveManifest's {"data": ...} envelope, the
+// steward endpoint writes SignedRevocationManifest directly (see
+// handleGetStewardRevocationManifest's doc comment) because its consumer is
+// operatorroster.FetchAndVerify, which expects the manifest at the JSON top level.
+func getStewardRevocationManifest(t *testing.T, server *Server, certMgr *cert.Manager, stewardID string) (*httptest.ResponseRecorder, SignedRevocationManifest) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, stewardManifestRequest(t, certMgr, stewardID))
+
+	var body SignedRevocationManifest
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&body))
+	}
+	return rec, body
+}
+
+// TestHandleGetStewardRevocationManifest_RegisteredStewardSucceeds verifies a steward
+// whose certificate CommonName resolves to a registered device receives the manifest,
+// with RevokedSerials served in full (REQUIRED TEST, Issue #4400 AC: "a steward
+// certificate reaches the endpoint successfully").
+func TestHandleGetStewardRevocationManifest_RegisteredStewardSucceeds(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	const stewardID = "steward-manifest-ok"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-manifest-ok-revoked-cert",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-manifest-ok-revoked-cert",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	require.NoError(t, certMgr.Revoke(issued.SerialNumber))
+
+	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, body.Manifest.RevokedSerials, issued.SerialNumber,
+		"a registered steward must receive the full, unfiltered revoked-serials list")
+}
+
+// TestHandleGetStewardRevocationManifest_UnregisteredCertificateRefused verifies a
+// certificate that is neither admin-marked nor resolvable to a registered steward is
+// refused (REQUIRED TEST, Issue #4400 AC: "a certificate with neither the admin marker
+// nor a valid steward identity is still refused").
+func TestHandleGetStewardRevocationManifest_UnregisteredCertificateRefused(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	rec, _ := getStewardRevocationManifest(t, server, certMgr, "never-registered-steward")
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetStewardRevocationManifest_NoPeerCertificateRefused verifies a request
+// with no client certificate at all is refused, not treated as some default identity.
+func TestHandleGetStewardRevocationManifest_NoPeerCertificateRefused(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	req := httptest.NewRequest("GET", "/api/v1/public/steward-revocation-manifest", nil)
+	rec, _ := serveManifest(t, server, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials verifies
+// the tenant-isolation rule for the filtering decision (REQUIRED TEST, Issue #4400 AC):
+// a steward in tenant path root/msp-a/client-1 does not receive AuthorizedWebAuthnCredentials
+// belonging to an operator scoped only to root/msp-b, but does receive its own tenant's
+// credential and any root-scope (fleet-wide) credential.
+func TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+
+	const stewardID = "steward-tenant-isolation"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+
+	createManifestAccount(t, server, AccountRequest{
+		Username:    "manifest-user-msp-a",
+		TenantID:    "root/msp-a",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	_, pubKeyA := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-msp-a", []byte("manifest-cred-msp-a"), pubKeyA, 0)
+
+	createManifestAccount(t, server, AccountRequest{
+		Username:    "manifest-user-msp-b",
+		TenantID:    "root/msp-b",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	_, pubKeyB := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-msp-b", []byte("manifest-cred-msp-b"), pubKeyB, 0)
+
+	createManifestAccount(t, server, AccountRequest{Username: "manifest-user-root", RootScope: true})
+	_, pubKeyRoot := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-root", []byte("manifest-cred-root"), pubKeyRoot, 0)
+
+	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var credIDs [][]byte
+	for _, entry := range body.Manifest.AuthorizedWebAuthnCredentials {
+		credIDs = append(credIDs, entry.CredentialID)
+	}
+	assert.Contains(t, credIDs, []byte("manifest-cred-msp-a"),
+		"a steward must receive credentials whose operator tenant covers its own tenant")
+	assert.Contains(t, credIDs, []byte("manifest-cred-root"),
+		"a steward must receive root-scope (fleet-wide) credentials")
+	assert.NotContains(t, credIDs, []byte("manifest-cred-msp-b"),
+		"a steward must not receive another tenant's operator credentials")
+}
+
+// TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded verifies the
+// per-steward filter is fail-closed on an account with neither root scope nor a tenant
+// path. handleCreateAccount accepts root_scope:false with no tenant_id (it only rejects
+// the root_scope+tenant_id combination), so this entry shape is reachable; treating its
+// empty TenantID as "unrestricted" would have disclosed its credential ID, public key
+// and existence to every steward in the fleet. The steward's own
+// entryAuthorizedForTenant denies this shape, and the server filter must not admit more
+// than the steward accepts.
+func TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+
+	const stewardID = "steward-untenanted-entry"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+
+	// No TenantID, no RootScope — accepted by handleCreateAccount today.
+	createManifestAccount(t, server, AccountRequest{
+		Username:    "manifest-user-untenanted",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	_, pubKey := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-untenanted", []byte("manifest-cred-untenanted"), pubKey, 0)
+
+	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	for _, entry := range body.Manifest.AuthorizedWebAuthnCredentials {
+		assert.NotEqual(t, []byte("manifest-cred-untenanted"), entry.CredentialID,
+			"an entry with no tenant path and no root scope authorizes nothing and must not be disclosed")
+	}
+}
+
+// TestWebAuthnCredentialAuthorizedForSteward covers every combination of entry scope and
+// steward tenant against the steward-side rule this filter mirrors
+// (commands.entryAuthorizedForTenant). Each unset-tenant combination must deny.
+func TestWebAuthnCredentialAuthorizedForSteward(t *testing.T) {
+	tests := []struct {
+		name          string
+		credential    AuthorizedWebAuthnCredential
+		stewardTenant string
+		want          bool
+	}{
+		{"root scope with no tenant covers the fleet",
+			AuthorizedWebAuthnCredential{RootScope: true}, "root/msp-a", true},
+		{"root scope with no tenant covers an untenanted steward",
+			AuthorizedWebAuthnCredential{RootScope: true}, "", true},
+		{"root scope naming a tenant is self-contradictory and authorizes nothing",
+			AuthorizedWebAuthnCredential{RootScope: true, TenantID: "root/msp-a"}, "root/msp-a", false},
+		{"no tenant and no root scope authorizes nothing",
+			AuthorizedWebAuthnCredential{}, "root/msp-a", false},
+		{"tenant-scoped entry does not reach an untenanted steward",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "", false},
+		{"exact tenant match",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-a", true},
+		{"ancestor tenant covers a descendant steward",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-a/client-1", true},
+		{"descendant tenant does not cover an ancestor steward",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-a/client-1"}, "root/msp-a", false},
+		{"sibling tenant is excluded",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-b"}, "root/msp-a", false},
+		{"prefix collision without a separator is excluded",
+			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-ab", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, webauthnCredentialAuthorizedForSteward(tc.credential, tc.stewardTenant))
+
+			filtered := filterWebAuthnCredentialsForSteward(
+				[]AuthorizedWebAuthnCredential{tc.credential}, tc.stewardTenant)
+			assert.Equal(t, tc.want, len(filtered) == 1,
+				"filterWebAuthnCredentialsForSteward must agree with the per-entry rule")
+		})
+	}
+}
+
+// TestHandleGetStewardRevocationManifest_Signed verifies the steward-scoped manifest is
+// signed and its signature verifies against the PurposeSigning certificate, exactly like
+// the fleet-wide admin manifest (REQUIRED for AC: "Each filtered response is signed by
+// the controller").
+func TestHandleGetStewardRevocationManifest_Signed(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	const stewardID = "steward-manifest-signed"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a", "", "active"))
+
+	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.NotNil(t, body.Signature)
+
+	signingCert, err := certMgr.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(signingCert.CertificatePEM)
+	require.NoError(t, err)
+
+	verifier, err := signature.NewVerifierFromCertificate(x509Cert)
+	require.NoError(t, err)
+	data, err := json.Marshal(body.Manifest)
+	require.NoError(t, err)
+	assert.NoError(t, verifier.Verify(data, body.Signature))
+}
+
 func sortStringsIsSorted(s []string) bool {
 	for i := 1; i < len(s); i++ {
 		if s[i-1] > s[i] {
