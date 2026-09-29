@@ -503,12 +503,15 @@ founder. When filing a fix issue, say it waits for manual promotion — never
 When this pass does run (interactive), it works as follows.
 
 Find `Draft` stories via `./scripts/project-queue.sh list-by-status Draft`.
-**Filter out revision-pending drafts first:** a Draft that already carries an
-unaddressed `<!-- tl-revision -->` comment (a Tech Lead "Revision Needed" marker
-newer than the story's last body update) is waiting on BA / Planning Team rework,
-not on Tech Lead — skip it, or it churns the Tech Lead every cycle. It re-enters
-the queue when its body is updated. For the remaining drafts, collect their issue
-numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
+**Filter out revision-pending and parked drafts first:** a Draft that already
+carries an unaddressed `<!-- tl-revision -->` comment (a Tech Lead "Revision
+Needed" marker newer than the story's last body update) is waiting on BA /
+Planning Team rework, not on Tech Lead; a Draft that already carries an
+unaddressed `<!-- tl-parked-live -->` comment (newer than the story's last body
+update) is waiting on a live measurement only a human run can produce, not on
+any further edit — skip both, or they churn the Tech Lead every cycle. Either
+story re-enters the queue when its body is updated. For the remaining drafts,
+collect their issue numbers and item IDs, then use the **Agent tool** (not Bash) to spawn the Tech
 Lead: subagent_type `tech-lead`, prompt `"Review draft stories for dev agent
 executability: #NNN --project-item <ITEM_ID_NNN> #NNN --project-item
 <ITEM_ID_NNN>"`, mode `auto`. The spawn will be backgrounded regardless of

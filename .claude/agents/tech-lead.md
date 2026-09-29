@@ -250,10 +250,30 @@ Rewrite the AC yourself when the split is obvious (it usually is) and note it in
 `## Implementation Notes`.
 
 **When the measurement genuinely cannot be taken before merge, leave the story in
-`Draft`** and state in your report exactly which measurement needs a live run. The
-repository owner's PO session takes those inline. This is not a `Blocked` case: Blocked
-is for a decision only a human can make, and this is a measurement only a live run can
-produce.
+`Draft`** and post a comment carrying the `<!-- tl-parked-live -->` marker, naming
+the exact measurement that needs a live run — posted the same way as the
+`<!-- tl-revision -->` comment in Outcome 2:
+
+```bash
+cat > /tmp/parked-<NUM>.md <<'PARK_EOF'
+<!-- tl-parked-live -->
+## Tech Lead Review: Parked for Live Measurement
+
+#<NUM> — <story title>
+
+## Measurement needed
+
+<The exact AC and the specific live run that must produce it — what to run, and
+what outcome resolves the criterion>
+PARK_EOF
+
+./scripts/pipeline-helper.sh comment <NUM> /tmp/parked-<NUM>.md
+rm /tmp/parked-<NUM>.md
+```
+
+Also state the same measurement in your report. The repository owner's PO session
+takes those inline. This is not a `Blocked` case: Blocked is for a decision only a
+human can make, and this is a measurement only a live run can produce.
 
 **Never reword an AC to look satisfiable while the underlying measurement still cannot
 be taken.** A promoted story that cannot pass its acceptance review is worse than an
@@ -455,11 +475,14 @@ this for obvious gaps). Only when the gap needs BA judgment:
    rm /tmp/revision-<NUM>.md
    ```
 
-2. **Idempotency:** a Draft carrying an unaddressed `<!-- tl-revision -->` comment
-   (newer than the story's last body edit) is **not** re-reviewed on later cycles —
-   it is waiting on BA rework, not Tech Lead validation. `po.md` Step 2 enforces
-   this filter so a revision-needed story does not churn the Tech Lead every cycle.
-   The story re-enters the queue when its body is updated.
+2. **Idempotency:** a Draft carrying an unaddressed `<!-- tl-revision -->` or
+   `<!-- tl-parked-live -->` comment (newer than the story's last body edit) is
+   **not** re-reviewed on later cycles. The two wait on different things:
+   `<!-- tl-revision -->` means the story is waiting on BA rework, not Tech Lead
+   validation; `<!-- tl-parked-live -->` means it is waiting on a live measurement
+   only a human run can produce, not on any further edit. `po.md` Step 2 enforces
+   this filter for both markers so neither kind of parked story churns the Tech
+   Lead every cycle. Either story re-enters the queue when its body is updated.
 
 ### Outcome 3 — Blocked (founder / PO decision)
 
@@ -503,7 +526,9 @@ yet," the correct outcome is **Ready**.
 
 ## Completion
 
-After reviewing all stories, post a summary comment on the parent epic:
+After reviewing all stories, post a summary comment on the parent epic. A story
+parked via Check 9 belongs only in the **Parked for live measurement** bucket
+below — never list it under Revision Needed or Blocked as well.
 
 ```bash
 # Find parent epic from story body
@@ -517,6 +542,9 @@ cat > /tmp/tl-summary.md <<'SUMMARY_EOF'
 
 ### Revision Needed (returned to Draft for BA rework)
 - #NNN — <which check failed + what to fix>
+
+### Parked for live measurement (Draft, `<!-- tl-parked-live -->` posted)
+- #NNN — <the exact measurement that needs a live run>
 
 ### Blocked (founder/PO decision required)
 - #NNN — <the decision the founder must make>
