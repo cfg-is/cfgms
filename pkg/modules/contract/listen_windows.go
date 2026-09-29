@@ -15,15 +15,24 @@ import (
 // pipe: a protected DACL (P — the NPFS default ACL is not inherited) whose
 // single allow ACE grants GENERIC_ALL to the pipe's owner (OW).
 //
-// This DACL is the sole trust boundary on the module gRPC channel, exactly as
-// the mode-0700 socket directory is on Unix (see
-// features/steward/modules/runtime/socket_unix.go): the module server
-// registers no per-caller authentication and both runtimes dial with
-// insecure.NewCredentials. go-winio's default — what a nil PipeConfig selects
-// — is rtlDefaultNpAcl, which grants Everyone and ANONYMOUS LOGON read/write.
-// Since pipe names are predictable and the steward runs modules with its own
-// LocalSystem token, that default would let any unprivileged local user invoke
+// This DACL is the trust boundary for inbound clients on the module gRPC
+// channel: the module server registers no per-caller authentication and both
+// runtimes dial with insecure.NewCredentials. go-winio's default — what a nil
+// PipeConfig selects — is rtlDefaultNpAcl, which grants Everyone and ANONYMOUS
+// LOGON read/write. Since the steward runs modules with its own LocalSystem
+// token, that default would let any unprivileged local user invoke
 // ModuleService.Apply against a SYSTEM module.
+//
+// It is not full parity with the mode-0700 socket directory on Unix (see
+// features/steward/modules/runtime/socket_unix.go), and must not be read as
+// such: that directory also stops another user from *creating* the endpoint,
+// whereas an NPFS name belongs to whichever process creates it first and this
+// DACL only applies once the module has created the pipe. The opposite
+// direction — a local user pre-creating a module's pipe name and serving the
+// runtime itself — is closed in the runtimes, which put 128 crypto/rand bits in
+// every pipe name and verify the pipe's server process on every connection
+// (features/steward/modules/runtime/socket_windows.go,
+// features/workflow/runtime/socket_windows.go).
 //
 // The owner is the launching runtime's own account — the runtime fork/execs
 // the module with its own token — so the runtime can still connect and the

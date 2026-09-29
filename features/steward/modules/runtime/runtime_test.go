@@ -14,6 +14,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,10 @@ import (
 // echoModuleBin is the path to the compiled echo_module binary. It is set by
 // TestMain before any tests run.
 var echoModuleBin string
+
+// exitModuleBin is the path to the compiled exit_module binary — a module that
+// exits immediately without listening. Set by TestMain before any tests run.
+var exitModuleBin string
 
 // shortBaseDir returns a runtimeDir for the module runtime. On Unix it is a
 // temp dir under /tmp with a predictably short path so socket paths
@@ -70,6 +75,13 @@ func run(m *testing.M) int {
 	cmd := exec.Command("go", "build", "-o", echoModuleBin, "./testdata/echo_module")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime_test: failed to build echo_module: %s: %v\n", out, err)
+		return 1
+	}
+
+	exitModuleBin = filepath.Join(binaryDir, "exit_module"+exeSuffix())
+	cmd = exec.Command("go", "build", "-o", exitModuleBin, "./testdata/exit_module")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime_test: failed to build exit_module: %s: %v\n", out, err)
 		return 1
 	}
 
@@ -163,6 +175,33 @@ func TestEchoModuleLifecycleWithHashFallbackRuntimeDir(t *testing.T) {
 	assert.Equal(t, "echo:long-path", resp.ConfigData)
 
 	require.NoError(t, rt.Stop(handle))
+}
+
+// TestStartFailsFastWhenModuleExitsBeforeListening asserts Start reports a
+// module that died during startup — promptly, rather than waiting out the 30 s
+// listen deadline.
+//
+// The runtime reaps the child from the moment it is forked, so a module that
+// fails closed at startup is reported as an early exit. That case is not
+// hypothetical: contract.Listen fails closed when the address it was given is
+// already held by another local process (on Windows, a named pipe another user
+// created first). Before, cmd.Wait() was not consulted until after the
+// handshake, so the runtime kept polling the address and would have accepted,
+// handshaked with and trusted whatever other server answered there.
+func TestStartFailsFastWhenModuleExitsBeforeListening(t *testing.T) {
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
+	b := makeBypassBundle(exitModuleBin)
+
+	start := time.Now()
+	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Nil(t, handle)
+	assert.Contains(t, err.Error(), "exited before it was ready",
+		"error must identify the module's exit rather than a generic listen timeout; got %v", err)
+	assert.Less(t, elapsed, 10*time.Second,
+		"Start must report the dead child promptly, not wait out the 30 s listen deadline (took %s)", elapsed)
 }
 
 // TestStartReturnsErrWrongModuleKindForNonStewardBundle verifies that Start()

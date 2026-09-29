@@ -7,8 +7,10 @@ package contract_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/Microsoft/go-winio"
@@ -29,6 +31,34 @@ func dialPlatform(ctx context.Context, addr string) (net.Conn, error) {
 // fork/exec'd the module.
 const sidOwnerRights = "S-1-3-4"
 
+// readPipeSecurityDescriptor reads addr's security descriptor, waiting out
+// ERROR_PIPE_BUSY.
+//
+// GetNamedSecurityInfo on an SE_FILE_OBJECT opens a client handle to the pipe,
+// and a go-winio listener has no connectable instance until its caller reaches
+// Accept (its first instance is created without read/write access, which leaves
+// it disconnected). The caller therefore starts an accept loop before calling
+// here, but that goroutine may not have entered Accept yet, so a busy result is
+// a startup race rather than a permanent state. Waiting it out is what any real
+// client does — WaitNamedPipe, or winio.DialPipeContext's own ERROR_PIPE_BUSY
+// retry. Any other error, and busy past the deadline, fail the test.
+func readPipeSecurityDescriptor(t *testing.T, addr string) *windows.SECURITY_DESCRIPTOR {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		sd, err := windows.GetNamedSecurityInfo(addr, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err == nil {
+			return sd
+		}
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) || time.Now().After(deadline) {
+			require.NoError(t, err, "read security descriptor of %s", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // assertOwnerOnlyAccess reads the named pipe's real security descriptor and
 // asserts it grants the owner and nobody else.
 //
@@ -40,9 +70,7 @@ const sidOwnerRights = "S-1-3-4"
 func assertOwnerOnlyAccess(t *testing.T, addr string) {
 	t.Helper()
 
-	sd, err := windows.GetNamedSecurityInfo(addr, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	require.NoError(t, err, "read security descriptor of %s", addr)
+	sd := readPipeSecurityDescriptor(t, addr)
 	sddl := sd.String()
 
 	control, _, err := sd.Control()

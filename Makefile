@@ -641,6 +641,14 @@ test-go-group-windows-controller:
 # Administrator rights — a non-verbose run only prints one "ok <package>" line
 # per package with no per-test result. features/steward stays non-verbose to
 # keep the rest of the log readable.
+#
+# Both go test calls share one shell, so their exit statuses are latched into
+# $$status and re-raised at the end rather than left to the recipe's last
+# command. Without that, a features/steward failure was silently discarded
+# whenever ./cmd/... passed: run 36518171606 job 109245289531 printed
+# "FAIL github.com/cfgis/cfgms/features/steward/modules/runtime" and still
+# concluded success. Both package sets must keep running on every invocation, so
+# `&&` is the wrong fix — a failure in the first must not hide the second's results.
 .PHONY: test-go-group-windows-steward
 test-go-group-windows-steward:
 	@race_flag="-race"; \
@@ -648,10 +656,12 @@ test-go-group-windows-steward:
 	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
 		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
 	else \
+		status=0; \
 		echo "  Testing windows-steward group (features/steward)..."; \
-		go test $$race_flag -short -timeout=10m ./features/steward/...; \
+		go test $$race_flag -short -timeout=10m ./features/steward/... || status=1; \
 		echo "  Testing windows-steward group (cmd, verbose)..."; \
-		go test -v $$race_flag -short -timeout=10m ./cmd/...; \
+		go test -v $$race_flag -short -timeout=10m ./cmd/... || status=1; \
+		exit $$status; \
 	fi
 
 # Everything the queue's former Native Build (Windows) job tested (./pkg/...

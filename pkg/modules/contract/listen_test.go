@@ -18,8 +18,29 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/contract"
 )
 
+// listenTestBaseDir returns a base directory for Unix socket paths that is
+// short enough to bind.
+//
+// t.TempDir() cannot be used here: on macOS it returns a
+// /var/folders/<...>/T/<test-name>/ path that is already 80+ bytes before the
+// sockets subdirectory and filename are appended, which overflows
+// sockaddr_un.sun_path (103 usable bytes — socket_unix.go's
+// unixSocketPathMax) and makes net.Listen("unix", ...) fail with
+// "bind: invalid argument". The sibling runtime tests adopted this same /tmp
+// base for exactly that reason; see shortBaseDir in
+// features/steward/modules/runtime/runtime_test.go.
+//
+// Only called on non-Windows platforms, where /tmp always exists.
+func listenTestBaseDir(t *testing.T) string {
+	t.Helper()
+	base, err := os.MkdirTemp("/tmp", "cfgms-listen-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	return base
+}
+
 // listenTestAddr returns a platform-appropriate address for Listen: a named
-// pipe path on Windows (not backed by a filesystem, so t.TempDir() is not
+// pipe path on Windows (not backed by a filesystem, so no temp dir is
 // involved), a Unix domain socket path in a private mode-0700 directory
 // elsewhere — the layout the steward runtime uses for real module sockets
 // (features/steward/modules/runtime/socket_unix.go).
@@ -28,7 +49,7 @@ func listenTestAddr(t *testing.T) string {
 	if goruntime.GOOS == "windows" {
 		return `\\.\pipe\cfgms-contract-` + strings.NewReplacer(`\`, "-", "/", "-").Replace(t.Name())
 	}
-	sockDir := filepath.Join(t.TempDir(), "sockets")
+	sockDir := filepath.Join(listenTestBaseDir(t), "sockets")
 	// #nosec G301 -- 0700 is the restrictive mode under test; the execute bit
 	// is required for the owning process to traverse to the socket.
 	require.NoError(t, os.Mkdir(sockDir, 0o700))
@@ -83,9 +104,12 @@ func TestListen_AcceptsConnection(t *testing.T) {
 // than panicking when the address cannot be bound (parent directory does not
 // exist on Unix; malformed pipe path on Windows).
 func TestListen_ErrorsOnInvalidAddr(t *testing.T) {
-	addr := filepath.Join(t.TempDir(), "no-such-dir", "test.sock")
-	if goruntime.GOOS == "windows" {
-		addr = "not-a-valid-pipe-path"
+	addr := "not-a-valid-pipe-path"
+	if goruntime.GOOS != "windows" {
+		// Base the path on the short /tmp dir so the bind fails because the
+		// parent directory is missing — the condition under test — and not
+		// because the path overflowed sun_path.
+		addr = filepath.Join(listenTestBaseDir(t), "no-such-dir", "test.sock")
 	}
 	_, err := contract.Listen(addr)
 	assert.Error(t, err)
@@ -96,10 +120,12 @@ func TestListen_ErrorsOnInvalidAddr(t *testing.T) {
 //
 // The module gRPC server registers no per-caller authentication and both
 // runtimes dial it with insecure.NewCredentials, so the endpoint's own access
-// control is the sole trust boundary on this channel. Module names — and
-// therefore addresses — are predictable, and the steward runs modules with its
-// own (LocalSystem, on Windows) token, so an endpoint any local user can open
-// is a local privilege escalation. Accepting a connection is not enough to
+// control is the trust boundary for inbound clients on this channel. The steward
+// runs modules with its own (LocalSystem, on Windows) token, so an endpoint any
+// local user can open is a local privilege escalation. The runtimes additionally
+// put crypto/rand entropy in each address, but that keeps an address from being
+// guessed or pre-created — it does not restrict who may connect to one that
+// leaks, which is what this test covers. Accepting a connection is not enough to
 // prove the boundary holds; assertOwnerOnlyAccess inspects the platform's
 // actual access control (the pipe DACL on Windows, the private socket
 // directory on Unix).
@@ -110,7 +136,32 @@ func TestListen_RestrictsAccessToOwner(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = lis.Close() }()
 
+	// On Windows, a connectable named pipe instance only exists once something
+	// calls Accept: go-winio creates the listener's first instance without
+	// read/write access, which deliberately leaves it disconnected, so every
+	// client-side open -- including the one GetNamedSecurityInfo makes
+	// internally to read the descriptor below -- fails with ERROR_PIPE_BUSY
+	// ("all pipe instances are busy") until Accept runs. Keep accepting for
+	// the duration of the check. This is a no-op on Unix, where Lstat/Stat
+	// never dial.
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
 	assertOwnerOnlyAccess(t, addr)
+
+	// Close before waiting: the accept loop only returns once the listener is
+	// closed.
+	_ = lis.Close()
+	<-acceptDone
 }
 
 // dialTestAddr dials the address using the same transport Listen used to
