@@ -2076,6 +2076,16 @@ func (s *Server) SetModuleResolution(
 	s.moduleTrustStore = store
 }
 
+// ModuleBundleResolver returns the currently wired git source resolver, or nil
+// if startup did not construct one (Issue #4409). Exposed so wiring tests
+// outside the api package can assert that the production startup path actually
+// supplied a resolver, not just that SetModuleResolution is reachable.
+func (s *Server) ModuleBundleResolver() resolution.BundleResolver {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.moduleBundleResolver
+}
+
 // SetModuleBundleReviewer wires the human-decision interface for module bundle approval.
 // When nil (default), POST .../approve and POST .../reject return 503.
 // Call after New() but before Start().

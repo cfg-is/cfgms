@@ -143,38 +143,184 @@ func buildCloneURL(base, name string) (string, error) {
 	return strings.TrimRight(base, "/") + "/" + name, nil
 }
 
-// cloneRepo clones cloneURL to a subdirectory of cloneRoot.
-// Idempotent: if the destination already exists (has a .git dir), it is reused.
+// cloneRepo resolves version (a tag, branch or commit SHA) to an exact commit on
+// cloneURL, checks that commit out, and returns the directory it was checked out
+// into. The directory name is keyed by the resolved commit — not just the
+// requested version string — so that two requests for the same version can never
+// share a cache entry unless they truly resolved to the same commit, and a
+// mis-keyed first resolution cannot poison later lookups for the same version.
+//
+// Idempotent: if a directory for the resolved commit already exists (has a .git
+// dir), it is reused without a network round-trip beyond the ref resolution.
 func (r *GitSourceResolver) cloneRepo(ctx context.Context, publisher, name, version, cloneURL string) (string, error) {
-	// Derive a stable local directory name from the content-addressed tuple.
-	dirName := publisher + "-" + name + "-" + version
-	cloneDir := filepath.Join(r.cloneRoot, dirName)
-
-	// Idempotent: reuse existing clone.
-	if _, err := os.Stat(filepath.Join(cloneDir, ".git")); err == nil {
-		return cloneDir, nil
-	}
-
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
 		return "", fmt.Errorf("git binary not found in PATH: %w", err)
 	}
 
-	r.logger.Info("cloning module repository",
+	r.logger.Info("resolving module repository ref",
 		"publisher", logging.SanitizeLogValue(publisher),
 		"name", logging.SanitizeLogValue(name),
 		"version", logging.SanitizeLogValue(version),
 		"url", logging.SanitizeLogValue(cloneURL),
 	)
 
-	// "--" prevents git from interpreting a URL starting with "-" as a flag.
-	// #nosec G204 - gitBin is resolved via exec.LookPath; cloneURL is separated by "--"
-	cmd := exec.CommandContext(ctx, gitBin, "clone", "--depth", "1", "--", cloneURL, cloneDir)
-	if out, runErr := cmd.CombinedOutput(); runErr != nil {
-		return "", fmt.Errorf("git clone failed: %w (output: %s)", runErr, string(out))
+	// version is usually a tag or branch name, which ls-remote can resolve to a
+	// commit without fetching any objects. This lets the idempotent-reuse check
+	// below run before any clone/fetch happens.
+	commit, lsErr := resolveRemoteRef(ctx, gitBin, cloneURL, version)
+	if lsErr != nil {
+		return r.cloneUnresolvedRef(ctx, gitBin, publisher, name, version, cloneURL, lsErr)
 	}
 
+	cloneDir := filepath.Join(r.cloneRoot, cacheDirName(publisher, name, version, commit))
+	if _, statErr := os.Stat(filepath.Join(cloneDir, ".git")); statErr == nil {
+		return cloneDir, nil
+	}
+	if err := shallowFetchInto(ctx, gitBin, cloneURL, version, cloneDir); err != nil {
+		return "", fmt.Errorf("fetch ref %q: %w", version, err)
+	}
 	return cloneDir, nil
+}
+
+// cloneUnresolvedRef handles a version that ls-remote could not resolve as a tag
+// or branch (it may be a raw commit SHA, or it may simply not exist). It stages a
+// full fetch-then-checkout in a scratch directory so the resolved commit — and
+// therefore the final cache key — is only known once the checkout has actually
+// succeeded. It never falls back to the remote's default branch: checkout always
+// names the exact requested version, so an unresolvable ref fails closed.
+func (r *GitSourceResolver) cloneUnresolvedRef(ctx context.Context, gitBin, publisher, name, version, cloneURL string, lsErr error) (string, error) {
+	stagingDir, err := os.MkdirTemp(r.cloneRoot, ".staging-*")
+	if err != nil {
+		return "", fmt.Errorf("create staging dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stagingDir) }()
+
+	commit, err := fullFetchCheckout(ctx, gitBin, cloneURL, version, stagingDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q: %w (ls-remote: %s)", version, err, lsErr)
+	}
+
+	cloneDir := filepath.Join(r.cloneRoot, cacheDirName(publisher, name, version, commit))
+	if _, statErr := os.Stat(filepath.Join(cloneDir, ".git")); statErr == nil {
+		return cloneDir, nil
+	}
+	if err := os.Rename(stagingDir, cloneDir); err != nil {
+		return "", fmt.Errorf("move resolved clone into place: %w", err)
+	}
+	return cloneDir, nil
+}
+
+// cacheDirName derives the local cache directory name from the resolved
+// content-addressed tuple, including a short prefix of the resolved commit so
+// that different commits for the same requested version never collide.
+func cacheDirName(publisher, name, version, commit string) string {
+	short := commit
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return publisher + "-" + name + "-" + version + "-" + short
+}
+
+// resolveRemoteRef resolves ref (a tag or branch name) to a commit SHA on
+// cloneURL using "git ls-remote", without fetching any objects. Annotated tags
+// are peeled to the commit they point at. Returns an error if ref does not
+// match any tag or branch on the remote.
+func resolveRemoteRef(ctx context.Context, gitBin, cloneURL, ref string) (string, error) {
+	// "--" prevents cloneURL or ref from being interpreted as flags.
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
+	cmd := exec.CommandContext(ctx, gitBin, "ls-remote", "--tags", "--heads", "--", cloneURL, ref)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("ls-remote failed: %w", err)
+	}
+
+	var plain, peeled string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		sha, refName := fields[0], fields[1]
+		if strings.HasSuffix(refName, "^{}") {
+			peeled = sha
+		} else if plain == "" {
+			plain = sha
+		}
+	}
+	if peeled != "" {
+		return peeled, nil
+	}
+	if plain != "" {
+		return plain, nil
+	}
+	return "", fmt.Errorf("ref %q not found on remote", ref)
+}
+
+// shallowFetchInto initializes an empty repository at destDir and shallow-fetches
+// exactly ref from cloneURL, then checks it out. destDir is removed on failure so
+// a failed fetch never leaves a directory behind under a cache-key name.
+func shallowFetchInto(ctx context.Context, gitBin, cloneURL, ref, destDir string) error {
+	if err := os.MkdirAll(destDir, 0750); err != nil {
+		return fmt.Errorf("create clone dir: %w", err)
+	}
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated.
+	if out, err := exec.CommandContext(ctx, gitBin, "init", "--quiet", destDir).CombinedOutput(); err != nil {
+		_ = os.RemoveAll(destDir)
+		return fmt.Errorf("git init failed: %w (output: %s)", err, string(out))
+	}
+	// "--" prevents cloneURL or ref from being interpreted as flags.
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
+	fetchCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--depth", "1", "--", cloneURL, ref)
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(destDir)
+		return fmt.Errorf("git fetch failed: %w (output: %s)", err, string(out))
+	}
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; FETCH_HEAD is a fixed literal.
+	if out, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "checkout", "--quiet", "FETCH_HEAD").CombinedOutput(); err != nil {
+		_ = os.RemoveAll(destDir)
+		return fmt.Errorf("git checkout failed: %w (output: %s)", err, string(out))
+	}
+	return nil
+}
+
+// fullFetchCheckout initializes an empty repository at destDir, fetches ref from
+// cloneURL (falling back to fetching the full tag/branch namespace if the remote
+// refuses to advertise/fetch the ref directly — e.g. a raw commit SHA on a server
+// without uploadpack.allowReachableSHA1InWant), checks out exactly ref, and
+// returns the resulting HEAD commit SHA. It never checks out anything other than
+// the requested ref, so an unresolvable ref fails closed rather than falling
+// back to the remote's default branch.
+func fullFetchCheckout(ctx context.Context, gitBin, cloneURL, ref, destDir string) (string, error) {
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated.
+	if out, err := exec.CommandContext(ctx, gitBin, "init", "--quiet", destDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git init failed: %w (output: %s)", err, string(out))
+	}
+
+	// "--" prevents cloneURL or ref from being interpreted as flags.
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL/ref follow "--"
+	fetchCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--", cloneURL, ref)
+	out, fetchErr := fetchCmd.CombinedOutput()
+	if fetchErr != nil {
+		// #nosec G204 -- gitBin is resolved via exec.LookPath; cloneURL follows "--"
+		fetchAllCmd := exec.CommandContext(ctx, gitBin, "-C", destDir, "fetch", "--",
+			cloneURL, "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*")
+		if out2, err2 := fetchAllCmd.CombinedOutput(); err2 != nil {
+			return "", fmt.Errorf("git fetch failed for ref %q: %w (output: %s / %s)", ref, fetchErr, string(out), string(out2))
+		}
+	}
+
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; ref is a validated path component.
+	if out, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "checkout", "--quiet", ref).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git checkout failed for ref %q: %w (output: %s)", ref, err, string(out))
+	}
+
+	// #nosec G204 -- gitBin is resolved via exec.LookPath; destDir is controller-generated; "HEAD" is a fixed literal.
+	revParseOut, err := exec.CommandContext(ctx, gitBin, "-C", destDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("rev-parse HEAD failed: %w", err)
+	}
+	return strings.TrimSpace(string(revParseOut)), nil
 }
 
 // parseBundleFromDir reads module.yaml, binary files, and signature files from cloneDir
@@ -266,6 +412,12 @@ func validatePathComponent(s string) error {
 	}
 	if strings.Contains(s, "..") || strings.ContainsRune(s, '/') || strings.ContainsRune(s, '\\') {
 		return fmt.Errorf("must not contain path separators or dot sequences: %q", s)
+	}
+	// publisher, name and version are all passed as literal arguments to git
+	// subcommands (ls-remote, fetch, checkout). A leading "-" would let a
+	// crafted ref be interpreted as a git flag rather than a ref name.
+	if strings.HasPrefix(s, "-") {
+		return fmt.Errorf("must not start with '-': %q", s)
 	}
 	return nil
 }

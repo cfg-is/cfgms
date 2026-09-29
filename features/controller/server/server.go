@@ -43,6 +43,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/modules/approval"
 	modulecache "github.com/cfgis/cfgms/features/controller/modules/cache"
 	"github.com/cfgis/cfgms/features/controller/modules/resolution"
+	moduleGitSource "github.com/cfgis/cfgms/features/controller/modules/sources/git"
 	"github.com/cfgis/cfgms/features/controller/push"
 	controllerRegistration "github.com/cfgis/cfgms/features/controller/registration"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
@@ -1824,11 +1825,15 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// GET /api/v1/modules (Issue #4270) always answer 503 in every real
 		// deployment, despite being fully implemented and handler-tested — only
 		// SetModuleResolution/SetModuleBundleReviewer were never called outside
-		// tests. Resolver/approver/store stay nil: those three gate the separate
-		// required_modules-on-cfg-push enforcement (Issue #1884), not this
-		// read/approve/reject surface, which only consults the cache lister and
-		// the reviewer set below.
-		httpServer.SetModuleResolution(moduleCache, nil, nil, nil)
+		// tests. Approver/store stay nil: those two, together with the resolver,
+		// gate the separate required_modules-on-cfg-push enforcement (Issue
+		// #1884), not this read/approve/reject surface, which only consults the
+		// cache lister and the reviewer set below. The resolver is supplied
+		// (Issue #4409) so it is reachable for the read surface and so cfg push
+		// enforcement is one step from complete, but enforcement itself stays
+		// off until the approver and trust store are also wired.
+		gitResolver := newModuleGitSourceResolver(cfg, logger)
+		httpServer.SetModuleResolution(moduleCache, gitResolver, nil, nil)
 		httpServer.SetModuleBundleReviewer(approval.New(moduleCache))
 	}
 	workflowRuntimeDir := filepath.Join(resolveDNADataRoot(cfg), "workflow-runtime")
@@ -2081,6 +2086,35 @@ func wireClusterModuleApprovalStore(moduleCache *modulecache.ModuleCache, cfg *c
 	}
 	moduleCache.SetApprovalStore(store)
 	logger.Info("Module bundle approval status wired to cluster-visible, CAS-protected store (Issue #3886)")
+}
+
+// newModuleGitSourceResolver constructs the git source resolver consumed by
+// required_modules resolution (Issue #1884, #4409). Its sources map comes from
+// controller configuration (cfg.ModuleSources) and its clone root is a path
+// under the controller's existing DNA data root — neither is hard-coded.
+//
+// Returns a nil (untyped) resolution.BundleResolver, not a typed-nil pointer,
+// when no sources are configured or construction fails, so the moduleCache-nil
+// check pattern above works identically here: a failure is logged and startup
+// continues with module resolution disabled rather than crashing.
+func newModuleGitSourceResolver(cfg *config.Config, logger logging.Logger) resolution.BundleResolver {
+	if len(cfg.ModuleSources) == 0 {
+		return nil
+	}
+
+	sources := make(map[string]moduleGitSource.SourceConfig, len(cfg.ModuleSources))
+	for publisher, src := range cfg.ModuleSources {
+		sources[publisher] = moduleGitSource.SourceConfig{Type: src.Type, Base: src.Base}
+	}
+
+	cloneRoot := filepath.Join(resolveDNADataRoot(cfg), "module-sources")
+	resolver, err := moduleGitSource.New(sources, cloneRoot, logger)
+	if err != nil {
+		logger.Warn("Failed to initialize git module source resolver; required_modules resolution via git will be unavailable",
+			"error", logging.SanitizeLogValue(err.Error()), "dir", cloneRoot)
+		return nil
+	}
+	return resolver
 }
 
 // initializeRollbackManager creates and wires the rollback manager.
