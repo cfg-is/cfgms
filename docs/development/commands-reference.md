@@ -147,8 +147,17 @@ prints one line naming the groups and why, e.g.
 `📋 test-scripts groups: core (vs develop merge base 685a6437: Matched suite groups: core)`.
 A Go-only change runs `core` alone; a change under
 `.claude/skills/security-review/` adds `security-review`; a change to the
-gating machinery itself (`Makefile`, `scripts/test-scripts.sh`,
-`.github/workflows/test-suite.yml`) runs every group. The pre-push hook runs
+gating machinery itself (`scripts/test-scripts.sh`,
+`.github/workflows/test-suite.yml`) runs every group. A `Makefile` change is
+classified like any other path — `core` always, plus whichever other groups
+the rest of the diff selects on its own paths (Issue #4424) — because only two
+spots in the Makefile take part in this gating (the `test-scripts` target's
+`CFGMS_TEST_SCRIPTS_GROUPS` forwarding and `make test`'s own group
+auto-detection below), and no suite outside `core` invokes a `make` target.
+`scripts/test-scripts.sh`'s `test_make_test_groups` (itself in the `core`
+group) guards that forwarding directly, so a break there is still caught even
+though a `Makefile` change no longer forces every group by itself. The
+pre-push hook runs
 `make test`, so it gets the same selection. Two cases fail closed to every
 group: no resolvable `origin/develop` merge base (a fresh clone without the
 remote ref, a shallow clone whose history stops short of it), or a detector run that

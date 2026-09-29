@@ -170,16 +170,31 @@ else
 fi
 rm -rf "$repo"
 
-# --- 8. gating machinery change forces every group (Makefile) ---------------
+# --- 8. Makefile-only change classifies as core only (Issue #4424) ---------
 repo="$(make_repo)"
 base="$(git -C "$repo" rev-parse HEAD)"
 commit_change "$repo" "Makefile"
 run_detector "$repo" "$base"
 line="$(last_line "$STDOUT")"
-if [ "$RC" -eq 0 ] && [ "$line" = "groups=core,security-review,claude-tooling,devinfra" ]; then
-    pass "Makefile change forces every suite group"
+if [ "$RC" -eq 0 ] && [ "$line" = "groups=core" ]; then
+    pass "Makefile-only change resolves groups=core only"
 else
-    fail "Makefile change should force every group (rc=$RC, got: $line)"
+    fail "Makefile-only change should resolve groups=core only (rc=$RC, got: $line)"
+fi
+rm -rf "$repo"
+
+# --- 8b. Makefile plus another group's path resolves core + that group only
+# (Issue #4424) ---------------------------------------------------------
+repo="$(make_repo)"
+base="$(git -C "$repo" rev-parse HEAD)"
+commit_change "$repo" "Makefile"
+commit_change "$repo" ".claude/agents/po.md"
+run_detector "$repo" "$base"
+line="$(last_line "$STDOUT")"
+if [ "$RC" -eq 0 ] && [ "$line" = "groups=core,claude-tooling" ]; then
+    pass "Makefile plus a claude-tooling path resolves groups=core,claude-tooling only"
+else
+    fail "Makefile plus a claude-tooling path should resolve groups=core,claude-tooling only (rc=$RC, got: $line)"
 fi
 rm -rf "$repo"
 

@@ -16,9 +16,19 @@
 # ships untested tooling.
 #
 # If the diff touches the gating machinery itself (scripts/test-scripts.sh,
-# Makefile, .github/workflows/test-suite.yml), every group runs immediately --
-# the mechanism that decides what to skip changed, so nothing else in the
-# diff is trusted to be classifiable by it.
+# .github/workflows/test-suite.yml), every group runs immediately -- the
+# mechanism that decides what to skip changed, so nothing else in the diff is
+# trusted to be classifiable by it. The Makefile is NOT in this set (Issue
+# #4424): it is a large shared file, and only two spots in it -- the
+# test-scripts target forwarding CFGMS_TEST_SCRIPTS_GROUPS, and `make test`'s
+# group auto-detection -- take part in this gating at all. A Makefile change
+# that touches neither of those (the overwhelming majority: Go build/test
+# targets) cannot affect which suite group any test belongs to, so it is
+# classified like any other path -- `core` always, plus whichever other
+# groups the rest of the diff selects on its own paths.
+# scripts/test-scripts.sh's test_make_test_groups (core group) guards the one
+# gating-relevant Makefile wiring directly, so a break there is still caught
+# even though a Makefile change no longer forces every group by itself.
 set -uo pipefail
 
 ALL_GROUPS="groups=core,security-review,claude-tooling,devinfra"
@@ -62,8 +72,9 @@ fi
 echo "Changed file(s): $(wc -l < "$changed")"
 
 # The gating machinery itself changed -- nothing else in this diff can be
-# trusted to be classified honestly by the thing that just changed.
-GATING_RE='^(scripts/test-scripts\.sh|Makefile|\.github/workflows/test-suite\.yml)$'
+# trusted to be classified honestly by the thing that just changed. Makefile
+# is deliberately excluded -- see the header comment.
+GATING_RE='^(scripts/test-scripts\.sh|\.github/workflows/test-suite\.yml)$'
 grep_status=0
 grep -qE "$GATING_RE" "$changed" || grep_status=$?
 case "$grep_status" in
