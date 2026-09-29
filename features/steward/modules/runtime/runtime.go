@@ -63,15 +63,22 @@ func NewModuleRuntimeWithEnforcer(runtimeDir string, enforcer *stewardtrust.Stew
 // waits for it to start listening, dials gRPC, and returns a ModuleHandle ready
 // for RPC calls.
 //
+// additionalPublisherNames is steward.cfg's module_trust.additional_publishers
+// list (plain publisher names). It is resolved to key material only when mode
+// is strict — the only mode that consults it — matching where
+// StewardTrustEnforcer.VerifyForLoad itself consults the list.
+//
 // Error precedence:
 //  1. ErrWrongModuleKind — bundle.Manifest.Kind != "steward"
-//  2. pkgtrust.ErrPublisherNotTrusted — trust verification failed (strict mode)
-//  3. binary not found in bundle.Binaries for current os-arch
-//  4. fork/exec, socket, or gRPC errors
+//  2. stewardtrust.ErrAdditionalPublisherUnresolvable — an additional_publishers
+//     entry has no known key material (strict mode only)
+//  3. pkgtrust.ErrPublisherNotTrusted — trust verification failed (strict mode)
+//  4. binary not found in bundle.Binaries for current os-arch
+//  5. fork/exec, socket, or gRPC errors
 func (r *ModuleRuntime) Start(
 	b *bundle.Bundle,
 	mode stewardtypes.ModuleTrustMode,
-	additionalPublishers []stewardtrust.PublisherIdentity,
+	additionalPublisherNames []string,
 ) (*ModuleHandle, error) {
 	// 1. Kind gate — must be first; steward runtime hosts only steward-kind modules.
 	if b.Manifest == nil || b.Manifest.Kind != "steward" {
@@ -82,7 +89,18 @@ func (r *ModuleRuntime) Start(
 		return nil, fmt.Errorf("%w: got %q", ErrWrongModuleKind, got)
 	}
 
-	// 2. Trust enforcement — must happen before any fork/exec.
+	// 2. Trust enforcement — must happen before any fork/exec. Resolution runs
+	// only in strict mode: controller and bypass modes never consult
+	// additional_publishers, so an unresolvable name must not block a load that
+	// wouldn't have looked at the list anyway.
+	var additionalPublishers []stewardtrust.PublisherIdentity
+	if mode == stewardtypes.ModuleTrustModeStrict {
+		resolved, err := r.enforcer.ResolveAdditionalPublishers(additionalPublisherNames)
+		if err != nil {
+			return nil, err
+		}
+		additionalPublishers = resolved
+	}
 	if err := r.enforcer.VerifyForLoad(b, mode, additionalPublishers); err != nil {
 		return nil, err
 	}

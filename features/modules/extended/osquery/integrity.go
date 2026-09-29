@@ -7,6 +7,7 @@ import (
 	"fmt"
 	goruntime "runtime"
 
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 )
@@ -49,6 +50,10 @@ func NewPreExecVerifierWithEnforcer(enforcer *stewardtrust.StewardTrustEnforcer)
 // VerifyBeforeExec verifies the osquery bundle installed at root and returns the
 // on-disk path of the osquery binary for the current platform.
 //
+// additionalPublisherNames is steward.cfg's module_trust.additional_publishers
+// list (plain publisher names). It is resolved to key material only when mode
+// is strict — the only mode that consults it.
+//
 // The returned path is only ever produced after both the trust gate and the
 // on-disk content re-check have passed, so a caller that invokes only the
 // returned path cannot execute an unverified binary.
@@ -56,13 +61,24 @@ func (v *PreExecVerifier) VerifyBeforeExec(
 	b *bundle.Bundle,
 	root string,
 	mode stewardtrust.TrustMode,
-	additionalPublishers []stewardtrust.PublisherIdentity,
+	additionalPublisherNames []string,
 ) (string, error) {
 	if b == nil {
 		return "", fmt.Errorf("osquery pre-exec verification: nil bundle")
 	}
 
 	// 1. Trust gate — honours module_trust.mode and the publisher trust store.
+	// Resolution runs only in strict mode: controller and bypass never consult
+	// additional_publishers, so an unresolvable name must not block a load that
+	// wouldn't have looked at the list anyway.
+	var additionalPublishers []stewardtrust.PublisherIdentity
+	if mode == stewardtypes.ModuleTrustModeStrict {
+		resolved, err := v.enforcer.ResolveAdditionalPublishers(additionalPublisherNames)
+		if err != nil {
+			return "", fmt.Errorf("osquery bundle trust verification failed: %w", err)
+		}
+		additionalPublishers = resolved
+	}
 	if err := v.enforcer.VerifyForLoad(b, mode, additionalPublishers); err != nil {
 		return "", fmt.Errorf("osquery bundle trust verification failed: %w", err)
 	}

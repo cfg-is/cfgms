@@ -207,6 +207,71 @@ func TestVerifyBeforeExec_UntrustedPublisherRefused(t *testing.T) {
 	}
 }
 
+// [REQUIRED TEST] TestVerifyBeforeExec_AdditionalPublisherResolvesAndLoads: a
+// bundle signed by a publisher listed in additionalPublisherNames, whose key
+// material is present in the enforcer's known-publisher registry, resolves and
+// loads under module_trust.mode: strict (Issue #4398).
+func TestVerifyBeforeExec_AdditionalPublisherResolvesAndLoads(t *testing.T) {
+	root, b, _ := installOsqueryBundle(t, []byte("osquery-binary-content"))
+
+	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate cfgms key: %v", err)
+	}
+	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate extra-vendor key: %v", err)
+	}
+	b.Signatures = []bundle.BundleSignature{{
+		Publisher: "extra-vendor",
+		Algorithm: "ed25519",
+		Signature: ed25519.Sign(extraPriv, []byte(b.ContentHash)),
+	}}
+
+	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() pkgtrust.PublisherIdentity {
+			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+		},
+		map[string]pkgtrust.PublisherIdentity{
+			"extra-vendor": {Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
+		},
+	)
+
+	if _, err := NewPreExecVerifierWithEnforcer(enforcer).
+		VerifyBeforeExec(b, root, stewardtypes.ModuleTrustModeStrict, []string{"extra-vendor"}); err != nil {
+		t.Fatalf("VerifyBeforeExec rejected a bundle signed by a resolvable additional_publishers entry: %v", err)
+	}
+}
+
+// [REQUIRED TEST] TestVerifyBeforeExec_UnresolvableAdditionalPublisherRefusesLoad:
+// an additionalPublisherNames entry with no resolvable key material refuses the
+// load, naming the entry in the error, in strict mode.
+func TestVerifyBeforeExec_UnresolvableAdditionalPublisherRefusesLoad(t *testing.T) {
+	root, b, enforcer := installOsqueryBundle(t, []byte("osquery-binary-content"))
+
+	_, err := NewPreExecVerifierWithEnforcer(enforcer).
+		VerifyBeforeExec(b, root, stewardtypes.ModuleTrustModeStrict, []string{"never-heard-of-this-vendor"})
+	if err == nil {
+		t.Fatal("VerifyBeforeExec accepted an unresolvable additional_publishers entry")
+	}
+	if !strings.Contains(err.Error(), "never-heard-of-this-vendor") {
+		t.Errorf("error should name the unresolvable entry: %q", err)
+	}
+}
+
+// [REQUIRED TEST] TestVerifyBeforeExec_ControllerModeIgnoresUnresolvableAdditionalPublisher
+// proves resolution runs only in strict mode: controller mode never consults
+// additional_publishers, so an unresolvable name must not block a load that
+// would otherwise succeed.
+func TestVerifyBeforeExec_ControllerModeIgnoresUnresolvableAdditionalPublisher(t *testing.T) {
+	root, b, enforcer := installOsqueryBundle(t, []byte("osquery-binary-content"))
+
+	if _, err := NewPreExecVerifierWithEnforcer(enforcer).
+		VerifyBeforeExec(b, root, stewardtypes.ModuleTrustModeController, []string{"never-heard-of-this-vendor"}); err != nil {
+		t.Fatalf("controller mode must not resolve additional_publishers, but got: %v", err)
+	}
+}
+
 func TestVerifyBeforeExec_MissingBinaryIsRefused(t *testing.T) {
 	root, b, enforcer := installOsqueryBundle(t, []byte("osquery-binary-content"))
 
