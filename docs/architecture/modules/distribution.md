@@ -232,6 +232,56 @@ cfg module list
 cfg module list --status pending
 ```
 
+### Git Source Resolver (live, Issue #4409)
+
+`GitSourceResolver` (`features/controller/modules/sources/git`) resolves a
+`publisher/name@version` reference to a `Bundle` by cloning the publisher's
+configured git repository and reading `module.yaml`, `binaries/` and
+`signatures/` out of the checkout. It is wired into the running controller as
+the `resolver` argument of `Server.SetModuleResolution` at startup
+(`features/controller/server/server.go`), constructed from controller
+configuration rather than from a hard-coded source list or path.
+
+**Configuration.** Controller config carries a `module_sources` map from
+publisher name to source repository namespace:
+
+```yaml
+module_sources:
+  cfgms:
+    type: git
+    base: https://git.example.com/cfgms
+```
+
+The clone URL for a given module is `<base>/<name>` (e.g. `.../cfgms/firewall`
+for `cfgms/firewall@1.0.0`). The resolver's clone cache lives under
+`<controller data root>/module-sources`, alongside the other module-subsystem
+directories under the same root. When `module_sources` is empty or absent, or
+when the clone root cannot be created, startup logs a warning and continues
+with a nil resolver — the same nil-tolerant pattern already used for the
+module cache above, never a crash.
+
+**Version pinning.** `version` is resolved to an exact commit — via `git
+ls-remote` for a tag or branch name, or via a full fetch-and-checkout for a
+raw commit SHA — and that exact commit is checked out before `module.yaml` and
+the binaries are read. The local clone cache directory is keyed by the
+resolved commit, not only by the requested version string, so a first
+resolution that happened to land on the wrong commit can never poison a later
+lookup for the same version: a different resolved commit is always a different
+cache entry. Resolving `pub/name@v1.0.0` and `pub/name@v2.0.0` against a
+repository where those tags point at different commits fetches and returns
+their respective content, not whichever commit the repository's default
+branch currently happens to be on. An unresolvable ref fails the request with
+an error naming the ref — there is no fallback to the default branch.
+
+**What this does not do.** Supplying the resolver makes it reachable for the
+module cache's read/approve/reject REST surface and for
+`handleUpdateStewardConfig`'s required_modules resolution path, but
+`ResolveCfgRequiredModules` only runs when the cache lister, resolver,
+approver *and* trust store are all non-nil. The approver and trust store are
+not wired at startup, so a `cfg push` declaring `required_modules:` is still
+never blocked on cache/approval state — that enforcement remains a distinct,
+not-yet-scheduled change.
+
 ### Implementation Reference
 
 - `features/controller/modules/approval` — `ApprovalWorkflow`

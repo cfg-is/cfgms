@@ -119,6 +119,9 @@ func initUnsignedModuleRepo(t *testing.T, gitBin, repoDir, publisher, name, vers
 	git("-C", repoDir, "config", "user.name", "CFGMS Test")
 	git("add", ".")
 	git("commit", "-m", "Initial module commit")
+	// The resolver pins to the requested version by checking out a git ref of
+	// that exact name (Issue #4409); tag the commit so "version" resolves.
+	git("tag", version)
 }
 
 // initSignedModuleRepo creates a local git repo for a module signed by a fresh
@@ -175,6 +178,9 @@ func initSignedModuleRepo(t *testing.T, gitBin, repoDir, publisher, name, versio
 	git("-C", repoDir, "config", "user.name", "CFGMS Test")
 	git("add", ".")
 	git("commit", "-m", "Initial module commit")
+	// The resolver pins to the requested version by checking out a git ref of
+	// that exact name (Issue #4409); tag the commit so "version" resolves.
+	git("tag", version)
 	return pubKey
 }
 

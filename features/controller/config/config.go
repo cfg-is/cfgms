@@ -450,6 +450,25 @@ type Config struct {
 	// A SaaS cluster deployment (ha.mode: cluster) refuses to start in production
 	// with this unset — see tenant.EnforceRealmGuard.
 	RealmID string `yaml:"realm_id,omitempty"`
+
+	// ModuleSources maps a module publisher name to the git repository namespace
+	// it resolves against (Issue #1884, #4409). Consumed by the git source
+	// resolver to fetch modules that are declared in required_modules: but not
+	// yet cached. Absent or empty: no publisher can be resolved via git, and the
+	// controller starts with a nil resolver — required_modules enforcement on
+	// cfg push stays inert regardless, since it also needs the (separately
+	// wired) approver and trust store.
+	ModuleSources map[string]ModuleSourceConfig `yaml:"module_sources,omitempty"`
+}
+
+// ModuleSourceConfig describes a single publisher's module source repository
+// namespace, consumed by the git source resolver (Issue #4409).
+type ModuleSourceConfig struct {
+	// Type selects the source backend. Only "git" is currently supported.
+	Type string `yaml:"type"`
+	// Base is the base URL; the module name is appended as a path segment.
+	// e.g. "https://git.example.com/cfgms" → clone URL ".../cfgms/<name>"
+	Base string `yaml:"base"`
 }
 
 // EffectiveRings returns the deployment ring configuration with defaults applied.
