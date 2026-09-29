@@ -13,9 +13,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller"
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/steward/client"
 	"github.com/cfgis/cfgms/pkg/cert"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
@@ -30,7 +30,7 @@ type TestEnv struct {
 	T                    *testing.T
 	TempDir              string
 	Logger               *testpkg.MockLogger
-	Controller           *controller.Controller
+	Controller           *server.Server
 	ControllerCfg        *config.Config
 	TransportClient      *client.TransportClient
 	CertManager          *cert.Manager
@@ -196,7 +196,7 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 	}
 
 	// Create controller - loads existing CA from pre-initialization
-	ctrl, err := controller.New(controllerCfg, logger)
+	ctrl, err := server.New(controllerCfg, logger)
 	require.NoError(t, err)
 
 	// Get the cert manager that the controller created and initialized
@@ -216,13 +216,9 @@ func createTestEnv(t *testing.T, tempDir string, logger *testpkg.MockLogger, ctx
 
 	// Generate a cryptographically-random registration token.
 	// Hardcoded credentials are banned by CLAUDE.md and flagged by gosec G101.
-	tokenStoreIface := ctrl.GetRegistrationTokenStore()
-	if tokenStoreIface == nil {
+	tokenStore := ctrl.GetRegistrationTokenStore()
+	if tokenStore == nil {
 		t.Fatalf("registration token store is nil — controller not initialized")
-	}
-	tokenStore, ok := tokenStoreIface.(registration.Store)
-	if !ok {
-		t.Fatalf("failed to obtain registration token store: unexpected type %T", tokenStoreIface)
 	}
 	tokenReq := &registration.TokenCreateRequest{
 		TenantID:      "test-tenant",
@@ -264,7 +260,7 @@ func (e *TestEnv) Start() {
 		quicAddr = "localhost:4436"
 	} else {
 		// Start the in-process controller
-		if err := e.Controller.Start(e.ctx); err != nil {
+		if err := e.Controller.Start(); err != nil {
 			e.T.Fatalf("Failed to start controller: %v", err)
 		}
 
@@ -331,7 +327,7 @@ func (e *TestEnv) Stop() {
 
 	// Only stop controller if it's in-process (not Docker)
 	if !e.useDockerController && e.Controller != nil {
-		_ = e.Controller.Stop(e.ctx)
+		_ = e.Controller.Stop()
 	}
 }
 

@@ -35,8 +35,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -124,21 +124,19 @@ func TestAuthTierE2E_Tier3Enforcement(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "storage"), 0755))
 
-	ctrl, err := controller.New(cfg, logger)
-	require.NoError(t, err, "controller.New")
+	ctrl, err := server.New(cfg, logger)
+	require.NoError(t, err, "server.New")
 
 	ctrlErrCh := make(chan error, 1)
 	go func() {
-		ctrlErrCh <- ctrl.Start(ctx)
+		ctrlErrCh <- ctrl.Start()
 	}()
 
 	httpBase := fmt.Sprintf("https://localhost:%d", httpPort)
 	waitForControllerHTTP(t, certMgr, httpBase, 30*time.Second)
 
 	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stopCancel()
-		if err := ctrl.Stop(stopCtx); err != nil && err.Error() != "controller not running" {
+		if err := ctrl.Stop(); err != nil && err.Error() != "controller not running" {
 			t.Logf("controller Stop returned: %v", err)
 		}
 		select {

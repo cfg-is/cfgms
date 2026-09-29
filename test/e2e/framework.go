@@ -30,8 +30,8 @@ import (
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 
-	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/steward"
 	"github.com/cfgis/cfgms/features/terminal"
@@ -73,7 +73,7 @@ type E2ETestFramework struct {
 	cancel  context.CancelFunc
 
 	// Core components
-	controller         *controller.Controller
+	controller         *server.Server
 	stewards           map[string]*steward.Steward   // Standalone stewards (Phase 1)
 	registeredStewards map[string]*RegisteredSteward // gRPC-connected stewards (Phase 3)
 	certManager        *cert.Manager
@@ -407,7 +407,7 @@ func (f *E2ETestFramework) initializeController() error {
 		return fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
-	ctrl, err := controller.New(config, f.logger)
+	ctrl, err := server.New(config, f.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create controller: %w", err)
 	}
@@ -420,7 +420,7 @@ func (f *E2ETestFramework) initializeController() error {
 	// its SQLite handles. Capture it and report it as itself.
 	startErr := make(chan error, 1)
 	go func() {
-		startErr <- ctrl.Start(f.ctx)
+		startErr <- ctrl.Start()
 	}()
 
 	select {
@@ -435,7 +435,7 @@ func (f *E2ETestFramework) initializeController() error {
 
 	f.controller = ctrl
 	f.addCleanup(func() error {
-		err := ctrl.Stop(context.Background())
+		err := ctrl.Stop()
 		// Ignore "controller not running" errors during cleanup
 		if err != nil && err.Error() == "controller not running" {
 			return nil
@@ -518,16 +518,12 @@ func (f *E2ETestFramework) CreateRegistrationToken(tenantID string) (string, err
 		return "", fmt.Errorf("controller not initialized - cannot create registration token")
 	}
 
-	// Get the registration token store from the controller
-	tokenStoreInterface := f.controller.GetRegistrationTokenStore()
-	if tokenStoreInterface == nil {
+	// Get the registration token store from the controller. The server exposes
+	// it as a registration.Store, so no type assertion is needed — only a nil
+	// check for the not-yet-initialized case.
+	tokenStore := f.controller.GetRegistrationTokenStore()
+	if tokenStore == nil {
 		return "", fmt.Errorf("registration token store not available")
-	}
-
-	// Type assert to registration.Store
-	tokenStore, ok := tokenStoreInterface.(registration.Store)
-	if !ok {
-		return "", fmt.Errorf("invalid registration token store type")
 	}
 
 	// Create a new registration token

@@ -4,7 +4,6 @@
 package controller
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -26,9 +25,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	cfgcontroller "github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/testutil"
@@ -127,7 +126,7 @@ func waitForHealthControllerReadyOrErr(t *testing.T, client *http.Client, base s
 // (ImplicitAdmin, per features/controller/api/middleware.go) authorized for every
 // permission — including the monitoring:read-* gates the new health-detail routes
 // carry (Issue #4208, AC1).
-func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string, string, *http.Client) {
+func startHealthTestController(t *testing.T) (*server.Server, string, string, *http.Client) {
 	t.Helper()
 	ctrl, _, base, metricsBase, client := startHealthTestControllerWithConfig(t, nil)
 	return ctrl, base, metricsBase, client
@@ -139,7 +138,7 @@ func startHealthTestController(t *testing.T) (*cfgcontroller.Controller, string,
 // in which on-disk state can be seeded ahead of the real controller reading it at startup
 // (e.g. pre-populating the module cache directory the way a real deployment's disk would
 // already contain bundles — Issue #4270, AC4).
-func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *controllerConfig.Config)) (*cfgcontroller.Controller, *controllerConfig.Config, string, string, *http.Client) {
+func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *controllerConfig.Config)) (*server.Server, *controllerConfig.Config, string, string, *http.Client) {
 	t.Helper()
 	testutil.SetupSecretsEnvForTest(t)
 	cfg := newHealthTestControllerConfig(t, freePort(t))
@@ -155,14 +154,11 @@ func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *con
 		beforeStart(cfg)
 	}
 
-	ctrl, err := cfgcontroller.New(cfg, logging.NewNoopLogger())
-	require.NoError(t, err, "controller.New")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	t.Cleanup(cancel)
+	ctrl, err := server.New(cfg, logging.NewNoopLogger())
+	require.NoError(t, err, "server.New")
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- ctrl.Start(ctx) }()
+	go func() { errCh <- ctrl.Start() }()
 
 	certMgr := ctrl.GetCertificateManager()
 	require.NotNil(t, certMgr, "controller certificate manager")
@@ -199,9 +195,7 @@ func startHealthTestControllerWithConfig(t *testing.T, beforeStart func(cfg *con
 	waitForHealthControllerReadyOrErr(t, client, base, 30*time.Second, errCh)
 
 	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stopCancel()
-		if err := ctrl.Stop(stopCtx); err != nil && !strings.Contains(err.Error(), "not running") {
+		if err := ctrl.Stop(); err != nil && !strings.Contains(err.Error(), "not running") {
 			t.Logf("controller Stop: %v", err)
 		}
 	})
