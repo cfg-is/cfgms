@@ -46,6 +46,12 @@ type BundleSignature struct {
 // Binaries maps os-arch keys (e.g. "linux-amd64", "windows-amd64") to the file
 // path of the corresponding contract binary. Paths are relative to the bundle
 // root directory.
+//
+// Once installed, Manifest lives at ManifestFileName (module.yaml) under the
+// installation root, and Binaries, Signatures and ContentHash live in
+// BundleSidecarFileName beside it — see WriteInstalledSidecar and ReadInstalled
+// in installed.go for the writer/reader that round-trip a Bundle through that
+// on-disk shape.
 type Bundle struct {
 	Manifest    *modules.ModuleMetadata `yaml:"manifest" json:"manifest"`
 	Binaries    map[string]string       `yaml:"binaries" json:"binaries"`
