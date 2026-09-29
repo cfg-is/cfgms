@@ -55,15 +55,17 @@ var ErrNoVerifiedInstallation = errors.New(
 // Root is the directory the bundle was installed into; Bundle is the ADR-006
 // bundle record (manifest, os-arch keyed binary paths, publisher signatures,
 // signed content hash) describing what should be there. TrustMode is the
-// steward.cfg module_trust.mode in force, and AdditionalPublishers are any
-// operator-configured publishers beyond the baked-in CFGMS identity.
+// steward.cfg module_trust.mode in force, and AdditionalPublishers are the
+// operator-configured publisher names from module_trust.additional_publishers
+// (resolved to key material by PreExecVerifier.VerifyBeforeExec when TrustMode
+// is strict).
 //
 // The zero value carries no bundle, so a module built from it fails closed.
 type Installation struct {
 	Bundle               *bundle.Bundle
 	Root                 string
 	TrustMode            stewardtrust.TrustMode
-	AdditionalPublishers []stewardtrust.PublisherIdentity
+	AdditionalPublishers []string
 }
 
 // osqueryModule implements modules.Module for read-only host fact observation.

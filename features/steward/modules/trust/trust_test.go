@@ -169,6 +169,122 @@ func TestStrictModeAdditionalPublisherCannotDisplaceCFGMSIdentity(t *testing.T) 
 	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
 }
 
+// [REQUIRED TEST] TestResolveAdditionalPublishers_KnownNameLoadsUnderStrict:
+// a bundle signed by a publisher listed in additional_publishers, whose key
+// material is present in the enforcer's known-publisher registry, resolves and
+// then loads under module_trust.mode: strict (Issue #4398).
+func TestResolveAdditionalPublishers_KnownNameLoadsUnderStrict(t *testing.T) {
+	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() pkgtrust.PublisherIdentity {
+			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+		},
+		map[string]pkgtrust.PublisherIdentity{
+			"extra-vendor": {Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
+		},
+	)
+
+	resolved, err := enforcer.ResolveAdditionalPublishers([]string{"extra-vendor"})
+	require.NoError(t, err)
+
+	b := makeTestBundle()
+	signBundle(b, "extra-vendor", extraPriv)
+	assert.NoError(t, enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, resolved))
+}
+
+// [REQUIRED TEST] TestResolveAdditionalPublishers_NotListedNameIsRejected: the
+// same bundle/publisher as above is refused under strict mode when the
+// publisher's name is NOT included in the additional_publishers list passed to
+// ResolveAdditionalPublishers — the registry knowing about a publisher is not
+// enough; the config must actually list it.
+func TestResolveAdditionalPublishers_NotListedNameIsRejected(t *testing.T) {
+	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	extraPub, extraPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() pkgtrust.PublisherIdentity {
+			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+		},
+		map[string]pkgtrust.PublisherIdentity{
+			"extra-vendor": {Name: "extra-vendor", PublicKey: []byte(extraPub), Algorithm: "ed25519"},
+		},
+	)
+
+	// additional_publishers is empty: "extra-vendor" is known to the registry
+	// but never named by the operator.
+	resolved, err := enforcer.ResolveAdditionalPublishers(nil)
+	require.NoError(t, err)
+
+	b := makeTestBundle()
+	signBundle(b, "extra-vendor", extraPriv)
+	err = enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustModeStrict, resolved)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+}
+
+// [REQUIRED TEST] TestResolveAdditionalPublishers_UnresolvableNameNamesEntryInError:
+// an additional_publishers entry with no resolvable key material refuses
+// resolution, naming the entry in the error, rather than being dropped or
+// falling through to the compiled-in CFGMS publisher only.
+func TestResolveAdditionalPublishers_UnresolvableNameNamesEntryInError(t *testing.T) {
+	// The production resolver (no known-publishers override) has an empty
+	// compiled-in registry, so every name is unresolvable.
+	enforcer := stewardtrust.NewStewardTrustEnforcer()
+
+	_, err := enforcer.ResolveAdditionalPublishers([]string{"never-heard-of-this-vendor"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, stewardtrust.ErrAdditionalPublisherUnresolvable)
+	assert.Contains(t, err.Error(), "never-heard-of-this-vendor")
+}
+
+// [REQUIRED TEST] TestResolveAdditionalPublishers_CollidingNameCannotDisplaceCFGMSIdentity
+// pins Issue #4324's protection against the new resolution path introduced by
+// #4398: an additional_publishers name that resolves to key material under the
+// baked-in CFGMS identity's own name ("cfgms") must not let that resolved
+// identity displace the real one during verification.
+func TestResolveAdditionalPublishers_CollidingNameCannotDisplaceCFGMSIdentity(t *testing.T) {
+	cfgmsPub, cfgmsPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	attackerPub, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	require.NotEqual(t, []byte(cfgmsPub), []byte(attackerPub))
+
+	enforcer := stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+		func() pkgtrust.PublisherIdentity {
+			return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+		},
+		map[string]pkgtrust.PublisherIdentity{
+			// The registry itself resolves "cfgms" to the attacker's key — as if
+			// an operator mistakenly (or maliciously) listed "cfgms" in
+			// additional_publishers and a colliding entry existed to resolve it.
+			"cfgms": {Name: "cfgms", PublicKey: []byte(attackerPub), Algorithm: "ed25519"},
+		},
+	)
+
+	resolved, err := enforcer.ResolveAdditionalPublishers([]string{"cfgms"})
+	require.NoError(t, err)
+
+	genuine := makeTestBundle()
+	signBundle(genuine, "cfgms", cfgmsPriv)
+	assert.NoError(t, enforcer.VerifyForLoad(genuine, stewardtypes.ModuleTrustModeStrict, resolved),
+		"a bundle signed by the real baked-in CFGMS key must still verify")
+
+	forged := makeTestBundle()
+	signBundle(forged, "cfgms", attackerPriv)
+	err = enforcer.VerifyForLoad(forged, stewardtypes.ModuleTrustModeStrict, resolved)
+	require.Error(t, err, "a bundle signed by the colliding resolved publisher's key must not verify")
+	assert.ErrorIs(t, err, pkgtrust.ErrInvalidSignature)
+}
+
 // TestUnknownModeReturnsError: an unrecognised mode string returns an error.
 func TestUnknownModeReturnsError(t *testing.T) {
 	b := makeTestBundle()
