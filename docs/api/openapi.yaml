@@ -130,7 +130,11 @@ paths:
   /stewards/{stewardId}/config:
     get:
       summary: Get steward configuration
-      description: Returns the current configuration for a steward
+      description: >-
+        Returns the current configuration for a steward. Tenant scope: a
+        scoped caller may read only a steward within its own tenant subtree;
+        an out-of-subtree or unknown steward returns 404. Root/unscoped
+        callers may read any steward.
       operationId: getStewardConfig
       tags:
         - Configuration
@@ -156,7 +160,14 @@ paths:
 
     put:
       summary: Update steward configuration
-      description: Updates the configuration for a steward (currently not implemented)
+      description: >-
+        Stores configuration for a steward and triggers delivery. Tenant
+        scope: a scoped caller may write configuration only for a steward
+        within its own tenant subtree; an out-of-subtree or unknown steward
+        is rejected with 404 STEWARD_NOT_FOUND (not 403, to avoid disclosing
+        that the steward exists in another tenant). Root/unscoped callers
+        retain authority across tenants, subject to the ADR-025 root/MSP
+        tenant-crossing-boundary check for principals that are subject to it.
       operationId: updateStewardConfig
       tags:
         - Configuration
@@ -170,22 +181,72 @@ paths:
               type: object
               additionalProperties: true
       responses:
-        '501':
-          description: Not implemented
+        '200':
+          description: Configuration stored, with a trackable delivery record
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      steward_id:
+                        type: string
+                      tenant_id:
+                        type: string
+                      message:
+                        type: string
+                      command_id:
+                        type: string
+                        description: >-
+                          Present when a durable delivery record was created;
+                          absent if no command store is configured.
+                      delivery_status:
+                        type: string
+                        enum: [pending, delivered]
+                  timestamp:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: A required module is not cached and approved
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error:
-                  code: NOT_IMPLEMENTED
-                  message: Configuration updates not yet implemented
+                  code: REQUIRED_MODULE_NOT_APPROVED
+                  message: required module not approved
+                timestamp: "2025-07-27T16:00:00Z"
+        '500':
+          description: Configuration could not be stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: STORAGE_ERROR
+                  message: Failed to store configuration
                 timestamp: "2025-07-27T16:00:00Z"
 
   /stewards/{stewardId}/config/effective:
     get:
       summary: Get effective configuration with inheritance
-      description: Returns the effective configuration after applying inheritance hierarchy
+      description: >-
+        Returns the effective configuration after applying inheritance
+        hierarchy. Tenant scope: resolved against the steward's own tenant
+        when known to the controller's registry; a caller whose tenant
+        differs from the steward's owning tenant is rejected (mapped to 500,
+        since this check does not distinguish the case from a genuine
+        resolution failure).
       operationId: getEffectiveConfig
       tags:
         - Configuration
@@ -214,7 +275,11 @@ paths:
   /stewards/{stewardId}/config/validate:
     post:
       summary: Validate configuration
-      description: Validates a configuration without applying it
+      description: >-
+        Validates a configuration without applying it. Tenant scope: a
+        scoped caller may validate only a steward within its own tenant
+        subtree; an out-of-subtree or unknown steward returns 404.
+        Root/unscoped callers may validate for any steward.
       operationId: validateConfig
       tags:
         - Configuration
@@ -248,7 +313,13 @@ paths:
   /certificates:
     get:
       summary: List certificates
-      description: Returns a list of all certificates managed by the system
+      description: >-
+        Returns certificates within the caller's tenant scope: a scoped
+        caller sees only certificates whose owning steward is in its own
+        tenant subtree (plus certificates with no owning steward). If the
+        subtree cannot be evaluated the request fails closed with 503 rather
+        than returning an unfiltered list. Root/unscoped callers see every
+        certificate.
       operationId: listCertificates
       tags:
         - Certificates
@@ -444,7 +515,10 @@ paths:
   /api-keys:
     get:
       summary: List API keys
-      description: Returns all API keys (requires admin permissions)
+      description: >-
+        Returns API keys belonging to the caller's own tenant — an exact
+        tenant match, not a subtree. A request with no resolved tenant is
+        rejected with 401.
       operationId: listAPIKeys
       tags:
         - API Keys

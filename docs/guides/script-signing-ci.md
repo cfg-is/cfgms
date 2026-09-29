@@ -21,9 +21,10 @@ developer pushes script  ──CI──►  sign-scripts action runs
                                   script executes  ✓
 ```
 
-CFGMS stewards configured with `policy: required` will refuse to execute any
-script that lacks a valid `.sig` sidecar, ensuring only CI-approved scripts
-reach your endpoints.
+Each script resource can require a valid `.sig` sidecar via its own
+`signing_policy: required` setting (see [Signing policies](#signing-policies)
+below); CI-signed scripts satisfy that requirement once the steward trusts the
+signing key (Step 4).
 
 ## Prerequisites
 
@@ -95,21 +96,34 @@ jobs:
 Commit and push this file.  On the next push to `main`, the action will
 automatically sign any changed scripts and commit the `.sig` sidecars.
 
-## Step 4: Configure CFGMS stewards to enforce signatures
+## Step 4: Configure CFGMS stewards to trust your signing key
 
-Register the public key thumbprint with each steward that should enforce
+Register the public key thumbprint with each steward that should verify
 signatures from this repository.  Add the following to your steward
 configuration (typically managed via the CFGMS controller):
 
 ```yaml
 steward:
   script_signing:
-    policy: required          # reject unsigned scripts
     trust_mode: trusted_keys  # only accept keys in the list below
     trusted_keys:
       - name: "MSP Production Signer"
         thumbprint: "<sha256-thumbprint>"   # see below
 ```
+
+`trust_mode` and `trusted_keys` are what a steward actually verifies a
+signature against — they are carried into the script module's runtime
+signing config (`BuildModuleSigningConfig`,
+`features/steward/config/config.go`). **`script_signing.policy` at the
+steward level is not an enforcement switch.** The field is validated and
+cascades through tenant configuration inheritance (a child tenant may only
+tighten it, never loosen it — Story #4324), but nothing on the execution path
+reads it: `BuildModuleSigningConfig` carries `trust_mode`, `trusted_keys` and
+`allow_public_ca` into the module's runtime config and deliberately does not
+carry `policy` — there is no steward-wide "require a signature on every
+script" switch today. This gap is not tracked by an open issue. Whether a
+given script actually requires a signature is controlled per script instead —
+see [Signing policies](#signing-policies) below.
 
 To obtain the thumbprint:
 
@@ -127,8 +141,8 @@ Copy the hex output as the `thumbprint` value.
 1. Add a test script to your repository and push to `main`.
 2. Confirm the signing workflow runs and a corresponding `.sig` file appears
    in the repository.
-3. On a steward with `policy: required`, trigger a script run and confirm it
-   executes without a signature error.
+3. On a script resource with `signing_policy: required`, trigger a script run
+   and confirm it executes without a signature error.
 4. Manually corrupt the `.sig` file content and confirm the steward rejects
    execution.
 
@@ -158,16 +172,22 @@ The algorithm value must match what is configured in the steward
 
 ### Signing policies
 
-Set `steward.script_signing.policy` on your stewards to control enforcement:
+Whether a given script requires a valid signature is set on the script's own
+resource configuration (the `script:` block a config pushes to the steward) —
+not on the steward as a whole. See the `signing_policy` field in the
+[script module documentation](../modules/script-module.md):
 
 | Policy | Behaviour |
 |--------|-----------|
-| `none` | Signatures are ignored (default; use during initial rollout) |
+| `none` | Signatures are ignored (default when `signing_policy` is omitted) |
 | `optional` | Signatures are verified when present, unsigned scripts are allowed |
-| `required` | Scripts without a valid `.sig` sidecar are rejected |
+| `required` | The script is rejected unless it carries a valid `.sig` sidecar signed by a key in the steward's `trusted_keys` |
 
-**Recommended rollout:** start with `optional`, verify signatures are being
-generated and verified correctly, then switch to `required`.
+**Recommended rollout:** start every script resource at `optional`, verify
+signatures are being generated and verified correctly, then set
+`signing_policy: required` on each script resource that should be enforced.
+There is no steward-wide default that applies this to scripts that omit the
+field — each script resource opts in individually.
 
 ## Windows runners
 

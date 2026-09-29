@@ -675,9 +675,10 @@ gate — not the deeper risk of silently stealing a years-old credential.
 > carries the CFGMS admin marker — which a steward certificate does not. Closing it needs a
 > steward-reachable delivery path, a controller-side decision about what the fleet-wide
 > manifest (revoked steward-certificate serials, the fleet's authorized-WebAuthn roster)
-> may disclose to any single steward. Tracked in #3571. The verification, anti-rollback and
-> `IsRevoked` semantics described below are implemented and tested; only delivery is
-> missing.
+> may disclose to any single steward. Epic #3571, previously cited here as the tracker for
+> this gap, is closed with all sub-issues complete and did not add the delivery path; no
+> open issue currently tracks it. The verification, anti-rollback and `IsRevoked` semantics
+> described below are implemented and tested; only delivery is missing.
 
 The X.509 path above verifies an operator certificate's chain, EKU, expiry, and
 payload-signing marker — none of which change the moment a certificate is revoked, since
