@@ -241,6 +241,156 @@ func TestQueryDirectoryDNA(t *testing.T) {
 	})
 }
 
+// TestQueryDirectoryDNAFilters covers the five DirectoryDNAQuery fields that
+// QueryDirectoryDNA previously ignored (Issue #4368): Providers, TenantIDs,
+// Domains, ChangedSince, and MinChangeCount. Each subtest seeds records that
+// differ only in the field under test and confirms the query narrows to the
+// matching subset.
+func TestQueryDirectoryDNAFilters(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Providers narrows results", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "prov_a", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_prov_a", Attributes: map[string]string{}, Provider: "provider-a", LastUpdated: &now,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "prov_b", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_prov_b", Attributes: map[string]string{}, Provider: "provider-b", LastUpdated: &now,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			ObjectIDs: []string{"prov_a", "prov_b"},
+			Providers: []string{"provider-a"},
+			Limit:     10,
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "prov_a", results[0].ObjectID)
+	})
+
+	t.Run("TenantIDs narrows results", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "tenant_a", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_tenant_a", Attributes: map[string]string{}, TenantID: "tenant-1", LastUpdated: &now,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "tenant_b", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_tenant_b", Attributes: map[string]string{}, TenantID: "tenant-2", LastUpdated: &now,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			ObjectIDs: []string{"tenant_a", "tenant_b"},
+			TenantIDs: []string{"tenant-2"},
+			Limit:     10,
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "tenant_b", results[0].ObjectID)
+	})
+
+	t.Run("Domains narrows results", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "dom_a", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_dom_a", Attributes: map[string]string{}, Domain: "example.com", LastUpdated: &now,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "dom_b", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_dom_b", Attributes: map[string]string{}, Domain: "acme-corp.com", LastUpdated: &now,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			ObjectIDs: []string{"dom_a", "dom_b"},
+			Domains:   []string{"acme-corp.com"},
+			Limit:     10,
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "dom_b", results[0].ObjectID)
+	})
+
+	t.Run("ChangedSince narrows results", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+		older := now.Add(-2 * time.Hour)
+		newer := now.Add(-time.Minute)
+		cutoff := now.Add(-time.Hour)
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "changed_old", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_changed_old", Attributes: map[string]string{}, LastUpdated: &now, LastChangeTime: &older,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "changed_new", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_changed_new", Attributes: map[string]string{}, LastUpdated: &now, LastChangeTime: &newer,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			ObjectIDs:    []string{"changed_old", "changed_new"},
+			ChangedSince: &cutoff,
+			Limit:        10,
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "changed_new", results[0].ObjectID)
+	})
+
+	t.Run("MinChangeCount narrows results", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "changes_few", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_changes_few", Attributes: map[string]string{}, LastUpdated: &now, ChangeCount: 1,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "changes_many", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_changes_many", Attributes: map[string]string{}, LastUpdated: &now, ChangeCount: 5,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			ObjectIDs:      []string{"changes_few", "changes_many"},
+			MinChangeCount: 3,
+			Limit:          10,
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "changes_many", results[0].ObjectID)
+	})
+
+	t.Run("Providers filter with ObjectIDs empty returns matches, not silent empty", func(t *testing.T) {
+		adapter := newDirectoryStorageAdapter(t)
+		now := time.Now()
+
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "noids_a", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_noids_a", Attributes: map[string]string{}, Provider: "provider-a", LastUpdated: &now,
+		}))
+		require.NoError(t, adapter.StoreDirectoryDNA(ctx, &DirectoryDNA{
+			ObjectID: "noids_b", ObjectType: interfaces.DirectoryObjectTypeUser,
+			ID: "dna_noids_b", Attributes: map[string]string{}, Provider: "provider-b", LastUpdated: &now,
+		}))
+
+		results, err := adapter.QueryDirectoryDNA(ctx, &DirectoryDNAQuery{
+			Providers: []string{"provider-b"},
+			Limit:     10,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, results, "a Providers-only query must not silently return (empty, nil)")
+		require.Len(t, results, 1)
+		assert.Equal(t, "noids_b", results[0].ObjectID)
+	})
+}
+
 func TestGetDirectoryHistory(t *testing.T) {
 	adapter := newDirectoryStorageAdapter(t)
 	ctx := context.Background()

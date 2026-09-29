@@ -265,14 +265,25 @@ func (s *DirectoryDNAStorageAdapter) GetDirectoryDNA(ctx context.Context, object
 }
 
 // QueryDirectoryDNA queries directory DNA records based on specified criteria.
+//
+// ObjectIDs seeds the set of objects to fetch from the indexer. When it is
+// empty, the adapter's own type-tracking map (populated by every
+// StoreDirectoryDNA call, the same source GetDirectoryStats/GetObjectStats
+// aggregate from) supplies the candidate object IDs instead, narrowed by
+// ObjectTypes first when that filter is also set. Every other declared filter
+// (ObjectTypes, Providers, TenantIDs, Domains, ChangedSince, MinChangeCount) is
+// then applied per-record via matchesDirectoryDNAQuery.
 func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, query *DirectoryDNAQuery) ([]*DirectoryDNA, error) {
 	s.logger.Debug("Querying directory DNA records", "limit", query.Limit)
 
+	objectIDs := query.ObjectIDs
+	if len(objectIDs) == 0 {
+		objectIDs = s.knownObjectIDs(query.ObjectTypes)
+	}
+
 	var allResults []*DirectoryDNA
 
-	// Deferred: tracked in #4368 -- Providers/TenantIDs/Domains/ChangedSince/MinChangeCount
-	// filters are not yet applied here; only ObjectIDs/ObjectTypes/TimeRange are.
-	for _, objectID := range query.ObjectIDs {
+	for _, objectID := range objectIDs {
 		options := &storage.QueryOptions{
 			Limit:       query.Limit,
 			Offset:      query.Offset,
@@ -312,19 +323,8 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 				continue
 			}
 
-			// Apply ObjectTypes filtering; see the Deferred note above for the
-			// remaining unapplied query criteria.
-			if len(query.ObjectTypes) > 0 {
-				found := false
-				for _, queryType := range query.ObjectTypes {
-					if directoryDNA.ObjectType == queryType {
-						found = true
-						break
-					}
-				}
-				if !found {
-					continue
-				}
+			if !matchesDirectoryDNAQuery(directoryDNA, query) {
+				continue
 			}
 
 			allResults = append(allResults, directoryDNA)
@@ -343,6 +343,88 @@ func (s *DirectoryDNAStorageAdapter) QueryDirectoryDNA(ctx context.Context, quer
 
 	s.logger.Debug("Directory DNA query completed", "results", len(allResults))
 	return allResults, nil
+}
+
+// knownObjectIDs returns every object ID the adapter has tracked via
+// trackObjectType, narrowed to objectTypes when it is non-empty. It backs
+// QueryDirectoryDNA when the caller supplies no ObjectIDs, so a query that
+// filters only on Providers/TenantIDs/Domains/ChangedSince/MinChangeCount
+// still has a set of candidates to fetch and filter instead of returning
+// nothing.
+func (s *DirectoryDNAStorageAdapter) knownObjectIDs(objectTypes []interfaces.DirectoryObjectType) []string {
+	s.typeStatsMu.RLock()
+	defer s.typeStatsMu.RUnlock()
+
+	var ids []string
+	if len(objectTypes) == 0 {
+		for _, objects := range s.typeObjects {
+			for id := range objects {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+
+	for _, objType := range objectTypes {
+		for id := range s.typeObjects[objType] {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// matchesDirectoryDNAQuery applies every non-ObjectIDs/TimeRange filter
+// declared on DirectoryDNAQuery to a decoded record. TimeRange and ObjectIDs
+// are handled upstream (TimeRange via storage.QueryOptions, ObjectIDs by
+// selecting which objects to fetch), so this only needs to cover the fields
+// the indexer query itself can't express.
+func matchesDirectoryDNAQuery(dna *DirectoryDNA, query *DirectoryDNAQuery) bool {
+	if len(query.ObjectTypes) > 0 {
+		found := false
+		for _, queryType := range query.ObjectTypes {
+			if dna.ObjectType == queryType {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	if len(query.Providers) > 0 && !containsString(query.Providers, dna.Provider) {
+		return false
+	}
+
+	if len(query.TenantIDs) > 0 && !containsString(query.TenantIDs, dna.TenantID) {
+		return false
+	}
+
+	if len(query.Domains) > 0 && !containsString(query.Domains, dna.Domain) {
+		return false
+	}
+
+	if query.ChangedSince != nil {
+		if dna.LastChangeTime == nil || dna.LastChangeTime.Before(*query.ChangedSince) {
+			return false
+		}
+	}
+
+	if query.MinChangeCount > 0 && dna.ChangeCount < query.MinChangeCount {
+		return false
+	}
+
+	return true
+}
+
+// containsString reports whether value is present in values.
+func containsString(values []string, value string) bool {
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 // GetDirectoryHistory retrieves historical DNA records for a specific object.
