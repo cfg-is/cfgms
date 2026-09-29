@@ -111,7 +111,43 @@ func dialGRPCSocket(socketPath string, serverPID int) (*grpc.ClientConn, error) 
 // dialVerifiedPipe opens the named pipe at addr and returns the connection only
 // if its server is process serverPID. On any mismatch the connection is closed
 // before it is used, so no module payload ever reaches a foreign server.
+//
+// The connect-and-verify work runs on its own goroutine, raced against ctx.Done
+// here rather than left to winio.DialPipeContext alone: that call retries on
+// ERROR_PIPE_BUSY in a loop that only checks ctx *between* attempts, and each
+// attempt is a synchronous CreateFile that Go cannot interrupt once it is in
+// flight. An attempt that stalls (observed on a loaded CI runner) would
+// otherwise hold this call past the deadline waitForSocket's contract
+// promises its caller. If ctx fires first, the in-flight attempt is left to
+// finish on its own goroutine and its connection, if any, is closed so it
+// isn't leaked.
 func dialVerifiedPipe(ctx context.Context, addr string, serverPID int) (net.Conn, error) {
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult, 1)
+	go func() {
+		conn, err := dialAndVerifyPipe(ctx, addr, serverPID)
+		resultCh <- dialResult{conn, err}
+	}()
+	select {
+	case res := <-resultCh:
+		return res.conn, res.err
+	case <-ctx.Done():
+		go func() {
+			if res := <-resultCh; res.conn != nil {
+				_ = res.conn.Close()
+			}
+		}()
+		return nil, ctx.Err()
+	}
+}
+
+// dialAndVerifyPipe performs the named pipe connect and server-identity check.
+// Split out from dialVerifiedPipe so the latter can race it against ctx (see
+// dialVerifiedPipe).
+func dialAndVerifyPipe(ctx context.Context, addr string, serverPID int) (net.Conn, error) {
 	conn, err := winio.DialPipeContext(ctx, addr)
 	if err != nil {
 		return nil, err

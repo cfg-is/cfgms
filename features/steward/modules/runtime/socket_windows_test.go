@@ -157,19 +157,41 @@ func TestWaitForSocket_ForeignServerDoesNotSatisfyWait(t *testing.T) {
 	addr := testPipePath(t)
 	startTestPipeServer(t, addr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	const ctxTimeout = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 
+	// waitForSocket runs on its own goroutine, raced here against a watchdog
+	// well past ctxTimeout: dialVerifiedPipe's ctx.Done race (socket_windows.go)
+	// is what makes waitForSocket honor ctxTimeout even when the underlying pipe
+	// dial stalls, but if that guarantee ever regresses this bound turns the
+	// symptom back into a test failure instead of the full go test -timeout
+	// panic that surfaced it (a 10-minute hang with no assertion output).
+	const watchdogBound = 2 * ctxTimeout
+	type result struct {
+		err     error
+		elapsed time.Duration
+	}
+	resultCh := make(chan result, 1)
 	start := time.Now()
-	err := waitForSocket(ctx, addr, idleProcessPID)
-	elapsed := time.Since(start)
+	go func() {
+		err := waitForSocket(ctx, addr, idleProcessPID)
+		resultCh <- result{err: err, elapsed: time.Since(start)}
+	}()
 
-	require.Error(t, err, "a pipe served by another process must not satisfy the wait")
-	assert.ErrorIs(t, err, errPipeServerMismatch)
-	assert.Contains(t, err.Error(), "not served by the module",
-		"error must explain that another process holds the name; got %v", err)
-	assert.Less(t, elapsed, 5*time.Second,
-		"a foreign server is terminal and must be reported at once, not after the deadline (took %s)", elapsed)
+	var res result
+	select {
+	case res = <-resultCh:
+	case <-time.After(watchdogBound):
+		t.Fatalf("waitForSocket did not return within %s of its %s ctx deadline", watchdogBound, ctxTimeout)
+	}
+
+	require.Error(t, res.err, "a pipe served by another process must not satisfy the wait")
+	assert.ErrorIs(t, res.err, errPipeServerMismatch)
+	assert.Contains(t, res.err.Error(), "not served by the module",
+		"error must explain that another process holds the name; got %v", res.err)
+	assert.Less(t, res.elapsed, 5*time.Second,
+		"a foreign server is terminal and must be reported at once, not after the deadline (took %s)", res.elapsed)
 }
 
 // TestWaitForSocket_ReturnsOnceExpectedServerListens verifies the wait succeeds
