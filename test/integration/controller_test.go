@@ -46,8 +46,7 @@ func (s *ControllerTestSuite) SetupSuite() {
 	s.env = testutil.NewTestEnv(s.T())
 
 	// Start the controller (real in-process startup)
-	ctx := s.env.GetContext()
-	err := s.env.Controller.Start(ctx)
+	err := s.env.Controller.Start()
 	require.NoError(s.T(), err, "Failed to start controller")
 
 	// Poll until HTTP API is ready (replaces hardcoded sleep)
@@ -90,7 +89,7 @@ func (s *ControllerTestSuite) tlsClient() *http.Client {
 
 func (s *ControllerTestSuite) TearDownSuite() {
 	if s.env != nil {
-		_ = s.env.Controller.Stop(s.env.GetContext())
+		_ = s.env.Controller.Stop()
 		s.env.Cleanup()
 	}
 }
@@ -166,11 +165,8 @@ func generateRegistrationKeypairAndCSR(commonName string) (keyPEM, csrPEM string
 // TestStewardRegistration tests the full registration flow with a real token and real API
 func (s *ControllerTestSuite) TestStewardRegistration() {
 	// Get the registration token store from the running controller
-	tokenStoreIface := s.env.Controller.GetRegistrationTokenStore()
-	require.NotNil(s.T(), tokenStoreIface, "Controller should have a registration token store")
-
-	tokenStore, ok := tokenStoreIface.(registration.Store)
-	require.True(s.T(), ok, "Token store should implement registration.Store")
+	tokenStore := s.env.Controller.GetRegistrationTokenStore()
+	require.NotNil(s.T(), tokenStore, "Controller should have a registration token store")
 
 	// Create a real registration token
 	token, err := registration.CreateToken(&registration.TokenCreateRequest{

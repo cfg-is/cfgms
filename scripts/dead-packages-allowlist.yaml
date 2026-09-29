@@ -116,8 +116,6 @@ packages:
     reason: test suite entry point (test/unit), run via `go test`, never imported.
   - path: test/unit/build
     reason: test suite entry point (test/unit/build), run via `go test`, never imported.
-  - path: test/unit/controller
-    reason: test suite entry point (test/unit/controller), run via `go test`, never imported.
   - path: test/unit/steward
     reason: test suite entry point (test/unit/steward), run via `go test`, never imported.
 
@@ -250,37 +248,13 @@ packages:
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---
   # --- is explicitly out of scope for #4345 — see its Out of Scope section.
-  - path: features/controller
-    reason: >
-      DELETE (Issue #4345): Controller wrapper struct, superseded by
-      cmd/controller/main.go's direct use of features/controller/server +
-      features/controller/initialization — its own GetAPIServer() doc
-      comment says so explicitly ("cmd/controller/main.go does the
-      equivalent wiring ... through features/controller/server.Server
-      directly, one layer below this wrapper"). Kept compiling only because
-      7 test files (test/integration, test/e2e, test/unit/controller)
-      still construct against it; migrating those to construct
-      server.Server directly (as main.go already does) is part of the
-      capability-map-then-delete follow-up, not a trivial delete.
-
-  - path: features/controller/cirunner
-    reason: >
-      DELETE (Issue #4345): CI-runner provisioning measurement helpers for
-      a one-off de-risking spike (epic #565) — the package's own doc
-      comment disclaims provider/module status. Zero importers anywhere,
-      including tests.
-
-  - path: internal/cli/commands
-    reason: >
-      DELETE (Issue #4345): minimal Cobra root-command scaffold, superseded
-      by the real CLI at cmd/cfg/cmd (confirmed by this repo's own git
-      history of cfgctl → cfgcli → cfg renames, all of which moved forward
-      without ever touching this package). Zero importers anywhere.
-
-  - path: internal/controller
-    reason: >
-      DELETE (Issue #4345): placeholder Controller stub — Start()'s body is
-      literally "// Placeholder for future implementation; return nil".
-      Zero importers, zero tests, untouched by feature work since the
-      repository's earliest commits (pre-dates features/controller, which
-      superseded it and is itself DELETE-classified above).
+  #
+  # features/controller (root), features/controller/cirunner,
+  # internal/cli/commands and internal/controller were all deleted by Issue
+  # #4406 (the capability-map-then-delete follow-up referenced above): the
+  # seven test-only importers of features/controller now construct against
+  # features/controller/server.Server directly, matching
+  # cmd/controller/main.go's own wiring, and all four packages are gone from
+  # the tree. features/controller/directory (below) is unaffected — it is a
+  # subdirectory, not part of the deleted root package, and Issue #4406 was
+  # scoped to leave its WIRE entry untouched for the sibling wiring story.

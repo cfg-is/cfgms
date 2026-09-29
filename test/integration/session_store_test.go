@@ -24,8 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -206,24 +206,19 @@ func waitForHTTPReady(t *testing.T, httpClient *http.Client, base string, timeou
 
 // startController boots a controller, waits for it to be ready, and registers cleanup.
 // Returns the running controller and the HTTPS base URL.
-func startController(t *testing.T, cfg *controllerConfig.Config, logger logging.Logger, httpClient *http.Client) (*controller.Controller, string) {
+func startController(t *testing.T, cfg *controllerConfig.Config, logger logging.Logger, httpClient *http.Client) (*server.Server, string) {
 	t.Helper()
-	ctrl, err := controller.New(cfg, logger)
-	require.NoError(t, err, "controller.New")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	t.Cleanup(cancel)
+	ctrl, err := server.New(cfg, logger)
+	require.NoError(t, err, "server.New")
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- ctrl.Start(ctx) }()
+	go func() { errCh <- ctrl.Start() }()
 
 	base := fmt.Sprintf("https://%s", cfg.ListenAddr)
 	waitForHTTPReady(t, httpClient, base, 30*time.Second)
 
 	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stopCancel()
-		if err := ctrl.Stop(stopCtx); err != nil && !strings.Contains(err.Error(), "not running") {
+		if err := ctrl.Stop(); err != nil && !strings.Contains(err.Error(), "not running") {
 			t.Logf("controller Stop: %v", err)
 		}
 	})
@@ -325,9 +320,7 @@ func TestSessionStore_SQLite_PersistenceAcrossRestart(t *testing.T) {
 		"raw session token must not appear in controller log output (ADR-014 security invariant)")
 
 	// Stop the first controller (simulates a process restart).
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer stopCancel()
-	err = ctrl1.Stop(stopCtx)
+	err = ctrl1.Stop()
 	if err != nil && !strings.Contains(err.Error(), "not running") {
 		t.Logf("ctrl1.Stop: %v", err)
 	}
@@ -414,9 +407,7 @@ func TestSessionStore_InMemoryFallback_SessionsWorkAndAreNonDurable(t *testing.T
 	assert.Equal(t, http.StatusOK, code, "session must validate on issuing in-memory controller")
 
 	// Stop controller-1 (in-memory store is lost).
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer stopCancel()
-	if err := ctrl1.Stop(stopCtx); err != nil && !strings.Contains(err.Error(), "not running") {
+	if err := ctrl1.Stop(); err != nil && !strings.Contains(err.Error(), "not running") {
 		t.Logf("ctrl1.Stop: %v", err)
 	}
 

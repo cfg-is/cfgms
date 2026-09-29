@@ -48,8 +48,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
-	"github.com/cfgis/cfgms/features/controller"
 	controllerConfig "github.com/cfgis/cfgms/features/controller/config"
+	"github.com/cfgis/cfgms/features/controller/server"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/client"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
@@ -99,7 +99,7 @@ type streamEnv struct {
 	t            *testing.T
 	ctx          context.Context
 	cancel       context.CancelFunc
-	ctrl         *controller.Controller
+	ctrl         *server.Server
 	certMgr      *cert.Manager
 	stewardID    string
 	emitter      *client.EventEmitter
@@ -246,12 +246,19 @@ func newStreamEnv(t *testing.T) *streamEnv {
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, "storage"), 0755))
 	require.NoError(t, os.MkdirAll(logDir, 0755))
 
-	ctrl, err := controller.New(cfg, logger)
-	require.NoError(t, err, "controller.New")
+	ctrl, err := server.New(cfg, logger)
+	require.NoError(t, err, "server.New")
+
+	// Wire the dedicated steward-event LoggingManager (queried by queryLogs via
+	// GET /api/v1/stewards/{id}/logs) the same way features/controller.New used
+	// to before Issue #4406 deleted that wrapper — server.New itself only
+	// exposes Set/GetStewardEventManager, it does not construct one from
+	// cfg.Logging, so the caller (here, the test) must.
+	wireStewardEventManager(t, cfg, ctrl)
 
 	ctrlErrCh := make(chan error, 1)
 	go func() {
-		ctrlErrCh <- ctrl.Start(ctx)
+		ctrlErrCh <- ctrl.Start()
 	}()
 
 	httpBase := fmt.Sprintf("https://localhost:%d", httpPort)
@@ -260,9 +267,7 @@ func newStreamEnv(t *testing.T) *streamEnv {
 	waitForControllerHTTP(t, certMgr, httpBase, 30*time.Second)
 
 	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer stopCancel()
-		_ = ctrl.Stop(stopCtx)
+		_ = ctrl.Stop()
 		// Drain the error channel so any early-exit error is visible in test output.
 		select {
 		case err := <-ctrlErrCh:
@@ -274,8 +279,8 @@ func newStreamEnv(t *testing.T) *streamEnv {
 	})
 
 	// ── 3. Register a steward via HTTP ────────────────────────────────────────
-	tokenStore, ok := ctrl.GetRegistrationTokenStore().(registration.Store)
-	require.True(t, ok, "registration token store must be accessible")
+	tokenStore := ctrl.GetRegistrationTokenStore()
+	require.NotNil(t, tokenStore, "registration token store must be accessible")
 
 	tokenReq := &registration.TokenCreateRequest{
 		TenantID:      "e2e-tenant",
@@ -418,6 +423,35 @@ func newStreamEnv(t *testing.T) *streamEnv {
 		adminClient:  adminHTTPClient,
 		httpBase:     httpBase,
 	}
+}
+
+// wireStewardEventManager builds the dedicated steward-event LoggingManager from
+// cfg.Logging and injects it into both srv and its REST API server, replicating
+// features/controller.Controller.New's construction (deleted by Issue #4406). It
+// is a separate LoggingManager instance from the controller's own application
+// logging so per-steward queries (handleGetStewardLogs, S6) don't co-mingle with
+// controller-internal log lines — see server.SetStewardEventManager's doc comment.
+func wireStewardEventManager(t *testing.T, cfg *controllerConfig.Config, srv *server.Server) {
+	t.Helper()
+	require.NotNil(t, cfg.Logging, "test config must set Logging to exercise the steward-event sink")
+
+	baseCfg := cfg.Logging.ToLoggingManagerConfig()
+	stewardProviderCfg := make(map[string]interface{}, len(baseCfg.Config))
+	for k, v := range baseCfg.Config {
+		stewardProviderCfg[k] = v
+	}
+	stewardCfg := *baseCfg
+	stewardCfg.Config = stewardProviderCfg
+	stewardCfg.ServiceName = "cfgms-steward-events"
+	stewardCfg.Component = "steward-event-sink"
+	stewardCfg.Subscribers = nil
+
+	mgr, err := logging.NewLoggingManager(&stewardCfg)
+	require.NoError(t, err, "steward-event LoggingManager")
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	srv.SetStewardEventManager(mgr)
+	srv.GetAPIServer().SetStewardEventLoggingManager(mgr)
 }
 
 // waitForControllerHTTP polls GET /api/v1/health until the controller answers
