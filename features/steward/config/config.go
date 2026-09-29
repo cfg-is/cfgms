@@ -358,6 +358,13 @@ func validateScriptSigningConfig(cfg ScriptSigningConfig) error {
 // script.ModuleSigningConfig consumed by the script module and the steward
 // command handler's pre-dispatch signature verification (Issue #1671).
 //
+// Policy carries the steward-wide signing floor through to the module, which
+// combines it with each script's own signing_policy via
+// ScriptConfig.EffectiveSigningPolicy — the floor may be tightened per script
+// but never loosened (Issue #4399). An empty/absent Policy maps to
+// script.SigningPolicy(""), which EffectiveSigningPolicy treats as no floor,
+// preserving pre-#4399 behavior for deployments that don't set it.
+//
 // It is used by both standalone-mode wiring (steward.go) and controller-connected
 // wiring (client.TransportClient) so the two paths cannot diverge.
 func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfig {
@@ -370,6 +377,7 @@ func BuildModuleSigningConfig(cfg ScriptSigningConfig) script.ModuleSigningConfi
 		}
 	}
 	return script.ModuleSigningConfig{
+		Policy:        script.SigningPolicy(cfg.Policy),
 		TrustMode:     script.TrustMode(cfg.TrustMode),
 		TrustedKeys:   entries,
 		AllowPublicCA: cfg.AllowPublicCA,

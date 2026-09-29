@@ -518,6 +518,99 @@ func TestModuleVerifySignature_NilSignature_Fails(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Module.validateSignature — steward-wide floor enforcement (Issue #4399)
+// ---------------------------------------------------------------------------
+
+func TestValidateSignature_FloorRequired_UnsignedScript_Refused(t *testing.T) {
+	mod := NewModule()
+	mod.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyRequired})
+
+	cfg := &ScriptConfig{
+		Content:       "#!/bin/bash\necho hello",
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyNone,
+		Signature:     nil,
+	}
+
+	if err := mod.validateSignature(cfg); err == nil {
+		t.Fatal("unsigned script must be refused when the steward-wide floor is 'required'")
+	}
+}
+
+func TestValidateSignature_FloorRequired_PerScriptOptionalCannotLoosen(t *testing.T) {
+	mod := NewModule()
+	mod.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyRequired})
+
+	cfg := &ScriptConfig{
+		Content:       "#!/bin/bash\necho hello",
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyOptional, // would permit unsigned on its own
+		Signature:     nil,
+	}
+
+	if err := mod.validateSignature(cfg); err == nil {
+		t.Fatal("a per-script policy that permits unsigned scripts must not override the steward-wide 'required' floor")
+	}
+}
+
+func TestValidateSignature_FloorRequired_SignedScript_Passes(t *testing.T) {
+	mod := NewModule()
+	mod.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyRequired, TrustMode: TrustModeAnyValid})
+
+	key := generateRSAKey(t)
+	content := "#!/bin/bash\necho hello"
+	sig := &ScriptSignature{
+		Algorithm: "rsa-sha256",
+		Signature: signRSASHA256(t, key, []byte(content)),
+		PublicKey: rsaPublicKeyPEM(key),
+	}
+
+	cfg := &ScriptConfig{
+		Content:       content,
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyNone, // per-script says none; the floor still demands a valid signature
+		Signature:     sig,
+	}
+
+	if err := mod.validateSignature(cfg); err != nil {
+		t.Errorf("a correctly signed script must pass under the 'required' floor, not be refused: %v", err)
+	}
+}
+
+func TestValidateSignature_FloorOptional_UnsignedScript_Unchanged(t *testing.T) {
+	mod := NewModule()
+	mod.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyOptional})
+
+	cfg := &ScriptConfig{
+		Content:       "#!/bin/bash\necho hello",
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyNone,
+		Signature:     nil,
+	}
+
+	if err := mod.validateSignature(cfg); err != nil {
+		t.Errorf("steward floor 'optional' must not force a signature on a per-script 'none': %v", err)
+	}
+}
+
+func TestValidateSignature_FloorAbsent_UnsignedScript_Unchanged(t *testing.T) {
+	mod := NewModule()
+	// SetSigningConfig deliberately not called: the floor is the zero value ("" — no
+	// floor imposed), matching a deployment that predates Issue #4399.
+
+	cfg := &ScriptConfig{
+		Content:       "#!/bin/bash\necho hello",
+		Shell:         ShellBash,
+		SigningPolicy: SigningPolicyNone,
+		Signature:     nil,
+	}
+
+	if err := mod.validateSignature(cfg); err != nil {
+		t.Errorf("an absent steward-wide policy must match pre-#4399 behavior: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // verifyScriptSignature dispatch
 // ---------------------------------------------------------------------------
 

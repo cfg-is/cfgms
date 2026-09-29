@@ -380,6 +380,61 @@ func TestScriptModule_GetSet(t *testing.T) {
 	}
 }
 
+// TestScriptModule_Set_StewardFloorRequired_UnsignedScript_Refused exercises
+// the full Set() path (not just validateSignature) to confirm an unsigned
+// script is refused end-to-end when the steward-wide signing floor is
+// 'required', even though the resource omits signing_policy (Issue #4399).
+func TestScriptModule_Set_StewardFloorRequired_UnsignedScript_Refused(t *testing.T) {
+	module := NewModule()
+	module.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyRequired})
+
+	cfg := &ScriptConfig{
+		Content: getTestScript(),
+		Shell:   getTestShell(),
+		Timeout: 10 * time.Second,
+	}
+
+	if err := module.Set(context.Background(), "floor-required-unsigned", cfg); err == nil {
+		t.Fatal("Set() must refuse an unsigned script when the steward-wide signing floor is 'required'")
+	}
+}
+
+// TestScriptModule_Set_StewardFloorRequired_SignedScript_Executes confirms the
+// 'required' floor does not refuse everything: a correctly signed script must
+// still run to completion end-to-end (Issue #4399).
+func TestScriptModule_Set_StewardFloorRequired_SignedScript_Executes(t *testing.T) {
+	module := NewModule()
+	module.SetSigningConfig(ModuleSigningConfig{Policy: SigningPolicyRequired, TrustMode: TrustModeAnyValid})
+
+	content := getTestScript()
+	key := generateRSAKey(t)
+	sig := &ScriptSignature{
+		Algorithm: "rsa-sha256",
+		Signature: signRSASHA256(t, key, []byte(content)),
+		PublicKey: rsaPublicKeyPEM(key),
+	}
+
+	cfg := &ScriptConfig{
+		Content:   content,
+		Shell:     getTestShell(),
+		Timeout:   10 * time.Second,
+		Signature: sig,
+	}
+
+	resourceID := "floor-required-signed"
+	if err := module.Set(context.Background(), resourceID, cfg); err != nil {
+		t.Fatalf("Set() should execute a correctly signed script under the 'required' floor: %v", err)
+	}
+
+	state, exists := module.GetExecutionState(resourceID)
+	if !exists {
+		t.Fatal("expected execution state to be recorded after Set()")
+	}
+	if state.Status != StatusCompleted {
+		t.Errorf("expected script to run to completion, got status %v (execution error: %v)", state.Status, state.Error)
+	}
+}
+
 func TestScriptModule_ExecutionState(t *testing.T) {
 	module := NewModule()
 	resourceID := "test-execution-state"
