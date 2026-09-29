@@ -21,6 +21,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // unscopedAdminManifestRequest builds a manifest GET authenticated as an unscoped
@@ -527,6 +528,75 @@ func TestHandleGetStewardRevocationManifest_UnregisteredCertificateRefused(t *te
 
 	rec, _ := getStewardRevocationManifest(t, server, certMgr, "never-registered-steward")
 	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetStewardRevocationManifest_DecommissionedStewardRefused verifies a
+// certificate belonging to a steward whose registry entry has moved to a terminal
+// status (deregistered, the same status handleDecommissionSteward's in-memory update
+// sets) is refused even though its certificate chain is genuine and the CommonName
+// still resolves to a known registry entry — decommissioning never revokes the
+// steward's mTLS certificate or removes its registry entry, so existence alone would
+// otherwise keep serving this endpoint indefinitely (REQUIRED TEST, Issue #4400 AC: "a
+// certificate with neither the admin marker nor a valid steward identity is still
+// refused").
+func TestHandleGetStewardRevocationManifest_DecommissionedStewardRefused(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	const stewardID = "steward-manifest-decommissioned"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.UpdateStewardStatus(stewardID, string(business.StewardStatusDeregistered)))
+
+	rec, _ := getStewardRevocationManifest(t, server, certMgr, stewardID)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleGetStewardRevocationManifest_RevokedCertificateRefused verifies a steward
+// certificate whose serial is in the controller's revocation store is refused, even
+// though it is chain-valid and its CommonName still resolves to an active registry
+// entry. This is the stolen-steward-key case the endpoint exists to mitigate: the TLS
+// handshake cannot decide revocation (VerifyClientCertIfGiven checks the chain only, and
+// CFGMS publishes no CRL or OCSP responder) and handleRevokeCertificate does not move the
+// steward registry record to a terminal status, so the per-request
+// certManager.IsRevoked gate in stewardTenantFromPeerCertificate is the only thing that
+// stops a revoked credential from continuing to collect the operator WebAuthn roster and
+// fleet revocation list on every poll. The same certificate is served successfully first,
+// so the refusal is attributable to revocation alone and not to some unrelated difference
+// in the request.
+func TestHandleGetStewardRevocationManifest_RevokedCertificateRefused(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	ensureSharedSigningCertificate(t, certMgr)
+
+	const stewardID = "steward-manifest-revoked-cert"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   stewardID,
+		Organization: "Test CFGMS",
+		ClientID:     stewardID,
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
+	require.NoError(t, err)
+
+	serveAsCert := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/api/v1/public/steward-revocation-manifest", nil)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := serveAsCert()
+	require.Equal(t, http.StatusOK, rec.Code,
+		"this certificate must be served before revocation: %s", rec.Body.String())
+
+	require.NoError(t, certMgr.Revoke(issued.SerialNumber))
+
+	rec = serveAsCert()
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a revoked steward certificate must not receive the manifest: %s", rec.Body.String())
 }
 
 // TestHandleGetStewardRevocationManifest_NoPeerCertificateRefused verifies a request

@@ -16,7 +16,25 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// terminalStewardManifestStatuses are the ControllerService steward statuses that must
+// never reach the manifest, mirroring the terminal set EnsureSteward already refuses to
+// promote out of (controller_service.go, Issue #3403). A steward's mTLS certificate is
+// never revoked or removed on decommission (handleDecommissionSteward tombstones the
+// durable record and best-effort updates this in-memory Status, but issues no
+// certManager.Revoke call and never deletes the registry entry), so a decommissioned
+// device keeps a fully chain-valid client certificate indefinitely. Without this check,
+// TenantForDevice's existence-only test would keep answering "known" for that
+// certificate forever, handing a decommissioned steward the live WebAuthn operator
+// roster for its former tenant on every subsequent request.
+var terminalStewardManifestStatuses = map[string]struct{}{
+	string(business.StewardStatusDeregistered): {},
+	string(business.StewardStatusRevoked):      {},
+	string(business.StewardStatusArchived):     {},
+	string(business.StewardStatusDormant):      {},
+}
 
 // RevocationManifestKind identifies RevocationManifest's payload shape. It exists
 // so a manifest can never be confused with a signed config/DNA payload — both are
@@ -350,22 +368,72 @@ func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Requ
 // (VerifyClientCertIfGiven + ClientCAs, server.go) has already chain-verified
 // r.TLS.PeerCertificates[0] against the controller's own CA — but chain trust alone is
 // not identity: an admin certificate, or a steward certificate for a different,
-// unregistered or decommissioned device, would also chain-verify. The additional bar
-// applied here is a REGISTERED steward: the certificate's CommonName must resolve via
-// the steward registry (controllerService.TenantForDevice) to a known device, the same
-// "known identity, not just a valid chain" bar pkg/transport/quic.PeerStewardID applies
-// on the gRPC control plane. An unknown CommonName is refused even though its
-// certificate chain is genuine — a never-registered or decommissioned device has no
-// legitimate call to see any part of this manifest.
+// unregistered or decommissioned device, would also chain-verify. Three additional bars
+// are applied here.
+//
+// First, the presented certificate must not be REVOKED. The TLS handshake cannot decide
+// this — VerifyClientCertIfGiven checks the chain only and CFGMS publishes no CRL or OCSP
+// responder, so the controller's own revocation store is the sole authority, and it is
+// consulted per request exactly as every other certificate-authenticated path in this
+// package does (extractAdminPrincipal for admin mTLS, hardened fail-closed by Issue
+// #3852; verifyOperatorSigningCertificate for operator certs). This gate is what makes
+// revoking a stolen steward key actually stop that key: without it a revoked certificate
+// would keep collecting its tenant subtree's operator WebAuthn roster and the fleet
+// revocation list on every poll, indefinitely — the stolen-steward-key scenario this
+// endpoint exists to mitigate. The terminal-status check below does not cover it:
+// handleRevokeCertificate records the serial in the revocation store and never writes
+// StewardStatusRevoked to the steward registry record. A revocation-store read error
+// fails closed (deny), never falls through as "not revoked", matching Manager.IsRevoked's
+// documented contract.
+//
+// Second, the certificate's CommonName must resolve via the steward registry
+// (controllerService.GetStewardInfo) to a known device — the same "known identity, not
+// just a valid chain" bar pkg/transport/quic.PeerStewardID applies on the gRPC control
+// plane. Third, that device's Status must not be one of the terminal states
+// (terminalStewardManifestStatuses). The status check is required because decommissioning
+// a steward never revokes its mTLS certificate or removes its registry entry (see
+// terminalStewardManifestStatuses), so certificate validity and chain trust alone would
+// keep a decommissioned device "known" forever. A revoked certificate, an unknown
+// CommonName, or a known one in a terminal status is refused even though its certificate
+// chain is genuine — none of those has any legitimate call to see any part of this
+// manifest.
 func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID string, ok bool) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return "", false
 	}
-	stewardID := r.TLS.PeerCertificates[0].Subject.CommonName
+	peerCert := r.TLS.PeerCertificates[0]
+	stewardID := peerCert.Subject.CommonName
 	if stewardID == "" || s.controllerService == nil {
 		return "", false
 	}
-	return s.controllerService.TenantForDevice(stewardID)
+	// certManager may be nil in deployments that have not initialised certificate
+	// management; the caller refuses such a request with 503 before serving anything,
+	// so there is no path where a revocation check is skipped and a manifest is served.
+	if s.certManager != nil {
+		serial := peerCert.SerialNumber.String()
+		revoked, err := s.certManager.IsRevoked(serial)
+		if err != nil {
+			s.logger.Error("Steward certificate revocation check failed; failing closed",
+				"cert_serial", logging.SanitizeLogValue(serial),
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			return "", false
+		}
+		if revoked {
+			s.logger.Warn("Refused revocation manifest request from a revoked steward certificate",
+				"cert_serial", logging.SanitizeLogValue(serial),
+				"steward_id", logging.SanitizeLogValue(stewardID))
+			return "", false
+		}
+	}
+	info, known := s.controllerService.GetStewardInfo(stewardID)
+	if !known {
+		return "", false
+	}
+	if _, terminal := terminalStewardManifestStatuses[info.Status]; terminal {
+		return "", false
+	}
+	return info.TenantID, true
 }
 
 // filterWebAuthnCredentialsForSteward narrows creds to the entries a requesting steward
