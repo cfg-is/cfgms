@@ -72,6 +72,18 @@ var RegisterTestModule = func(s *Steward, name string, mod modules.Module) {
 	s.moduleFactory.RegisterModule(name, mod)
 }
 
+// LoadModuleForTest exposes the module factory's LoadModule for black-box tests
+// that need to verify factory-level wiring (e.g. the maintenance gate injected
+// into the patch module's window manager, Issue #4411).
+var LoadModuleForTest = func(s *Steward, name string) (modules.Module, error) {
+	return s.moduleFactory.LoadModule(name)
+}
+
+// BuildMaintenanceGateForTest exposes the unexported buildMaintenanceGate helper
+// so black-box tests can construct the exact same Gate NewStandalone wires into
+// the module factory, without duplicating its resolution logic (Issue #4411).
+var BuildMaintenanceGateForTest = buildMaintenanceGate
+
 // GetMonitorDNARefreshCount reports how many DNA snapshot refreshes were
 // triggered by monitor-driven targeted reconciles that applied changes. In
 // controller mode the same post-reconcile path updates the heartbeat

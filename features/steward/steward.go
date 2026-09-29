@@ -45,7 +45,9 @@ import (
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	maintenancesteward "github.com/cfgis/cfgms/pkg/maintenance/providers/steward"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -182,6 +184,19 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		}
 	}
 
+	// Wire the steward-side reboot Gate into the factory unconditionally — even
+	// when no reboot_window is configured (Issue #4411). PatchModule fails closed
+	// on a nil window manager, so leaving this unset denies every auto-reboot on
+	// every device forever, whether or not a window was ever declared. A device
+	// with no configured window instead gets an ungated Gate, whose CanReboot
+	// always returns true, matching the intended default of "reboot as it always
+	// should have."
+	maintenanceGate, err := buildMaintenanceGate(cfg, stewardID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build maintenance reboot gate: %w", err)
+	}
+	moduleFactory.SetMaintenanceGate(maintenanceGate)
+
 	// Create state comparator for configuration drift detection
 	comparator := stewardtesting.NewStateComparator()
 
@@ -249,6 +264,21 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
 
 	return s, nil
+}
+
+// buildMaintenanceGate constructs the steward-side reboot Gate from the synced
+// StewardConfig (Issue #4411). Called unconditionally — a nil or empty
+// RebootWindow still produces a Gate (the ungated case, CanReboot always true);
+// only a Timezone that cannot be resolved to an IANA location fails construction.
+// Timezone is resolved via pkg/config.ResolveRebootWindowTimezone rather than the
+// raw config value, so a "device" or empty timezone resolves to the host zone
+// instead of failing time.LoadLocation.
+func buildMaintenanceGate(cfg config.StewardConfig, stewardID string) (*maintenancesteward.Gate, error) {
+	return maintenancesteward.New(maintenancesteward.Config{
+		Window:   cfg.Steward.RebootWindow,
+		Timezone: pkgconfig.ResolveRebootWindowTimezone(cfg.Steward.RebootWindow, cfg.Steward.TenantDefaultTimezone),
+		DeviceID: stewardID,
+	})
 }
 
 // configContentRevision derives the revision identifier stamped on every drift-diff
