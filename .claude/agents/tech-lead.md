@@ -409,13 +409,41 @@ and overusing it buries real escalations in noise.
 
 When all 10 checks pass:
 
-1. Update the issue body with any additions (implementation notes, dependency fixes):
+1. Update the issue body with any additions (implementation notes, dependency fixes). Read the
+   live body immediately before writing, not the one this pass started with — the checklist above
+   can take a while, and a second review pass, a PO edit, or the BA can land a change to this same
+   issue while you were validating it. Re-reading right before the write is what
+   `edit-body`'s conflict check is comparing against, and re-reading the write back afterward is
+   what turns a silent loss into a visible one — the incident this guards against (2026-09-29,
+   Issue #4433) had two passes each believe their own write had succeeded:
    ```bash
-   # Fetch current body from the private project, write updated version to temp file
-   ./scripts/project-queue.sh get-item "<ITEM_ID>" | python3 -c "import json,sys; print(json.load(sys.stdin)['body'])" > /tmp/story-<NUM>-body.md
+   # Story bodies can carry business/customer specifics, so stage them in a
+   # private 0700 scratch dir — never a predictable /tmp path, which is both
+   # world-readable and a symlink-traversal target on a shared host.
+   work=$(mktemp -d)
+
+   # Read live, right before writing — not the body/ITEM_ID snapshot from Input above.
+   live=$(./scripts/pipeline-helper.sh view <NUM>)
+   echo "$live" | python3 -c "import json,sys; print(json.load(sys.stdin)['body'])" > "$work/story-body.md"
+   updated_at=$(echo "$live" | python3 -c "import json,sys; print(json.load(sys.stdin)['updatedAt'])")
    # ... edit the file to add implementation notes ...
-   ./scripts/pipeline-helper.sh edit-body <NUM> /tmp/story-<NUM>-body.md
-   rm /tmp/story-<NUM>-body.md
+
+   # edit-body refuses the write (non-zero exit) if the issue changed since
+   # $updated_at was read (Issue #4433). On refusal it names both timestamps
+   # and writes the live body to a conflict file — merge your notes into that
+   # file and retry with a fresh `view`, rather than re-deriving from scratch.
+   ./scripts/pipeline-helper.sh edit-body <NUM> "$work/story-body.md" "$updated_at"
+
+   # Read the write back and confirm your own additions actually landed.
+   # UPDATED / rc0 means the API call succeeded, not that your specific
+   # content is what a later reader will see.
+   ./scripts/pipeline-helper.sh view <NUM> | python3 -c "
+   import json, sys
+   body = json.load(sys.stdin)['body']
+   assert '<distinctive snippet of what you just added>' in body, \
+       'edit-body reported UPDATED but the read-back body is missing this pass\'s addition'
+   "
+   rm -rf "$work"
    ```
 
 2. Update project status to Ready:

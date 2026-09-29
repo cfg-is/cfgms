@@ -441,6 +441,48 @@ For continuous integration and deployment:
 - `make security-scan` - Security gates
 - `make test-integration-complete` - Full integration testing
 
+## Pipeline Helper Script (scripts/pipeline-helper.sh)
+
+Wraps `gh` CLI calls for pipeline agents (BA, Tech Lead, Acceptance Reviewer, PO) so they can edit
+issues without triggering approval prompts on heredocs, subshells, and compound commands. Run
+`./scripts/pipeline-helper.sh` with no arguments for the full command list.
+
+### edit-body — optimistic concurrency (Issue #4433)
+
+```bash
+./scripts/pipeline-helper.sh edit-body <issue_num> <body_file> <expected_updated_at>
+```
+
+`edit-body` replaces an issue's body. `expected_updated_at` is required — it is the `updatedAt`
+timestamp the caller read for that issue, from `pipeline-helper.sh view <issue_num>` or
+`gh issue view --json updatedAt`, fetched immediately before writing. The command re-fetches the
+live issue and compares:
+
+- **Match** — the read is still current. Before calling `gh issue edit`, the body about to be
+  applied is written to `<scratch>/<issue_num>-applied.md` (a predictable path, not a random
+  `mktemp` name), so the write is recoverable if `gh issue edit` itself fails. The edit is then
+  applied, the applied copy is deleted, and the command prints `UPDATED:<issue_num>`.
+- **Mismatch** — the issue changed after the caller's read (someone else's edit landed in
+  between). The write is refused: the command exits non-zero, writes the *live* body to
+  `<scratch>/<issue_num>-conflict.md`, and prints both the expected and the live `updatedAt` plus
+  that file path, so the caller can merge its intended changes into the live body instead of
+  re-deriving them from scratch.
+- **`expected_updated_at` omitted** — refused with a usage error and a non-zero exit. There is no
+  flag to skip the check; a caller that has not read the current issue state cannot overwrite it.
+
+`<scratch>` is `${XDG_RUNTIME_DIR:-$HOME/.cache}/cfgms/edit-body`, never a world-writable
+directory: these files hold complete issue bodies in cleartext, and a predictable name under
+`/tmp` would be both a symlink-traversal write primitive (`mkdir -p` succeeds silently on a
+pre-existing symlink-to-directory) and a world-readable copy of the body. The command refuses to
+run if that path is a symlink or is not a directory owned by the caller, creates it `0700`, writes
+both files `0600`, and removes the applied copy once the edit lands — only the conflict file
+persists, because merging it is the caller's next step.
+
+This closes a silent last-writer-wins race: previously, two sessions that both read a body, both
+revised it, and both called `edit-body` would both be told `UPDATED`, and the second write would
+silently discard the first. `append-section` (adds after a heading rather than replacing the whole
+body) does not have this failure mode and is unchanged.
+
 ---
 
 ## Quick Reference
