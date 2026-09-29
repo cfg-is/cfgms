@@ -225,6 +225,13 @@ Installer bundling:
 - **macOS** (.pkg): binaries at `/usr/local/lib/cfgms/modules/cfgms-module-<name>`, included in the pkg payload
 - **Windows** (MSI): binaries at `C:\Program Files\CFGMS\modules\cfgms-module-<name>.exe`, included via WiX components
 
+### Reboot-Window Gating (Issue #4411, ADR-026 §6)
+
+The `patch` module's auto-reboot path and `maintenance.window`/`maintenance.schedule` checks are gated by a steward-side reboot Gate (`pkg/maintenance/providers/steward`), built at startup from the synced `StewardConfig.Steward.RebootWindow` and installed into the module factory before any module loads. The Gate is built unconditionally, whether or not a window is configured:
+
+- **Reboot window configured**: the patch module's auto-reboot and maintenance-window checks are enforced against the declared schedule — a patch apply outside the window is denied (`ErrMaintenanceWindowNotActive`) rather than rebooting immediately.
+- **No reboot window configured**: the device is ungated — auto-reboot and maintenance-window checks always pass, matching the steward's behavior before reboot-window gating existed. A missing configuration is not the same as a denied one.
+
 ### Module Trust Modes
 
 The steward verifies module bundle signatures according to the `module_trust.mode` field in `steward.cfg`:
