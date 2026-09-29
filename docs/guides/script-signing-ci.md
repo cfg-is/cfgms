@@ -121,9 +121,9 @@ tighten it, never loosen it — Story #4324), but nothing on the execution path
 reads it: `BuildModuleSigningConfig` carries `trust_mode`, `trusted_keys` and
 `allow_public_ca` into the module's runtime config and deliberately does not
 carry `policy` — there is no steward-wide "require a signature on every
-script" switch today. This gap is not tracked by an open issue. Whether a
-given script actually requires a signature is controlled per script instead —
-see [Signing policies](#signing-policies) below.
+script" switch today. Tracked in #4399. Whether a given script actually
+requires a signature is controlled per script instead — see
+[Signing policies](#signing-policies) below.
 
 To obtain the thumbprint:
 
