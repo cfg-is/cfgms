@@ -111,19 +111,19 @@ steward:
         thumbprint: "<sha256-thumbprint>"   # see below
 ```
 
-`trust_mode` and `trusted_keys` are what a steward actually verifies a
-signature against — they are carried into the script module's runtime
-signing config (`BuildModuleSigningConfig`,
+`trust_mode`, `trusted_keys` and `policy` are all carried into the script
+module's runtime signing config (`BuildModuleSigningConfig`,
 `features/steward/config/config.go`). **`script_signing.policy` at the
-steward level is not an enforcement switch.** The field is validated and
-cascades through tenant configuration inheritance (a child tenant may only
-tighten it, never loosen it — Story #4324), but nothing on the execution path
-reads it: `BuildModuleSigningConfig` carries `trust_mode`, `trusted_keys` and
-`allow_public_ca` into the module's runtime config and deliberately does not
-carry `policy` — there is no steward-wide "require a signature on every
-script" switch today. Tracked in #4399. Whether a given script actually
-requires a signature is controlled per script instead — see
-[Signing policies](#signing-policies) below.
+steward level is a fleet-wide enforcement floor.** Setting it to `required`
+means every script the steward executes must carry a valid signature,
+regardless of that script's own `signing_policy` — a per-script setting may
+raise the bar further (e.g. pin a specific trusted key) but can never lower
+it below the steward's floor. The field is validated and cascades through
+tenant configuration inheritance (a child tenant may only tighten it, never
+loosen it — Story #4324), and the resolved floor is enforced on every
+execution (Issue #4399). Leaving `policy` unset imposes no floor: whether a
+given script requires a signature is then controlled entirely per script —
+see [Signing policies](#signing-policies) below.
 
 To obtain the thumbprint:
 
@@ -172,22 +172,25 @@ The algorithm value must match what is configured in the steward
 
 ### Signing policies
 
-Whether a given script requires a valid signature is set on the script's own
-resource configuration (the `script:` block a config pushes to the steward) —
-not on the steward as a whole. See the `signing_policy` field in the
-[script module documentation](../modules/script-module.md):
+Whether a given script requires a valid signature is decided by two settings
+together: the steward-wide `script_signing.policy` floor (Step 4 above) and
+the script's own resource-level `signing_policy` (the `script:` block a
+config pushes to the steward — see the `signing_policy` field in the
+[script module documentation](../modules/script-module.md)). The steward
+executes each script under whichever of the two is more restrictive; a
+per-script setting can tighten the floor but can never loosen it.
 
 | Policy | Behaviour |
 |--------|-----------|
-| `none` | Signatures are ignored (default when `signing_policy` is omitted) |
+| `none` | Signatures are ignored (default when neither the steward floor nor `signing_policy` is set) |
 | `optional` | Signatures are verified when present, unsigned scripts are allowed |
 | `required` | The script is rejected unless it carries a valid `.sig` sidecar signed by a key in the steward's `trusted_keys` |
 
-**Recommended rollout:** start every script resource at `optional`, verify
-signatures are being generated and verified correctly, then set
-`signing_policy: required` on each script resource that should be enforced.
-There is no steward-wide default that applies this to scripts that omit the
-field — each script resource opts in individually.
+**Recommended rollout:** start with the steward floor at `optional` (or
+unset), verify signatures are being generated and verified correctly, then
+set `script_signing.policy: required` on the steward — or `signing_policy:
+required` on individual script resources first, if you want to enforce
+signing incrementally before raising the fleet-wide floor.
 
 ## Windows runners
 

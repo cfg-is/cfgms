@@ -3,8 +3,10 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -1060,6 +1062,74 @@ func TestBuildModuleSigningConfig(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// TestBuildModuleSigningConfig_PolicyPassthrough covers the gap fixed by
+// Issue #4399: script_signing.policy must reach the module's runtime signing
+// config so the steward-wide floor can be enforced, not silently dropped.
+func TestBuildModuleSigningConfig_PolicyPassthrough(t *testing.T) {
+	tests := []struct {
+		name       string
+		policy     ScriptSigningPolicy
+		wantPolicy script.SigningPolicy
+	}{
+		{name: "required policy passes through", policy: ScriptSigningPolicyRequired, wantPolicy: script.SigningPolicyRequired},
+		{name: "optional policy passes through", policy: ScriptSigningPolicyOptional, wantPolicy: script.SigningPolicyOptional},
+		{name: "none policy passes through", policy: ScriptSigningPolicyNone, wantPolicy: script.SigningPolicyNone},
+		{name: "absent policy maps to empty (no floor, matches pre-#4399 behavior)", policy: "", wantPolicy: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildModuleSigningConfig(ScriptSigningConfig{Policy: tt.policy})
+			assert.Equal(t, tt.wantPolicy, got.Policy)
+		})
+	}
+}
+
+// TestScriptSigningCascade_EndToEnd_ParentRequiredChildAttemptsNone ties the
+// tighten-only cascade (Story #4324, features/config/stewardtypes/validation.go
+// — out of scope for #4399) to the enforcement wired up by this story: a child
+// tenant cannot loosen an inherited "required" floor, and whatever config
+// actually reaches the steward still enforces "required" end to end.
+func TestScriptSigningCascade_EndToEnd_ParentRequiredChildAttemptsNone(t *testing.T) {
+	parent := ScriptSigningConfig{Policy: ScriptSigningPolicyRequired, TrustMode: TrustModeAnyValid}
+	child := ScriptSigningConfig{Policy: ScriptSigningPolicyNone}
+
+	// The cascade rejects the child's attempt to loosen outright — the config
+	// is never accepted, so the steward keeps enforcing the parent's floor
+	// rather than silently dropping to "none".
+	_, err := MergeScriptSigningConfig(parent, child)
+	require.Error(t, err)
+
+	// End to end: the floor that actually reaches the steward is still
+	// "required" — confirm it is carried into the module's runtime config and
+	// enforced, exactly as if the child's rejected loosening attempt had never
+	// been proposed.
+	signingCfg := BuildModuleSigningConfig(parent)
+	require.Equal(t, script.SigningPolicyRequired, signingCfg.Policy)
+
+	mod := script.NewModule()
+	mod.SetSigningConfig(signingCfg)
+
+	shell, content := testShellAndScript()
+	unsigned := &script.ScriptConfig{
+		Content: content,
+		Shell:   shell,
+		Timeout: 10 * time.Second,
+		// SigningPolicy omitted: per-script default is "none" — must not bypass the floor.
+	}
+
+	err = mod.Set(context.Background(), "cascade-end-to-end", unsigned)
+	require.Error(t, err, "unsigned script must be refused: the parent's 'required' floor holds end to end")
+}
+
+// testShellAndScript returns a minimal shell/content pair valid on the current platform.
+func testShellAndScript() (script.ShellType, string) {
+	if runtime.GOOS == "windows" {
+		return script.ShellCmd, "echo Hello World"
+	}
+	return script.ShellBash, "echo 'Hello World'"
 }
 
 func TestScriptSigningConfigValidationInLoadConfiguration(t *testing.T) {

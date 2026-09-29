@@ -363,9 +363,16 @@ func (m *Module) updateExecutionStatus(resourceID string, status ExecutionStatus
 	}
 }
 
-// validateSignature validates script signatures based on the signing policy
+// validateSignature validates script signatures based on the effective signing
+// policy: the more restrictive of the script's own SigningPolicy and the
+// steward-wide floor injected via SetSigningConfig (Issue #4399). A per-script
+// setting may tighten the floor but can never loosen it.
 func (m *Module) validateSignature(config *ScriptConfig) error {
-	switch config.SigningPolicy {
+	m.mu.RLock()
+	floor := m.signingConfig.Policy
+	m.mu.RUnlock()
+
+	switch config.EffectiveSigningPolicy(floor) {
 	case SigningPolicyNone:
 		// No validation required
 		return nil

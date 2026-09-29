@@ -49,8 +49,16 @@ type TrustedKeyEntry struct {
 
 // ModuleSigningConfig holds the steward-level signing policy for the script module.
 // It is injected via Module.SetSigningConfig and consulted during signature verification.
-// The zero value corresponds to TrustModeAnyValid (no key restriction).
+// The zero value corresponds to TrustModeAnyValid (no key restriction) and Policy ""
+// (no steward-wide floor — per-script signing_policy governs alone, matching pre-#4399
+// behavior).
 type ModuleSigningConfig struct {
+	// Policy is the steward-wide signing floor (none/optional/required). A per-script
+	// SigningPolicy may tighten it but never loosen it — see
+	// ScriptConfig.EffectiveSigningPolicy, which combines the two. Empty behaves as
+	// SigningPolicyNone: no floor is imposed and per-script policy governs alone.
+	Policy SigningPolicy
+
 	// TrustMode controls which signatures are accepted after cryptographic verification.
 	TrustMode TrustMode
 
