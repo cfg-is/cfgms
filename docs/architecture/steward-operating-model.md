@@ -664,31 +664,46 @@ gate — not the deeper risk of silently stealing a years-old credential.
 
 #### Operator Certificate Revocation Consumption (Issue #3699)
 
-> **Not yet active in production.** Nothing in the steward runtime currently fetches a
-> manifest into the verifier, so `IsRevoked` answers `false` on every deployed steward and
-> the check described below does not fire. **Revoking an operator certificate does not yet
-> cause stewards to reject it for inline script execution.** The chain, client-auth EKU,
-> expiry and payload-signing-marker checks above are unaffected and remain the controls
-> that actually run. The blocker is authorization, not fetch scheduling:
-> `GET /api/v1/certificates/revocation-manifest` is gated on `certificate:list`, and the
-> controller derives a REST principal from an mTLS certificate only when that certificate
-> carries the CFGMS admin marker — which a steward certificate does not. Closing it needs a
-> steward-reachable delivery path, a controller-side decision about what the fleet-wide
-> manifest (revoked steward-certificate serials, the fleet's authorized-WebAuthn roster)
-> may disclose to any single steward. Epic #3571, previously cited here as the tracker for
-> this gap, is closed with all sub-issues complete and did not add the delivery path;
-> delivery is now tracked in #4400. The verification, anti-rollback and `IsRevoked`
-> semantics described below are implemented and tested; only delivery is missing.
+Delivery (Issue #4400): `features/steward/client/client_transport.go`'s
+`setupCommandHandler` fetches the manifest on startup and refreshes it every 5 minutes
+for the life of the connection, from `GET /api/v1/public/steward-revocation-manifest`
+(`features/controller/api/handlers_revocation_manifest.go`'s
+`handleGetStewardRevocationManifest`) — a route separate from the fleet-wide,
+`certificate:list`-gated `GET /api/v1/certificates/revocation-manifest` above, because a
+steward's mTLS certificate carries no CFGMS admin marker and cannot authenticate against
+`certificate:list` at all. The steward route instead authorizes the caller from its own
+peer certificate: the controller resolves the certificate's CommonName to a registered
+steward via the fleet registry, and refuses any certificate — admin-marked or not — that
+does not resolve to one.
+
+The response is filtered per requesting steward, unlike the fleet-wide manifest:
+`revoked_serials` is served in full (a narrower list could only reduce coverage, and
+`VerifyManifest` only ever unions serials into what it already believed revoked, never
+replaces them, so full-list-per-steward is the safe default), while
+`authorized_webauthn_credentials` is narrowed to operators whose tenant scope covers the
+requesting steward's tenant path — the same rule the WebAuthn path above documents for
+how a steward applies `tenant_id`/`root_scope` once it has verified a manifest, applied
+here server-side so a compromised steward never receives another tenant's operator
+credentials in the first place. `webauthn_relying_party` is unchanged. Each filtered
+response is signed fresh with the controller's current signing certificate, so
+per-steward filtering never requires an unsigned or re-signed-by-a-relay payload.
+
+A fetch failure only logs and leaves `IsRevoked` answering from whatever manifest, if
+any, was last verified — execution availability never depends on this round trip
+succeeding, matching every other design choice on this path (see below). Epic #3571,
+previously cited here as the tracker for this gap, is closed with all sub-issues
+complete and did not add this delivery path; #4400 is the issue that did.
 
 The X.509 path above verifies an operator certificate's chain, EKU, expiry, and
 payload-signing marker — none of which change the moment a certificate is revoked, since
 revocation is deliberately independent of the certificate's own claims about itself.
 `features/steward/operatorroster.RevocationVerifier` is the component that closes that
-gap: it verifies the same signed revocation manifest the WebAuthn path resolves its roster
-from (`GET /api/v1/certificates/revocation-manifest`) against the steward's own pinned CA
-roots, and `verifyOperatorCert` adds `IsRevoked(serial)` as a final check after the marker
-check succeeds — so that once a manifest reaches the steward, a certificate that is
-otherwise perfectly valid is rejected when its serial appears in it.
+gap: it verifies the signed revocation manifest fetched as described above (the same
+manifest shape the WebAuthn path's embedded-manifest roster is drawn from, just a
+different, steward-initiated delivery route) against the steward's own pinned CA roots,
+and `verifyOperatorCert` adds `IsRevoked(serial)` as a final check after the marker check
+succeeds — so that once a manifest reaches the steward, a certificate that is otherwise
+perfectly valid is rejected when its serial appears in it.
 
 Deliberately, this is never a live controller assertion made at verification time: the
 steward checks the last manifest it independently verified for itself, using the same

@@ -38,6 +38,7 @@ import (
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/commands"
 	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
@@ -105,6 +106,13 @@ type FragmentCollector interface {
 // command. The controller only ever asks for IDs already in its stored manifest,
 // so a list this long indicates a malformed or hostile command.
 const maxRequestedFragmentIDs = 10000
+
+// revocationManifestRefreshInterval is how often setupCommandHandler's periodic
+// revocation-manifest refresh polls the controller (Issue #4400). Well below
+// dnaRefreshInterval's 30-minute default: a leaked operator certificate's exposure
+// window is bounded by this interval (on top of however long the revocation itself
+// takes), so this is a security control's polling cadence, not a config-sync one.
+const revocationManifestRefreshInterval = 5 * time.Minute
 
 // parseFragmentIDs normalises the fragment_ids param of a SYNC_DNA command into a
 // []string.
@@ -216,6 +224,11 @@ type TransportClient struct {
 	eventEmitter *EventEmitter
 
 	// Command authentication settings (Story #919)
+	// moduleTrustMode mirrors TransportConfig.ModuleTrustMode; see that field's doc
+	// comment for why the revocation-manifest fetch (Issue #4400) reuses it rather
+	// than taking its own configuration knob.
+	moduleTrustMode stewardtypes.ModuleTrustMode
+
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
 
@@ -531,6 +544,16 @@ type TransportConfig struct {
 	// means signing enforcement is inactive (policy: none).
 	ScriptSigning stewardconfig.ScriptSigningConfig
 
+	// ModuleTrustMode is steward.cfg's module_trust.mode (strict/controller/bypass,
+	// CLAUDE.md's "Threat Model" section). Reused, not duplicated, as the trust mode
+	// for the operator-certificate revocation manifest fetch (Issue #4400) — both
+	// decide the same question, "does this steward independently verify a
+	// controller-signed artifact, or trust the controller's live word for it", so one
+	// config value answers it for both. The zero value is treated as
+	// stewardtypes.ModuleTrustModeController, matching features/steward/config's own
+	// default for an unset mode.
+	ModuleTrustMode stewardtypes.ModuleTrustMode
+
 	// PublicBeta enables the fail-closed connected-execution contract. It
 	// requires signed ad-hoc commands and a valid, loaded controller CA root.
 	// Development and tests must opt out explicitly by leaving this false.
@@ -712,6 +735,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		commandReplayWindow:        cfg.SignedCommandReplayWindow,
 		commandMaxParamsBytes:      cfg.SignedCommandMaxParamsBytes,
 		scriptSigning:              cfg.ScriptSigning,
+		moduleTrustMode:            cfg.ModuleTrustMode,
 		publicBeta:                 cfg.PublicBeta,
 		identityPersistFunc:        cfg.IdentityPersistFunc,
 		secretStore:                cfg.SecretStore,
@@ -1199,38 +1223,44 @@ func (c *TransportClient) setupCommandHandler(ctx context.Context, stewardID str
 	// on its nil-roots guard, so IsRevoked never sees one verify successfully and answers
 	// false, the same degrade-safe posture as the rest of operator-cert verification when
 	// no usable CA bundle is configured).
-	//
-	// READ THIS BEFORE RELYING ON OPERATOR-CERTIFICATE REVOCATION: nothing here, or
-	// anywhere else in the steward, currently fetches a manifest into this verifier, so
-	// IsRevoked answers false on every real steward and the revocation check in
-	// verifyOperatorCert (features/steward/commands/execute_script.go) does not fire in
-	// production. Revoking a leaked operator certificate does NOT yet cause stewards to
-	// reject it for inline script execution; the certificate's chain, client-auth EKU,
-	// expiry and payload-signing marker are still enforced, and remain the controls that
-	// actually run.
-	//
-	// The blocker is authorization, not scheduling. The manifest is served by
-	// GET /api/v1/certificates/revocation-manifest behind requirePermission("certificate",
-	// "list") (features/controller/api/routes_certificates.go), and the controller's REST
-	// authentication derives a principal from an mTLS certificate only when that
-	// certificate carries the CFGMS admin marker (extractAdminPrincipal,
-	// features/controller/api/middleware.go). A steward's client certificate carries no
-	// admin marker — the same reason the steward binary download needed a separate
-	// unauthenticated route (features/controller/api/server.go, the public
-	// steward-binaries handler). Pointing RunPeriodicRefresh at that URL today would loop
-	// on 403 forever and make an inert control look wired, so it is deliberately not
-	// called. Closing the gap needs a steward-reachable delivery path for the manifest
-	// (a steward-authenticated route, or delivery over the already-mTLS'd control plane),
-	// which is a controller-side design decision about what the fleet-wide manifest may
-	// disclose to any single steward — it carries revoked steward-certificate serials and
-	// the fleet's authorized-WebAuthn roster, which is why the existing endpoint is closed
-	// even to tenant-scoped administrators.
-	//
-	// Deferred: tracked in #3571 — steward-reachable delivery of the signed revocation
-	// manifest; until it lands, operatorroster.RevocationVerifier's verification,
-	// anti-rollback and IsRevoked semantics are complete and tested, and
-	// FetchAndVerify/RunPeriodicRefresh are the entry points that delivery will call.
 	revocationVerifier := operatorroster.NewRevocationVerifier(controllerCARoots)
+
+	// Delivery (Issue #4400): fetch-on-startup plus periodic refresh against the
+	// controller's steward-authenticated, per-steward-filtered manifest endpoint
+	// (operatorroster.ManifestPath — see that constant's doc comment for why this is a
+	// separate route from the admin-only, certificate:list-gated
+	// GET /api/v1/certificates/revocation-manifest a steward certificate cannot reach).
+	// Started in a goroutine bound to ctx — the same context Connect received from its
+	// caller, which in production is the steward's process-lifetime run context (see
+	// cmd/steward/main.go's registerAndConnect and runStewardInternal), never a
+	// per-command context — so a slow or unreachable controller never blocks Connect
+	// returning: execution availability must not depend on a controller round trip,
+	// exactly the case this control exists for (a leaked operator credential coinciding
+	// with an attacker blocking the connection). A fetch failure only logs; the
+	// verifier keeps answering IsRevoked from whatever manifest, if any, it last
+	// verified (RunPeriodicRefresh's contract).
+	moduleTrustMode := c.moduleTrustMode
+	if moduleTrustMode == "" {
+		moduleTrustMode = stewardtypes.ModuleTrustModeController
+	}
+	if manifestURL, urlErr := operatorroster.BuildManifestURL(c.controllerHTTPSBaseURL); urlErr != nil {
+		c.logger.Warn("Revocation manifest fetch disabled: cannot build manifest URL",
+			"error", logging.SanitizeLogValue(urlErr.Error()))
+	} else if httpClient, clientErr := c.buildHTTPClientForUpgrade(); clientErr != nil {
+		c.logger.Warn("Revocation manifest fetch disabled: cannot build mTLS HTTP client",
+			"error", logging.SanitizeLogValue(clientErr.Error()))
+	} else {
+		// The refresh error is sanitized because it is tainted: FetchAndVerify's error
+		// chain interpolates controller response-body content (operatorroster.
+		// VerifyManifest's "unexpected manifest kind %q"), so an attacker-controlled or
+		// tampered response reaches this sink. Same rule as every other error logged in
+		// this file — never log a bare err.
+		go revocationVerifier.RunPeriodicRefresh(ctx, httpClient, manifestURL, moduleTrustMode,
+			revocationManifestRefreshInterval, func(err error) {
+				c.logger.Warn("Revocation manifest fetch failed; continuing on last verified manifest",
+					"error", logging.SanitizeLogValue(err.Error()))
+			})
+	}
 
 	handler, err := commands.New(&commands.Config{
 		StewardID:          stewardID,

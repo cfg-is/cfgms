@@ -21,6 +21,11 @@ func registerCertificateRoutes(s *Server, api *mux.Router) {
 	// unscoped principal, since the manifest is fleet-wide and cannot be tenant-filtered
 	// without breaking steward-side verification (see handlers_revocation_manifest.go).
 	certs.Handle("/revocation-manifest", s.requirePermission("certificate", "list")(http.HandlerFunc(s.handleGetRevocationManifest))).Methods("GET")
+	// The steward-authenticated, per-steward-filtered sibling of the route above
+	// (Issue #4400) is registered on the base router, not here: a steward mTLS
+	// certificate carries no admin marker, so it cannot satisfy requirePermission at
+	// all. See server.go's GET /api/v1/public/steward-revocation-manifest registration and
+	// handleGetStewardRevocationManifest.
 	certs.Handle("/{serial}", s.requirePermission("certificate", "get")(http.HandlerFunc(s.handleGetCertificate))).Methods("GET")
 	certs.Handle("/{serial}/revoke", s.requirePermission("certificate", "revoke")(http.HandlerFunc(s.handleRevokeCertificate))).Methods("POST")
 }

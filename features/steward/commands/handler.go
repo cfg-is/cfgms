@@ -311,6 +311,16 @@ func (h *Handler) UpdateVerifier(v signature.Verifier) {
 	h.mu.Unlock()
 }
 
+// RevocationVerifier returns the operator-certificate revocation verifier wired into
+// this handler (Issue #3699/#4400), so a caller can observe whether a manifest has
+// been verified without this package duplicating operatorroster's own storage. Used
+// by the steward's transport-layer manifest-fetch wiring (features/steward/client) and
+// by tests exercising that wiring end to end. May be nil if the handler was built
+// without one.
+func (h *Handler) RevocationVerifier() *operatorroster.RevocationVerifier {
+	return h.revocationVerifier
+}
+
 // sweepStaleExecutingCommands marks commands left in "executing" state (from a
 // crashed or restarted process) as "failed" with error "controller_restart" —
 // but only once they have been executing longer than executingRestartTimeout
