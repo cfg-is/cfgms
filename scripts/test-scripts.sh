@@ -3933,6 +3933,68 @@ test_dispatch_creds_gate() {
     fi
 }
 
+test_dispatch_image_gate_hermetic() {
+    log_test "Testing agent-dispatch.sh: launch-generic validates its clone dir before the image-staleness gate, so a forced-stale image never triggers a rebuild (Issue #4423)..."
+
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    if [[ ! -f "$dispatch_script" ]]; then
+        log_fail "dispatch_image_gate_hermetic: script not found at $dispatch_script"
+        return
+    fi
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local rebuild_marker="${tmp_dir}/rebuild-happened"
+    local nonexistent_clone="${tmp_dir}/nonexistent-clone-dir"
+
+    # Fake `docker` on PATH: report an image label that never matches any real
+    # checkout hash, so gate_image_staleness_for_launch's mismatch branch
+    # always fires if it is ever reached — same tripwire shape as
+    # image_staleness.test.sh, adapted for a subprocess invocation (PATH stub
+    # instead of a sourced shell function, since this test runs the script via
+    # `bash "$dispatch_script" ...` rather than sourcing it).
+    cat > "${tmp_dir}/docker" << 'DOCKEREOF'
+#!/usr/bin/env bash
+case "$1" in
+    inspect) echo "forced-stale-label" ;;
+    image)   exit 1 ;;
+    *)       exit 0 ;;
+esac
+DOCKEREOF
+    chmod +x "${tmp_dir}/docker"
+
+    local output exit_code=0
+    output=$(
+        PATH="${tmp_dir}:${PATH}" \
+        CFGMS_TEST_CREDS_STATUS="CREDS_OK:60" \
+        CFGMS_AGENT_LEDGER_DIR="${tmp_dir}/ledger" \
+        CFGMS_TEST_IMAGE_REBUILD_CMD="touch '${rebuild_marker}'; exit 0" \
+        bash "$dispatch_script" launch-generic "cfg-agent-test" "$nonexistent_clone" 2>&1
+    ) || exit_code=$?
+
+    if [[ $exit_code -eq 1 ]]; then
+        log_pass "dispatch_image_gate_hermetic: launch-generic on a missing clone dir exits 1"
+    else
+        log_fail "dispatch_image_gate_hermetic: expected exit 1, got ${exit_code}: ${output}"
+    fi
+
+    if echo "$output" | grep -q "ERROR: clone not found: ${nonexistent_clone}"; then
+        log_pass "dispatch_image_gate_hermetic: reports ERROR: clone not found before any gate runs"
+    else
+        log_fail "dispatch_image_gate_hermetic: expected 'ERROR: clone not found: ${nonexistent_clone}' in output: ${output}"
+    fi
+
+    if [[ -f "$rebuild_marker" ]]; then
+        log_fail "dispatch_image_gate_hermetic: rebuild command ran despite invalid clone dir — image gate ran before input validation"
+    else
+        log_pass "dispatch_image_gate_hermetic: rebuild command never ran (forced-stale image never triggered a real/stubbed docker build)"
+    fi
+
+    rm -rf "$tmp_dir"
+}
+
 test_preflight_acceptance_review_comment_match() {
     log_test "Testing po-cycle-preflight.py: is_trusted_review_comment matches sentinel and heading, not just author..."
 
@@ -5550,6 +5612,7 @@ DISPATCH_TABLE=(
     "test_preflight_forged_acceptance_review:claude-tooling"
     "test_preflight_gh_call_budget:claude-tooling"
     "test_dispatch_creds_gate:claude-tooling"
+    "test_dispatch_image_gate_hermetic:claude-tooling"
     "test_preflight_acceptance_review_comment_match:claude-tooling"
     "test_preflight_review_verdict_routing:claude-tooling"
     "test_check_cla_signed:core"
