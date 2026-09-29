@@ -3888,7 +3888,14 @@ test_dispatch_creds_gate() {
     fi
 
     exit_code=0
-    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
+    # CFGMS_TEST_REPO_ROOT keeps gate_image_staleness_for_launch (#4388) a
+    # no-op here, same as every other pre-existing launch-path test. Without
+    # it this call is not hermetic: PR 1589 is a real, merged PR, so `gh pr
+    # view` can succeed on any host with `gh` authenticated against this repo
+    # (it does in this environment), and review-pr's gates then run for real
+    # against the live host's docker/image state (Issue #4423).
+    output=$(CFGMS_TEST_CREDS_STATUS="CREDS_LOW:2" CFGMS_TEST_REPO_ROOT="$(mktemp -d)" \
+        bash "$dispatch_script" review-pr 1589 2>&1) || exit_code=$?
     if echo "$output" | grep -q "DISPATCH_DEFERRED:creds_missing:"; then
         log_fail "dispatch_creds_gate review-pr CREDS_LOW: gate deferred, expected pass-through: ${output}"
     else
