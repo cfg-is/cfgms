@@ -298,6 +298,29 @@ else
 fi
 rm -rf "$nonmod"
 
+# --- 8. A package under node_modules is vendored third-party content: it is --
+#        never reported and never needs an allowlist entry (Issue #4389).
+repo="$(make_fixture)"
+mkdir -p "$repo/web/node_modules/flatted/golang/pkg/flatted"
+cat >"$repo/web/node_modules/flatted/golang/pkg/flatted/flatted.go" <<'EOF'
+package flatted
+
+func Vendored() {}
+EOF
+write_allowlist "$repo/allow.yaml" \
+    "deadparent" "chaina" "chainb" "chainc"
+run_checker "$repo" "allow.yaml"
+if [ "$RC" -eq 0 ]; then
+    pass "vendored node_modules package does not require an allowlist entry"
+else
+    fail "node_modules package must not fail the gate (rc=$RC, stdout: $STDOUT, stderr: $STDERR)"
+fi
+case "$STDOUT$STDERR" in
+    *node_modules*) fail "node_modules package must not be named in the output (stdout: $STDOUT)" ;;
+    *) pass "vendored node_modules package is absent from every bucket" ;;
+esac
+rm -rf "$repo"
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

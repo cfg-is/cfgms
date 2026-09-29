@@ -1614,7 +1614,7 @@ test_refresh_pins_discovery() {
 
 # Coverage suite for the security review harness core (Issue #3901): schema
 # validation, the atomic writer, the resume scanner, and fail-closed base-dir
-# resolution. Each module under .claude/scripts/security-review/ ships its own
+# resolution. Each module under .claude/skills/security-review/ ships its own
 # <module>_test.py, hand-rolled to the discover_pins_test.py convention above
 # (stdlib only, exit 0 on all-pass). Every downstream harness story (lane
 # adapters, consolidator, orchestrator) depends on these primitives, so a gap

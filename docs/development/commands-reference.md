@@ -183,6 +183,18 @@ no-Python-in-core check (Issue #4303) is unaffected by this gating —
 it runs in the `changes` job itself, outside any suite group, so it always
 executes regardless of which groups `unit-tests-scripts` requests.
 
+**Measured effect on a Go-only change (Epic #4296).** Every time below is
+wall-clock, measured, not estimated.
+
+| Where | Before gating (all four groups) | After gating (`core` only) |
+|---|---|---|
+| CI `unit-tests-scripts` job | 275 s: run 35422391484, job 105842339942, 04:53:17Z–04:57:52Z on 2026-09-19 | 183 s: run 36492330634, job 109163697601, 22:26:18Z–22:29:21Z on 2026-09-28 |
+| Local `make test`, Linux container (`--memory 12g --cpus 8`) | 783 s | 305 s |
+| Local `make test`, Windows Server 2025 git-bash (native) | 2748 s | 2108 s |
+
+- **CI rows.** The "after" run is a throwaway Go-only PR, #4395. It changed one comment in `pkg/version/version.go` and was closed unmerged. Its `changes` job (109163610647) printed `groups=core`, and `unit-tests-scripts` ran with `CFGMS_TEST_SCRIPTS_GROUPS: core`. The "before" run predates group gating, so its `unit-tests-scripts` job ran every group whatever the diff.
+- **Local rows.** Measured in PR #4331. Each pair used the same one-line `pkg/version/version.go` change and differs only in the `test-scripts` step. The Windows "before" run exited non-zero on 7 non-`core` script suites that were unrelated to that change.
+
 ## Security Scanning
 
 ### Security Commands
