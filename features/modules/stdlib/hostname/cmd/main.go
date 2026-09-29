@@ -8,7 +8,6 @@ package main
 
 import (
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +15,8 @@ import (
 	proto "github.com/cfgis/cfgms/api/proto/modules"
 	"github.com/cfgis/cfgms/features/modules/adapter"
 	hostname "github.com/cfgis/cfgms/features/modules/stdlib/hostname"
+	"github.com/cfgis/cfgms/pkg/modules/contract"
+
 	"google.golang.org/grpc"
 )
 
@@ -25,7 +26,7 @@ func main() {
 		log.Fatal("cfgms-module-hostname: CFGMS_MODULE_SOCKET environment variable is required")
 	}
 
-	lis, err := net.Listen("unix", socketPath)
+	lis, err := contract.Listen(socketPath)
 	if err != nil {
 		log.Fatalf("cfgms-module-hostname: failed to listen on %s: %v", socketPath, err) // #nosec G706 - socketPath is system-set (CFGMS_MODULE_SOCKET), not user input
 	}

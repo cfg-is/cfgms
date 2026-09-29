@@ -81,7 +81,13 @@ func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
 
 // waitForSocket polls the Unix socket at socketPath until it accepts a
 // connection or ctx is cancelled.
-func waitForSocket(ctx context.Context, socketPath string) error {
+//
+// serverPID (the fork/exec'd module's pid) is unused here: the socket lives in a
+// mode-0700 directory owned by the controller, so no other user can create the
+// socket in the first place and no identity check on the peer is needed. The
+// Windows implementation has no such directory and must verify the pipe's server
+// process instead (socket_windows.go).
+func waitForSocket(ctx context.Context, socketPath string, serverPID int) error {
 	for {
 		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
 		if err == nil {
@@ -97,7 +103,10 @@ func waitForSocket(ctx context.Context, socketPath string) error {
 }
 
 // dialGRPCSocket creates a gRPC client connection over the Unix socket at socketPath.
-func dialGRPCSocket(socketPath string) (*grpc.ClientConn, error) {
+//
+// serverPID is unused here for the same reason as in waitForSocket: the
+// mode-0700 socket directory already restricts who can bind the socket.
+func dialGRPCSocket(socketPath string, serverPID int) (*grpc.ClientConn, error) {
 	return grpc.NewClient(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

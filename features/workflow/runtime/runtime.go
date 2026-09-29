@@ -85,29 +85,75 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle) (*ModuleHandle, error) {
 		return nil, fmt.Errorf("fork/exec module %q (%s): %w", b.Manifest.Name, binPath, err)
 	}
 
-	// 5. Wait for the module to start listening on its socket (up to 30 s).
+	// 5. Reap the child from the moment it exists — not after the handshake — so
+	// every later step can tell "not listening yet" from "already dead". A module
+	// fails closed when it cannot create its own listener (a Windows pipe-name
+	// collision, for instance, which is exactly the case where something else
+	// holds the name); without this the runtime would poll, handshake and trust
+	// whatever else answers on that address.
+	waitCh := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(waitCh)
+	}()
+
+	// childExited reports the child's exit as an error if it has already been
+	// reaped, or nil if it is still running. Safe to read waitErr: waitCh's
+	// close orders the reaping goroutine's write before this read.
+	childExited := func() error {
+		select {
+		case <-waitCh:
+			if waitErr != nil {
+				return fmt.Errorf("module %q exited before it was ready: %w", b.Manifest.Name, waitErr)
+			}
+			return fmt.Errorf("module %q exited before it was ready", b.Manifest.Name)
+		default:
+			return nil
+		}
+	}
+
+	// terminate kills the child (no-op if already reaped), waits for the
+	// reaping goroutine, and removes the socket.
+	terminate := func() {
+		_ = cmd.Process.Kill()
+		<-waitCh
+		_ = os.Remove(socketPath)
+	}
+
+	// 6. Wait for the module to start listening on its socket (up to 30 s).
 	startCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := waitForSocket(startCtx, socketPath); err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+	// Cut the wait short when the child dies, so a module that failed to listen
+	// reports that instead of burning the whole deadline.
+	go func() {
+		select {
+		case <-waitCh:
+			cancel()
+		case <-startCtx.Done():
+		}
+	}()
+
+	if err := waitForSocket(startCtx, socketPath, cmd.Process.Pid); err != nil {
+		exitErr := childExited()
+		terminate()
+		if exitErr != nil {
+			return nil, exitErr
+		}
 		return nil, fmt.Errorf("module %q did not start listening: %w", b.Manifest.Name, err)
 	}
 
-	// 6. Dial gRPC over the local socket.
-	conn, err := dialGRPCSocket(socketPath)
+	// 7. Dial gRPC over the local socket.
+	conn, err := dialGRPCSocket(socketPath, cmd.Process.Pid)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+		terminate()
 		return nil, fmt.Errorf("dial gRPC for module %q: %w", b.Manifest.Name, err)
 	}
 
 	client := proto.NewWorkflowModuleServiceClient(conn)
 
-	// 7. Perform the workflow handshake to confirm the gRPC session.
+	// 8. Perform the workflow handshake to confirm the gRPC session.
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer hsCancel()
 
@@ -117,18 +163,15 @@ func (r *ModuleRuntime) Start(b *bundle.Bundle) (*ModuleHandle, error) {
 		Publisher:     b.Manifest.Publisher,
 	}); err != nil {
 		_ = conn.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		_ = os.Remove(socketPath)
+		// Read the exit state before terminate kills the child, or the kill
+		// would make every handshake failure look like an early exit.
+		exitErr := childExited()
+		terminate()
+		if exitErr != nil {
+			return nil, exitErr
+		}
 		return nil, fmt.Errorf("handshake with module %q: %w", b.Manifest.Name, err)
 	}
-
-	// 8. Start a goroutine to collect the process exit status.
-	waitCh := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(waitCh)
-	}()
 
 	h := &ModuleHandle{
 		Name:       b.Manifest.Name,
