@@ -14,7 +14,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -25,6 +24,7 @@ import (
 	entrauser "github.com/cfgis/cfgms/features/workflow/modules/m365/entra_user"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/modules/contract"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 
 	// Blank-imported for their init() registration side effects with the
@@ -52,7 +52,7 @@ func main() {
 
 	mod := entrauser.New(authProvider, graphClient)
 
-	lis, err := net.Listen("unix", socketPath)
+	lis, err := contract.Listen(socketPath)
 	if err != nil {
 		log.Fatalf("cfgms-module-%s: failed to listen on %s: %v", moduleName, socketPath, err) // #nosec G706 - socketPath is system-set (CFGMS_MODULE_SOCKET), not user input
 	}

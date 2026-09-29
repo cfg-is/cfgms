@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
 
-//go:build !windows
-
 package workflow
 
 import (
@@ -25,18 +23,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/modules/bundle"
 )
 
-// Windows-excluded (build tag above): entra_user/cmd/main.go, like every other
-// out-of-process module binary in this repo (all ten STDLIB_MODULES plus both
-// echo_module test fixtures), listens with net.Listen("unix", socketPath) —
-// this package's own ModuleRuntime already special-cases Windows to a named
-// pipe address instead (runtime/socket_windows.go), so a unix-socket module
-// binary cannot serve it there. This is a pre-existing, repo-wide gap in the
-// module out-of-process transport, not something introduced or fixable here;
-// features/workflow/runtime/runtime_test.go (the same fork/exec-over-unix-socket
-// shape, one directory over) carries the identical `!windows` exclusion for the
-// same reason. Fixing it for all eleven binaries at once is a separate,
-// cross-cutting change, not part of Issue #4325's one-module scope.
-//
 // [REQUIRED TEST] Issue #4325: with the m365-entra-user bundle published and
 // approved, WorkflowModuleFactory.CreateModuleInstance resolves it, fork/execs
 // it, and a workflow step reaches the module over gRPC. This test builds the
@@ -54,7 +40,7 @@ import (
 // access or real M365 credentials in CI.
 func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 	binDir := t.TempDir()
-	bin := binDir + "/cfgms-module-m365-entra-user"
+	bin := binDir + "/cfgms-module-m365-entra-user" + exeSuffix()
 	// Path is relative to the features/workflow/ package directory where tests run.
 	buildCmd := exec.Command("go", "build", "-o", bin, "./modules/m365/entra_user/cmd")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
@@ -106,12 +92,7 @@ func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 	assert.Equal(t, "cfgms", stored.Signatures[0].Publisher)
 	assert.Equal(t, sig, stored.Signatures[0].Signature)
 
-	// Use /tmp explicitly so the socket path fits within macOS's 103-byte
-	// sun_path limit — t.TempDir() on macOS generates paths that are too long.
-	runtimeDir, err := os.MkdirTemp("/tmp", "cfgms-wf-m365-")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
-	rt := runtime.NewModuleRuntime(runtimeDir)
+	rt := runtime.NewModuleRuntime(shortRuntimeDir(t))
 	factory := NewWorkflowModuleFactory(c, rt)
 
 	// The forked module process builds its auth provider from its own
@@ -145,4 +126,32 @@ func TestWorkflowModuleFactory_IntegrationWithEntraUserModule(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tenant context required",
 		"error must come from the module's real Get() logic, not a transport/resolution failure: %v", err)
+}
+
+// exeSuffix returns the platform executable suffix (".exe" on Windows, empty
+// elsewhere) so exec.Command can resolve a binary built with "go build -o":
+// on Windows, exec.LookPath requires a PATHEXT-recognized extension.
+func exeSuffix() string {
+	if goruntime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// shortRuntimeDir returns a runtimeDir for the module runtime. On Unix it is
+// a temp dir under /tmp with a predictably short path so socket paths
+// constructed from it fit within the macOS sun_path limit (103 bytes) —
+// t.TempDir() on macOS generates paths that are too long. On Windows
+// runtimeDir is unused by makeSocketPath (named pipes are identified by
+// name, not filesystem path — see runtime/socket_windows.go), so t.TempDir()
+// is fine there.
+func shortRuntimeDir(t *testing.T) string {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp("/tmp", "cfgms-wf-m365-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }

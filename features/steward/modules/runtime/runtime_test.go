@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 CFGMS Contributors
 
-//go:build !windows
-
 package runtime_test
 
 import (
@@ -33,12 +31,18 @@ import (
 // TestMain before any tests run.
 var echoModuleBin string
 
-// shortBaseDir creates a temp dir under /tmp with a predictably short path so
-// that socket paths constructed from it fit within the macOS sun_path limit
-// (103 bytes). t.TempDir() on macOS returns /var/folders/... paths that are
-// already 80+ bytes, causing makeSocketPath to error before any gRPC is tried.
+// shortBaseDir returns a runtimeDir for the module runtime. On Unix it is a
+// temp dir under /tmp with a predictably short path so socket paths
+// constructed from it fit within the macOS sun_path limit (103 bytes) —
+// t.TempDir() on macOS returns /var/folders/... paths that are already 80+
+// bytes, causing makeSocketPath to error before any gRPC is tried. On Windows
+// runtimeDir is unused by makeSocketPath (named pipes are identified by name,
+// not filesystem path — see socket_windows.go), so t.TempDir() is fine there.
 func shortBaseDir(t *testing.T) string {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return t.TempDir()
+	}
 	base, err := os.MkdirTemp("/tmp", "cfgms-rt-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
@@ -62,7 +66,7 @@ func run(m *testing.M) int {
 	}
 	defer func() { _ = os.RemoveAll(binaryDir) }()
 
-	echoModuleBin = filepath.Join(binaryDir, "echo_module")
+	echoModuleBin = filepath.Join(binaryDir, "echo_module"+exeSuffix())
 	cmd := exec.Command("go", "build", "-o", echoModuleBin, "./testdata/echo_module")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime_test: failed to build echo_module: %s: %v\n", out, err)
@@ -70,6 +74,16 @@ func run(m *testing.M) int {
 	}
 
 	return m.Run()
+}
+
+// exeSuffix returns the platform executable suffix (".exe" on Windows, empty
+// elsewhere) so exec.Command can resolve a binary built with "go build -o":
+// on Windows, exec.LookPath requires a PATHEXT-recognized extension.
+func exeSuffix() string {
+	if goruntime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // makeBypassBundle creates a minimal steward-kind bundle using the echo_module

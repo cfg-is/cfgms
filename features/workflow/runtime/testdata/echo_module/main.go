@@ -16,12 +16,12 @@ package main
 import (
 	"context"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
 	proto "github.com/cfgis/cfgms/api/proto/modules"
+	"github.com/cfgis/cfgms/pkg/modules/contract"
 	"google.golang.org/grpc"
 )
 
@@ -57,7 +57,7 @@ func main() {
 		log.Fatal("echo_module: CFGMS_MODULE_SOCKET environment variable is required")
 	}
 
-	lis, err := net.Listen("unix", socketPath)
+	lis, err := contract.Listen(socketPath)
 	if err != nil {
 		log.Fatalf("echo_module: failed to listen on %s: %v", socketPath, err)
 	}
