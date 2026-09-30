@@ -604,6 +604,17 @@ For each steward, the controller tracks:
 | Steward version | Heartbeat `Version` field + `steward.version` DNA attribute | With each heartbeat and DNA delta |
 | Performance metrics | Steward metric uploads | Periodic + on-demand |
 
+Every committed DNA fragment set (full sync or partial-sync delta) is also written
+into the entity graph by `pkg/entitygraph/writers/dnasync.Writer`, chained onto
+`features/controller/transport.DNAHandler` via `WithEntityGraph` (Issue #4444,
+ADR-022 §9). The write is additive: it runs after the fragment manifest commit
+and a write failure logs a warning without failing the steward's stream or
+rolling back the manifest. Host-scoped fragments land under
+`host:<mTLS-verified peer>`; a clustered VM lands under `cluster:<name>/vm:<name>`
+only when the controller's `dnasync.ClusterMembership` verifier corroborates the
+peer's claimed cluster membership from controller-side state — an unset verifier
+denies every cluster claim and the VM is recorded under its reporting host instead.
+
 ### Heartbeat Monitoring
 
 The controller monitors steward heartbeats to detect connectivity loss:
