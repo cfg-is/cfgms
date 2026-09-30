@@ -563,9 +563,18 @@ test-go-group-heavy-providers:
 		go test -race -short -timeout=10m $(GO_GROUP_HEAVY_PROVIDERS); \
 	fi
 
+# `set -e` is load-bearing (Issue #4420): this recipe runs four commands in one
+# shell — the framework package list, the per-module loop, and the final
+# adapter/conformance run — and a recipe's exit status is the status of its LAST
+# command only. Without it, a failing framework run followed by three passing
+# ones exited 0, so `make test` -> test-commit -> test-agent-complete reported
+# success over a real test failure. Do not remove it, and do not add a command
+# after the last one without keeping the chain fail-fast.
+# Guarded by scripts/test-scripts.sh's test_go_group_rest_propagates_early_failure.
 .PHONY: test-go-group-rest
 test-go-group-rest:
-	@pkgs=$$(go list ./... \
+	@set -e; \
+	pkgs=$$(go list ./... \
 		| grep -v '/features/modules/' \
 		| grep -v '/test/integration' \
 		| grep -v '/test/e2e' \

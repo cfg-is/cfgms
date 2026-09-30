@@ -5,6 +5,9 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
+	"runtime"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -53,9 +56,29 @@ func dummyRecord(deviceID string) *DNARecord {
 // warm's per-op cost would be orders of magnitude larger than cold's
 // (matching the 34x measured on windows-latest for the full stack). With the
 // O(1) stats update, both must land in the same ballpark.
+//
+// Measuring that with a wall clock needs two confounders removed, both of
+// which hit the warm case harder than the cold one and both of which produced
+// a false failure in CI (cold=5.683µs/write, warm=36.52µs/write on a run where
+// the write path was provably O(1)):
+//
+//   - A GC cycle landing inside a timed batch. A batch is ~10ms of work, a
+//     mark phase over warm's 50k live devices is a large fraction of that, and
+//     the mark cost scales with the live heap — so the noise itself looks like
+//     the defect being guarded against. Each timed batch therefore runs with
+//     the collector off (restored immediately after), having just collected;
+//     one batch's worth of retained garbage is ~batchSize records.
+//   - Losing the P to an unrelated package's tests. `make test` runs this
+//     package alongside the rest of the tree under `go test -race`, so a
+//     single batch can be preempted for milliseconds at a time. Both cases are
+//     therefore measured `rounds` times, interleaved so they see the same
+//     contention, and compared on the *minimum* per-write cost of each — an
+//     interference-free round only needs to happen once per case, whereas a
+//     mean is dragged by every round that was interrupted.
 func TestMemoryIndexerIndexRecordCostIsIndependentOfIndexSize(t *testing.T) {
 	const preSeededDevices = 50_000
 	const batchSize = 2_000
+	const rounds = 5
 
 	ctx := context.Background()
 	logger := logging.NewNoopLogger()
@@ -69,42 +92,71 @@ func TestMemoryIndexerIndexRecordCostIsIndependentOfIndexSize(t *testing.T) {
 		return idx
 	}
 
-	timeBatch := func(idx *MemoryIndexer, keyPrefix string) time.Duration {
-		start := time.Now()
+	indexBatch := func(idx *MemoryIndexer, keyPrefix string) {
 		for n := 0; n < batchSize; n++ {
 			require.NoError(t, idx.IndexRecord(ctx, dummyRecord(fmt.Sprintf("%s-%d", keyPrefix, n))))
 		}
-		return time.Since(start)
 	}
 
-	cold := newIndexer(t)
-	coldDuration := timeBatch(cold, "cold")
-	coldPerWrite := coldDuration / batchSize
+	// timePerWrite returns the wall-clock cost of one IndexRecord call,
+	// averaged over a fixed batch of them, with the collector quiesced for the
+	// duration of the batch (see the GC note above).
+	timePerWrite := func(idx *MemoryIndexer, keyPrefix string) time.Duration {
+		runtime.GC()
+		defer debug.SetGCPercent(debug.SetGCPercent(-1))
+
+		start := time.Now()
+		indexBatch(idx, keyPrefix)
+		return time.Since(start) / batchSize
+	}
 
 	warm := newIndexer(t)
 	for i := 0; i < preSeededDevices; i++ {
 		require.NoError(t, warm.IndexRecord(ctx, dummyRecord(fmt.Sprintf("seed-%d", i))))
 	}
-	warmDuration := timeBatch(warm, "warm")
-	warmPerWrite := warmDuration / batchSize
 
-	t.Logf("cold per-write (empty index): %v, warm per-write (%d pre-seeded devices): %v",
-		coldPerWrite, preSeededDevices, warmPerWrite)
+	coldPerWrite, warmPerWrite := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+	for r := 0; r < rounds; r++ {
+		// A fresh indexer per round keeps the cold case's index empty; the warm
+		// case keeps accumulating on top of its pre-seeded devices.
+		roundCold := timePerWrite(newIndexer(t), fmt.Sprintf("cold-%d", r))
+		roundWarm := timePerWrite(warm, fmt.Sprintf("warm-%d", r))
+		t.Logf("round %d: cold (empty index) %v/write, warm (>=%d devices) %v/write",
+			r, roundCold, preSeededDevices, roundWarm)
+
+		// Explicit comparisons rather than the min builtin: this package
+		// declares its own min(int, int) (sqlite_backend.go), which shadows the
+		// builtin and does not accept a time.Duration.
+		if roundCold < coldPerWrite {
+			coldPerWrite = roundCold
+		}
+		if roundWarm < warmPerWrite {
+			warmPerWrite = roundWarm
+		}
+	}
+
+	t.Logf("best-of-%d cold per-write (empty index): %v, warm per-write (%d+ pre-seeded devices): %v",
+		rounds, coldPerWrite, preSeededDevices, warmPerWrite)
 
 	require.Positive(t, coldPerWrite, "no measurable per-write cost to compare against")
 
 	// A generous bound: an O(1) write path should land within a small constant
-	// factor regardless of scheduler/allocator noise between the two runs. An
-	// O(n) write path blows this by more than an order of magnitude at 50k
-	// pre-seeded devices, not by a small factor.
-	const maxSlowdown = 5
+	// factor regardless of residual scheduler noise and of warm's worse cache
+	// locality (a 50k-entry map and 50k one-element slices miss where an empty
+	// index hits). Measured parity on an uncontended host is ~1.1x
+	// (cold 4.08-4.13µs/write, warm 4.34-4.57µs/write). Restoring the O(n)
+	// stats recomputation this test guards against was measured at 56x
+	// (cold 51.41µs/write, warm 2.886181ms/write), so 8x sits most of an order
+	// of magnitude clear of the defect it has to catch while leaving room for a
+	// contended two-vCPU runner.
+	const maxSlowdown = 8
 	require.Lessf(t, warmPerWrite, maxSlowdown*coldPerWrite,
-		"IndexRecord cost grew with existing index size: cold=%v/write warm(%d devices)=%v/write",
+		"IndexRecord cost grew with existing index size: cold=%v/write warm(%d+ devices)=%v/write",
 		coldPerWrite, preSeededDevices, warmPerWrite)
 
 	// Stats tracking itself must stay correct under the incremental update.
 	stats, err := warm.GetGlobalStats(ctx)
 	require.NoError(t, err)
-	require.Equal(t, int64(preSeededDevices+batchSize), stats.TotalEntries)
-	require.Equal(t, int64(preSeededDevices+batchSize), stats.UniqueDevices)
+	require.Equal(t, int64(preSeededDevices+rounds*batchSize), stats.TotalEntries)
+	require.Equal(t, int64(preSeededDevices+rounds*batchSize), stats.UniqueDevices)
 }
