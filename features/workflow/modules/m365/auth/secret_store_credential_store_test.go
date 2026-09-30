@@ -323,11 +323,7 @@ func TestSecretStoreCredentialStore_RejectsMalformedTenantID(t *testing.T) {
 func TestSecretStoreCredentialStore_ReadRejectsForeignTenantRecord(t *testing.T) {
 	cs := newTestCredentialStore(t)
 
-	require.NoError(t, cs.StoreToken("tenant-owner", &AccessToken{
-		Token: "owner-token", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
-	}))
-
-	// Overwrite the value at tenant-owner's key while recording a different
+	// Create the record at tenant-owner's key directly, recording a different
 	// tenant, exactly as a key collision would.
 	require.NoError(t, cs.store.StoreSecret(context.Background(), &interfaces.SecretRequest{
 		Key:       tokenKey("tenant-owner"),
