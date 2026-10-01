@@ -80,6 +80,13 @@ func TestMemoryIndexerIndexRecordCostIsIndependentOfIndexSize(t *testing.T) {
 	const batchSize = 2_000
 	const rounds = 5
 
+	// minSampleElapsed is the floor a timed sample must clear before its
+	// duration is trusted. A single batchSize batch runs in low single-digit
+	// milliseconds, well under a coarse platform timer's resolution (observed
+	// as a 0 duration on Windows runners, Issue #4464) -- 0s/write then fails
+	// require.Positive below. 20ms sits comfortably above any such tick.
+	const minSampleElapsed = 20 * time.Millisecond
+
 	ctx := context.Background()
 	logger := logging.NewNoopLogger()
 	config := DefaultConfig()
@@ -92,35 +99,64 @@ func TestMemoryIndexerIndexRecordCostIsIndependentOfIndexSize(t *testing.T) {
 		return idx
 	}
 
-	indexBatch := func(idx *MemoryIndexer, keyPrefix string) {
-		for n := 0; n < batchSize; n++ {
-			require.NoError(t, idx.IndexRecord(ctx, dummyRecord(fmt.Sprintf("%s-%d", keyPrefix, n))))
+	seed := func(idx *MemoryIndexer, n int, keyPrefix string) {
+		for i := 0; i < n; i++ {
+			require.NoError(t, idx.IndexRecord(ctx, dummyRecord(fmt.Sprintf("%s-%d", keyPrefix, i))))
 		}
 	}
 
-	// timePerWrite returns the wall-clock cost of one IndexRecord call,
-	// averaged over a fixed batch of them, with the collector quiesced for the
-	// duration of the batch (see the GC note above).
-	timePerWrite := func(idx *MemoryIndexer, keyPrefix string) time.Duration {
+	indexBatch := func(idx *MemoryIndexer, keyPrefix string) {
+		seed(idx, batchSize, keyPrefix)
+	}
+
+	// timePerWrite returns the wall-clock cost of one IndexRecord call, with
+	// the collector quiesced for the duration of every batch it runs (see the
+	// GC note above). idx receives exactly one batch of batchSize writes --
+	// warm's resulting record count is checked against an exact total via
+	// GetGlobalStats below, so idx must never receive more than that one
+	// batch. If that single batch doesn't clear minSampleElapsed, additional
+	// batches run against padIdx instead -- a same-shape indexer whose record
+	// count nothing depends on -- until the elapsed time measured since
+	// before the first batch clears the floor. padIdx must already be the
+	// same order of magnitude (empty vs. tens of thousands of devices) as
+	// idx: padding a "warm" sample with writes into an empty index would
+	// dilute away the very O(n) slowdown this test exists to catch.
+	timePerWrite := func(idx, padIdx *MemoryIndexer, keyPrefix string) time.Duration {
 		runtime.GC()
 		defer debug.SetGCPercent(debug.SetGCPercent(-1))
 
 		start := time.Now()
 		indexBatch(idx, keyPrefix)
-		return time.Since(start) / batchSize
+		writes := int64(batchSize)
+
+		for rep := 0; time.Since(start) < minSampleElapsed; rep++ {
+			indexBatch(padIdx, fmt.Sprintf("%s-pad-%d", keyPrefix, rep))
+			writes += batchSize
+		}
+
+		return time.Since(start) / time.Duration(writes)
 	}
 
 	warm := newIndexer(t)
-	for i := 0; i < preSeededDevices; i++ {
-		require.NoError(t, warm.IndexRecord(ctx, dummyRecord(fmt.Sprintf("seed-%d", i))))
-	}
+	seed(warm, preSeededDevices, "seed")
+
+	// warmPadding stands in for warm whenever a round's single batch needs
+	// padding to clear minSampleElapsed. It starts at the same size as warm
+	// and only ever grows, so it never dilutes the warm sample with
+	// artificially-fast writes into a small index.
+	warmPadding := newIndexer(t)
+	seed(warmPadding, preSeededDevices, "padseed")
 
 	coldPerWrite, warmPerWrite := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
 	for r := 0; r < rounds; r++ {
 		// A fresh indexer per round keeps the cold case's index empty; the warm
-		// case keeps accumulating on top of its pre-seeded devices.
-		roundCold := timePerWrite(newIndexer(t), fmt.Sprintf("cold-%d", r))
-		roundWarm := timePerWrite(warm, fmt.Sprintf("warm-%d", r))
+		// case keeps accumulating on top of its pre-seeded devices. Any padding
+		// the cold round needs reuses that same fresh indexer -- a few thousand
+		// extra writes within one round keep it orders of magnitude smaller
+		// than warm, so it stays representative of "empty index" cost.
+		coldIdx := newIndexer(t)
+		roundCold := timePerWrite(coldIdx, coldIdx, fmt.Sprintf("cold-%d", r))
+		roundWarm := timePerWrite(warm, warmPadding, fmt.Sprintf("warm-%d", r))
 		t.Logf("round %d: cold (empty index) %v/write, warm (>=%d devices) %v/write",
 			r, roundCold, preSeededDevices, roundWarm)
 
