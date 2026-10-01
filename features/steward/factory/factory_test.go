@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/modules/stdlib/file"
@@ -227,7 +230,7 @@ func TestGetModuleInfo(t *testing.T) {
 
 func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "cert_trust", "directory", "file", "firewall", "github_runner", "hostname", "hyperv", "package", "patch", "script", "time", "user"} {
+	for _, name := range []string{"acme", "activedirectory", "cert_trust", "directory", "file", "firewall", "github_runner", "hostname", "hyperv", "package", "patch", "script", "time", "user"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
@@ -533,4 +536,174 @@ func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
 	_, statErr := os.Stat(unwritable)
 	assert.Error(t, statErr,
 		"durable store root must not exist on the fallback path")
+}
+
+// capturingADLogger is a Logger that records every call (including Debug,
+// which logging.CapturingLogger deliberately drops). It exists to prove the
+// factory's own logger — not a noop — reaches the activedirectory module,
+// which has no SetLogger method and so is wired via constructor injection
+// rather than attemptLoggerInjection.
+type capturingADLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *capturingADLogger) record(msg string, kv ...interface{}) {
+	parts := []string{msg}
+	for _, v := range kv {
+		parts = append(parts, fmt.Sprintf("%v", v))
+	}
+	l.mu.Lock()
+	l.lines = append(l.lines, strings.Join(parts, " "))
+	l.mu.Unlock()
+}
+
+func (l *capturingADLogger) Lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.lines))
+	copy(out, l.lines)
+	return out
+}
+
+func (l *capturingADLogger) Debug(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingADLogger) Info(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingADLogger) Warn(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingADLogger) Error(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingADLogger) Fatal(msg string, kv ...interface{}) { l.record(msg, kv...) }
+
+func (l *capturingADLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+
+// TestActiveDirectory_NotInBuiltinModuleConstructors asserts that
+// "activedirectory" is absent from the zero-argument constructor map — it
+// needs the factory's logger, which the map's func() modules.Module shape
+// cannot carry. Contrast with TestHyperv/TestPatch above: same reason, third
+// module of this kind.
+func TestActiveDirectory_NotInBuiltinModuleConstructors(t *testing.T) {
+	_, ok := builtinModuleConstructors["activedirectory"]
+	assert.False(t, ok, `"activedirectory" must NOT be in builtinModuleConstructors — it is handled by newActiveDirectoryModule`)
+}
+
+// TestActiveDirectory_ModuleLoads proves the steward's built-in load path —
+// the one factory.go's own comment calls out as the single extension point —
+// returns a working, interface-valid instance for the name "activedirectory"
+// rather than the "unknown built-in module" error the factory returned before
+// this story registered it.
+func TestActiveDirectory_ModuleLoads(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err, "activedirectory builtin must load without error")
+	require.NotNil(t, mod, "activedirectory builtin module must not be nil")
+
+	assert.NoError(t, factory.ValidateModuleInterface(mod),
+		"loaded activedirectory instance must satisfy modules.Module")
+}
+
+// TestActiveDirectory_NameMatchesManifest pins loadBuiltinModule's literal
+// "activedirectory" string to the module's own declared name in module.yaml,
+// so a future rename of one without the other silently reproduces the exact
+// bug this story fixes: a complete, tested module the steward refuses to load.
+func TestActiveDirectory_NameMatchesManifest(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "modules", "extended", "activedirectory", "module.yaml")
+	data, err := os.ReadFile(manifestPath) //nolint:gosec // fixed, repo-relative test path
+	require.NoError(t, err, "must be able to read the activedirectory module manifest")
+
+	var manifest struct {
+		Name string `yaml:"name"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &manifest))
+	require.Equal(t, "activedirectory", manifest.Name,
+		"module.yaml's name must match the literal loadBuiltinModule accepts")
+
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule(manifest.Name)
+	require.NoError(t, err, "the name read from module.yaml must be loadable")
+	require.NotNil(t, mod)
+}
+
+// TestActiveDirectory_FactoryLoggerReaches proves the factory's own logger —
+// not logging.NewNoopLogger() — reaches the module instance. The module has
+// no SetLogger method, so it implements neither modules.LoggingInjectable nor
+// modules.SecretStoreInjectable; attemptLoggerInjection silently no-ops on
+// it, and the only wiring path is newActiveDirectoryModule passing f.logger
+// into the constructor. Get(ctx, "status") emits a Debug log unconditionally
+// on entry, which a noop logger would silently swallow.
+func TestActiveDirectory_FactoryLoggerReaches(t *testing.T) {
+	cap := &capturingADLogger{}
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, cap)
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err)
+	require.NotNil(t, mod)
+
+	_, _ = mod.Get(context.Background(), "status")
+
+	lines := cap.Lines()
+	require.NotEmpty(t, lines, "the factory logger must have recorded a log line from the module")
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "Getting local AD object") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected the module's Get() Debug log to reach the factory's logger, got: %v", lines)
+}
+
+// TestActiveDirectory_NetworkADNotRegistered asserts that the sibling
+// network_activedirectory module — ruled out of the product and deleted by
+// Issue #4447 — is not reachable through the same built-in load path this
+// story wires up for "activedirectory". Registering it here would resurrect
+// a module the founder has already decided against.
+func TestActiveDirectory_NetworkADNotRegistered(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	_, ok := builtinModuleConstructors["network_activedirectory"]
+	assert.False(t, ok, "network_activedirectory must not be a builtin module constructor")
+
+	_, err := factory.LoadModule("network_activedirectory")
+	assert.Error(t, err, "network_activedirectory must not be loadable as a built-in module")
+}
+
+// TestActiveDirectory_UnavailableErrorNotUnknownModule is the required test
+// distinguishing "the module loaded and this host has no AD" from "the
+// steward refused the name" — the exact gap this story closes. On the Linux
+// runners make test-complete uses, the module has no PowerShell/AD access,
+// so Get(ctx, "status") must surface that unavailability, never the
+// registration-time "unknown built-in module: activedirectory" error the
+// factory returned for this name before it was wired in. A successful AD
+// query is out of scope and is not asserted — only the error identity is.
+func TestActiveDirectory_UnavailableErrorNotUnknownModule(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err, "activedirectory must load: this is the registration this story adds")
+	require.NotNil(t, mod)
+
+	result, getErr := mod.Get(context.Background(), "status")
+	require.NoError(t, getErr, "Get(status) itself does not fail; unavailability is carried in the returned status")
+	require.NotNil(t, result)
+
+	state := result.AsMap()
+	errMsg, _ := state["error"].(string)
+	assert.NotContains(t, errMsg, "unknown built-in module",
+		"a loaded module's status error must never be the factory's registration-failure message")
+	assert.NotEmpty(t, errMsg, "on a host with no AD/PowerShell access, the status must carry an unavailability error")
+	assert.Equal(t, "unhealthy", state["health_status"],
+		"status must reflect AD unavailability, not a successful query")
 }

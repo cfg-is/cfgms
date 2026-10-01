@@ -42,6 +42,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/modules"
 	acme_module "github.com/cfgis/cfgms/features/modules/extended/acme"
+	activedirectory_module "github.com/cfgis/cfgms/features/modules/extended/activedirectory"
 	github_runner_module "github.com/cfgis/cfgms/features/modules/extended/github_runner"
 	"github.com/cfgis/cfgms/features/modules/hyperv"
 	cert_trust_module "github.com/cfgis/cfgms/features/modules/stdlib/cert_trust"
@@ -204,9 +205,10 @@ func (f *ModuleFactory) LoadModule(moduleName string) (modules.Module, error) {
 // builtinModuleConstructors maps module names to their zero-argument constructors.
 // The "directory" name is retained as an alias for the merged file module so that
 // existing cfg files using type: directory continue to work without migration.
-// Note: "hyperv" and "patch" are intentionally absent — they are handled separately
-// by newHypervModule / newPatchModule (which wire the durable provision store /
-// maintenance gate) and early-returned in loadBuiltinModule.
+// Note: "hyperv", "patch" and "activedirectory" are intentionally absent — they are
+// handled separately by newHypervModule / newPatchModule (which wire the durable
+// provision store / maintenance gate) and newActiveDirectoryModule (which wires the
+// factory logger), and are early-returned in loadBuiltinModule.
 var builtinModuleConstructors = map[string]func() modules.Module{
 	"acme":          func() modules.Module { return acme_module.New() },
 	"cert_trust":    func() modules.Module { return cert_trust_module.New() },
@@ -234,6 +236,9 @@ func (f *ModuleFactory) loadBuiltinModule(moduleName string) (modules.Module, er
 	if moduleName == "patch" {
 		return f.newPatchModule(), nil
 	}
+	if moduleName == "activedirectory" {
+		return f.newActiveDirectoryModule(), nil
+	}
 	ctor, ok := builtinModuleConstructors[moduleName]
 	if !ok {
 		return nil, fmt.Errorf("unknown built-in module: %s", moduleName)
@@ -260,6 +265,18 @@ func (f *ModuleFactory) newPatchModule() modules.Module {
 	pm.SetWindowManager(patch.NewGateWindowAdapter(f.gate, f.stewardID))
 	pm.SetDeviceID(f.stewardID)
 	return m
+}
+
+// newActiveDirectoryModule constructs the activedirectory module with the
+// factory's own logger. The module has no SetLogger method (it does not
+// implement modules.LoggingInjectable), so attemptLoggerInjection would no-op
+// on it; passing the logger through the constructor is the only way it
+// reaches the module. The module authenticates through the Windows system
+// context rather than a stored credential, so no secret store is wired here.
+//
+// Callers must hold f.mu (it reads f.logger).
+func (f *ModuleFactory) newActiveDirectoryModule() modules.Module {
+	return activedirectory_module.New(f.logger)
 }
 
 // SetMaintenanceGate sets the maintenance gate used by the patch module for
