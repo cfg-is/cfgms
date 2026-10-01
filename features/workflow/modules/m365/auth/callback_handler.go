@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"html/template"
 	"net"
 	"net/http"
 	"sync"
@@ -287,6 +289,11 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
 	errorCode, _ := response["error"].(string)
 	errorDescription, _ := response["error_description"].(string)
 
+	// state is request-derived and is rendered inside a JS string literal.
+	state, _ := response["state"].(string)
+	jsState := template.JSEscapeString(state)
+	message = html.EscapeString(message)
+
 	var statusClass, statusIcon, details string
 	if success {
 		statusClass = "success"
@@ -297,7 +304,8 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
 		statusIcon = "❌"
 		details = "<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup."
 		if errorCode != "" {
-			details = fmt.Sprintf("<strong>Error:</strong> %s<br>%s<br><br><strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.", errorCode, errorDescription)
+			// errorCode and errorDescription come straight from the callback query string.
+			details = fmt.Sprintf("<strong>Error:</strong> %s<br>%s<br><br><strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.", html.EscapeString(errorCode), html.EscapeString(errorDescription))
 		}
 	}
 
@@ -413,7 +421,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
     </script>
 </body>
 </html>
-`, statusClass, statusIcon, message, details, success, success, response["state"], success, response["state"])
+`, statusClass, statusIcon, message, details, success, success, jsState, success, jsState)
 }
 
 // GetCallbackURL returns the callback URL for the OAuth2 flow

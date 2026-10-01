@@ -4,6 +4,10 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,4 +72,42 @@ func TestCallbackHandler_WithLogger_nilIsIgnored(t *testing.T) {
 func TestCallbackHandler_defaultLogger_isNoopLogger(t *testing.T) {
 	h := NewCallbackHandler()
 	assert.NotNil(t, h.logger, "default logger must be non-nil")
+}
+
+// TestCallbackHandler_handleCallback_escapesRequestValues verifies that
+// request-derived query values are never reflected into the HTML page unescaped.
+func TestCallbackHandler_handleCallback_escapesRequestValues(t *testing.T) {
+	payload := "<script>alert(1)</script>"
+
+	cases := map[string]url.Values{
+		"error":    {"error": {payload}, "error_description": {payload}, "state": {"s"}},
+		"code":     {"code": {"c"}, "state": {payload}},
+		"state-js": {"code": {"c"}, "state": {"');alert(1);//"}},
+	}
+	for name, q := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := NewCallbackHandler()
+			req := httptest.NewRequest(http.MethodGet, "/callback?"+q.Encode(), nil)
+			rec := httptest.NewRecorder()
+
+			h.handleCallback(rec, req)
+
+			body := rec.Body.String()
+			assert.NotContains(t, body, payload)
+			// The quote must arrive backslash-escaped, never terminating the JS string.
+			assert.NotContains(t, body, "state: '');alert(1);//")
+			assert.NotContains(t, body, "state: ''")
+			// Only the page's own <script> block may exist.
+			assert.Equal(t, 1, strings.Count(body, "<script>"))
+		})
+	}
+
+	t.Run("escaped form is present", func(t *testing.T) {
+		h := NewCallbackHandler()
+		q := url.Values{"error": {payload}}
+		req := httptest.NewRequest(http.MethodGet, "/callback?"+q.Encode(), nil)
+		rec := httptest.NewRecorder()
+		h.handleCallback(rec, req)
+		assert.Contains(t, rec.Body.String(), "&lt;script&gt;alert(1)&lt;/script&gt;")
+	})
 }
