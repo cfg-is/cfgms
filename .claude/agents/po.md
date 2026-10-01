@@ -425,7 +425,7 @@ Locks open pipeline PRs (`feature/story-*` / `feature/item-*`) + tags them `inte
 
 **Step 1.6 — Dependency pin refresh (cron + cycle):**
 
-The `dependency-pin-check` GitHub Actions workflow appends a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) to a long-lived issue labelled `dependency-pins` whenever a pinned tool/toolchain has a newer upstream release. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
+The `dependency-pin-check` GitHub Actions workflow posts a `## Weekly Pin Check — <date>` comment (authored by `github-actions`) on the `dependency-pins`-labelled issue whenever a pinned tool/toolchain has a newer upstream release — whether that issue already existed (comment appended to it) or had to be created fresh for this run (the same comment is posted as a follow-up right after creation, Issue #4468), so the signal shape is always a comment, never only the issue body. This step turns that signal into dispatchable bump stories by running the `refresh-pins` skill — which researches every pin against upstream, applies the cooldown + CVE policy, and creates one Draft `story,dependencies` issue per pin that should bump. Those drafts are then promoted by the Tech Lead pass (Step 2) in this same cycle.
 
 Runs in both `cron` and `cycle` modes. It is **orchestrator-only** — the no-docker self-dispatch hosts do not run §4 steps. It needs no Docker (just `gh`/`curl`/`WebFetch`), so the remote `po-cron` trigger can run it too.
 
