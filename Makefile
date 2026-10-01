@@ -201,7 +201,8 @@ build-stdlib-modules: check-stdlib-payload-boundary
 # (Issue #4325). List entries are paths relative to
 # features/workflow/modules/, e.g. "m365/entra_user".
 WORKFLOW_MODULES := \
-	m365/entra_user
+	m365/entra_user \
+	m365/entra_group
 
 .PHONY: build-workflow-modules
 build-workflow-modules:
@@ -562,9 +563,18 @@ test-go-group-heavy-providers:
 		go test -race -short -timeout=10m $(GO_GROUP_HEAVY_PROVIDERS); \
 	fi
 
+# `set -e` is load-bearing (Issue #4420): this recipe runs four commands in one
+# shell — the framework package list, the per-module loop, and the final
+# adapter/conformance run — and a recipe's exit status is the status of its LAST
+# command only. Without it, a failing framework run followed by three passing
+# ones exited 0, so `make test` -> test-commit -> test-agent-complete reported
+# success over a real test failure. Do not remove it, and do not add a command
+# after the last one without keeping the chain fail-fast.
+# Guarded by scripts/test-scripts.sh's test_go_group_rest_propagates_early_failure.
 .PHONY: test-go-group-rest
 test-go-group-rest:
-	@pkgs=$$(go list ./... \
+	@set -e; \
+	pkgs=$$(go list ./... \
 		| grep -v '/features/modules/' \
 		| grep -v '/test/integration' \
 		| grep -v '/test/e2e' \
@@ -1487,18 +1497,20 @@ test-m365-integration:
 	@echo "⚡ This will FAIL if M365 credentials are not available"
 	@echo "📝 Add credentials to .env.local or set M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID"
 	@echo ""
-	go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
-	go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
 
-# M365 integration tests - PERMISSIVE mode (skips without credentials) 
+# M365 integration tests - PERMISSIVE mode (skips without credentials)
 # Use this for development when you don't have M365 credentials
 test-m365-integration-dev:
 	@echo "🌐 Running M365 Integration Tests (DEV MODE)"
 	@echo "============================================"
 	@echo "⚡ This will SKIP if M365 credentials are not available"
 	@echo ""
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
 
 # M365 unit tests (mocked dependencies, no credentials needed)
 test-m365-unit:

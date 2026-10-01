@@ -4858,6 +4858,67 @@ test_go_group_split_partition_covers_all_packages() {
     log_pass "go-group split: ${full_count} packages partitioned across controller-core (${core_count}), heavy-providers (${heavy_count}), rest (${rest_count}) — complete, no duplicates"
 }
 
+# Regression guard for Makefile's test-go-group-rest (Issue #4420): the recipe
+# runs four things in one shell — the framework package list, a per-module loop,
+# and a final adapter/conformance run. A make recipe's exit status is the status
+# of its LAST command, so without `set -e` a failing framework run followed by
+# three passing ones exited 0, and `make test` -> test-commit ->
+# test-agent-complete all reported success over a genuine test failure. This
+# drives the target with a stub `go` whose FIRST `go test` fails and whose
+# later ones pass — the exact shape that was silently swallowed — so the guard
+# fails if the propagation is ever removed. Costs milliseconds: no real
+# compilation happens.
+test_go_group_rest_propagates_early_failure() {
+    log_test "Testing test-go-group-rest: a failure in the first go test run propagates to a non-zero exit..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "$tmp_dir"; trap - RETURN' RETURN
+
+    local bin_dir="${tmp_dir}/bin"
+    mkdir -p "$bin_dir"
+
+    # Stub go: `go list` reports one package this module's filters keep, the
+    # first `go test` fails, every subsequent `go test` succeeds.
+    cat > "${bin_dir}/go" <<'STUB'
+#!/bin/sh
+if [ "$1" = "list" ]; then
+    echo "github.com/cfgis/cfgms/pkg/stubpkg"
+    exit 0
+fi
+if [ "$1" = "test" ]; then
+    if [ -e "${CFGMS_STUB_STATE}/first-test-ran" ]; then
+        echo "ok  	stub	0.01s"
+        exit 0
+    fi
+    : > "${CFGMS_STUB_STATE}/first-test-ran"
+    echo "FAIL	github.com/cfgis/cfgms/pkg/stubpkg	0.01s"
+    echo "FAIL"
+    exit 1
+fi
+exit 0
+STUB
+    chmod +x "${bin_dir}/go"
+
+    local out rc=0
+    out=$(PATH="${bin_dir}:$PATH" CFGMS_STUB_STATE="$tmp_dir" \
+        make --no-print-directory test-go-group-rest 2>&1) || rc=$?
+
+    if [[ ! -e "${tmp_dir}/first-test-ran" ]]; then
+        log_fail "test-go-group-rest never invoked \`go test\` — the stub was not exercised, so this guard proves nothing"
+        echo "$out" | tail -20
+        return
+    fi
+
+    if [[ $rc -eq 0 ]]; then
+        log_fail "test-go-group-rest exited 0 with a failing framework test run — \`make test\` would report a false green (needs \`set -e\` or \`&&\` chaining in the recipe)"
+        echo "$out" | tail -20
+        return
+    fi
+
+    log_pass "test-go-group-rest: a failing framework run exits ${rc}, so the failure reaches make test"
+}
+
 # Regression guard for Makefile's ALL_MODULES (Issue #4164): ALL_MODULES drives
 # CHANGED_MODULES, which is how `make test`'s smart mode decides which module's
 # tests to run for a change. A hand-maintained ALL_MODULES list silently drops
@@ -5634,6 +5695,7 @@ DISPATCH_TABLE=(
     "test_resource_sampler_no_placeholder:devinfra"
     "test_api_shard_partition_covers_all_tests:core"
     "test_go_group_split_partition_covers_all_packages:core"
+    "test_go_group_rest_propagates_early_failure:core"
     "test_all_modules_covers_module_yaml_tree:core"
     "test_api_shard_aggregation_fails_closed:core"
     "test_api_shard_count_rejects_non_integer:core"
