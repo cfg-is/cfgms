@@ -64,7 +64,7 @@ func TestListen_AcceptsConnection(t *testing.T) {
 
 	lis, err := contract.Listen(addr)
 	require.NoError(t, err)
-	defer func() { _ = lis.Close() }()
+	defer closeTestPipeListener(t, addr, lis)
 
 	serverDone := make(chan struct{})
 	var serverErr error
@@ -134,7 +134,7 @@ func TestListen_RestrictsAccessToOwner(t *testing.T) {
 
 	lis, err := contract.Listen(addr)
 	require.NoError(t, err)
-	defer func() { _ = lis.Close() }()
+	defer closeTestPipeListener(t, addr, lis)
 
 	// On Windows, a connectable named pipe instance only exists once something
 	// calls Accept: go-winio creates the listener's first instance without
@@ -159,8 +159,9 @@ func TestListen_RestrictsAccessToOwner(t *testing.T) {
 	assertOwnerOnlyAccess(t, addr)
 
 	// Close before waiting: the accept loop only returns once the listener is
-	// closed.
-	_ = lis.Close()
+	// closed. Bounded per pipeCloseTimeout so a go-winio Close/Accept deadlock
+	// (#4438) fails this test loudly instead of hanging it.
+	closeTestPipeListener(t, addr, lis)
 	<-acceptDone
 }
 
@@ -171,4 +172,32 @@ func dialTestAddr(t *testing.T, addr string) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return dialPlatform(ctx, addr)
+}
+
+// pipeCloseTimeout bounds how long a test's cleanup waits for
+// win32PipeListener.Close (go-winio) to return.
+//
+// See #4438: go-winio v0.6.2's win32PipeListener can leave Close blocked
+// forever on <-l.doneCh when Close races a concurrent Accept, because the
+// abort error surfaced to listenerRoutine is not always the sentinel it
+// checks for. Close takes no context, so nothing above it can bound the call
+// except racing it on its own goroutine, as closeTestPipeListener does. This
+// is a no-op cost on non-Windows platforms, where net.Listener.Close does not
+// have this failure mode, so the helper is defined here unconditionally
+// rather than split across a windows/!windows pair.
+const pipeCloseTimeout = 5 * time.Second
+
+// closeTestPipeListener closes lis with a hard bound; see pipeCloseTimeout.
+func closeTestPipeListener(t *testing.T, addr string, lis net.Listener) {
+	t.Helper()
+	closed := make(chan struct{})
+	go func() {
+		_ = lis.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(pipeCloseTimeout):
+		t.Errorf("pipe listener for %s did not close within %s (see pipeCloseTimeout)", addr, pipeCloseTimeout)
+	}
 }
