@@ -414,3 +414,24 @@ func TestWireDNAEntityGraph_NilWriter_LogsWarningAndSkipsSilently(t *testing.T) 
 	require.NoError(t, dnaHandler.HandleGRPC(stream))
 	require.True(t, stream.resp.GetAccepted())
 }
+
+// TestWireDNAEntityGraph_WiredPath_NoWarning is the complement of
+// TestWireDNAEntityGraph_NilWriter_LogsWarningAndSkipsSilently: a Server whose
+// egDNAWriter is actually wired (the normal, non-defect state) must NOT log the
+// "not wired" warning. Without this, the warning added for visibility into the
+// unwired case could regress into firing unconditionally and the nil-writer test
+// alone would not catch it.
+func TestWireDNAEntityGraph_WiredPath_NoWarning(t *testing.T) {
+	logger := logging.NewCapturingLogger()
+	p := wiringEGProvider(t)
+	svc := &Server{egProvider: p, logger: logger}
+	writer, err := svc.buildDNAEntityGraphWriter()
+	require.NoError(t, err)
+	svc.egDNAWriter = writer
+
+	dnaHandler := controllerTransport.NewDNAHandler(logger, controllerTransport.NewTenantQueue(), nil)
+	svc.wireDNAEntityGraph(dnaHandler)
+
+	assert.Equal(t, 0, logger.WarnCount(),
+		"wireDNAEntityGraph must not warn when the entity-graph write path is wired")
+}

@@ -3588,7 +3588,7 @@ func (a *dnaClusterMembershipAdapter) IsClusterMember(peerHostAuthority, cluster
 // buildDNAEntityGraphWriter constructs the DNA-sync -> entity-graph writer wired
 // onto the DNA handler in Start() (Issue #4444, ADR-022 §9). It is a method rather
 // than inline construction so tests can build the exact writer production wiring
-// uses without booting the full server (see server_dna_entitygraph_wiring_test.go).
+// uses without booting the full server (see dna_entitygraph_wiring_test.go).
 //
 // The writer is built against s.egProvider and gated by dnaClusterMembershipAdapter
 // rather than a raw s.egClusterMembership snapshot — see that type's doc comment for
