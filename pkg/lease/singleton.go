@@ -114,8 +114,17 @@ func (j SingletonJob) RunIfLeader(ctx context.Context, fn func(ctx context.Conte
 	return true
 }
 
+// renewRetryBaseBackoff is the starting backoff for renewWithRetry, doubled
+// on each attempt within the budget — the same shape as the SQLite
+// provider's busyBaseBackoff (pkg/storage/providers/sqlite/retry.go), used
+// here for the same reason: the contending condition (a transient store
+// error, or another holder already fenced this one out) resolves in well
+// under a millisecond, so a short first retry almost always succeeds.
+const renewRetryBaseBackoff = 10 * time.Millisecond
+
 // renewWhileRunning renews j's lease every RenewInterval until ctx is done.
-// A renewal failure invokes onLost (cancelling fn's context) and returns.
+// A renewal that is still failing once renewWithRetry's budget is exhausted
+// invokes onLost (cancelling fn's context) and returns.
 func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.CancelFunc, token uint64) {
 	ticker := time.NewTicker(j.RenewInterval)
 	defer ticker.Stop()
@@ -126,7 +135,7 @@ func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.Canc
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			newToken, err := j.Manager.Renew(ctx, j.Name, j.HolderID, current)
+			newToken, err := j.renewWithRetry(ctx, current)
 			if err != nil {
 				j.logWarn("lease: renew failed mid-cycle; cancelling remaining work to avoid a duplicate run", err)
 				onLost()
@@ -134,6 +143,52 @@ func (j SingletonJob) renewWhileRunning(ctx context.Context, onLost context.Canc
 			}
 			current = newToken
 		}
+	}
+}
+
+// renewWithRetry calls Manager.Renew, retrying with bounded exponential
+// backoff while j.Manager.MaxAllowedRenewalLatency's budget has not yet
+// elapsed. Manager's doc comment defines that field as "the longest a
+// renewal call is allowed to take (including retries) before it must be
+// treated as failed" — SafetyMargin is derived from it on that assumption,
+// so retrying here, bounded by the same duration, costs nothing against the
+// margin the Manager already reserves for exactly this.
+//
+// Without this, a single transient error from the store — e.g. the flatfile
+// provider's atomic-rename write path on Windows, which deliberately does
+// not retry (pkg/storage/providers/flatfile/rename_windows.go; see Issues
+// #4262, #1919, #2068 for the same underlying Windows file-locking
+// flakiness on other call paths) — would cost the lease outright on its
+// very next tick, even though the lease was never actually lost to another
+// holder.
+//
+// A genuine fencing loss (another holder legitimately holds the lease)
+// fails the same way on every retry, but cheaply: the store's contended
+// branch returns without writing, so the loop still gives up promptly, well
+// within the budget.
+func (j SingletonJob) renewWithRetry(ctx context.Context, token uint64) (uint64, error) {
+	deadline := time.Now().Add(j.Manager.MaxAllowedRenewalLatency())
+	backoff := renewRetryBaseBackoff
+
+	for {
+		newToken, err := j.Manager.Renew(ctx, j.Name, j.HolderID, token)
+		if err == nil {
+			return newToken, nil
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, err
+		}
+		if backoff > remaining {
+			backoff = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
 	}
 }
 
