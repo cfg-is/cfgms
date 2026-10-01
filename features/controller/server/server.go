@@ -202,6 +202,7 @@ type Server struct {
 	terminalSessionMgr      terminal.SessionManager                  // Issue #2761: must be stopped on Stop to finalize session recordings
 	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
+	egDNAWriter             *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -1765,6 +1766,19 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		egProvider:              egProvider,       // Issue #3253: closed in Stop() to release DB handle
 	}
 
+	// Issue #4444: build the DNA-sync -> entity-graph writer against the same
+	// egProvider wired into the HTTP API server just above, so a steward's
+	// committed DNA delta also lands in the entity graph (chained onto the DNA
+	// handler in Start() via wireDNAEntityGraph). Built once, here, against srv
+	// rather than a bare provider so the membership adapter can always read
+	// whatever SetEntityGraphClusterMembership currently holds — see
+	// buildDNAEntityGraphWriter.
+	egDNAWriter, egDNAWriterErr := srv.buildDNAEntityGraphWriter()
+	if egDNAWriterErr != nil {
+		return nil, fmt.Errorf("failed to initialize DNA-sync entity graph writer: %w", egDNAWriterErr)
+	}
+	srv.egDNAWriter = egDNAWriter
+
 	// Issue #1673: Wire run/job/execution model into API server.
 	// The run store opens a dedicated connection to the same SQLite database.
 	if runManager := initializeRunManager(context.Background(), cfg, executionQueue, logger); runManager != nil {
@@ -2388,6 +2402,9 @@ func (s *Server) Start() error {
 		// than the first chunk's wire-supplied tenant_id, which is steward-supplied
 		// and could otherwise be used to name a victim tenant's bucket.
 		dnaHandler.WithTenantResolver(s.controllerService)
+		// Issue #4444: chain the entity-graph write path so a steward's committed
+		// DNA delta also lands in the entity graph.
+		s.wireDNAEntityGraph(dnaHandler)
 
 		// Wire fragment-root partial-sync detection (Issue #3329). The DNA handler
 		// compares the steward-claimed aggregate root against the stored manifest root
@@ -3539,6 +3556,64 @@ func (s *Server) entityGraphClusterMembership() dnasync.ClusterMembership {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.egClusterMembership
+}
+
+// dnaClusterMembershipAdapter adapts the server's live cluster-membership verifier
+// to dnasync.ClusterMembership (Issue #4444).
+//
+// The DNA-sync entity-graph writer is built once, in New(), before any caller has
+// had a chance to wire a verifier via SetEntityGraphClusterMembership (deferred to
+// #2853). Capturing s.egClusterMembership directly at that point would freeze a nil
+// snapshot into the writer forever. This adapter instead reads
+// entityGraphClusterMembership() on every call, so the writer always consults
+// whatever verifier is currently wired — the same live-lookup behavior the
+// apply-outcome path (applyOutcomeEIDResolver) already relies on, and exactly what
+// SetEntityGraphClusterMembership's own doc comment requires: "The same verifier
+// instance MUST be given to the DNA-sync entity-graph writer."
+type dnaClusterMembershipAdapter struct {
+	server *Server
+}
+
+var _ dnasync.ClusterMembership = (*dnaClusterMembershipAdapter)(nil)
+
+// IsClusterMember implements dnasync.ClusterMembership.
+func (a *dnaClusterMembershipAdapter) IsClusterMember(peerHostAuthority, clusterName string) bool {
+	m := a.server.entityGraphClusterMembership()
+	if m == nil {
+		return false
+	}
+	return m.IsClusterMember(peerHostAuthority, clusterName)
+}
+
+// buildDNAEntityGraphWriter constructs the DNA-sync -> entity-graph writer wired
+// onto the DNA handler in Start() (Issue #4444, ADR-022 §9). It is a method rather
+// than inline construction so tests can build the exact writer production wiring
+// uses without booting the full server (see dna_entitygraph_wiring_test.go).
+//
+// The writer is built against s.egProvider and gated by dnaClusterMembershipAdapter
+// rather than a raw s.egClusterMembership snapshot — see that type's doc comment for
+// why a snapshot would be wrong here.
+func (s *Server) buildDNAEntityGraphWriter() (*dnasync.Writer, error) {
+	return dnasync.New(s.egProvider, dnasync.WithClusterMembership(&dnaClusterMembershipAdapter{server: s}))
+}
+
+// wireDNAEntityGraph chains the DNA-sync entity-graph write path onto dnaHandler
+// (Issue #4444). Extracted out of Start() so both the wiring itself and the "not
+// wired" branch are directly unit-testable.
+//
+// s.egDNAWriter is nil only when buildDNAEntityGraphWriter's error path in New()
+// was somehow bypassed (it cannot happen through normal construction, since New()
+// aborts startup on that error) — but WithEntityGraph's own contract is a silent
+// skip on a nil writer, and a configuration error that silently discards every DNA
+// observation must not also be silent about being misconfigured (that silence is
+// exactly how this issue went unnoticed). So this path still logs, once, at warning
+// level, rather than trusting that it can never be reached.
+func (s *Server) wireDNAEntityGraph(dnaHandler *controllerTransport.DNAHandler) {
+	if s.egDNAWriter == nil {
+		s.logger.Warn("dna-sync: entity-graph write path not wired; steward DNA will not reach the entity graph")
+		return
+	}
+	dnaHandler.WithEntityGraph(s.egDNAWriter, egtypes.DefaultTaxonomy())
 }
 
 // applyOutcomeEIDResolver resolves the entity-graph EID for the apply-outcome
