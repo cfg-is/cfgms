@@ -14,6 +14,60 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// resourceIDDelimiter separates the operation:type:id[:domain] segments of the
+// colon-delimited resourceID sent to the steward's GetModuleState. The
+// steward-side activedirectory module parses resourceID with strings.Split and
+// has no escaping, so a caller-supplied value containing this delimiter could
+// shift which segment(s) the module reads — e.g. an id of "alice:bob" would
+// make the module answer about "alice" while the caller asked about
+// "alice:bob".
+const resourceIDDelimiter = ":"
+
+// rejectResourceIDDelimiter rejects a caller-supplied value destined for an
+// indexed segment of a resourceID (operation:type:id[:domain]) if it contains
+// the reserved delimiter. This is the single choice applied at every
+// composition site in this package that builds an identifier/type/domain
+// segment: reject rather than escape, because the steward-side parser has no
+// escaping support to match an escaped form against.
+//
+// The LDAP filter forwarded by Search (advanced_operations.go) deliberately
+// does not go through this helper: it is composed as the sole trailing segment
+// of "search:<filter>", the module reads it as the entire remainder rather
+// than an indexed parts[N], and compound/extensible-match LDAP filters
+// legitimately contain ':' (e.g. "member:1.2.840.113556.1.4.1941:=...").
+// Rejecting those would break valid filters for no safety benefit, since
+// nothing after the literal "search:" operation prefix is ever index-parsed.
+func rejectResourceIDDelimiter(field, value string) error {
+	if strings.Contains(value, resourceIDDelimiter) {
+		return fmt.Errorf("%s must not contain the reserved resourceID delimiter %q", field, resourceIDDelimiter)
+	}
+	return nil
+}
+
+// validCrossDomainObjectTypes is the closed set of object types accepted at
+// QueryTrustedDomain's resourceID composition site (advanced_operations.go,
+// "query:%s:%s:%s"). It is the one composition site in this package where the
+// caller supplies objectType directly into an indexed segment, so an injected
+// value doesn't just truncate an id — it changes which type of object is
+// named. A closed set closes that off entirely, rather than merely rejecting
+// a delimiter character. QueryForest's objectType is also caller-supplied,
+// but QueryForest never reaches the steward (see QueryForest), so the general
+// delimiter rejection applied there is sufficient.
+var validCrossDomainObjectTypes = map[string]bool{
+	string(interfaces.DirectoryObjectTypeUser):     true,
+	string(interfaces.DirectoryObjectTypeGroup):    true,
+	string(interfaces.DirectoryObjectTypeOU):       true,
+	string(interfaces.DirectoryObjectTypeComputer): true,
+}
+
+// validateCrossDomainObjectType rejects any objectType outside the closed set.
+func validateCrossDomainObjectType(objectType string) error {
+	if !validCrossDomainObjectTypes[objectType] {
+		return fmt.Errorf("unsupported object type %q: must be one of user, group, organizational_unit, computer", objectType)
+	}
+	return nil
+}
+
 // ErrNotConfigured is returned by providers created via the init() factory when no
 // steward client registry has been registered or the registry returns an error.
 type ErrNotConfigured struct {

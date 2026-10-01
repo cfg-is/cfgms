@@ -14,6 +14,10 @@ import (
 
 // GetUser retrieves a user from Active Directory
 func (p *ActiveDirectoryProvider) GetUser(ctx context.Context, userID string) (*interfaces.DirectoryUser, error) {
+	if err := rejectResourceIDDelimiter("userID", userID); err != nil {
+		return nil, err
+	}
+
 	p.logger.Debug("Getting AD user", "user_id", userID)
 
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:user:%s", userID))
@@ -95,6 +99,10 @@ func (p *ActiveDirectoryProvider) ListUsers(ctx context.Context, filters *interf
 
 // GetGroup retrieves a group from Active Directory
 func (p *ActiveDirectoryProvider) GetGroup(ctx context.Context, groupID string) (*interfaces.DirectoryGroup, error) {
+	if err := rejectResourceIDDelimiter("groupID", groupID); err != nil {
+		return nil, err
+	}
+
 	p.logger.Debug("Getting AD group", "group_id", groupID)
 
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:group:%s", groupID))
@@ -258,6 +266,10 @@ func (p *ActiveDirectoryProvider) GetGroupMembers(ctx context.Context, groupID s
 
 // GetOU retrieves an organizational unit from Active Directory
 func (p *ActiveDirectoryProvider) GetOU(ctx context.Context, ouID string) (*interfaces.OrganizationalUnit, error) {
+	if err := rejectResourceIDDelimiter("ouID", ouID); err != nil {
+		return nil, err
+	}
+
 	p.logger.Debug("Getting AD OU", "ou_id", ouID)
 
 	result, err := p.executeADQuery(ctx, fmt.Sprintf("query:ou:%s", ouID))

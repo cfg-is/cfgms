@@ -37,9 +37,18 @@ func validateLDAPFilter(filter string) error {
 }
 
 // Search performs an advanced LDAP search in Active Directory.
-// The caller's filter string is forwarded unchanged to the steward module so
-// that compound operators (&, |, !), extensible match, and other LDAP syntax
-// are preserved exactly as supplied.
+//
+// Design decision (Issue #4448): the activedirectory steward module has no
+// operation that accepts an arbitrary LDAP filter. Unlike the other nine
+// resourceID composition sites in this package, the filter cannot be
+// delimiter-rejected (compound and extensible-match filters legitimately
+// contain ':') and the module has no safe way to interpolate an unconstrained
+// filter string into its PowerShell execution path — doing so would trade the
+// resourceID-parsing defect this story closes for a worse one, LDAP-filter-to-
+// PowerShell injection. Search is therefore rejected after structural
+// validation rather than forwarded. Real search support is follow-up work
+// that must design a safe filter-to-PowerShell (or filter-to-cmdlet-parameter)
+// path before this can return results.
 func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.DirectoryQuery) (*interfaces.SearchResults, error) {
 	if query == nil {
 		return nil, fmt.Errorf("query is required")
@@ -51,30 +60,9 @@ func (p *ActiveDirectoryProvider) Search(ctx context.Context, query *interfaces.
 		return nil, err
 	}
 
-	p.logger.Debug("Performing AD search", "filter", logging.SanitizeLogValue(query.Filter), "search_base", logging.SanitizeLogValue(query.SearchBase))
+	p.logger.Debug("Rejecting AD search: not supported by activedirectory module", "filter", logging.SanitizeLogValue(query.Filter), "search_base", logging.SanitizeLogValue(query.SearchBase))
 
-	result, err := p.executeADQuery(ctx, fmt.Sprintf("search:%s", query.Filter))
-	if err != nil {
-		return nil, fmt.Errorf("LDAP search failed: %w", err)
-	}
-
-	queryResult, err := p.parseADQueryResult(result)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse search result: %w", err)
-	}
-
-	if !queryResult.Success {
-		return nil, fmt.Errorf("LDAP search failed: %s", queryResult.Error)
-	}
-
-	return &interfaces.SearchResults{
-		Users:      queryResult.Users,
-		Groups:     queryResult.Groups,
-		OUs:        queryResult.OUs,
-		TotalCount: queryResult.TotalCount,
-		HasMore:    queryResult.HasMore,
-		NextToken:  queryResult.NextToken,
-	}, nil
+	return nil, fmt.Errorf("design decision: SearchDirectory is not supported by the activedirectory module; forwarding an arbitrary LDAP filter into the module's PowerShell execution path has no safe escaping mechanism today. Write support is tracked separately")
 }
 
 // Bulk Operations
@@ -411,6 +399,10 @@ func (p *ActiveDirectoryProvider) GetConnectionInfo() (*interfaces.ConnectionInf
 
 // GetComputer retrieves a computer object from Active Directory
 func (p *ActiveDirectoryProvider) GetComputer(ctx context.Context, computerID string) (*interfaces.DirectoryUser, error) {
+	if err := rejectResourceIDDelimiter("computerID", computerID); err != nil {
+		return nil, err
+	}
+
 	if !p.IsConnected(ctx) {
 		return nil, fmt.Errorf("not connected to Active Directory")
 	}
@@ -515,6 +507,10 @@ func (p *ActiveDirectoryProvider) ListComputers(ctx context.Context, filters *in
 
 // GetGroupPolicy retrieves a Group Policy Object from Active Directory
 func (p *ActiveDirectoryProvider) GetGroupPolicy(ctx context.Context, gpoID string) (map[string]interface{}, error) {
+	if err := rejectResourceIDDelimiter("gpoID", gpoID); err != nil {
+		return nil, err
+	}
+
 	if !p.IsConnected(ctx) {
 		return nil, fmt.Errorf("not connected to Active Directory")
 	}
@@ -607,6 +603,10 @@ func (p *ActiveDirectoryProvider) ListGroupPolicies(ctx context.Context) ([]map[
 
 // GetDomainTrust retrieves domain trust information from Active Directory
 func (p *ActiveDirectoryProvider) GetDomainTrust(ctx context.Context, trustName string) (map[string]interface{}, error) {
+	if err := rejectResourceIDDelimiter("trustName", trustName); err != nil {
+		return nil, err
+	}
+
 	if !p.IsConnected(ctx) {
 		return nil, fmt.Errorf("not connected to Active Directory")
 	}
@@ -781,111 +781,65 @@ func (p *ActiveDirectoryProvider) ValidateDomainTrust(trust map[string]interface
 
 // Multi-Domain and Multi-Forest Provider Operations
 
-// QueryTrustedDomain performs a query in a trusted domain via AD steward
+// QueryTrustedDomain performs a query in a trusted domain via AD steward.
+//
+// Design decision (Issue #4448): the activedirectory steward module's Get()
+// only reads parts[0:3] of resourceID ("operation:type:id"); a fourth segment
+// carrying targetDomain is parsed into neither and silently dropped, so the
+// module answers from its local domain while the caller believes it queried
+// targetDomain. Silently answering from the wrong domain is worse than
+// failing, so this method is rejected after validating its inputs rather than
+// sending a resourceID whose fourth segment would be ignored. Real
+// cross-domain support is follow-up work that must give the module a
+// domain-aware query path (e.g. a validated Server/domain segment the module
+// actually reads) before this can return results.
 func (p *ActiveDirectoryProvider) QueryTrustedDomain(ctx context.Context, targetDomain, objectType, objectID string) (map[string]interface{}, error) {
-	if !p.IsConnected(ctx) {
-		return nil, fmt.Errorf("not connected to Active Directory")
+	if err := validateCrossDomainObjectType(objectType); err != nil {
+		return nil, err
+	}
+	if err := rejectResourceIDDelimiter("objectID", objectID); err != nil {
+		return nil, err
+	}
+	if err := rejectResourceIDDelimiter("targetDomain", targetDomain); err != nil {
+		return nil, err
 	}
 
-	p.logger.Debug("Querying trusted domain", "target_domain", targetDomain, "object_type", objectType, "object_id", objectID)
-
-	// Find suitable AD steward
-	stewardID, err := p.findADSteward(ctx, p.config.ServerAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find AD steward: %w", err)
-	}
-
-	// Query trusted domain via steward
-	resourceID := fmt.Sprintf("query:%s:%s:%s", objectType, objectID, targetDomain)
-	state, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", resourceID)
-	if err != nil {
-		p.updateStats(false, time.Since(time.Now()))
-		return nil, fmt.Errorf("failed to query trusted domain from steward: %w", err)
-	}
-
-	// Check for query success
-	success, ok := state["success"].(bool)
-	if !ok || !success {
-		errMsg, _ := state["error"].(string)
-		if errMsg == "" {
-			errMsg = "unknown error"
-		}
-		return nil, fmt.Errorf("trusted domain query failed: %s", errMsg)
-	}
-
-	p.updateStats(true, time.Since(time.Now()))
-	return state, nil
+	return nil, fmt.Errorf("design decision: cross-domain trust queries are not supported by the activedirectory module; only single-domain queries (GetUser, GetGroup, GetOU, GetComputer) are supported. Write support is tracked separately")
 }
 
-// QueryForest performs a forest-wide search via AD steward Global Catalog
+// QueryForest performs a forest-wide search via AD steward Global Catalog.
+//
+// Design decision (Issue #4448): the activedirectory steward module's Get()
+// has no "forest" operation — a composed "forest:type:id" resourceID always
+// hits the module's default case. Rather than send a resourceID the module
+// can only answer with a generic parse-style error, this method fails fast
+// locally, after validating its inputs, with an error that names the
+// capability gap directly. Real forest-wide (Global Catalog) support is
+// follow-up work.
 func (p *ActiveDirectoryProvider) QueryForest(ctx context.Context, objectType, objectID string) (map[string]interface{}, error) {
-	if !p.IsConnected(ctx) {
-		return nil, fmt.Errorf("not connected to Active Directory")
+	if err := rejectResourceIDDelimiter("objectType", objectType); err != nil {
+		return nil, err
+	}
+	if err := rejectResourceIDDelimiter("objectID", objectID); err != nil {
+		return nil, err
 	}
 
-	p.logger.Debug("Performing forest search", "object_type", objectType, "object_id", objectID)
-
-	// Find suitable AD steward
-	stewardID, err := p.findADSteward(ctx, p.config.ServerAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find AD steward: %w", err)
-	}
-
-	// Query forest via steward Global Catalog
-	resourceID := fmt.Sprintf("forest:%s:%s", objectType, objectID)
-	state, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", resourceID)
-	if err != nil {
-		p.updateStats(false, time.Since(time.Now()))
-		return nil, fmt.Errorf("failed to query forest from steward: %w", err)
-	}
-
-	// Check for query success
-	success, ok := state["success"].(bool)
-	if !ok || !success {
-		errMsg, _ := state["error"].(string)
-		if errMsg == "" {
-			errMsg = "unknown error"
-		}
-		return nil, fmt.Errorf("forest query failed: %s", errMsg)
-	}
-
-	p.updateStats(true, time.Since(time.Now()))
-	return state, nil
+	return nil, fmt.Errorf("design decision: forest-wide search is not supported by the activedirectory module; Global Catalog queries are not yet implemented. Write support is tracked separately")
 }
 
-// ValidateCrossDomainTrust validates cross-domain trust relationships via AD steward
+// ValidateCrossDomainTrust validates cross-domain trust relationships via AD steward.
+//
+// Design decision (Issue #4448): the activedirectory steward module's Get()
+// has no "validate_trust" operation — a composed "validate_trust:domain"
+// resourceID always hits the module's default case. Rather than send a
+// resourceID the module can only answer with a generic parse-style error,
+// this method fails fast locally, after validating its input, with an error
+// that names the capability gap directly. Real trust validation support is
+// follow-up work.
 func (p *ActiveDirectoryProvider) ValidateCrossDomainTrust(ctx context.Context, targetDomain string) error {
-	if !p.IsConnected(ctx) {
-		return fmt.Errorf("not connected to Active Directory")
+	if err := rejectResourceIDDelimiter("targetDomain", targetDomain); err != nil {
+		return err
 	}
 
-	p.logger.Debug("Validating cross-domain trust", "target_domain", targetDomain)
-
-	// Find suitable AD steward
-	stewardID, err := p.findADSteward(ctx, p.config.ServerAddress)
-	if err != nil {
-		return fmt.Errorf("failed to find AD steward: %w", err)
-	}
-
-	// Validate trust via steward
-	resourceID := fmt.Sprintf("validate_trust:%s", targetDomain)
-	state, err := p.stewardClient.GetModuleState(ctx, stewardID, "activedirectory", resourceID)
-	if err != nil {
-		p.updateStats(false, time.Since(time.Now()))
-		return fmt.Errorf("failed to validate trust via steward: %w", err)
-	}
-
-	// Check validation result
-	success, ok := state["success"].(bool)
-	if !ok || !success {
-		errMsg, _ := state["error"].(string)
-		if errMsg == "" {
-			errMsg = "trust validation failed"
-		}
-		return fmt.Errorf("%s", errMsg)
-	}
-
-	p.updateStats(true, time.Since(time.Now()))
-	p.logger.Info("Cross-domain trust validated successfully", "target_domain", targetDomain)
-	return nil
+	return fmt.Errorf("design decision: cross-domain trust validation is not supported by the activedirectory module. Write support is tracked separately")
 }
