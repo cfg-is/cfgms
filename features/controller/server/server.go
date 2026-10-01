@@ -71,6 +71,7 @@ import (
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/configrouting"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
@@ -203,6 +204,9 @@ type Server struct {
 	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
 	egDNAWriter             *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
+	configSyncService       *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
+	configSyncCancel        context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	routerSecretStore       secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -260,6 +264,22 @@ func resolveDNADataRoot(cfg *config.Config) string {
 		}
 	}
 	return root
+}
+
+// resolveRootTenantID returns the OSS single-root deployment's bootstrap/root
+// tenant ID ("default" — features/tenant/manager.go, e.g. ErrCannotSuspendDefault),
+// resolved through the tenant store rather than handed to configrouting.NewSyncService
+// as a bare literal. A missing record is logged but does not block startup:
+// SyncService.Run tolerates an unknown root — it enumerates zero git tenants until
+// the record exists, and picks them up on the next Register once it does — so
+// construction order here never depends on tenant bootstrap having already run.
+func resolveRootTenantID(ctx context.Context, tenantStore business.TenantStore, logger logging.Logger) string {
+	const bootstrapRootTenantID = "default"
+	if _, err := tenantStore.GetTenant(ctx, bootstrapRootTenantID); err != nil {
+		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
+			"root_tenant_id", bootstrapRootTenantID)
+	}
+	return bootstrapRootTenantID
 }
 
 // resolveInstallerBlobRoot returns the configured installer artifact root, or
@@ -649,8 +669,53 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	openedStores = append(openedStores, egProvider.Close)
 
-	// Create the configuration service (V2: durable storage via StorageManager)
-	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	// Issue #4408: dedicated secret store for the git-capable config source router.
+	// A separate instance from the audit signing key store above (closed immediately
+	// after use) and from httpServer's own internal secret store (api.New constructs
+	// that one later, after configService below already exists) — same on-disk
+	// backing (api.NewSecretStore(cfg)), kept open for the router's lifetime and
+	// closed explicitly in Stop().
+	routerSecretStore, routerSecretErr := api.NewSecretStore(cfg)
+	if routerSecretErr != nil {
+		return nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
+	}
+	openedStores = append(openedStores, routerSecretStore.Close)
+
+	gitConfigWorkDir := filepath.Join(resolveDNADataRoot(cfg), "config-git-sources")
+	if mkErr := os.MkdirAll(gitConfigWorkDir, 0750); mkErr != nil {
+		return nil, fmt.Errorf("failed to create config git work directory: %w", mkErr)
+	}
+
+	// Create the configuration service (V2: durable storage via StorageManager).
+	// WithGitRouter makes the router git-capable (Issue #4408): storeForSource can
+	// only reach a *gitprovider.GitConfigStore when it sees a non-nil secret store
+	// and a non-empty git work dir — without both, SyncTenantWithRemote (below)
+	// silently pulls nothing on every tick.
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService,
+		service.WithGitRouter(routerSecretStore, gitConfigWorkDir))
+
+	// Issue #4408: wire the periodic git-sourced tenant config sync service.
+	// rootTenantID is resolved through the tenant store (not inlined) so a missing
+	// bootstrap record is visible at startup; cascadeFn mirrors the tenant-only
+	// cascade that on-request resolution already performs for e.g.
+	// GET /api/v1/tenants/{id}/reboot-window (ConfigurationServiceV2.
+	// GetEffectiveConfiguration's own doc comment calls this a "tenant-only
+	// cascade") — distinct from the save=deploy steward fan-out registered
+	// separately below in features/controller/api/server.go, which is a
+	// write-triggered push, not a cascade recompute.
+	rootTenantID := resolveRootTenantID(context.Background(), storageManager.GetTenantStore(), logger)
+	cascadeFn := func(ctx context.Context, tenantID string) error {
+		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
+		return err
+	}
+	configSyncService := configrouting.NewSyncService(
+		configService.ConfigSourceRouter(),
+		storageManager.GetTenantStore(),
+		auditManager,
+		logger,
+		cascadeFn,
+		rootTenantID,
+	)
 
 	// Create the RBAC service
 	rbacService := service.NewRBACService(rbacManager)
@@ -1756,14 +1821,16 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		alertManager:            healthAlertManager,
 		healthTraceManager:      healthTraceManager,
 		storageManager:          storageManager,
-		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
-		tagStore:                tagStoreInstance, // Issue #2542: closed in Stop() to release SQLite handle on Windows
-		sessionStore:            sessionStore,     // Issue #2774: closed in Stop() to release SQLite handle on Windows
-		executionQueue:          executionQueue,   // Issue #1672
-		jobDispatcher:           jobDispatcher,    // Issue #1672
-		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
-		pendingExpiryJob:        pendingExpiryJob, // Issue #1697
-		egProvider:              egProvider,       // Issue #3253: closed in Stop() to release DB handle
+		upgradeStore:            upgradeStore,      // Issue #2464: closed in Stop() to release SQLite handle on Windows
+		tagStore:                tagStoreInstance,  // Issue #2542: closed in Stop() to release SQLite handle on Windows
+		sessionStore:            sessionStore,      // Issue #2774: closed in Stop() to release SQLite handle on Windows
+		executionQueue:          executionQueue,    // Issue #1672
+		jobDispatcher:           jobDispatcher,     // Issue #1672
+		ipTrustExpiryJob:        ipTrustExpiryJob,  // Issue #1697
+		pendingExpiryJob:        pendingExpiryJob,  // Issue #1697
+		egProvider:              egProvider,        // Issue #3253: closed in Stop() to release DB handle
+		configSyncService:       configSyncService, // Issue #4408: Run() started in Start(), Stop()ped in Stop()
+		routerSecretStore:       routerSecretStore, // Issue #4408: closed in Stop()
 	}
 
 	// Issue #4444: build the DNA-sync -> entity-graph writer against the same
@@ -2558,6 +2625,18 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start periodic git-sourced tenant config sync (Issue #4408). Run derives its
+	// own lifetime context from syncCtx and is idempotent; cancelling syncCtx (done
+	// in Stop, tied to this exact context) stops every per-tenant polling goroutine
+	// it owns — the mechanism behind "cancelling the controller's context stops the
+	// polling loop."
+	if s.configSyncService != nil {
+		syncCtx, cancel := context.WithCancel(context.Background())
+		s.configSyncCancel = cancel
+		s.configSyncService.Run(syncCtx)
+		s.logger.Info("Config source sync service started (Issue #4408)")
+	}
+
 	// Start health collector and alert manager (Story #417)
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Start(context.Background(), 30*time.Second); err != nil {
@@ -2832,6 +2911,29 @@ func (s *Server) Stop() error {
 	if s.gitSyncer != nil {
 		s.gitSyncer.Stop()
 		s.logger.Info("git-sync syncer stopped")
+	}
+
+	// Stop periodic git-sourced tenant config sync (Issue #4408). Cancels the
+	// context Start() passed to Run, then waits for every per-tenant polling
+	// goroutine to drain. Must also run before storageManager.Close(): the sync
+	// goroutines read the tenant store and the config router on every tick.
+	if s.configSyncService != nil {
+		if s.configSyncCancel != nil {
+			s.configSyncCancel()
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.configSyncService.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop config source sync service", "error", err)
+		}
+		stopCancel()
+	}
+
+	// Close the dedicated config-router secret store (Issue #4408) — a separate
+	// instance from httpServer's own, which api.Server.Close releases below.
+	if s.routerSecretStore != nil {
+		if err := s.routerSecretStore.Close(); err != nil {
+			s.logger.Warn("Failed to close config router secret store", "error", err)
+		}
 	}
 
 	// Close the REST API server — releases the public HTTPS listener and the

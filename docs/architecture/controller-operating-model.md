@@ -1601,10 +1601,41 @@ not make.
 
 Several other loops matching a `time.NewTicker` search were found unwired to any
 production binary (RBAC JIT access-manager cleanup, the SIEM engine's four
-tickers, directory DNA drift/monitoring, `pkg/configrouting.SyncService`, and
-`features/config/git.DefaultGitManager`, superseded by `pkg/gitsync`) — dead
-code, not currently running, so they are out of this story's live-loop count and
-were left untouched.
+tickers, directory DNA drift/monitoring, and `features/config/git.DefaultGitManager`,
+superseded by `pkg/gitsync`) — dead code, not currently running, so they are out
+of this story's live-loop count and were left untouched.
+
+`pkg/configrouting.SyncService` was in that unwired set when this story ran;
+Issue #4408 constructs and runs it from `features/controller/server/server.go`
+afterward (`Start()` calls `Run`, `Stop()` cancels the context `Start()` passed
+it and waits for every per-tenant goroutine to drain). It runs **unleased**: no
+`SingletonJob`/`NewBackgroundLoopLease` gate, so in a cluster deployment every
+node polls and pulls each git-sourced tenant independently rather than once per
+cluster per cycle — the same unconverted shape every loop in this section had
+before Issue #3762, not something #4408 introduced new. `SyncTenantWithRemote`
+is a fast-forward pull that is a no-op when already up to date, so redundant
+per-node polls are wasted work, not a correctness hazard; converting it to the
+per-scope lease pattern `pkg/gitsync.Syncer` already uses is a candidate
+follow-up, not done here (Issue #4408 wires the service as designed — "Out of
+Scope: Changing SyncService's own polling design").
+
+Each git-sourced tenant polls at its own `config_source_poll_interval` tenant
+metadata value, floored to **one minute**: a configured value below one minute
+(including zero or negative) is raised to one minute rather than rejected. An
+absent or unparseable value does not reach the floor at all — `pkg/config`'s
+`ParseConfigSource` falls back to a 5-minute default before `SyncService` ever
+sees it, and 5 minutes is already above the floor. A tenant with no git config
+source is never polled at all — `SyncService` discovers
+git-sourced tenants by walking the tenant hierarchy under its configured root
+(`rootTenantID`, resolved from the controller's "default" bootstrap tenant
+record) and only starts a polling goroutine for tenants whose effective config
+source resolves to `ConfigSourceTypeGit`. On a pull that introduces new
+commits, the service records a `config_source_sync` audit event and invokes
+the same tenant-level cascade recompute that on-request resolution already
+performs for that tenant (`ConfigurationServiceV2.GetEffectiveConfiguration`
+with an empty steward ID) — not the save=deploy steward fan-out, which is a
+separate, write-triggered push registered in
+`features/controller/api/server.go`.
 
 **Tests:** `pkg/lease/singleton_test.go` and
 `pkg/ha/background_loop_lease_test.go` prove the `SingletonJob`/
