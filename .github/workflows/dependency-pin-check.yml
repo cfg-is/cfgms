@@ -375,5 +375,17 @@ jobs:
         fi
 
         echo "Creating issue..."
-        printf "${body}" \
-          | gh issue create --repo "$GITHUB_REPOSITORY" --title "deps: ${title_parts} ($(date +%Y-%m-%d))" --label "dependency-pins,dependencies,security,automated" --body-file -
+        header="## Weekly Pin Check — $(date +%Y-%m-%d)"
+        new_issue_url=$(printf "${header}\n\n${body}" \
+          | gh issue create --repo "$GITHUB_REPOSITORY" --title "deps: ${title_parts} ($(date +%Y-%m-%d))" --label "dependency-pins,dependencies,security,automated" --body-file -)
+
+        # The PO pin-refresh gate's jq filter (po.md Step 1.6) only scans an
+        # issue's *comments* for the "Weekly Pin Check" marker, so a freshly
+        # created issue — which has no comments yet — was invisible to it
+        # (Issue #4468). Post the same header+findings as a comment too, the
+        # same shape the existing-issue branch above already produces, so the
+        # gate has one signal shape regardless of whether the issue already
+        # existed.
+        new_issue_number=${new_issue_url##*/}
+        printf "${header}\n\n${body}" \
+          | gh issue comment "$new_issue_number" --repo "$GITHUB_REPOSITORY" --body-file -
