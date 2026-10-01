@@ -615,6 +615,29 @@ only when the controller's `dnasync.ClusterMembership` verifier corroborates the
 peer's claimed cluster membership from controller-side state — an unset verifier
 denies every cluster claim and the VM is recorded under its reporting host instead.
 
+Controller startup also constructs two further entity-graph writers against the
+same provider (Issue #4413): `pkg/entitygraph/writers/tenantsync.Writer` mirrors
+the tenant hierarchy as `tenant:*` entities and `contains` edges (ADR-022 §7),
+and `pkg/entitygraph/writers/correlator.Writer` asserts cross-tenant `same-as`
+edges between entities that share a normalized MAC address (ADR-022 §3). Both
+run on a periodic sweep — a tenant-CRUD hook was considered for tenantsync and
+rejected: no hook point exists today at the tenant store's create/update/delete
+call sites, and instrumenting every one would be new plumbing beyond what this
+wiring required. `Server.Start()` starts each sweep (tenant-sync every 5
+minutes, correlator every 15 minutes) via a shared `entityGraphPeriodicSweeper`
+helper parameterized over the sweep function and interval, and `Server.Stop()`
+cancels and drains both before the entity-graph provider closes. Each sweep
+holds its own cluster-singleton lease (`entitygraph-tenantsync`,
+`entitygraph-correlator`) built by `ha.Manager.NewBackgroundLoopLease` and
+invoked through `lease.SingletonJob.RunIfLeader`, so exactly one node sweeps per
+tick (ADR-031 Decision 4). That gate is load-bearing rather than cosmetic: in
+cluster mode the entity graph is a single shared Postgres instance, the
+correlator's sweep is O(fleet size) (ADR-022 §9), and concurrent full-tree
+tenant snapshots would contend on the same claim-scope retraction. Neither writer
+sets `owning_tenant` on the entities or edges it asserts — ADR-022 §7 is
+explicit that authorization never uses graph traversal, so these cross-tenant
+writes change graph structure only, never access control.
+
 ### Heartbeat Monitoring
 
 The controller monitors steward heartbeats to detect connectivity loss:

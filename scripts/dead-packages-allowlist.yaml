@@ -202,34 +202,6 @@ packages:
       prerequisite owned by the module-foundation epic (ADR-016)." Missing
       only a call site in cmd/steward's startup path.
 
-  - path: pkg/entitygraph/writers/correlator
-    reason: >
-      WIRE (Issue #4345): MAC-identity correlator (ADR-022 §3, Issue
-      #3369), complete and tested, no stub markers. Its own package README
-      states it is "a standalone-invokable writer pending controller-startup
-      wiring (#3253)" — #3253 wired the sibling configstore writer and
-      explicitly deferred this one. Needs a construct-and-set call in
-      features/controller/server/server.go plus new periodic-sweep
-      scheduling (no existing job-scheduler to piggyback on), and a
-      pre-wiring security review of its deliberately cross-tenant sweep
-      given the repo's recent tenant-containment hardening (Issue #4335).
-
-  - path: pkg/entitygraph/writers/tenantsync
-    reason: >
-      WIRE (Issue #4345): tenant-hierarchy mirror writer (ADR-022 §7, Issue
-      #3370), complete and tested, no stub markers. Same deferred-wiring
-      shape as pkg/entitygraph/writers/correlator (epic #2853); needs a
-      construct-and-Ingest call in features/controller/server/server.go —
-      both its dependencies (the entity-graph provider and
-      storageManager.GetTenantStore()) are already local variables at the
-      sibling configstore writer's wiring point, so no new plumbing is
-      needed, only the call and a decision on sync cadence/trigger. Needs
-      the same pre-wiring security review as correlator: it does not set
-      owning_tenant (by design, per its own doc — authorization never uses
-      graph traversal per ADR-022 §7), but mirrors tenant topology and
-      shares the same reserved-delimiter injection class recent
-      tenant-containment work has been closing.
-
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---

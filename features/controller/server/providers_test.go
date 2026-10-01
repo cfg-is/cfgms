@@ -47,6 +47,19 @@ func requireInMemoryUpgradeStore(t *testing.T, store business.UpgradeStore, msgA
 	require.IsType(t, (*memoryprovider.UpgradeStore)(nil), store, msgAndArgs...)
 }
 
+// newFlatFileLeaseStore returns a real flat-file LeaseStore rooted at a
+// t.TempDir(), closed on test cleanup — the durable substrate a real
+// lease.Manager needs to exercise cluster-singleton gating without external
+// infrastructure. The concrete flatfile import is confined to this allowlisted
+// */providers_test.go path (see scripts/check-providers.sh).
+func newFlatFileLeaseStore(t *testing.T) business.LeaseStore {
+	t.Helper()
+	st, err := flatfile.NewFlatFileLeaseStore(t.TempDir())
+	require.NoError(t, err, "creating flat-file lease store")
+	t.Cleanup(func() { require.NoError(t, st.Close()) })
+	return st
+}
+
 // newFlatFileRoutingStore returns a real flat-file RoutingStore rooted at a
 // t.TempDir(). The concrete flatfile import is confined to this allowlisted
 // */providers_test.go path (see scripts/check-providers.sh).
