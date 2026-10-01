@@ -397,6 +397,16 @@ func (f *ModuleFactory) loadBundleModule(moduleName string) (modules.Module, err
 		return nil, fmt.Errorf("resolve bundle binary path for module %q: %w", moduleName, err)
 	}
 
+	// module_trust.mode: bypass disables all publisher-signature verification
+	// (StewardTrustEnforcer.VerifyForLoad is a no-op for it). A mode that turns
+	// off a trust check must be visible in the log, not silent — this is the
+	// one point in the load path that knows both the configured mode and the
+	// bundle being loaded.
+	if f.moduleTrustMode == config.ModuleTrustModeBypass {
+		f.logger.Warn("loading module bundle with module_trust.mode=bypass: signature verification disabled",
+			"module", moduleName, "mode", string(f.moduleTrustMode))
+	}
+
 	handle, err := f.moduleRuntime.Start(resolved, f.moduleTrustMode, f.additionalPublishers)
 	if err != nil {
 		return nil, fmt.Errorf("start bundle module %q: %w", moduleName, err)

@@ -292,3 +292,24 @@ func TestUnknownModeReturnsError(t *testing.T) {
 	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustMode("unsupported"), nil)
 	require.Error(t, err)
 }
+
+// [REQUIRED TEST] TestVerifyForLoad_UnknownModeRefusedOutright pins the second
+// of the two gates an unrecognised module_trust.mode must be refused at
+// (Issue #4426 AC): ValidateModuleTrustConfig refuses it at config load
+// (features/config/stewardtypes/validation_test.go pins that gate), and
+// VerifyForLoad's default arm must independently refuse it at load time too —
+// so a future config path that skips validation still fails closed here,
+// rather than an unrecognised value silently falling through to the
+// bypass/controller no-op arm. The error must name the offending value so an
+// operator can act on it, and must not be pkgtrust.ErrPublisherNotTrusted (a
+// strict-mode verification failure) — a distinct failure mode.
+func TestVerifyForLoad_UnknownModeRefusedOutright(t *testing.T) {
+	b := makeTestBundle()
+	enforcer := stewardtrust.NewStewardTrustEnforcer()
+
+	err := enforcer.VerifyForLoad(b, stewardtypes.ModuleTrustMode("bogus"), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown module trust mode")
+	assert.Contains(t, err.Error(), "bogus")
+	assert.NotErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+}
