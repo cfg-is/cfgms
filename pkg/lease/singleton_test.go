@@ -262,6 +262,56 @@ func TestSingletonJob_RenewFailureCancelsFnContext(t *testing.T) {
 	}
 }
 
+// renewOnceFailingStore delegates every call to a real store, but fails
+// exactly the callNumber'th AcquireOrRenew call (1-indexed, across all
+// holders) with a transient-looking error, then resumes delegating normally.
+// Models one unretried store hiccup — e.g. the flatfile provider's
+// atomic-rename write path on Windows, which deliberately does not retry
+// (pkg/storage/providers/flatfile/rename_windows.go) — landing on a single
+// renewal tick, as opposed to renewFailingStore's permanent outage.
+type renewOnceFailingStore struct {
+	business.LeaseStore
+	callNumber int32
+	calls      int32
+}
+
+func (s *renewOnceFailingStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	if n := atomic.AddInt32(&s.calls, 1); n == s.callNumber {
+		return nil, errors.New("simulated transient lease store error")
+	}
+	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// [REQUIRED TEST] (Issue #4487) renewWithRetry (pkg/lease/singleton.go) must
+// absorb a single transient renewal error within Manager's
+// MaxAllowedRenewalLatency budget rather than treating it as a lost lease.
+// Before that retry existed, renewWhileRunning gave up on the very first
+// error and cancelled fn's context on its first mid-cycle renewal tick.
+func TestSingletonJob_RenewWithRetry_SingleTransientErrorDoesNotLoseLease(t *testing.T) {
+	base := newTestStore(t)
+	// Call #1 is RunIfLeader's initial TryAcquire; call #2 is the first
+	// mid-cycle renewal tick.
+	store := &renewOnceFailingStore{LeaseStore: base, callNumber: 2}
+	ttl := 2 * time.Second
+	renewInterval := 200 * time.Millisecond
+	m, err := NewManager(store, ttl, renewInterval, renewInterval)
+	require.NoError(t, err)
+	job, err := NewSingletonJob(m, "x", "node-1", ttl, renewInterval, nil)
+	require.NoError(t, err)
+
+	var ctxCancelled bool
+	ran := job.RunIfLeader(context.Background(), func(ctx context.Context) {
+		time.Sleep(ttl + ttl/2) // forces at least one renewal past the injected failure
+		select {
+		case <-ctx.Done():
+			ctxCancelled = true
+		default:
+		}
+	})
+	assert.True(t, ran)
+	assert.False(t, ctxCancelled, "a single transient renewal error must not cancel fn's context / lose the lease")
+}
+
 func TestSingletonJob_AcquireErrorSkipsCycle(t *testing.T) {
 	base := newTestStore(t)
 	store := &renewFailingStore{LeaseStore: base, failAfter: 0} // every call fails, including the initial acquire
