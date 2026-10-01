@@ -77,14 +77,140 @@ def make_repo(tmp: Path) -> Path:
         "  a:\n"
         "    steps:\n"
         "    - uses: actions/checkout@" + "d" * 40 + " # v7.0.1\n"
+        "    - name: pre-pull builder image\n"
+        "      run: |\n"
+        "        pull_with_retry golang:1.26.5@sha256:" + "0" * 64 + "\n"
     )
     (root / "web/package.json").write_text(json.dumps({
         "dependencies": {"react": "^19.0.0"},
         "devDependencies": {"vitest": "^3.0.0"},
     }, indent=2))
 
+    # windows-setup.ps1: the location class issue #4472 reported entirely
+    # missing — a literal version string with no FROM/GO_VERSION/go-version
+    # structure around it (the winget Go pin), and a verified-download
+    # hashtable block whose Sha256 line carries no version string of its own.
+    (root / "windows-setup.ps1").write_text(
+        "$tools = @(\n"
+        "    @{ Name = 'Go'; Id = 'GoLang.Go'; Version = '1.26.5'; Command = 'go' },\n"
+        "    @{\n"
+        "        Name   = 'sometool'\n"
+        "        Url    = 'https://example.com/sometool/releases/download/v9.9.9/sometool.tar.gz'\n"
+        "        Sha256 = '" + "a" * 64 + "'\n"
+        "        Member = 'sometool.exe'\n"
+        "    }\n"
+        ")\n"
+        "$ClaudeCodeVersion = '1.2.3'\n"
+    )
+
+    # .devcontainer/Dockerfile: the Claude Code CLI ARG pin, whose
+    # discoverer must also find windows-setup.ps1's $ClaudeCodeVersion line.
+    (root / ".devcontainer").mkdir(parents=True)
+    (root / ".devcontainer/Dockerfile").write_text(
+        "ARG CLAUDE_CODE_VERSION=1.2.3\n"
+        "RUN npm install -g \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\"\n"
+    )
+
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     return root
+
+
+def _completeness_universe(root: Path) -> list[Path]:
+    """The file universe these pins are expected to live in.
+
+    Built independently of discover_tool_usage_locations()/
+    discover_go_toolchain()'s own search_files — via the same repo-wide globs
+    (all_dockerfiles, all_ps1_files) plus the workflow/Makefile/scripts
+    directories — so a future narrowing of either discoverer's search_files
+    is caught by this test rather than silently agreeing with it.
+    """
+    universe = [root / "go.mod"]
+    # dependency-pin-check.yml is excluded the same way
+    # discover_tool_usage_locations() excludes it: it's the declaration file,
+    # already represented by the check_version location discover_tool_pins()
+    # puts first — its validator steps print advisory text (e.g. "use X or Y
+    # instead") that mentions other versions in human-readable error
+    # messages, not a second pin declaration requiring lockstep tracking.
+    universe.extend(
+        f for f in sorted((root / ".github/workflows").glob("*.yml"))
+        if f.name != "dependency-pin-check.yml"
+    )
+    universe.extend(dp.all_dockerfiles(root))
+    universe.extend(dp.all_ps1_files(root))
+    makefile = root / "Makefile"
+    if makefile.exists():
+        universe.append(makefile)
+    universe.extend(sorted((root / "scripts").glob("*.sh")))
+    return [f for f in universe if f.exists() and f.is_file()]
+
+
+def _git_grep_literal(version: str, files: list[Path], root: Path) -> list[tuple[str, int, str]]:
+    """`git grep -F` for an exact version string, restricted to tracked files."""
+    rels = [f.relative_to(root).as_posix() for f in files]
+    if not rels:
+        return []
+    result = subprocess.run(
+        ["git", "grep", "-n", "-F", "--", version, *rels],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode not in (0, 1):  # 1 == no matches, not an error
+        raise RuntimeError(f"git grep failed: {result.stderr}")
+    hits = []
+    for line in result.stdout.splitlines():
+        fpart, lpart, content = line.split(":", 2)
+        hits.append((fpart, int(lpart), content))
+    return hits
+
+
+def check_completeness_against_real_repo() -> None:
+    """For each literal-version-string pin, nothing `git grep` finds in its
+    file universe is missing from the inventory.
+
+    This is the regression guard issue #4472 asked for: a `git grep` for a
+    pin's current version string must find no tracked location outside what
+    discover-pins.py reports, comments and docs excepted. Docs are excepted
+    structurally — docs/ and markdown reference files are never part of the
+    install/config-surface universe searched here, matching how
+    inventory-schema.md already scopes these pin kinds. Comments
+    (`#`-prefixed lines) are excepted explicitly, since a rationale note or a
+    commented-out example referencing a version is not a location that needs
+    to move in lockstep.
+
+    Scope: go-toolchain, every dependency-pin-check.yml tool pin, and
+    claude-code-cli — the pins whose locations[] comes from grepping a literal
+    version string across a fixed file set, built by discover_go_toolchain(),
+    discover_tool_pins() and discover_claude_code_cli(). Only this class
+    carries a "missed occurrence" risk: the grep's file-class universe can
+    silently fall out of step with where the string actually appears, which is
+    exactly the #4472 bug (windows-setup.ps1 and a workflow pre-pull line
+    weren't in the search set at all). Every other kind (gomod, npm, docker,
+    GitHub Action SHA, mcp) is parsed structurally from the one file that
+    declares it — there is nowhere else a location could hide.
+
+    Runs against the real repo (not the synthetic one above) because the
+    whole point is to catch a real location discovery doesn't yet know about.
+    """
+    root = dp.repo_root()
+    print("completeness: git grep over each pin's file universe finds nothing missed (#4472)")
+
+    pins = [dp.discover_go_toolchain(root)]
+    pins.extend(dp.discover_tool_pins(root))
+    pins.extend(dp.discover_claude_code_cli(root))
+    universe = _completeness_universe(root)
+
+    for pin in pins:
+        version = pin.get("current")
+        if not version or version == "unknown":
+            continue
+        known = {(loc["file"], loc["line"]) for loc in pin["locations"]}
+        missing = [
+            f"{fpart}:{lpart}: {content.strip()}"
+            for fpart, lpart, content in _git_grep_literal(version, universe, root)
+            if not content.strip().startswith("#") and (fpart, lpart) not in known
+        ]
+        check(not missing,
+              f"{pin['name']}: inventory covers every git-grep hit for '{version}'",
+              "missing: " + "; ".join(missing))
 
 
 def main() -> int:
@@ -98,12 +224,44 @@ def main() -> int:
 
         print("go-toolchain")
         files = {loc["file"] for loc in toolchain["locations"]}
+        locs_by_file = {}
+        for loc in toolchain["locations"]:
+            locs_by_file.setdefault(loc["file"], []).append(loc)
         check(toolchain["current"] == "1.26.5", "reads the toolchain directive")
         check("Dockerfile.test-runner" in files,
               "covers a repo-root Dockerfile",
               f"saw {sorted(files)}")
         check("cmd/controller/Dockerfile" in files, "covers cmd/*/Dockerfile")
         check(".github/workflows/ci.yml" in files, "covers workflow GO_VERSION")
+        check(any("pull_with_retry golang:1.26.5" in loc["match"]
+                   for loc in locs_by_file.get(".github/workflows/ci.yml", [])),
+              "covers a workflow pull_with_retry pre-pull line (#4472)",
+              f"saw {locs_by_file.get('.github/workflows/ci.yml')}")
+        check(any("Version = '1.26.5'" in loc["match"]
+                   for loc in locs_by_file.get("windows-setup.ps1", [])),
+              "covers a PowerShell literal version location with no FROM/GO_VERSION structure (#4472)",
+              f"saw {locs_by_file.get('windows-setup.ps1')}")
+
+        print("tool usage locations in PowerShell scripts (#4472)")
+        tool_locs = dp.discover_tool_usage_locations("9.9.9", root)
+        tool_files = {(loc["file"], loc["line"]) for loc in tool_locs}
+        check(("windows-setup.ps1", 5) in tool_files,
+              "finds the version string on the Url line",
+              f"saw {sorted(tool_files)}")
+        check(("windows-setup.ps1", 6) in tool_files,
+              "pairs the Url match with its Sha256 line, which carries no version string of its own",
+              f"saw {sorted(tool_files)}")
+
+        print("claude-code-cli (#4472)")
+        cli = dp.discover_claude_code_cli(root)
+        check(len(cli) == 1 and cli[0]["current"] == "1.2.3",
+              "reads the ARG CLAUDE_CODE_VERSION pin", f"saw {cli}")
+        cli_files = {loc["file"] for loc in cli[0]["locations"]} if cli else set()
+        check(".devcontainer/Dockerfile" in cli_files,
+              "still covers its own ARG declaration", f"saw {sorted(cli_files)}")
+        check("windows-setup.ps1" in cli_files,
+              "covers windows-setup.ps1's $ClaudeCodeVersion usage",
+              f"saw {sorted(cli_files)}")
 
         print("base images")
         names = {p["name"] for p in images}
@@ -179,6 +337,8 @@ def main() -> int:
         check(dp.discover_base_images(bare) == [], "no Dockerfiles -> no docker pins")
         check(dp.discover_npm_packages(bare) == [], "no package.json -> no npm pins")
         check(dp.discover_go_modules(bare) == [], "no requires -> no gomod pins")
+
+    check_completeness_against_real_repo()
 
     print()
     if FAILURES:
