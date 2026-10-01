@@ -176,18 +176,6 @@ packages:
       features/controller/directory; the fix is a caller two levels up in
       features/controller/server / cmd/controller, not in this package.
 
-  - path: pkg/configrouting
-    reason: >
-      WIRE (Issue #4345): SyncService (root package only — the
-      interfaces/providers subpackages are already live). Fully
-      implemented and tested background config-source polling; its trigger
-      interface is implemented by exactly one production type,
-      controllerRouter in pkg/configrouting/providers/controller, built
-      specifically to satisfy it per that file's own doc comment. Never
-      constructed by features/controller/service/config_service_v2.go or
-      features/controller/server/server.go — a "Phase 3" wiring the
-      original PR (#1410) deferred and nothing since has picked up.
-
   - path: features/saas
     reason: >
       WIRE (Issue #4345): multi-tenant SaaS provider/JWT/OAuth2

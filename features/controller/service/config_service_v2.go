@@ -22,10 +22,12 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/config"
+	configroutingiface "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -254,6 +256,27 @@ func mergeTagsIntoAttrs(attrs map[string]string, ctrlTags []string) map[string]s
 	return merged
 }
 
+// ConfigServiceOption configures optional dependencies for NewConfigurationServiceV2.
+type ConfigServiceOption func(*configServiceOptions)
+
+type configServiceOptions struct {
+	gitSecretStore secretsiface.SecretStore
+	gitWorkDir     string
+}
+
+// WithGitRouter enables git-sourced tenant config routing (Issue #4408). secretStore
+// supplies git credentials at transport time; gitWorkDir is the base directory for
+// cloned repositories. Without this option the constructed router only ever serves
+// the controller store — storeForSource returns the controller store whenever
+// either dependency is absent — so SyncTenantWithRemote silently no-ops for every
+// tenant, which is the pre-Issue-#4408 (and still default) behavior.
+func WithGitRouter(secretStore secretsiface.SecretStore, gitWorkDir string) ConfigServiceOption {
+	return func(o *configServiceOptions) {
+		o.gitSecretStore = secretStore
+		o.gitWorkDir = gitWorkDir
+	}
+}
+
 // FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
 // tenantID matches the authenticated tenant that issued the write; cfgID is the steward
 // config identifier. The callback must not block — hand off expensive work to a goroutine.
@@ -272,6 +295,7 @@ type ConfigurationServiceV2 struct {
 	fanoutCallback      FanoutCallback
 	callbackMu          sync.RWMutex
 	routerCloser        func() // stops the router's background cache goroutine
+	router              configroutingiface.ConfigSourceRouter
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
@@ -281,11 +305,30 @@ type ConfigurationServiceV2 struct {
 // When controllerSvc is non-nil, cluster-policies cascade is enabled via a
 // clusterRegistryAdapter that derives membership from the live in-memory fleet state
 // (eventually consistent; see Issue #2425).
-func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService) *ConfigurationServiceV2 {
-	router := controllerrouter.NewControllerRouter(
-		storageManager.GetConfigStore(),
-		storageManager.GetTenantStore(),
-	)
+// Pass WithGitRouter to construct a git-capable router (Issue #4408) — required for
+// configrouting.SyncService's periodic polling to reach a real git remote; without it
+// the router only ever serves the controller store.
+func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService, opts ...ConfigServiceOption) *ConfigurationServiceV2 {
+	var options configServiceOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var router configroutingiface.ConfigSourceRouter
+	if options.gitSecretStore != nil && options.gitWorkDir != "" {
+		router = controllerrouter.NewControllerRouterWithGit(
+			storageManager.GetConfigStore(),
+			storageManager.GetTenantStore(),
+			options.gitSecretStore,
+			options.gitWorkDir,
+			logger,
+		)
+	} else {
+		router = controllerrouter.NewControllerRouter(
+			storageManager.GetConfigStore(),
+			storageManager.GetTenantStore(),
+		)
+	}
 
 	var ir *config.InheritanceResolver
 	if controllerSvc != nil {
@@ -311,11 +354,20 @@ func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
+		router:              router,
 	}
 	if c, ok := router.(interface{ Close() }); ok {
 		svc.routerCloser = c.Close
 	}
 	return svc
+}
+
+// ConfigSourceRouter returns the router backing this service, for wiring into
+// configrouting.SyncService's periodic git-tenant polling (Issue #4408). The
+// returned router is git-capable only when NewConfigurationServiceV2 was built
+// with WithGitRouter.
+func (s *ConfigurationServiceV2) ConfigSourceRouter() configroutingiface.ConfigSourceRouter {
+	return s.router
 }
 
 // Close stops the router's background cache cleanup goroutine. Safe to call multiple times.
