@@ -29,8 +29,7 @@ modules/
 ├── extended/                # On-demand modules pulled per ADR-006
 │   ├── acme/
 │   ├── activedirectory/
-│   ├── github_runner/
-│   └── network_activedirectory/
+│   └── github_runner/
 ├── adapter/                 # gRPC adapter (unaffected by stdlib/extended split)
 └── hyperv/                  # Under active development (epic #2418; not split)
 ```
@@ -362,7 +361,6 @@ by a steward) and have no steward-pull DNA observation path (see Workflow module
 | `acme` | extended (steward) | `os=linux\|darwin\|windows` | Bounded: ACME cert-store enumeration; applicable on any steward OS |
 | `activedirectory` | extended (steward) | `os=windows` | Bounded: local AD objects via ADSI; Windows-exclusive interface |
 | `github_runner` | extended (steward) | `os=linux\|windows` | Bounded: runner install state + service state; active on supported platforms |
-| `network_activedirectory` | extended (steward→outpost) | omitted | Remote AD objects via LDAP: no steward DNA fact indicates AD connectivity; domain does not fit local host-state inventory model; outpost relocation candidate (ADR-024 §3) |
 | `osquery` | extended (steward) | omitted (pending) | Bounded, inventory-worthy domain via curated osquery queries (host:cpu/memory/os/bios); observe_when predicate will be added by the ADR-024 epic |
 
 ### Current stdlib members
@@ -391,8 +389,6 @@ CFGMS-authored but used on only a subset of the fleet; built as standalone bundl
 - `osquery` - Read-only host fact observation via the osquery binary; serves the four curated fact domains `host:cpu`, `host:memory`, `host:os`, and `host:bios`. osquery is never a managed authority — `Set()` permanently returns `ErrNotImplemented`. Before every osquery invocation the module re-verifies the installed bundle rather than trusting the pull-time check alone: `StewardTrustEnforcer.VerifyForLoad` applies `module_trust.mode` and the publisher signature, then `bundle.VerifyInstalledContent` re-derives the content hash from the files on disk and compares it to that signed hash. The module defines no trust scheme of its own; both primitives are the shared ADR-006 ones in `pkg/modules/trust` and `pkg/modules/bundle`. Part of epic #2855 (osquery integration — observe-only host facts via curated allowlist + ad-hoc fleet queries).
 
 **Outpost modules:**
-
-- `network_activedirectory` - Network-based AD integration via LDAP (outpost)
 
 **Workflow modules:**
 
