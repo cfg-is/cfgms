@@ -18,10 +18,12 @@ Discovery sources:
   sits at the root and was invisible to the earlier globs, so a toolchain bump
   left the image that runs the integration suites on the old Go version.
 - **/*.ps1            — every PowerShell script in the repo (windows-setup.ps1
-  today). Tool-pin and Claude Code CLI version strings are grepped here the
-  same as the other install-surface files; a matched `Url = '...'` line also
-  pulls in its paired `Sha256 = '...'` line, which carries no version string
-  of its own to grep for.
+  today). Tool-pin version strings are grepped here the same as the other
+  install-surface files; a matched `Url = '...'` line also pulls in its
+  paired `Sha256 = '...'` line, which carries no version string of its own to
+  grep for. Claude Code CLI is NOT grepped here — it is exempt from pin
+  tracking entirely (founder decision 2026-10-01, Issue #4473; see
+  references/cooldown-policy.md "Claude Code CLI exemption").
 - go.mod require blocks — every DIRECT module requirement, `kind: "gomod"`.
   Indirect requirements are deliberately not enumerated (334 of them here);
   their versions are chosen by MVS rather than by us, so the actionable signal
@@ -423,50 +425,17 @@ def discover_go_toolchain(root: Path) -> dict:
     }
 
 
-def discover_claude_code_cli(root: Path) -> list[dict]:
-    """Claude Code CLI pin — `ARG CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile.
-
-    dependency-pin-check.yml does check this pin's freshness, but through a bespoke
-    npm dist-tags block rather than a `check_version` declaration, so
-    discover_tool_pins() — which parses only `check_version` lines — never saw it.
-    The sweep was therefore blind to a pin CI actively tracks. Same root shape as
-    the Go toolchain, which needed its own discoverer for the same reason.
-
-    The version is read from the Dockerfile, matching where
-    dependency-pin-check.yml reads it from, so the two can never disagree about
-    what the image installs. Nothing here hardcodes a version.
-
-    Returns a list so a missing or renamed ARG yields [] rather than a bogus entry
-    with current="unknown" — the workflow already warns loudly in that case, and a
-    silent placeholder in the inventory would invite a story to "bump" a pin that
-    no longer exists.
-    """
-    dockerfile = root / ".devcontainer" / "Dockerfile"
-    if not dockerfile.exists():
-        return []
-
-    arg_re = re.compile(r"^ARG\s+CLAUDE_CODE_VERSION=(\S+)")
-    for i, line in enumerate(dockerfile.read_text().splitlines(), 1):
-        m = arg_re.match(line)
-        if not m:
-            continue
-        version = m.group(1)
-        # discover_tool_usage_locations() already includes
-        # .devcontainer/Dockerfile in its own search_files, so this single
-        # call also recovers the ARG line above — no separate entry needed,
-        # and it picks up every other install/usage site (e.g.
-        # windows-setup.ps1's $ClaudeCodeVersion) the same way a dependency-
-        # pin-check.yml tool pin does.
-        return [{
-            "name": "claude-code-cli",
-            "kind": "npm",
-            "current": version,
-            "release_source": "https://registry.npmjs.org/@anthropic-ai/claude-code",
-            "ecosystem": "NPM",
-            "package": "@anthropic-ai/claude-code",
-            "locations": discover_tool_usage_locations(version, root),
-        }]
-    return []
+# NOTE: there is deliberately no discover_claude_code_cli() here. Claude Code
+# CLI is exempt from pin tracking entirely (founder decision 2026-10-01,
+# Issue #4473; see references/cooldown-policy.md "Claude Code CLI
+# exemption") — .devcontainer/Dockerfile and windows-setup.ps1 both resolve
+# npm's `stable` dist-tag at build/setup time instead of naming a version, so
+# there is no version string left for a discoverer to find or a bump story to
+# target. A prior version of this script had a discoverer for `ARG
+# CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile; that ARG no longer
+# exists, having been replaced by the unrelated `CLAUDE_CODE_VERSION_OVERRIDE`
+# build-arg, which pins one exact release rather than declaring the tracked
+# version and is itself out of scope for pin discovery.
 
 
 #: A PowerShell verified-download block (windows-setup.ps1) pairs a version-
@@ -761,7 +730,6 @@ def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
-    inventory.extend(discover_claude_code_cli(root))
     inventory.extend(discover_github_actions(root))
     inventory.extend(discover_mcp_pins(root))
     inventory.extend(discover_base_images(root))

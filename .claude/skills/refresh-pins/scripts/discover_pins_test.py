@@ -100,15 +100,6 @@ def make_repo(tmp: Path) -> Path:
         "        Member = 'sometool.exe'\n"
         "    }\n"
         ")\n"
-        "$ClaudeCodeVersion = '1.2.3'\n"
-    )
-
-    # .devcontainer/Dockerfile: the Claude Code CLI ARG pin, whose
-    # discoverer must also find windows-setup.ps1's $ClaudeCodeVersion line.
-    (root / ".devcontainer").mkdir(parents=True)
-    (root / ".devcontainer/Dockerfile").write_text(
-        "ARG CLAUDE_CODE_VERSION=1.2.3\n"
-        "RUN npm install -g \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\"\n"
     )
 
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -176,11 +167,11 @@ def check_completeness_against_real_repo() -> None:
     commented-out example referencing a version is not a location that needs
     to move in lockstep.
 
-    Scope: go-toolchain, every dependency-pin-check.yml tool pin, and
-    claude-code-cli — the pins whose locations[] comes from grepping a literal
-    version string across a fixed file set, built by discover_go_toolchain(),
-    discover_tool_pins() and discover_claude_code_cli(). Only this class
-    carries a "missed occurrence" risk: the grep's file-class universe can
+    Scope: go-toolchain and every dependency-pin-check.yml tool pin — the
+    pins whose locations[] comes from grepping a literal version string
+    across a fixed file set, built by discover_go_toolchain() and
+    discover_tool_pins(). Only this class carries a "missed occurrence" risk:
+    the grep's file-class universe can
     silently fall out of step with where the string actually appears, which is
     exactly the #4472 bug (windows-setup.ps1 and a workflow pre-pull line
     weren't in the search set at all). Every other kind (gomod, npm, docker,
@@ -195,7 +186,6 @@ def check_completeness_against_real_repo() -> None:
 
     pins = [dp.discover_go_toolchain(root)]
     pins.extend(dp.discover_tool_pins(root))
-    pins.extend(dp.discover_claude_code_cli(root))
     universe = _completeness_universe(root)
 
     for pin in pins:
@@ -252,16 +242,19 @@ def main() -> int:
               "pairs the Url match with its Sha256 line, which carries no version string of its own",
               f"saw {sorted(tool_files)}")
 
-        print("claude-code-cli (#4472)")
-        cli = dp.discover_claude_code_cli(root)
-        check(len(cli) == 1 and cli[0]["current"] == "1.2.3",
-              "reads the ARG CLAUDE_CODE_VERSION pin", f"saw {cli}")
-        cli_files = {loc["file"] for loc in cli[0]["locations"]} if cli else set()
-        check(".devcontainer/Dockerfile" in cli_files,
-              "still covers its own ARG declaration", f"saw {sorted(cli_files)}")
-        check("windows-setup.ps1" in cli_files,
-              "covers windows-setup.ps1's $ClaudeCodeVersion usage",
-              f"saw {sorted(cli_files)}")
+        print("claude-code-cli exemption (#4473)")
+        check(not hasattr(dp, "discover_claude_code_cli"),
+              "Claude Code CLI has no discoverer — it is exempt from pin "
+              "tracking entirely, not just unpinned in this fixture",
+              "discover_claude_code_cli still exists; re-check "
+              "references/cooldown-policy.md \"Claude Code CLI exemption\" "
+              "before reintroducing it")
+        inventory_names = {
+            pin["name"] for pin in dp.discover_tool_pins(root)
+        } | {pin["name"] for pin in dp.discover_npm_packages(root)}
+        check("claude-code-cli" not in inventory_names,
+              "no inventory source emits a claude-code-cli pin",
+              f"saw {sorted(inventory_names)}")
 
         print("base images")
         names = {p["name"] for p in images}
