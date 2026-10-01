@@ -176,18 +176,6 @@ packages:
       module-wiring story — deleting it would strand that tree's only
       tenant-auth layer.
 
-  - path: features/steward/modules/runtime
-    reason: >
-      WIRE (Issue #4345): steward-kind out-of-process module runtime
-      (fork/exec, gRPC handshake, publisher-trust enforcement). Recently
-      security-hardened (Issue #1905, socket dir mode 0700), with real
-      integration tests against a compiled test module binary — not
-      abandoned. docs/architecture/decisions/019-third-party-module-inclusion-and-trust.md
-      names this exact gap explicitly: "Today it cannot [fork/exec signed
-      bundles] (compiled-in built-ins). Wiring the bundle runtime ... is a
-      prerequisite owned by the module-foundation epic (ADR-016)." Missing
-      only a call site in cmd/steward's startup path.
-
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
   # --- classification comment, pending PO creation. Deleting any of these ---
