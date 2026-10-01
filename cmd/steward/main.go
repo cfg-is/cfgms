@@ -1462,27 +1462,34 @@ func connectWithApprovedRegistration(
 	dnaAdapter := newDNACollectorAdapter(logger, nil)
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:               reg.TransportAddress,
-		ControllerHTTPSBaseURL:      resolveControllerHTTPSBaseURL(logger),
-		RegistrationToken:           token,
-		CACertPEM:                   reg.CACert,
-		ClientCertPEM:               reg.ClientCert,
-		ServerCertPEM:               reg.ServerCert,
-		CertManager:                 certMgr,
-		SecretStore:                 secretStore,
-		SignedCommandReplayWindow:   commandReplayWindow,
-		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
-		ScriptSigning:               scriptSigning,
-		ModuleTrustMode:             runtimeCfg.Steward.ModuleTrust.Mode,
-		PublicBeta:                  publicBeta,
-		CertStoreDir:                certStoreDir,
-		UpgradeAllowDowngrade:       upgradeAllowDowngrade,
-		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
-		DNARefreshInterval:          dnaRefreshInterval,
-		DNACollector:                dnaAdapter,
-		ObserveSweepN:               observeSweepN,
-		ObserveModuleLoader:         newObserveModuleLoader(reg.StewardID, secretStore, logger),
-		Logger:                      logger,
+		ControllerURL:                   reg.TransportAddress,
+		ControllerHTTPSBaseURL:          resolveControllerHTTPSBaseURL(logger),
+		RegistrationToken:               token,
+		CACertPEM:                       reg.CACert,
+		ClientCertPEM:                   reg.ClientCert,
+		ServerCertPEM:                   reg.ServerCert,
+		CertManager:                     certMgr,
+		SecretStore:                     secretStore,
+		SignedCommandReplayWindow:       commandReplayWindow,
+		SignedCommandMaxParamsBytes:     commandMaxParamsBytes,
+		ScriptSigning:                   scriptSigning,
+		ModuleTrustMode:                 runtimeCfg.Steward.ModuleTrust.Mode,
+		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
+		PublicBeta:                      publicBeta,
+		CertStoreDir:                    certStoreDir,
+		UpgradeAllowDowngrade:           upgradeAllowDowngrade,
+		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:              dnaRefreshInterval,
+		DNACollector:                    dnaAdapter,
+		ObserveSweepN:                   observeSweepN,
+		ObserveModuleLoader: newObserveModuleLoader(
+			reg.StewardID,
+			secretStore,
+			runtimeCfg.Steward.ModuleTrust.Mode,
+			runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
+			logger,
+		),
+		Logger: logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
 			if loadErr != nil {
@@ -1613,28 +1620,35 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	dnaAdapterReconnect := newDNACollectorAdapter(logger, nil)
 
 	transportClient, err := client.NewTransportClient(&client.TransportConfig{
-		ControllerURL:               id.TransportAddress,
-		ControllerHTTPSBaseURL:      resolveControllerHTTPSBaseURL(logger),
-		RegistrationToken:           token,
-		CACertPEM:                   id.CACertPEM,
-		ServerCertPEM:               id.ServerCertPEM,
-		SigningCertPEM:              id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
-		SigningCertPEMs:             id.SigningCertPEMs, // Issue #1816: mutable rotation set
-		CertManager:                 certMgr,
-		SecretStore:                 secretStore,
-		SignedCommandReplayWindow:   commandReplayWindow,
-		SignedCommandMaxParamsBytes: commandMaxParamsBytes,
-		ScriptSigning:               runtimeCfg.Steward.ScriptSigning,
-		ModuleTrustMode:             runtimeCfg.Steward.ModuleTrust.Mode,
-		PublicBeta:                  publicBeta,
-		CertStoreDir:                certStoreDir,
-		UpgradeAllowDowngrade:       upgradeAllowDowngradeReconnect,
-		UpgradePublisherTrustStore:  buildTestPublisherTrustStore(logger),
-		DNARefreshInterval:          dnaRefreshIntervalReconnect,
-		DNACollector:                dnaAdapterReconnect,
-		ObserveSweepN:               observeSweepNReconnect,
-		ObserveModuleLoader:         newObserveModuleLoader(id.StewardID, secretStore, logger),
-		Logger:                      logger,
+		ControllerURL:                   id.TransportAddress,
+		ControllerHTTPSBaseURL:          resolveControllerHTTPSBaseURL(logger),
+		RegistrationToken:               token,
+		CACertPEM:                       id.CACertPEM,
+		ServerCertPEM:                   id.ServerCertPEM,
+		SigningCertPEM:                  id.SigningCertPEM,  // backward compat seed; seeded into SigningCertPEMs in NewTransportClient when SigningCertPEMs is empty
+		SigningCertPEMs:                 id.SigningCertPEMs, // Issue #1816: mutable rotation set
+		CertManager:                     certMgr,
+		SecretStore:                     secretStore,
+		SignedCommandReplayWindow:       commandReplayWindow,
+		SignedCommandMaxParamsBytes:     commandMaxParamsBytes,
+		ScriptSigning:                   runtimeCfg.Steward.ScriptSigning,
+		ModuleTrustMode:                 runtimeCfg.Steward.ModuleTrust.Mode,
+		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
+		PublicBeta:                      publicBeta,
+		CertStoreDir:                    certStoreDir,
+		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
+		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
+		DNARefreshInterval:              dnaRefreshIntervalReconnect,
+		DNACollector:                    dnaAdapterReconnect,
+		ObserveSweepN:                   observeSweepNReconnect,
+		ObserveModuleLoader: newObserveModuleLoader(
+			id.StewardID,
+			secretStore,
+			runtimeCfg.Steward.ModuleTrust.Mode,
+			runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
+			logger,
+		),
+		Logger: logger,
 		IdentityPersistFunc: func(pems []string, at *time.Time) error {
 			cur, loadErr := loadIdentity(certStoreDir)
 			if loadErr != nil {
@@ -1732,7 +1746,13 @@ func buildTestPublisherTrustStore(logger logging.Logger) trust.TrustStore {
 //
 // The secret store is injected so observe modules implementing SecretStoreInjectable
 // are usable without a separate wiring path.
-func newObserveModuleLoader(stewardID string, secretStore secretsif.SecretStore, logger logging.Logger) *factory.ModuleFactory {
+func newObserveModuleLoader(
+	stewardID string,
+	secretStore secretsif.SecretStore,
+	moduleTrustMode stewardconfig.ModuleTrustMode,
+	moduleTrustAdditionalPublishers []string,
+	logger logging.Logger,
+) *factory.ModuleFactory {
 	errCfg := stewardconfig.ErrorHandlingConfig{
 		ModuleLoadFailure:  stewardconfig.ActionContinue,
 		ResourceFailure:    stewardconfig.ActionWarn,
@@ -1742,6 +1762,11 @@ func newObserveModuleLoader(stewardID string, secretStore secretsif.SecretStore,
 	if secretStore != nil {
 		f.SetSecretStore(secretStore)
 	}
+	// Wires installed bundle module loading (Issue #4410) into the Tier-2
+	// observe sweep's own factory. mode/additional_publishers are forwarded
+	// exactly as configured, never hardcoded, so strict-mode verification
+	// (Issue #4426) is honoured here too, not just on the convergence path.
+	f.SetModuleRuntime(factory.NewDefaultModuleRuntime(), moduleTrustMode, moduleTrustAdditionalPublishers)
 	return f
 }
 

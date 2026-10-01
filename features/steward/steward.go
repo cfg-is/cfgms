@@ -197,6 +197,17 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 	}
 	moduleFactory.SetMaintenanceGate(maintenanceGate)
 
+	// Wire the module runtime so LoadModule can resolve an installed bundle
+	// when no built-in matches (Issue #4410). mode and additional_publishers
+	// are forwarded from steward.cfg's module_trust config exactly as loaded —
+	// never hardcoded — so strict-mode verification (Issue #4426) is honoured
+	// end to end.
+	moduleFactory.SetModuleRuntime(
+		factory.NewDefaultModuleRuntime(),
+		cfg.Steward.ModuleTrust.Mode,
+		cfg.Steward.ModuleTrust.AdditionalPublishers,
+	)
+
 	// Create state comparator for configuration drift detection
 	comparator := stewardtesting.NewStateComparator()
 

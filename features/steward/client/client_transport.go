@@ -45,6 +45,7 @@ import (
 	dna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
+	"github.com/cfgis/cfgms/features/steward/factory"
 	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	"github.com/cfgis/cfgms/pkg/cert"
@@ -228,6 +229,14 @@ type TransportClient struct {
 	// comment for why the revocation-manifest fetch (Issue #4400) reuses it rather
 	// than taking its own configuration knob.
 	moduleTrustMode stewardtypes.ModuleTrustMode
+
+	// moduleTrustAdditionalPublishers mirrors
+	// TransportConfig.ModuleTrustAdditionalPublishers — steward.cfg's
+	// module_trust.additional_publishers, forwarded to every executor's
+	// auto-created ModuleFactory so strict-mode bundle verification (Issue
+	// #4410/#4426) sees the same additional-publisher list every other
+	// module_trust consumer does.
+	moduleTrustAdditionalPublishers []string
 
 	commandReplayWindow   time.Duration
 	commandMaxParamsBytes int
@@ -554,6 +563,14 @@ type TransportConfig struct {
 	// default for an unset mode.
 	ModuleTrustMode stewardtypes.ModuleTrustMode
 
+	// ModuleTrustAdditionalPublishers is steward.cfg's
+	// module_trust.additional_publishers — publisher names trusted in addition
+	// to the baked-in CFGMS identity, consulted only when ModuleTrustMode is
+	// "strict". Forwarded to every executor's auto-created ModuleFactory so
+	// installed-bundle loading (Issue #4410) honours the same list
+	// StewardTrustEnforcer.VerifyForLoad does.
+	ModuleTrustAdditionalPublishers []string
+
 	// PublicBeta enables the fail-closed connected-execution contract. It
 	// requires signed ad-hoc commands and a valid, loaded controller CA root.
 	// Development and tests must opt out explicitly by leaving this false.
@@ -715,36 +732,37 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 	}
 
 	c := &TransportClient{
-		heartbeatInterval:          heartbeatInterval,
-		rng:                        rng,
-		heartbeatStop:              make(chan struct{}),
-		convergenceStop:            make(chan struct{}),
-		dnaRefreshStop:             make(chan struct{}),
-		convergeInterval:           30 * time.Minute,
-		convergeIntervalCh:         make(chan struct{}, 1),
-		dnaRefreshInterval:         dnaRefreshInterval,
-		dnaCollector:               cfg.DNACollector,
-		transportAddress:           cfg.ControllerURL,
-		controllerHTTPSBaseURL:     cfg.ControllerHTTPSBaseURL,
-		certPath:                   cfg.TLSCertPath,
-		caCertPEM:                  cfg.CACertPEM,
-		serverCertPEM:              cfg.ServerCertPEM,
-		signingCertPEMs:            signingCertPEMs,
-		certManager:                cfg.CertManager,
-		offlineQueue:               offlineQueue,
-		commandReplayWindow:        cfg.SignedCommandReplayWindow,
-		commandMaxParamsBytes:      cfg.SignedCommandMaxParamsBytes,
-		scriptSigning:              cfg.ScriptSigning,
-		moduleTrustMode:            cfg.ModuleTrustMode,
-		publicBeta:                 cfg.PublicBeta,
-		identityPersistFunc:        cfg.IdentityPersistFunc,
-		secretStore:                cfg.SecretStore,
-		certStoreDir:               cfg.CertStoreDir,
-		fenceRatchet:               fenceRatchet,
-		termRatchetSet:             ratchetSet,
-		highestTermSeen:            highestTermSeen,
-		upgradeAllowDowngrade:      cfg.UpgradeAllowDowngrade,
-		upgradePublisherTrustStore: cfg.UpgradePublisherTrustStore,
+		heartbeatInterval:               heartbeatInterval,
+		rng:                             rng,
+		heartbeatStop:                   make(chan struct{}),
+		convergenceStop:                 make(chan struct{}),
+		dnaRefreshStop:                  make(chan struct{}),
+		convergeInterval:                30 * time.Minute,
+		convergeIntervalCh:              make(chan struct{}, 1),
+		dnaRefreshInterval:              dnaRefreshInterval,
+		dnaCollector:                    cfg.DNACollector,
+		transportAddress:                cfg.ControllerURL,
+		controllerHTTPSBaseURL:          cfg.ControllerHTTPSBaseURL,
+		certPath:                        cfg.TLSCertPath,
+		caCertPEM:                       cfg.CACertPEM,
+		serverCertPEM:                   cfg.ServerCertPEM,
+		signingCertPEMs:                 signingCertPEMs,
+		certManager:                     cfg.CertManager,
+		offlineQueue:                    offlineQueue,
+		commandReplayWindow:             cfg.SignedCommandReplayWindow,
+		commandMaxParamsBytes:           cfg.SignedCommandMaxParamsBytes,
+		scriptSigning:                   cfg.ScriptSigning,
+		moduleTrustMode:                 cfg.ModuleTrustMode,
+		moduleTrustAdditionalPublishers: cfg.ModuleTrustAdditionalPublishers,
+		publicBeta:                      cfg.PublicBeta,
+		identityPersistFunc:             cfg.IdentityPersistFunc,
+		secretStore:                     cfg.SecretStore,
+		certStoreDir:                    cfg.CertStoreDir,
+		fenceRatchet:                    fenceRatchet,
+		termRatchetSet:                  ratchetSet,
+		highestTermSeen:                 highestTermSeen,
+		upgradeAllowDowngrade:           cfg.UpgradeAllowDowngrade,
+		upgradePublisherTrustStore:      cfg.UpgradePublisherTrustStore,
 		// Self-exit after a pushed-upgrade swap only when a launcher is supervising
 		// this process (it sets EnvStewardLauncherManaged=1 on its child). (Issue #2003)
 		launcherManaged:     os.Getenv(version.EnvStewardLauncherManaged) == "1",
@@ -797,6 +815,14 @@ func (c *TransportClient) InitializeConfigExecutor(tenantID string) error {
 		SecretStore:       c.secretStore,
 		StewardID:         stewardID,
 		ModuleDNASnapshot: moduleDNAStore,
+		// Wires installed bundle module loading (Issue #4410) into the factory
+		// NewExecutor auto-creates for this — the controller-connected —
+		// steward path, which sets no Factory field of its own. mode and
+		// additional_publishers are forwarded exactly as configured, never
+		// hardcoded, so strict-mode verification (Issue #4426) is honoured.
+		ModuleRuntime:        factory.NewDefaultModuleRuntime(),
+		ModuleTrustMode:      c.moduleTrustMode,
+		AdditionalPublishers: c.moduleTrustAdditionalPublishers,
 		// Explicit rather than relying on executor.go's 120s fallback (Issue
 		// #3801): now that sync_config's ApplyConfiguration/StartMonitors run
 		// under a context with no command-level deadline (see the

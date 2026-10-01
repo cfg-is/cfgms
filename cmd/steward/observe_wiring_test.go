@@ -20,10 +20,10 @@ import (
 // The production observe loader must satisfy the client's loader contract; if the
 // interface changes this fails at compile time rather than silently leaving the
 // sweep unwired.
-var _ client.ObserveModuleLoader = newObserveModuleLoader("steward-1", nil, logging.NewLogger("error"))
+var _ client.ObserveModuleLoader = newObserveModuleLoader("steward-1", nil, stewardconfig.ModuleTrustModeController, nil, logging.NewLogger("error"))
 
 func TestNewObserveModuleLoader_LoadsRealBuiltinModule(t *testing.T) {
-	loader := newObserveModuleLoader("steward-1", nil, logging.NewLogger("error"))
+	loader := newObserveModuleLoader("steward-1", nil, stewardconfig.ModuleTrustModeController, nil, logging.NewLogger("error"))
 	require.NotNil(t, loader)
 
 	mod, err := loader.LoadModule("file")
@@ -32,7 +32,7 @@ func TestNewObserveModuleLoader_LoadsRealBuiltinModule(t *testing.T) {
 }
 
 func TestNewObserveModuleLoader_CachesLoadedInstance(t *testing.T) {
-	loader := newObserveModuleLoader("steward-1", nil, logging.NewLogger("error"))
+	loader := newObserveModuleLoader("steward-1", nil, stewardconfig.ModuleTrustModeController, nil, logging.NewLogger("error"))
 
 	first, err := loader.LoadModule("file")
 	require.NoError(t, err)
@@ -44,7 +44,7 @@ func TestNewObserveModuleLoader_CachesLoadedInstance(t *testing.T) {
 }
 
 func TestNewObserveModuleLoader_UnknownModuleReturnsError(t *testing.T) {
-	loader := newObserveModuleLoader("steward-1", nil, logging.NewLogger("error"))
+	loader := newObserveModuleLoader("steward-1", nil, stewardconfig.ModuleTrustModeController, nil, logging.NewLogger("error"))
 
 	_, err := loader.LoadModule("no-such-observe-module")
 	require.Error(t, err, "an unresolvable module name must surface an error so the sweep can skip it")
