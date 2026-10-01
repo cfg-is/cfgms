@@ -62,19 +62,23 @@ func TestExportTenants_EmitsParentsBeforeChildren(t *testing.T) {
 	if err := ts.Initialize(ctx); err != nil {
 		t.Fatalf("initialize tenant store: %v", err)
 	}
-	for _, tenant := range []*business.TenantData{
+	// Fixed, whole-second-separated CreatedAt values so the store's
+	// created_at-DESC ordering is deterministic: the RFC3339Nano text
+	// encoding of whole-second timestamps has no fractional component, so
+	// the strings stay equal-length and lexicographic order matches
+	// chronological order.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, tenant := range []*business.TenantData{
 		{ID: "hier-root", Name: "root"},
 		{ID: "hier-child", Name: "child", ParentID: "hier-root"},
 		{ID: "hier-leaf", Name: "leaf", ParentID: "hier-child"},
 	} {
 		tenant.Status = business.TenantStatusActive
-		tenant.CreatedAt = time.Now()
-		tenant.UpdatedAt = time.Now()
+		tenant.CreatedAt = base.Add(time.Duration(i) * time.Second)
+		tenant.UpdatedAt = tenant.CreatedAt
 		if err := ts.CreateTenant(ctx, tenant); err != nil {
 			t.Fatalf("create tenant %s: %v", tenant.ID, err)
 		}
-		// Distinct created_at values so the store's ordering is deterministic.
-		time.Sleep(2 * time.Millisecond)
 	}
 
 	// The unsorted store order must be leaf-first, otherwise this test would
