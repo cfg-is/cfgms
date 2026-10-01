@@ -30,6 +30,7 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
    - `WARN:image_age:...` — Image is stale, recommend rebuild
    - `WARN:claude_version:...` — Version mismatch, recommend rebuild
    - `WARN:image_inputs_stale:...` — Image was built from a different revision of `.devcontainer` than this checkout (Dockerfile or a runtime-mounted script changed since the last build); recommend rebuild
+   - `INFO:claude_code_version:...` — the `cfgms.claude_code_version` label on `cfg-agent:latest`: the exact Claude Code release this image installed (Issue #4473 — not a pinned version, so this label is the only record of it)
    - `WARN:creds:...` — Credentials missing
    - If any `WARN:image_age`, `WARN:claude_version`, or `WARN:image_inputs_stale` lines appear, recommend: "Image is stale. Run `/agent-setup rebuild` to refresh Trivy DB, Go modules, and Claude Code."
    - If the only warning is `WARN:creds`, proceed normally (step 5 handles it)
@@ -37,11 +38,22 @@ One-time bootstrap for agent dispatch. Builds the container image, sets up crede
 
 4. **If `$ARGUMENTS` is 'rebuild'**: Force rebuild with `--no-cache` (refreshes Trivy DB and Go modules).
 
-5. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes). The `--label` records the git tree hash of `.devcontainer` at HEAD — the exact set of paths the Dockerfile copies from and every runtime-mounted script (`setup-env.sh`, `review-entrypoint.sh`, `agent-context.sh`, `investigator-entrypoint.sh`) lives under. `agent-dispatch.sh`'s launch paths compare this label against the current checkout before every launch (Issue #4388) and refuse to run a container on a stale image:
+5. **Build agent container image** (use `run_in_background` since this takes 3-5 minutes). The `cfgms.build_inputs_hash` label records the git tree hash of `.devcontainer` at HEAD — the exact set of paths the Dockerfile copies from and every runtime-mounted script (`setup-env.sh`, `review-entrypoint.sh`, `agent-context.sh`, `investigator-entrypoint.sh`) lives under. `agent-dispatch.sh`'s launch paths compare this label against the current checkout before every launch (Issue #4388) and refuse to run a container on a stale image.
+
+   Claude Code is exempt from this image's pin-and-cooldown policy (Issue #4473, founder decision 2026-10-01): resolve npm's current `stable` release first, then pass it as both the `CLAUDE_CODE_VERSION_OVERRIDE` build-arg (so the installed version is pinned to exactly what was resolved, not re-resolved inside the build) and the `cfgms.claude_code_version` label (so it's recorded on the image the same way `cfgms.build_inputs_hash` is):
    ```bash
-   docker build --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" -t cfg-agent:latest -f .devcontainer/Dockerfile .
+   CC_VERSION=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code" | jq -r '.["dist-tags"].stable')
+   docker build --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" -t cfg-agent:latest -f .devcontainer/Dockerfile .
    ```
-   For rebuild: `docker build --no-cache --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" -t cfg-agent:latest -f .devcontainer/Dockerfile .`
+   For rebuild: `docker build --no-cache --label "cfgms.build_inputs_hash=$(git rev-parse HEAD:.devcontainer)" --build-arg "CLAUDE_CODE_VERSION_OVERRIDE=${CC_VERSION}" --label "cfgms.claude_code_version=${CC_VERSION}" -t cfg-agent:latest -f .devcontainer/Dockerfile .`
+
+   This is also how the Claude Code version actually moves forward: there is
+   no automatic trigger — the git-tree-hash staleness gate above only fires
+   on a `.devcontainer/` content change, which a new npm release does not
+   produce. A rebuild (this step, run manually or via `/agent-setup rebuild`)
+   is what picks up a newer release; the `WARN:image_age` (image >= 7 days
+   old) and `WARN:claude_version` (host `claude` newer than the container's)
+   health-check signals below are what prompt one.
 
    While waiting, proceed with steps 6-8 (they're independent).
 

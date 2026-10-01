@@ -101,11 +101,14 @@ wherever they like, and it can sit *below* what is installed:
 | Package | Installed | `latest` | Reality |
 |---|---|---|---|
 | `react-router` | 8.3.0 | 7.18.2 | 8.3.0 *is* current; `version-7` is a maintenance tag |
-| `claude-code-cli` | 2.1.226 | 2.1.232 | but `stable` is 2.1.223, below the pin |
 
 Compare `current` against `wanted`, and read the full `dist-tags` map before
 concluding anything. **Never propose a bump whose target is lower than the
 current version** — resolve the discrepancy instead.
+
+Claude Code CLI is not in this inventory at all — it is exempt from pin
+tracking entirely (see `references/cooldown-policy.md` "Claude Code CLI
+exemption"). Do not create a bump story for it.
 
 Match results back to inventory entries by `package`. A module that appears in
 the `go list` output but not in the inventory is **indirect** — do not create a

@@ -42,6 +42,24 @@ Example:
 
 Claude reads this in Phase 3 and applies the per-pin value when present.
 
+### Claude Code CLI exemption
+
+Claude Code is **exempt from the cooldown — and from pin tracking entirely.**
+Founder decision, 2026-10-01 (Issue #4473): Claude Code ships several
+releases a week, so the standard 3-day cooldown almost always lags what's
+actually shipping — on 2026-10-01, 2.1.285 was held until 2026-10-02 while
+2.1.286 had already shipped. Each lag cost a bump story and a review cycle
+for no supply-chain benefit the other pins get from waiting.
+
+Instead, `.devcontainer/Dockerfile` and `windows-setup.ps1` install npm's
+`stable` dist-tag at build/setup time. There is no pinned version for
+`dependency-pin-check.yml` to compare against upstream, and
+`discover-pins.py` does not emit a `claude-code-cli` inventory entry — do not
+file a bump story for it; there is nothing to bump. The version actually
+installed is still recorded, as the `cfgms.claude_code_version` image label
+(`agent-dispatch.sh health-check` prints it), so a run can always be traced
+to a specific Claude Code version despite none being pinned in source.
+
 ### MCP/agent-tooling pins (kind `mcp`, e.g. serena)
 
 These use the **default 3-day cooldown** for the *version* decision — same few days as any other pin. We deliberately do NOT lengthen the cooldown for them. The extra safety for agent tooling is not a longer wait; it's the **blast-radius classification** in `decision-matrix.md` ("MCP server pins"): a release that renames/removes a tool we consume routes to a human-reviewed **rewire story** (touching the `.claude/agents/*.md` allowlists + prose), not a mechanical bump that could auto-merge. So a non-breaking serena patch refreshes routinely after 3 days, while a breaking one is gated by review regardless of how long it's been out.
