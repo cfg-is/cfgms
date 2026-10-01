@@ -44,13 +44,15 @@ func rejectResourceIDDelimiter(field, value string) error {
 	return nil
 }
 
-// validCrossDomainObjectTypes is the closed set of object types accepted at the
-// two resourceID composition sites where the caller supplies objectType
-// directly into an indexed segment (QueryTrustedDomain, QueryForest). Unlike
-// the other eight composition sites, the "type" segment there is not literal
-// format text, so an injected value doesn't just truncate an id — it changes
-// which type of object the steward is asked about. A closed set closes that
-// off entirely, rather than merely rejecting a delimiter character.
+// validCrossDomainObjectTypes is the closed set of object types accepted at
+// QueryTrustedDomain's resourceID composition site (advanced_operations.go,
+// "query:%s:%s:%s"). It is the one composition site in this package where the
+// caller supplies objectType directly into an indexed segment, so an injected
+// value doesn't just truncate an id — it changes which type of object is
+// named. A closed set closes that off entirely, rather than merely rejecting
+// a delimiter character. QueryForest's objectType is also caller-supplied,
+// but QueryForest never reaches the steward (see QueryForest), so the general
+// delimiter rejection applied there is sufficient.
 var validCrossDomainObjectTypes = map[string]bool{
 	string(interfaces.DirectoryObjectTypeUser):     true,
 	string(interfaces.DirectoryObjectTypeGroup):    true,
