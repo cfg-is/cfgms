@@ -8,11 +8,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -478,42 +479,7 @@ func TestModuleFactoryConstructionSites_AllCallersSetModuleRuntime(t *testing.T)
 	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	require.NoError(t, err)
 
-	cmd := exec.Command("grep", "-rn", "-E", `factory\.New\(|factory\.NewWithStewardID`, "--include=*.go", repoRoot)
-	out, runErr := cmd.Output()
-	if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
-			t.Fatalf("grep failed: %v: %s", runErr, string(out))
-		}
-	}
-
-	type site struct {
-		path string
-		line int
-	}
-	var sites []site
-
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ":", 3)
-		require.Len(t, parts, 3, "unexpected grep output line: %q", line)
-
-		path := parts[0]
-		if strings.HasSuffix(path, "_test.go") {
-			continue // test-only construction is not a production convergence path
-		}
-
-		lineNo, convErr := strconv.Atoi(parts[1])
-		require.NoError(t, convErr)
-
-		if strings.HasPrefix(strings.TrimSpace(parts[2]), "//") {
-			continue // doc-comment example, not a real call site
-		}
-
-		sites = append(sites, site{path: path, line: lineNo})
-	}
-
+	sites := findModuleFactoryConstructionSites(t, repoRoot)
 	require.NotEmpty(t, sites, "expected at least one non-test, non-comment ModuleFactory construction site")
 
 	for _, s := range sites {
@@ -522,6 +488,60 @@ func TestModuleFactoryConstructionSites_AllCallersSetModuleRuntime(t *testing.T)
 			assertEnclosingFunctionSetsModuleRuntime(t, s.path, s.line)
 		})
 	}
+}
+
+type factorySite struct {
+	path string
+	line int
+}
+
+var moduleFactoryConstructionPattern = regexp.MustCompile(`factory\.New\(|factory\.NewWithStewardID`)
+
+// findModuleFactoryConstructionSites walks repoRoot in-process and scans each
+// non-test .go file's lines for a ModuleFactory construction call. It
+// deliberately does not shell out to grep and parse "path:line:text" output:
+// on Windows repoRoot begins with a drive letter (e.g. `D:\a\...`), which
+// collides with grep's own colon-delimited output format and corrupts the
+// parsed line number. Scanning in-process sidesteps that entirely and removes
+// the dependency on a grep binary being present on the runner.
+func findModuleFactoryConstructionSites(t *testing.T, repoRoot string) []factorySite {
+	t.Helper()
+
+	var sites []factorySite
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor", "node_modules":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+
+		for i, line := range strings.Split(string(data), "\n") {
+			if !moduleFactoryConstructionPattern.MatchString(line) {
+				continue
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue // doc-comment example, not a real call site
+			}
+			sites = append(sites, factorySite{path: path, line: i + 1})
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	return sites
 }
 
 // assertEnclosingFunctionSetsModuleRuntime finds the top-level Go function
