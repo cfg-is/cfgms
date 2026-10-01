@@ -124,7 +124,7 @@ if ($goBinDir) {
         @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.1' },
         @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
         @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },
-        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2' }
+        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0' }
     )
 
     foreach ($tool in $goTools) {
