@@ -615,6 +615,29 @@ only when the controller's `dnasync.ClusterMembership` verifier corroborates the
 peer's claimed cluster membership from controller-side state — an unset verifier
 denies every cluster claim and the VM is recorded under its reporting host instead.
 
+Controller startup also constructs two further entity-graph writers against the
+same provider (Issue #4413): `pkg/entitygraph/writers/tenantsync.Writer` mirrors
+the tenant hierarchy as `tenant:*` entities and `contains` edges (ADR-022 §7),
+and `pkg/entitygraph/writers/correlator.Writer` asserts cross-tenant `same-as`
+edges between entities that share a normalized MAC address (ADR-022 §3). Both
+run on a periodic sweep — a tenant-CRUD hook was considered for tenantsync and
+rejected: no hook point exists today at the tenant store's create/update/delete
+call sites, and instrumenting every one would be new plumbing beyond what this
+wiring required. `Server.Start()` starts each sweep (tenant-sync every 5
+minutes, correlator every 15 minutes) via a shared `entityGraphPeriodicSweeper`
+helper parameterized over the sweep function and interval, and `Server.Stop()`
+cancels and drains both before the entity-graph provider closes. Each sweep
+holds its own cluster-singleton lease (`entitygraph-tenantsync`,
+`entitygraph-correlator`) built by `ha.Manager.NewBackgroundLoopLease` and
+invoked through `lease.SingletonJob.RunIfLeader`, so exactly one node sweeps per
+tick (ADR-031 Decision 4). That gate is load-bearing rather than cosmetic: in
+cluster mode the entity graph is a single shared Postgres instance, the
+correlator's sweep is O(fleet size) (ADR-022 §9), and concurrent full-tree
+tenant snapshots would contend on the same claim-scope retraction. Neither writer
+sets `owning_tenant` on the entities or edges it asserts — ADR-022 §7 is
+explicit that authorization never uses graph traversal, so these cross-tenant
+writes change graph structure only, never access control.
+
 ### Heartbeat Monitoring
 
 The controller monitors steward heartbeats to detect connectivity loss:
@@ -1601,10 +1624,41 @@ not make.
 
 Several other loops matching a `time.NewTicker` search were found unwired to any
 production binary (RBAC JIT access-manager cleanup, the SIEM engine's four
-tickers, directory DNA drift/monitoring, `pkg/configrouting.SyncService`, and
-`features/config/git.DefaultGitManager`, superseded by `pkg/gitsync`) — dead
-code, not currently running, so they are out of this story's live-loop count and
-were left untouched.
+tickers, directory DNA drift/monitoring, and `features/config/git.DefaultGitManager`,
+superseded by `pkg/gitsync`) — dead code, not currently running, so they are out
+of this story's live-loop count and were left untouched.
+
+`pkg/configrouting.SyncService` was in that unwired set when this story ran;
+Issue #4408 constructs and runs it from `features/controller/server/server.go`
+afterward (`Start()` calls `Run`, `Stop()` cancels the context `Start()` passed
+it and waits for every per-tenant goroutine to drain). It runs **unleased**: no
+`SingletonJob`/`NewBackgroundLoopLease` gate, so in a cluster deployment every
+node polls and pulls each git-sourced tenant independently rather than once per
+cluster per cycle — the same unconverted shape every loop in this section had
+before Issue #3762, not something #4408 introduced new. `SyncTenantWithRemote`
+is a fast-forward pull that is a no-op when already up to date, so redundant
+per-node polls are wasted work, not a correctness hazard; converting it to the
+per-scope lease pattern `pkg/gitsync.Syncer` already uses is a candidate
+follow-up, not done here (Issue #4408 wires the service as designed — "Out of
+Scope: Changing SyncService's own polling design").
+
+Each git-sourced tenant polls at its own `config_source_poll_interval` tenant
+metadata value, floored to **one minute**: a configured value below one minute
+(including zero or negative) is raised to one minute rather than rejected. An
+absent or unparseable value does not reach the floor at all — `pkg/config`'s
+`ParseConfigSource` falls back to a 5-minute default before `SyncService` ever
+sees it, and 5 minutes is already above the floor. A tenant with no git config
+source is never polled at all — `SyncService` discovers
+git-sourced tenants by walking the tenant hierarchy under its configured root
+(`rootTenantID`, resolved from the controller's "default" bootstrap tenant
+record) and only starts a polling goroutine for tenants whose effective config
+source resolves to `ConfigSourceTypeGit`. On a pull that introduces new
+commits, the service records a `config_source_sync` audit event and invokes
+the same tenant-level cascade recompute that on-request resolution already
+performs for that tenant (`ConfigurationServiceV2.GetEffectiveConfiguration`
+with an empty steward ID) — not the save=deploy steward fan-out, which is a
+separate, write-triggered push registered in
+`features/controller/api/server.go`.
 
 **Tests:** `pkg/lease/singleton_test.go` and
 `pkg/ha/background_loop_lease_test.go` prove the `SingletonJob`/

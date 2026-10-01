@@ -126,6 +126,12 @@ func (m *Manager) SafetyMargin() time.Duration { return m.safetyMargin }
 // LeaseTTL returns this Manager's configured lease TTL.
 func (m *Manager) LeaseTTL() time.Duration { return m.leaseTTL }
 
+// MaxAllowedRenewalLatency returns this Manager's configured budget for how
+// long a single renewal call is allowed to take, including retries, before
+// it must be treated as failed (see the field's doc comment and
+// SingletonJob.renewWithRetry, pkg/lease/singleton.go).
+func (m *Manager) MaxAllowedRenewalLatency() time.Duration { return m.maxAllowedRenewalLatency }
+
 // TryAcquire attempts to claim or renew the lease named name on behalf of
 // holderID. ttl must equal the Manager's configured leaseTTL — the local
 // -authority safety margin is derived from that TTL and is not a valid bound

@@ -71,6 +71,7 @@ import (
 	workflowtrigger "github.com/cfgis/cfgms/features/workflow/trigger"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/configrouting"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
@@ -82,7 +83,9 @@ import (
 	egsqlite "github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	egconfigstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/correlator"
 	"github.com/cfgis/cfgms/pkg/entitygraph/writers/dnasync"
+	"github.com/cfgis/cfgms/pkg/entitygraph/writers/tenantsync"
 	fleetSelector "github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/gitsync"
 	"github.com/cfgis/cfgms/pkg/ha"
@@ -203,6 +206,15 @@ type Server struct {
 	egProvider              egServerProvider                         // Issue #3253: entity graph provider (must be closed on Stop to release DB handle)
 	egClusterMembership     dnasync.ClusterMembership                // Issue #3376: gates cluster authority; nil denies every claim
 	egDNAWriter             *dnasync.Writer                          // Issue #4444: DNA-sync -> entity-graph writer, chained onto the DNA handler in Start()
+	configSyncService       *configrouting.SyncService               // Issue #4408: periodic git-sourced tenant config polling
+	configSyncCancel        context.CancelFunc                       // Issue #4408: cancels configSyncService's Run context on Stop
+	routerSecretStore       secretsif.SecretStore                    // Issue #4408: dedicated secret store for the git-capable config router (separate instance from httpServer's own, closed on Stop)
+	egTenantSyncWriter      *tenantsync.Writer                       // Issue #4413: tenant-hierarchy mirror writer (ADR-022 §7); periodic sweep started in Start()
+	egCorrelatorWriter      *correlator.Writer                       // Issue #4413: MAC-identity correlator writer (ADR-022 §3); periodic sweep started in Start()
+	egTenantSyncSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egCorrelatorSweeper     *entityGraphPeriodicSweeper              // Issue #4413: stopped in Stop() before egProvider closes
+	egTenantSyncLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the tenant-sync sweep (ADR-031 Decision 4)
+	egCorrelatorLeaseJob    lease.SingletonJob                       // Issue #4413: cluster-singleton claim for the correlator sweep (ADR-031 Decision 4)
 }
 
 // egServerProvider is the combined interface the controller server needs for
@@ -214,6 +226,98 @@ type Server struct {
 type egServerProvider interface {
 	eginterfaces.EntityGraphProvider
 	Close() error
+}
+
+// entityGraphTenantSyncSweepInterval and entityGraphCorrelatorSweepInterval are
+// the polling cadences for the tenant-sync and correlator entity-graph writers
+// (Issue #4413). See the cadence-decision comments at each writer's Start()
+// call site for why each is periodic rather than event-driven.
+const (
+	entityGraphTenantSyncSweepInterval = 5 * time.Minute
+	entityGraphCorrelatorSweepInterval = 15 * time.Minute
+)
+
+// entityGraphPeriodicSweeper runs a bound sweep function on a fixed interval
+// until its context is cancelled. It is parameterized over the sweep function
+// and interval rather than any specific writer (Issue #4413), so a future
+// periodic entity-graph writer reuses this type instead of a new scheduler —
+// construct one with a closure over the writer's own method (and whatever
+// extra arguments that method needs, e.g. tenantsync's store) plus an interval.
+//
+// Every tick is gated on leaseJob, the loop's own cluster-singleton lease
+// (ADR-031 Decision 4), exactly as the other controller sweeps are: the entity
+// graph is a SHARED Postgres instance in cluster mode (see
+// initializeEntityGraphProvider), so an ungated loop would run one fleet-sized
+// scan per node against the same database on every tick, and racing full-tree
+// tenant snapshots would retract and re-assert each other's claim scopes.
+type entityGraphPeriodicSweeper struct {
+	name     string
+	interval time.Duration
+	sweep    func(context.Context) error
+	leaseJob lease.SingletonJob
+	logger   logging.Logger
+	cancel   context.CancelFunc
+	done     chan struct{}
+}
+
+// newEntityGraphPeriodicSweeper constructs a sweeper. Start must be called to
+// begin sweeping. leaseJob must come from ha.Manager.NewBackgroundLoopLease
+// (nil-receiver-safe, and a nil lease.Manager inside it means "no shared
+// substrate — always run", matching every other background loop).
+func newEntityGraphPeriodicSweeper(name string, interval time.Duration, sweep func(context.Context) error, leaseJob lease.SingletonJob, logger logging.Logger) *entityGraphPeriodicSweeper {
+	return &entityGraphPeriodicSweeper{name: name, interval: interval, sweep: sweep, leaseJob: leaseJob, logger: logger}
+}
+
+// Start launches the sweep loop as a goroutine deriving its lifetime from ctx.
+// The first sweep fires after one interval, not immediately — each writer
+// already runs once at controller startup implicitly through whatever state
+// is already in the graph, and the periodic sweep exists to keep that state
+// fresh, not to gate startup on a full sweep completing.
+func (p *entityGraphPeriodicSweeper) Start(ctx context.Context) {
+	sweepCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	go p.run(sweepCtx)
+}
+
+func (p *entityGraphPeriodicSweeper) run(ctx context.Context) {
+	defer close(p.done)
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// RunIfLeader is a no-op on every node that does not hold this
+			// loop's lease this cycle, so exactly one node in the cluster
+			// performs the sweep per tick. The context it hands back is
+			// cancelled if the lease is lost mid-sweep, so a long scan stops
+			// writing once authority is gone rather than racing the new holder.
+			p.leaseJob.RunIfLeader(ctx, func(sweepCtx context.Context) {
+				if err := p.sweep(sweepCtx); err != nil {
+					p.logger.Warn("entity graph periodic sweep failed",
+						"sweep", p.name, "error", logging.SanitizeLogValue(err.Error()))
+				}
+			})
+		}
+	}
+}
+
+// Stop cancels the sweep loop and waits, bounded by ctx, for the goroutine to
+// actually exit — not merely for cancellation to be requested — so a caller
+// can assert the goroutine has drained.
+func (p *entityGraphPeriodicSweeper) Stop(ctx context.Context) error {
+	if p.cancel == nil {
+		return nil
+	}
+	p.cancel()
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // resolveDNADataRoot returns an ABSOLUTE directory under which the durable DNA
@@ -260,6 +364,22 @@ func resolveDNADataRoot(cfg *config.Config) string {
 		}
 	}
 	return root
+}
+
+// resolveRootTenantID returns the OSS single-root deployment's bootstrap/root
+// tenant ID ("default" — features/tenant/manager.go, e.g. ErrCannotSuspendDefault),
+// resolved through the tenant store rather than handed to configrouting.NewSyncService
+// as a bare literal. A missing record is logged but does not block startup:
+// SyncService.Run tolerates an unknown root — it enumerates zero git tenants until
+// the record exists, and picks them up on the next Register once it does — so
+// construction order here never depends on tenant bootstrap having already run.
+func resolveRootTenantID(ctx context.Context, tenantStore business.TenantStore, logger logging.Logger) string {
+	const bootstrapRootTenantID = "default"
+	if _, err := tenantStore.GetTenant(ctx, bootstrapRootTenantID); err != nil {
+		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
+			"root_tenant_id", bootstrapRootTenantID)
+	}
+	return bootstrapRootTenantID
 }
 
 // resolveInstallerBlobRoot returns the configured installer artifact root, or
@@ -649,8 +769,53 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	}
 	openedStores = append(openedStores, egProvider.Close)
 
-	// Create the configuration service (V2: durable storage via StorageManager)
-	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	// Issue #4408: dedicated secret store for the git-capable config source router.
+	// A separate instance from the audit signing key store above (closed immediately
+	// after use) and from httpServer's own internal secret store (api.New constructs
+	// that one later, after configService below already exists) — same on-disk
+	// backing (api.NewSecretStore(cfg)), kept open for the router's lifetime and
+	// closed explicitly in Stop().
+	routerSecretStore, routerSecretErr := api.NewSecretStore(cfg)
+	if routerSecretErr != nil {
+		return nil, fmt.Errorf("failed to initialize config router secret store: %w", routerSecretErr)
+	}
+	openedStores = append(openedStores, routerSecretStore.Close)
+
+	gitConfigWorkDir := filepath.Join(resolveDNADataRoot(cfg), "config-git-sources")
+	if mkErr := os.MkdirAll(gitConfigWorkDir, 0750); mkErr != nil {
+		return nil, fmt.Errorf("failed to create config git work directory: %w", mkErr)
+	}
+
+	// Create the configuration service (V2: durable storage via StorageManager).
+	// WithGitRouter makes the router git-capable (Issue #4408): storeForSource can
+	// only reach a *gitprovider.GitConfigStore when it sees a non-nil secret store
+	// and a non-empty git work dir — without both, SyncTenantWithRemote (below)
+	// silently pulls nothing on every tick.
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService,
+		service.WithGitRouter(routerSecretStore, gitConfigWorkDir))
+
+	// Issue #4408: wire the periodic git-sourced tenant config sync service.
+	// rootTenantID is resolved through the tenant store (not inlined) so a missing
+	// bootstrap record is visible at startup; cascadeFn mirrors the tenant-only
+	// cascade that on-request resolution already performs for e.g.
+	// GET /api/v1/tenants/{id}/reboot-window (ConfigurationServiceV2.
+	// GetEffectiveConfiguration's own doc comment calls this a "tenant-only
+	// cascade") — distinct from the save=deploy steward fan-out registered
+	// separately below in features/controller/api/server.go, which is a
+	// write-triggered push, not a cascade recompute.
+	rootTenantID := resolveRootTenantID(context.Background(), storageManager.GetTenantStore(), logger)
+	cascadeFn := func(ctx context.Context, tenantID string) error {
+		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
+		return err
+	}
+	configSyncService := configrouting.NewSyncService(
+		configService.ConfigSourceRouter(),
+		storageManager.GetTenantStore(),
+		auditManager,
+		logger,
+		cascadeFn,
+		rootTenantID,
+	)
 
 	// Create the RBAC service
 	rbacService := service.NewRBACService(rbacManager)
@@ -1573,6 +1738,41 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// controller (else s.egWatchProv stays nil and every /watch request 503s).
 	httpServer.SetEntityGraphWatchProvider(egProvider)
 
+	// Issue #4413: construct the tenant-hierarchy mirror (ADR-022 §7, Issue #3370)
+	// and MAC-identity correlator (ADR-022 §3, Issue #3369) entity graph writers
+	// against the same egProvider. Both were previously standalone-invokable only
+	// (#3253 wired their sibling configstore writer and explicitly deferred these
+	// two). Neither sets owning_tenant — authorization never uses graph traversal
+	// (ADR-022 §7) — so wiring them changes graph structure only, not access
+	// control. Periodic sweep scheduling for both is started in Start().
+	egTenantSyncWriter, egTenantSyncErr := tenantsync.New(egProvider)
+	if egTenantSyncErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph tenantsync writer: %w", egTenantSyncErr)
+	}
+	// Route quarantine warnings (unrepresentable tenant/parent IDs) through the
+	// controller's own logger instead of tenantsync.New's standalone default, so
+	// they reach the same sink as every other startup/runtime log line.
+	egTenantSyncWriter = egTenantSyncWriter.WithLogger(logger)
+	egCorrelatorWriter, egCorrelatorErr := correlator.New(egProvider)
+	if egCorrelatorErr != nil {
+		return nil, fmt.Errorf("failed to initialize entity graph correlator writer: %w", egCorrelatorErr)
+	}
+	// ADR-031 Decision 4: each periodic sweep claims its own cluster-singleton
+	// lease, so only one node sweeps per tick. This matters more here than for
+	// the expiry jobs above: in cluster mode the entity graph is a single shared
+	// Postgres instance, correlator.Correlate is O(fleet size) per sweep
+	// (ADR-022 §9), and tenantsync.Ingest writes a full-tree snapshot whose
+	// claim-scope retraction concurrent writers would contend on.
+	// NewBackgroundLoopLease is nil-receiver-safe.
+	egTenantSyncLeaseJob, egTenantSyncLeaseErr := haManager.NewBackgroundLoopLease("entitygraph-tenantsync", logger)
+	if egTenantSyncLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct entity graph tenantsync sweep lease job: %w", egTenantSyncLeaseErr)
+	}
+	egCorrelatorLeaseJob, egCorrelatorLeaseErr := haManager.NewBackgroundLoopLease("entitygraph-correlator", logger)
+	if egCorrelatorLeaseErr != nil {
+		return nil, fmt.Errorf("failed to construct entity graph correlator sweep lease job: %w", egCorrelatorLeaseErr)
+	}
+
 	// Issue #2098: Wire registration-refresh stores into the HTTP API server so the
 	// challenge/complete endpoints and the admin approve/reject/policy endpoints are
 	// operational. GetStewardStore is always non-nil for the OSS composite (flatfile
@@ -1756,14 +1956,20 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		alertManager:            healthAlertManager,
 		healthTraceManager:      healthTraceManager,
 		storageManager:          storageManager,
-		upgradeStore:            upgradeStore,     // Issue #2464: closed in Stop() to release SQLite handle on Windows
-		tagStore:                tagStoreInstance, // Issue #2542: closed in Stop() to release SQLite handle on Windows
-		sessionStore:            sessionStore,     // Issue #2774: closed in Stop() to release SQLite handle on Windows
-		executionQueue:          executionQueue,   // Issue #1672
-		jobDispatcher:           jobDispatcher,    // Issue #1672
-		ipTrustExpiryJob:        ipTrustExpiryJob, // Issue #1697
-		pendingExpiryJob:        pendingExpiryJob, // Issue #1697
-		egProvider:              egProvider,       // Issue #3253: closed in Stop() to release DB handle
+		upgradeStore:            upgradeStore,         // Issue #2464: closed in Stop() to release SQLite handle on Windows
+		tagStore:                tagStoreInstance,     // Issue #2542: closed in Stop() to release SQLite handle on Windows
+		sessionStore:            sessionStore,         // Issue #2774: closed in Stop() to release SQLite handle on Windows
+		executionQueue:          executionQueue,       // Issue #1672
+		jobDispatcher:           jobDispatcher,        // Issue #1672
+		ipTrustExpiryJob:        ipTrustExpiryJob,     // Issue #1697
+		pendingExpiryJob:        pendingExpiryJob,     // Issue #1697
+		egProvider:              egProvider,           // Issue #3253: closed in Stop() to release DB handle
+		configSyncService:       configSyncService,    // Issue #4408: Run() started in Start(), Stop()ped in Stop()
+		routerSecretStore:       routerSecretStore,    // Issue #4408: closed in Stop()
+		egTenantSyncWriter:      egTenantSyncWriter,   // Issue #4413: periodic sweep started in Start()
+		egCorrelatorWriter:      egCorrelatorWriter,   // Issue #4413: periodic sweep started in Start()
+		egTenantSyncLeaseJob:    egTenantSyncLeaseJob, // Issue #4413: gates the tenant-sync sweep (ADR-031 Decision 4)
+		egCorrelatorLeaseJob:    egCorrelatorLeaseJob, // Issue #4413: gates the correlator sweep (ADR-031 Decision 4)
 	}
 
 	// Issue #4444: build the DNA-sync -> entity-graph writer against the same
@@ -2558,6 +2764,53 @@ func (s *Server) Start() error {
 		}
 	}
 
+	// Start periodic git-sourced tenant config sync (Issue #4408). Run derives its
+	// own lifetime context from syncCtx and is idempotent; cancelling syncCtx (done
+	// in Stop, tied to this exact context) stops every per-tenant polling goroutine
+	// it owns — the mechanism behind "cancelling the controller's context stops the
+	// polling loop."
+	if s.configSyncService != nil {
+		syncCtx, cancel := context.WithCancel(context.Background())
+		s.configSyncCancel = cancel
+		s.configSyncService.Run(syncCtx)
+		s.logger.Info("Config source sync service started (Issue #4408)")
+	}
+
+	// Start the entity-graph tenant-tree mirror's periodic sweep (Issue #4413,
+	// ADR-022 §7). Cadence decision: periodic, not a tenant CRUD hook — no hook
+	// point exists today at the tenant store's create/update/delete call sites,
+	// and adding one to every call site is new plumbing beyond this wiring
+	// story. Ingest's cost is proportional to tenant count, not fleet size, and
+	// a full-tree snapshot is idempotent, so a short bounded interval keeps the
+	// mirror eventually consistent cheaply. Gated on the sweep's own
+	// cluster-singleton lease (ADR-031 Decision 4) so racing full-tree snapshots
+	// from sibling nodes cannot retract and re-assert each other's claim scopes.
+	if s.egTenantSyncWriter != nil {
+		tenantStore := s.storageManager.GetTenantStore()
+		s.egTenantSyncSweeper = newEntityGraphPeriodicSweeper("entitygraph-tenantsync", entityGraphTenantSyncSweepInterval,
+			func(ctx context.Context) error {
+				return s.egTenantSyncWriter.Ingest(ctx, tenantStore)
+			}, s.egTenantSyncLeaseJob, s.logger)
+		s.egTenantSyncSweeper.Start(context.Background())
+		s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
+			"interval", entityGraphTenantSyncSweepInterval)
+	}
+
+	// Start the MAC-identity correlator's periodic sweep (Issue #4413, ADR-022
+	// §3). The correlator has no event source to hook (it correlates across
+	// fleet-wide observations already in the graph), so periodic is the only
+	// viable cadence. Correlate is O(fleet size) per sweep (ADR-022 §9's known
+	// tension), so it is gated on the sweep's own cluster-singleton lease
+	// (ADR-031 Decision 4): without it, an N-node cluster would multiply a
+	// fleet-sized scan of the shared entity graph by N on every tick.
+	if s.egCorrelatorWriter != nil {
+		s.egCorrelatorSweeper = newEntityGraphPeriodicSweeper("entitygraph-correlator", entityGraphCorrelatorSweepInterval,
+			s.egCorrelatorWriter.Correlate, s.egCorrelatorLeaseJob, s.logger)
+		s.egCorrelatorSweeper.Start(context.Background())
+		s.logger.Info("Entity graph correlator periodic sweep started (Issue #4413)",
+			"interval", entityGraphCorrelatorSweepInterval)
+	}
+
 	// Start health collector and alert manager (Story #417)
 	if s.healthCollector != nil {
 		if err := s.healthCollector.Start(context.Background(), 30*time.Second); err != nil {
@@ -2791,6 +3044,24 @@ func (s *Server) Stop() error {
 		}
 	}
 
+	// Stop entity-graph periodic writer sweeps (Issue #4413) before the provider
+	// they write through closes below. Each Stop cancels its sweep loop's context
+	// and waits (bounded) for the goroutine to drain.
+	if s.egTenantSyncSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.egTenantSyncSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop entity graph tenant-sync sweep", "error", err)
+		}
+		stopCancel()
+	}
+	if s.egCorrelatorSweeper != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.egCorrelatorSweeper.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop entity graph correlator sweep", "error", err)
+		}
+		stopCancel()
+	}
+
 	// Close entity graph provider — releases the SQLite or Postgres connection
 	// so temp-directory cleanup succeeds on Windows (Issue #3253).
 	if s.egProvider != nil {
@@ -2832,6 +3103,29 @@ func (s *Server) Stop() error {
 	if s.gitSyncer != nil {
 		s.gitSyncer.Stop()
 		s.logger.Info("git-sync syncer stopped")
+	}
+
+	// Stop periodic git-sourced tenant config sync (Issue #4408). Cancels the
+	// context Start() passed to Run, then waits for every per-tenant polling
+	// goroutine to drain. Must also run before storageManager.Close(): the sync
+	// goroutines read the tenant store and the config router on every tick.
+	if s.configSyncService != nil {
+		if s.configSyncCancel != nil {
+			s.configSyncCancel()
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.configSyncService.Stop(stopCtx); err != nil {
+			s.logger.Warn("Failed to stop config source sync service", "error", err)
+		}
+		stopCancel()
+	}
+
+	// Close the dedicated config-router secret store (Issue #4408) — a separate
+	// instance from httpServer's own, which api.Server.Close releases below.
+	if s.routerSecretStore != nil {
+		if err := s.routerSecretStore.Close(); err != nil {
+			s.logger.Warn("Failed to close config router secret store", "error", err)
+		}
 	}
 
 	// Close the REST API server — releases the public HTTPS listener and the

@@ -2034,7 +2034,7 @@ security-remediation-report:
 # GOLANGCI_LINT_VERSION must match .github/workflows/dependency-pin-check.yml,
 # .github/workflows/golangci-lint.yml, .devcontainer/Dockerfile and
 # windows-setup.ps1.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GO_TOOLCHAIN_VERSION := $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod)
 LINT_TOOLS_BIN := $(HOME)/.cache/cfgms/tools/bin
 

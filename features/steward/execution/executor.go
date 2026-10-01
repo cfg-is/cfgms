@@ -21,6 +21,7 @@ import (
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -80,6 +81,17 @@ type ExecutorConfig struct {
 	// executor it builds so module DNA survives executor re-init on reconnect. Nil
 	// gives the executor a private store (standalone / tests).
 	ModuleDNASnapshot *ModuleDNASnapshot
+
+	// ModuleRuntime, ModuleTrustMode and AdditionalPublishers wire installed
+	// bundle module loading (Issue #4410) into the factory NewExecutor creates
+	// when Factory is nil — the controller-connected steward's path
+	// (features/steward/client.TransportClient sets no Factory field, so this
+	// is the only way that path can ever load a bundle). Ignored when Factory
+	// is supplied — callers wiring their own factory call SetModuleRuntime on
+	// it themselves (see features/steward/steward.go's NewStandalone).
+	ModuleRuntime        *moduleruntime.ModuleRuntime
+	ModuleTrustMode      config.ModuleTrustMode
+	AdditionalPublishers []string
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
@@ -147,6 +159,12 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		if cfg.SecretStore != nil {
 			f.SetSecretStore(cfg.SecretStore)
 		}
+		// Wire the module runtime (Issue #4410) so this auto-created factory —
+		// the one the controller-connected steward actually uses — can resolve
+		// installed bundle modules, not just built-ins. A nil ModuleRuntime is
+		// safe: SetModuleRuntime(nil, ...) simply disables bundle loading,
+		// matching LoadModule's pre-bundle-support behaviour.
+		f.SetModuleRuntime(cfg.ModuleRuntime, cfg.ModuleTrustMode, cfg.AdditionalPublishers)
 	}
 	if comp == nil {
 		comp = stewardtesting.NewStateComparator()

@@ -216,7 +216,7 @@ Modules are the code packages that manage resources. Each resource block in the 
 
 ### Stdlib Modules
 
-The six stdlib modules (`file`, `service`, `package`, `script`, `firewall`, `patch`) ship as out-of-process gRPC binaries bundled in the steward installer. They use the same module contract as third-party modules — publisher-signed bundles, verified by the runtime at load time, invoked via `CFGMS_MODULE_SOCKET`. There are no compiled-in modules; stdlib is governance (installer payload), not implementation.
+The ten stdlib modules (`file`, `service`, `package`, `script`, `firewall`, `patch`, `user`, `cert_trust`, `time`, `hostname` — ADR-016's closed set) are compiled into the steward binary today and load through `ModuleFactory`'s built-in path (`features/steward/factory/factory.go`), not through the out-of-process module runtime described below. Stdlib's status is governance (installer payload, ADR-016), not implementation: nothing about the closed set requires the modules to be compiled in, and converting them to publisher-signed out-of-process bundles — so stdlib and third-party modules share one load path — is tracked separately (ADR-019; Issue #4410's Out of Scope) and has not happened yet.
 
 Because they are part of the installer payload, the stdlib modules load at steward startup without any network access to the controller — a steward can converge against locally-cached cfg using the stdlib set even when the controller is unreachable. The `directory` resource is no longer a separate module: it is the `file` module's `type: directory` variant.
 
@@ -253,9 +253,31 @@ In `strict` mode, the trusted publisher set is:
 
 **Threat model invariant**: a compromised controller cannot push arbitrary modules to stewards running in `strict` mode — the steward rejects any bundle whose publisher key is not in its local trust set, regardless of controller approval.
 
+### Module Resolution: Built-in vs. Installed Bundle (Issue #4410)
+
+`ModuleFactory.LoadModule` resolves a module name in two steps, in order:
+
+1. **Built-in.** The compiled-in stdlib and extended modules (`loadBuiltinModule`). A built-in always wins on a name collision with an installed bundle.
+2. **Installed bundle.** When no built-in matches, the factory looks for an installed bundle on disk and, if found, starts it through the out-of-process module runtime described below and wraps the resulting gRPC session as an ordinary `modules.Module` (`features/modules/adapter.Client`). The convergence loop cannot tell a bundle module apart from a built-in.
+
+A `ModuleFactory` only attempts the second step once a `ModuleRuntime` has been wired in via `SetModuleRuntime` — every production construction site (standalone startup, the controller-connected executor, the Tier-2 observe sweep) wires one. A factory with no runtime configured, or with no installed-bundle directory present, behaves exactly as it did before this path existed: only built-ins resolve.
+
+**Installed-bundle discovery root**, one per platform, matching where the steward installers stage module payloads:
+
+| Platform | Root |
+|----------|------|
+| Windows | `C:\Program Files\CFGMS\modules\` |
+| Linux / macOS | `/usr/local/lib/cfgms/modules/` |
+
+Each installed bundle lives in its own `<name>/` subdirectory under that root (`module.yaml` plus the `bundle.yaml` sidecar — Issue #4425's on-disk layout). Bundle binary paths are root-relative; the factory resolves the current platform's entry to an absolute path before starting it, on a copy of the bundle, so the original `ContentHash` (which covers binary content and the manifest, never the path string) still verifies.
+
+Today this path is exercised by test fixtures only: the installers stage stdlib binaries flat into the same root (`cfgms-module-<name>`, no `module.yaml`, no `<name>/` subdirectory — see Stdlib Modules above), so no installed bundle exists on a real steward yet. Making the installer produce the `<name>/` layout for third-party and extended modules is separate, unfiled work.
+
+The configured `module_trust.mode` and `module_trust.additional_publishers` are forwarded unmodified to every bundle start — trust enforcement (below) applies identically whether the bundle came to rest on disk via a future installer-staged payload or a test fixture.
+
 ### Module Runtime Lifecycle
 
-Out-of-process module binaries are managed by the steward module runtime. Each module runs in a separate process connected over a local socket:
+Out-of-process module binaries — whether started for an installed bundle (above) or, once ADR-019's migration lands, a stdlib module — are managed by the steward module runtime. Each module runs in a separate process connected over a local socket:
 
 **Startup sequence (per module):**
 
@@ -271,6 +293,8 @@ Out-of-process module binaries are managed by the steward module runtime. Each m
 
 1. `stopping` — runtime sends the `Shutdown` RPC; module should exit cleanly
 2. `stopped` — if the module has not exited within **10 seconds** after the `Shutdown` RPC, the runtime kills the process; socket file is removed
+
+Every installed-bundle handle the factory started is tracked and stopped the same way when the steward itself shuts down: `Steward.Stop` calls `ModuleFactory.UnloadAllModules`, which stops each tracked handle before returning, so no bundle module process outlives the steward process that started it.
 
 Trust verification (in `strict` mode) is performed **before** fork/exec. If the bundle fails trust verification, `Start()` returns `ErrPublisherNotTrusted` and no process is started.
 

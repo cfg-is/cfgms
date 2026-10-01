@@ -8,12 +8,22 @@ lockstep bumps.
 
 Discovery sources:
 - go.mod              — Go toolchain directive
-- .github/workflows/  — GO_VERSION env vars, go-version: in setup-go uses
+- .github/workflows/  — GO_VERSION env vars, go-version: in setup-go uses, and
+  `docker pull` / `pull_with_retry` pre-pull steps that warm a golang: base
+  image ahead of the build — these must move in lockstep with the Dockerfile
+  FROM line below but live in a workflow step, not a Dockerfile.
 - **/Dockerfile*      — FROM golang:X tags (toolchain, lockstep) and every other
   base image (alpine, debian, ...) as its own `kind: "docker"` pin. Globbed from
   the repo root, not from cmd/ and .devcontainer/ only: Dockerfile.test-runner
   sits at the root and was invisible to the earlier globs, so a toolchain bump
   left the image that runs the integration suites on the old Go version.
+- **/*.ps1            — every PowerShell script in the repo (windows-setup.ps1
+  today). Tool-pin version strings are grepped here the same as the other
+  install-surface files; a matched `Url = '...'` line also pulls in its
+  paired `Sha256 = '...'` line, which carries no version string of its own to
+  grep for. Claude Code CLI is NOT grepped here — it is exempt from pin
+  tracking entirely (founder decision 2026-10-01, Issue #4473; see
+  references/cooldown-policy.md "Claude Code CLI exemption").
 - go.mod require blocks — every DIRECT module requirement, `kind: "gomod"`.
   Indirect requirements are deliberately not enumerated (334 of them here);
   their versions are chosen by MVS rather than by us, so the actionable signal
@@ -86,6 +96,23 @@ def all_dockerfiles(root: Path) -> list[Path]:
     """
     out: list[Path] = []
     for f in sorted(root.glob("**/Dockerfile*")):
+        if _VENDOR_DIRS & set(f.parts):
+            continue
+        if f.is_file():
+            out.append(f)
+    return out
+
+
+def all_ps1_files(root: Path) -> list[Path]:
+    """Every PowerShell script in the repo, wherever it lives.
+
+    Mirrors all_dockerfiles(): globbed from the repo root rather than a fixed
+    location list, and filtered through the same _VENDOR_DIRS set. Issue #4472
+    found pins declared only in windows-setup.ps1 (golangci-lint, trufflehog,
+    Claude Code CLI, the winget Go package) that no discoverer searched.
+    """
+    out: list[Path] = []
+    for f in sorted(root.glob("**/*.ps1")):
         if _VENDOR_DIRS & set(f.parts):
             continue
         if f.is_file():
@@ -366,6 +393,27 @@ def discover_go_toolchain(root: Path) -> dict:
         all_dockerfiles(root), root,
     ))
 
+    # Workflow pre-pull steps (`docker pull` / the retry-wrapped
+    # `pull_with_retry` helper) that warm the same golang: base image a
+    # Dockerfile FROM line above references. These must move in lockstep with
+    # that FROM digest, but live in a workflow step rather than a Dockerfile,
+    # so they need their own grep target (issue #4472 — production-gates.yml's
+    # pre-pull of the builder image was invisible to every existing pattern).
+    locations.extend(grep_files(
+        re.compile(r"^\s*(?:docker\s+pull|pull_with_retry)\s+[\"']?golang:\d+\.\d+(\.\d+)?"),
+        workflows, root,
+    ))
+
+    # Any other literal occurrence of the toolchain version that the
+    # structural patterns above don't match — e.g. a Windows dev-setup
+    # script's winget package pin, which names the version with neither a
+    # FROM nor a GO_VERSION/go-version key.
+    if current:
+        locations.extend(grep_files(
+            re.compile(re.escape(current)),
+            all_ps1_files(root), root,
+        ))
+
     return {
         "name": "go-toolchain",
         "kind": "lockstep",
@@ -377,47 +425,54 @@ def discover_go_toolchain(root: Path) -> dict:
     }
 
 
-def discover_claude_code_cli(root: Path) -> list[dict]:
-    """Claude Code CLI pin — `ARG CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile.
+# NOTE: there is deliberately no discover_claude_code_cli() here. Claude Code
+# CLI is exempt from pin tracking entirely (founder decision 2026-10-01,
+# Issue #4473; see references/cooldown-policy.md "Claude Code CLI
+# exemption") — .devcontainer/Dockerfile and windows-setup.ps1 both resolve
+# npm's `stable` dist-tag at build/setup time instead of naming a version, so
+# there is no version string left for a discoverer to find or a bump story to
+# target. A prior version of this script had a discoverer for `ARG
+# CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile; that ARG no longer
+# exists, having been replaced by the unrelated `CLAUDE_CODE_VERSION_OVERRIDE`
+# build-arg, which pins one exact release rather than declaring the tracked
+# version and is itself out of scope for pin discovery.
 
-    dependency-pin-check.yml does check this pin's freshness, but through a bespoke
-    npm dist-tags block rather than a `check_version` declaration, so
-    discover_tool_pins() — which parses only `check_version` lines — never saw it.
-    The sweep was therefore blind to a pin CI actively tracks. Same root shape as
-    the Go toolchain, which needed its own discoverer for the same reason.
 
-    The version is read from the Dockerfile, matching where
-    dependency-pin-check.yml reads it from, so the two can never disagree about
-    what the image installs. Nothing here hardcodes a version.
+#: A PowerShell verified-download block (windows-setup.ps1) pairs a version-
+#: bearing Url line with a Sha256 line that carries no version string of its
+#: own:
+#:   Url    = 'https://.../v3.97.4/trufflehog_3.97.4_windows_amd64.tar.gz'
+#:   Sha256 = '6ce9a957...'
+#: A literal version-string grep matches the Url line but can never match the
+#: Sha256 line next to it, so without pairing the hash silently falls out of
+#: lockstep tracking whenever the version bumps — the gap issue #4472 reported
+#: for trufflehog.
+_PS1_SHA256_RE = re.compile(r"^\s*Sha256\s*=")
+_PS1_BLOCK_BOUNDARY_RE = re.compile(r"^\s*(\}|Name\s*=)")
 
-    Returns a list so a missing or renamed ARG yields [] rather than a bogus entry
-    with current="unknown" — the workflow already warns loudly in that case, and a
-    silent placeholder in the inventory would invite a story to "bump" a pin that
-    no longer exists.
-    """
-    dockerfile = root / ".devcontainer" / "Dockerfile"
-    if not dockerfile.exists():
+
+def _paired_ps1_sha256_locations(f: Path, matched_lines: set[int], root: Path) -> list[dict]:
+    """For each matched `Url = '...'` line, find the Sha256 line in the same block."""
+    try:
+        lines = f.read_text().splitlines()
+    except (UnicodeDecodeError, OSError):
         return []
-
-    arg_re = re.compile(r"^ARG\s+CLAUDE_CODE_VERSION=(\S+)")
-    for i, line in enumerate(dockerfile.read_text().splitlines(), 1):
-        m = arg_re.match(line)
-        if not m:
+    extra = []
+    for ln in sorted(matched_lines):
+        idx = ln - 1
+        if idx < 0 or idx >= len(lines) or "Url" not in lines[idx]:
             continue
-        return [{
-            "name": "claude-code-cli",
-            "kind": "npm",
-            "current": m.group(1),
-            "release_source": "https://registry.npmjs.org/@anthropic-ai/claude-code",
-            "ecosystem": "NPM",
-            "package": "@anthropic-ai/claude-code",
-            "locations": [{
-                "file": ".devcontainer/Dockerfile",
-                "line": i,
-                "match": line.strip(),
-            }],
-        }]
-    return []
+        for j in range(idx + 1, min(idx + 6, len(lines))):
+            if _PS1_BLOCK_BOUNDARY_RE.match(lines[j]):
+                break
+            if _PS1_SHA256_RE.match(lines[j]):
+                extra.append({
+                    "file": f.relative_to(root).as_posix(),
+                    "line": j + 1,
+                    "match": lines[j].strip(),
+                })
+                break
+    return extra
 
 
 def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
@@ -425,9 +480,14 @@ def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
 
     Searches for the literal version string across workflow files (excluding the
     dependency-pin-check.yml declaration file itself), devcontainer Dockerfile,
-    Makefile, cmd Dockerfiles, and shell scripts. Returns location dicts for
-    every match — these are the install/usage pins that must move lockstep with
-    the check_version declaration.
+    Makefile, cmd Dockerfiles, shell scripts, and every PowerShell script in the
+    repo (windows-setup.ps1 and any future one — see all_ps1_files()). Returns
+    location dicts for every match — these are the install/usage pins that must
+    move lockstep with the check_version declaration.
+
+    A PowerShell Url match additionally pulls in its paired Sha256 line (see
+    _paired_ps1_sha256_locations()), since that line carries no version string
+    a plain grep could find on its own.
     """
     search_files: list[Path] = []
 
@@ -449,7 +509,18 @@ def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
     for f in sorted((root / "scripts").glob("*.sh")):
         search_files.append(f)
 
-    return grep_files(re.compile(re.escape(version)), search_files, root)
+    search_files.extend(all_ps1_files(root))
+
+    locations = grep_files(re.compile(re.escape(version)), search_files, root)
+
+    ps1_matched_lines_by_file: dict[str, set[int]] = {}
+    for loc in locations:
+        if loc["file"].endswith(".ps1"):
+            ps1_matched_lines_by_file.setdefault(loc["file"], set()).add(loc["line"])
+    for rel_file, matched_lines in ps1_matched_lines_by_file.items():
+        locations.extend(_paired_ps1_sha256_locations(root / rel_file, matched_lines, root))
+
+    return locations
 
 
 def discover_tool_pins(root: Path) -> list[dict]:
@@ -659,7 +730,6 @@ def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
-    inventory.extend(discover_claude_code_cli(root))
     inventory.extend(discover_github_actions(root))
     inventory.extend(discover_mcp_pins(root))
     inventory.extend(discover_base_images(root))

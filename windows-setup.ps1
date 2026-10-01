@@ -3,7 +3,13 @@
 
 param(
     [switch]$SkipDocker,
-    [switch]$SkipClaudeCode
+    [switch]$SkipClaudeCode,
+    # Claude Code is exempt from this script's pin-everything rule (Issue
+    # #4473, founder decision 2026-10-01): it ships several releases a week,
+    # so a hand-maintained pin almost always lags what's actually shipping.
+    # Defaults to npm's `stable` dist-tag; pass an exact version to pin one
+    # release (e.g. to hold back a bad release or reproduce a past setup).
+    [string]$ClaudeCodeVersion = 'stable'
 )
 
 Write-Host "=== CFGMS Windows Development Environment Setup ===" -ForegroundColor Cyan
@@ -124,7 +130,7 @@ if ($goBinDir) {
         @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.1' },
         @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
         @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },
-        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2' }
+        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0' }
     )
 
     foreach ($tool in $goTools) {
@@ -216,8 +222,8 @@ if ($goBinDir) {
         },
         @{
             Name   = 'trufflehog'
-            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.4/trufflehog_3.97.4_windows_amd64.tar.gz'
-            Sha256 = '6ce9a957ac62bfb19463048333d9e8481327dbbf5bdc0c43f5ab5327b9631fb9'
+            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.9/trufflehog_3.97.9_windows_amd64.tar.gz'
+            Sha256 = '7436c13a12f378738db1b65803b00fa3b816db3dc28084e52b9a377c6b12901d'
             Member = 'trufflehog.exe'
         },
         @{
@@ -293,13 +299,16 @@ if (-not $SkipDocker) {
 # Refresh environment
 Update-SessionPath
 
-# Install Claude Code via npm, pinned -- matches CLAUDE_CODE_VERSION in
-# .devcontainer/Dockerfile (Issue #4343: every tool this script installs is
-# pinned, not just the ones with a release binary to hash-verify; npm itself
-# resolves and integrity-checks the pinned tarball against the registry).
-$ClaudeCodeVersion = '2.1.273'
+# Install Claude Code via npm. Unlike every other tool this script installs
+# (Issue #4343: pinned so npm can integrity-check a known tarball), Claude
+# Code is deliberately NOT pinned -- see the -ClaudeCodeVersion param comment
+# above. `stable`, not `latest`: `latest` is npm's most-recently-published
+# tag and can sit ahead of general availability, while `stable` is the
+# vetted-rollout tag the CLI's own auto-updater follows. npm still
+# integrity-checks whatever version `stable` (or an explicit override)
+# resolves to against the registry.
 if (-not $SkipClaudeCode) {
-    Write-Host "`n=== Installing Claude Code $ClaudeCodeVersion ===" -ForegroundColor Yellow
+    Write-Host "`n=== Installing Claude Code ($ClaudeCodeVersion) ===" -ForegroundColor Yellow
     npm install -g "@anthropic-ai/claude-code@$ClaudeCodeVersion"
 }
 

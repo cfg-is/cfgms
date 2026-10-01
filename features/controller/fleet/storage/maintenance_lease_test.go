@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
@@ -149,6 +151,99 @@ func TestManager_MaintenanceLease_SlowCycleRenewsAcrossTTL_NoDuplicateRun(t *tes
 	assert.True(t, ranA)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&nodeBAttempts),
 		"node-b must never run while node-a's slow cycle is still renewing the lease")
+}
+
+// transientErrorLeaseStore wraps a real business.LeaseStore (the package's
+// flatfile store, built by pkgtesting.SetupTestLeaseStore) and fails the
+// callNumber'th AcquireOrRenew call made on behalf of holderID with a
+// transient-looking error, delegating to the real store on every other call
+// — reproducing one unretried store hiccup (e.g. the flatfile provider's
+// atomic-rename write path on Windows, which deliberately does not retry:
+// pkg/storage/providers/flatfile/rename_windows.go) hitting a single
+// renewal mid-cycle, without reimplementing or mocking the store itself.
+type transientErrorLeaseStore struct {
+	business.LeaseStore
+	holderID   string
+	callNumber int32
+	calls      int32
+}
+
+func (s *transientErrorLeaseStore) AcquireOrRenew(ctx context.Context, name, holderID string, ttl time.Duration) (*business.LeaseState, error) {
+	if holderID == s.holderID {
+		if n := atomic.AddInt32(&s.calls, 1); n == s.callNumber {
+			return nil, fmt.Errorf("simulated transient lease store error (e.g. Windows ERROR_SHARING_VIOLATION on an unretried rename)")
+		}
+	}
+	return s.LeaseStore.AcquireOrRenew(ctx, name, holderID, ttl)
+}
+
+// [REQUIRED TEST] (Issue #4487) A single transient error from the lease
+// store on node-a's first mid-cycle renewal call must not cost node-a the
+// lease outright: renewWithRetry (pkg/lease/singleton.go) must retry within
+// Manager's MaxAllowedRenewalLatency budget before giving up. Before that
+// retry existed, renewWhileRunning gave up on the very first error and
+// node-b ran; this reproduces that starvation deterministically, with no
+// dependency on real wall-clock scheduling delays.
+func TestManager_MaintenanceLease_TransientRenewalError_DoesNotLoseLease(t *testing.T) {
+	ttl := 2 * time.Second
+	renew := 200 * time.Millisecond
+
+	realStore := pkgtesting.SetupTestLeaseStore(t)
+	// Fail node-a's second AcquireOrRenew call: call #1 is RunIfLeader's
+	// initial TryAcquire, call #2 is the first mid-cycle renewal tick.
+	flakyStore := &transientErrorLeaseStore{LeaseStore: realStore, holderID: "node-a", callNumber: 2}
+
+	mgrAManager, err := lease.NewManager(flakyStore, ttl, renew, renew)
+	require.NoError(t, err)
+	mgrBManager, err := lease.NewManager(realStore, ttl, renew, renew)
+	require.NoError(t, err)
+
+	leaseJobA, err := lease.NewSingletonJob(mgrAManager, "dna-storage-maintenance-flaky-test", "node-a", ttl, renew, nil)
+	require.NoError(t, err)
+	leaseJobB, err := lease.NewSingletonJob(mgrBManager, "dna-storage-maintenance-flaky-test", "node-b", ttl, renew, nil)
+	require.NoError(t, err)
+
+	// Same 1.5x-TTL slow cycle as the scheduling-based reproduction above —
+	// the transient error is injected deterministically by call count, not
+	// by timing, so node-a's cycle length only needs to outlast one renewal
+	// tick for the injected failure to land mid-cycle.
+	mgrA := newMaintenanceLeaseManager(t, func(real Backend) Backend {
+		return &slowFlushBackend{Backend: real, delay: ttl + ttl/2}
+	})
+	mgrA.SetMaintenanceLease(leaseJobA)
+
+	mgrB := newMaintenanceLeaseManager(t, nil)
+	mgrB.SetMaintenanceLease(leaseJobB)
+
+	var nodeBAttempts int32
+	stopProbing := make(chan struct{})
+	probeDone := make(chan struct{})
+	go func() {
+		defer close(probeDone)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopProbing:
+				return
+			case <-ticker.C:
+				mgrB.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+					atomic.AddInt32(&nodeBAttempts, 1)
+					mgrB.runMaintenance()
+				})
+			}
+		}
+	}()
+
+	ranA := mgrA.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+		mgrA.runMaintenance()
+	})
+	close(stopProbing)
+	<-probeDone
+
+	assert.True(t, ranA)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&nodeBAttempts),
+		"a single transient renewal-store error must not cost node-a the lease")
 }
 
 // [REQUIRED TEST] A two-node simulation proves exactly one node executes a

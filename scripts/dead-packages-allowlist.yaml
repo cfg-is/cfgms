@@ -50,27 +50,6 @@ packages:
       provider exists under pkg/storage/providers/ (CLAUDE.md Central
       Provider System, pkg/storage / pkg/logging timescale backing store).
 
-  - path: pkg/directory/interfaces
-    reason: >
-      Confirmed contract with no implementation yet. Reachable only through
-      features/controller/directory, which is reachable only through
-      features/controller — and neither of those is reachable from any
-      main package either (see Issue #4345's WIRE entries below). An
-      importer-walking check would follow that chain and wrongly conclude
-      this package is live; the dependency-closure-from-main computation in
-      check-dead-packages.sh does not make that mistake.
-
-  - path: pkg/directory/types
-    reason: >
-      Confirmed contract, Issue #4345: type definitions for the directory
-      abstraction (Computer/Group/User/errors), consumed only by
-      pkg/directory/interfaces (contract, no implementation), by
-      features/controller/directory (unreachable, see the WIRE entry
-      below), and by features/workflow/modules/m365 (out of scope for
-      #4345 — its own module-wiring story). No reachable consumer exists
-      yet; this is the types half of the same contract as
-      pkg/directory/interfaces above, not abandoned code.
-
   # --- Confirmed contracts delivered through a non-Go-import mechanism -------
   - path: features/workflow/templates
     reason: >
@@ -119,16 +98,21 @@ packages:
   - path: test/unit/steward
     reason: test suite entry point (test/unit/steward), run via `go test`, never imported.
 
+  - path: features/modules/extended/activedirectory/tests
+    reason: >
+      Issue #4445: test-only package, zero non-test Go files
+      (`go list -f '{{len .GoFiles}}' ./features/modules/extended/activedirectory/tests`
+      returns 0), so it can never enter the `go list -deps` closure of any
+      main package — permanently, not pending wiring. It is also not reported
+      as test-support: nothing in a production-reachable package's _test.go
+      files imports it. features/modules/extended/activedirectory itself
+      (the module, not this tests package) is registered in the steward
+      factory by this same story and is no longer unreachable.
+
   # --- Out of scope for Issue #4345: module-kind work with its own wiring ---
   # --- story (M365 / Active Directory), excluded per #4345's Out of Scope ---
   # --- section to avoid double-covering the same packages. Reasons below ----
   # --- are unchanged from Issue #4317's original baseline entries. ----------
-  - path: features/modules/extended/activedirectory
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/modules/extended/activedirectory/tests
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/modules/extended/network_activedirectory
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365/conditional_access
@@ -176,18 +160,6 @@ packages:
       features/controller/directory; the fix is a caller two levels up in
       features/controller/server / cmd/controller, not in this package.
 
-  - path: pkg/configrouting
-    reason: >
-      WIRE (Issue #4345): SyncService (root package only — the
-      interfaces/providers subpackages are already live). Fully
-      implemented and tested background config-source polling; its trigger
-      interface is implemented by exactly one production type,
-      controllerRouter in pkg/configrouting/providers/controller, built
-      specifically to satisfy it per that file's own doc comment. Never
-      constructed by features/controller/service/config_service_v2.go or
-      features/controller/server/server.go — a "Phase 3" wiring the
-      original PR (#1410) deferred and nothing since has picked up.
-
   - path: features/saas
     reason: >
       WIRE (Issue #4345): multi-tenant SaaS provider/JWT/OAuth2
@@ -201,46 +173,6 @@ packages:
       sequenced after, and should be decided jointly with, the M365
       module-wiring story — deleting it would strand that tree's only
       tenant-auth layer.
-
-  - path: features/steward/modules/runtime
-    reason: >
-      WIRE (Issue #4345): steward-kind out-of-process module runtime
-      (fork/exec, gRPC handshake, publisher-trust enforcement). Recently
-      security-hardened (Issue #1905, socket dir mode 0700), with real
-      integration tests against a compiled test module binary — not
-      abandoned. docs/architecture/decisions/019-third-party-module-inclusion-and-trust.md
-      names this exact gap explicitly: "Today it cannot [fork/exec signed
-      bundles] (compiled-in built-ins). Wiring the bundle runtime ... is a
-      prerequisite owned by the module-foundation epic (ADR-016)." Missing
-      only a call site in cmd/steward's startup path.
-
-  - path: pkg/entitygraph/writers/correlator
-    reason: >
-      WIRE (Issue #4345): MAC-identity correlator (ADR-022 §3, Issue
-      #3369), complete and tested, no stub markers. Its own package README
-      states it is "a standalone-invokable writer pending controller-startup
-      wiring (#3253)" — #3253 wired the sibling configstore writer and
-      explicitly deferred this one. Needs a construct-and-set call in
-      features/controller/server/server.go plus new periodic-sweep
-      scheduling (no existing job-scheduler to piggyback on), and a
-      pre-wiring security review of its deliberately cross-tenant sweep
-      given the repo's recent tenant-containment hardening (Issue #4335).
-
-  - path: pkg/entitygraph/writers/tenantsync
-    reason: >
-      WIRE (Issue #4345): tenant-hierarchy mirror writer (ADR-022 §7, Issue
-      #3370), complete and tested, no stub markers. Same deferred-wiring
-      shape as pkg/entitygraph/writers/correlator (epic #2853); needs a
-      construct-and-Ingest call in features/controller/server/server.go —
-      both its dependencies (the entity-graph provider and
-      storageManager.GetTenantStore()) are already local variables at the
-      sibling configstore writer's wiring point, so no new plumbing is
-      needed, only the call and a decision on sync cadence/trigger. Needs
-      the same pre-wiring security review as correlator: it does not set
-      owning_tenant (by design, per its own doc — authorization never uses
-      graph traversal per ADR-022 §7), but mirrors tenant topology and
-      shares the same reserved-delimiter injection class recent
-      tenant-containment work has been closing.
 
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
