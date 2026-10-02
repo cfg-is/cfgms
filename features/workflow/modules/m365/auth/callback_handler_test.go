@@ -111,3 +111,41 @@ func TestCallbackHandler_handleCallback_escapesRequestValues(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "&lt;script&gt;alert(1)&lt;/script&gt;")
 	})
 }
+
+// TestCallbackHandler_handleCallback_rendersVisibleText verifies the success and
+// error pages keep their expected visible text and JS state value.
+func TestCallbackHandler_handleCallback_rendersVisibleText(t *testing.T) {
+	render := func(q url.Values) string {
+		h := NewCallbackHandler()
+		req := httptest.NewRequest(http.MethodGet, "/callback?"+q.Encode(), nil)
+		rec := httptest.NewRecorder()
+		h.handleCallback(rec, req)
+		assert.Equal(t, "text/html", rec.Header().Get("Content-Type"))
+		return rec.Body.String()
+	}
+
+	t.Run("success", func(t *testing.T) {
+		body := render(url.Values{"code": {"c"}, "state": {"abc123"}})
+		assert.Contains(t, body, "Microsoft 365 Authorization")
+		assert.Contains(t, body, "Authorization successful! Processing your request...")
+		assert.Contains(t, body, `class="status-icon success">✅`)
+		assert.Contains(t, body, "<strong>Next Steps:</strong>")
+		assert.Contains(t, body, "if ( true )")
+		assert.Contains(t, body, `state: "abc123"`)
+		assert.NotContains(t, body, "<strong>Error:</strong>")
+	})
+
+	t.Run("error", func(t *testing.T) {
+		body := render(url.Values{"error": {"access_denied"}, "error_description": {"User said no"}, "state": {"s"}})
+		assert.Contains(t, body, "Authorization failed. Please close this window and try again.")
+		assert.Contains(t, body, `class="status-icon error">❌`)
+		assert.Contains(t, body, "<strong>Error:</strong> access_denied<br>User said no<br><br>")
+		assert.Contains(t, body, "if ( false )")
+	})
+
+	t.Run("missing code", func(t *testing.T) {
+		body := render(url.Values{"state": {"s"}})
+		assert.Contains(t, body, "Missing authorization code. Please close this window and try again.")
+		assert.Contains(t, body, "<strong>Error:</strong> invalid_request")
+	})
+}
