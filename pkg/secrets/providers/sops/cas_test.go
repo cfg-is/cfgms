@@ -317,3 +317,16 @@ func TestCompareAndSwapSecret_FailsClosedWithoutAtomicityPrimitive(t *testing.T)
 	assert.ErrorIs(t, err, errNoCASLockRoot)
 	assert.False(t, ok)
 }
+
+// TestDeleteSecret_ErrorsDoNotContainKey proves the errors DeleteSecret returns
+// never embed the key (callers key secrets by credential hash and log errors).
+func TestDeleteSecret_ErrorsDoNotContainKey(t *testing.T) {
+	base := t.TempDir()
+	store := newTestSOPSStore(t, filepath.Join(base, "data"), writeTestKey(t, base))
+
+	err := store.DeleteSecret(context.Background(), "tenant-a/deadbeefcafe1234hash")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound)
+	assert.NotContains(t, err.Error(), "deadbeefcafe1234hash")
+	assert.NotContains(t, err.Error(), base)
+}

@@ -777,7 +777,20 @@ func TestProvision_RealPreseedRenderedToSeed(t *testing.T) {
 	assert.Contains(t, content, "d-i partman", "rendered preseed must carry partitioning directives")
 	assert.Contains(t, content, "reg-token-stub-value", "registration token secret must be resolved into the preseed")
 	assert.Contains(t, content, "stw-01", "CorrelationID must appear in the preseed")
-	lower := strings.ToLower(content)
+	// The per-VM admin password is random data, not code: a generated value can
+	// contain "iex"/"eval" as a substring. Redact it before scanning so the
+	// banned-pattern check covers the template text only and is deterministic.
+	const pwDirective = "d-i passwd/user-password password "
+	var password string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, pwDirective) {
+			password = strings.TrimSpace(strings.TrimPrefix(line, pwDirective))
+			break
+		}
+	}
+	require.NotEmpty(t, password, "rendered preseed must carry the generated user password")
+	scanned := strings.ReplaceAll(content, password, "<redacted-password>")
+	lower := strings.ToLower(scanned)
 	for _, banned := range []string{"eval", "bash -c", "iex"} {
 		assert.NotContains(t, lower, banned, "rendered preseed must not contain banned pattern %q", banned)
 	}
