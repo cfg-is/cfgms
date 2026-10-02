@@ -1868,3 +1868,46 @@ func TestWebAuthnRegistration_RejectsRawIDMismatch(t *testing.T) {
 			"a credential omitting rawId must be refused; body: %s", rec.Body.String())
 	})
 }
+
+// authenticatorSelectionOf decodes data.publicKey.authenticatorSelection from a
+// registration begin response.
+func authenticatorSelectionOf(t *testing.T, body []byte) map[string]interface{} {
+	t.Helper()
+	var resp struct {
+		Data struct {
+			PublicKey struct {
+				AuthenticatorSelection map[string]interface{} `json:"authenticatorSelection"`
+			} `json:"publicKey"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp))
+	require.NotNil(t, resp.Data.PublicKey.AuthenticatorSelection, "begin response must carry authenticatorSelection")
+	return resp.Data.PublicKey.AuthenticatorSelection
+}
+
+// TestRegistrationBegin_RequiresDiscoverableCredential guards Issue #4505: passkey
+// login is usernameless (BeginDiscoverableLogin sends an empty allowCredentials),
+// so a non-discoverable credential can be registered but never used to sign in.
+// Both registration paths must require a resident key.
+func TestRegistrationBegin_RequiresDiscoverableCredential(t *testing.T) {
+	assertResident := func(t *testing.T, sel map[string]interface{}) {
+		t.Helper()
+		assert.Equal(t, "required", sel["residentKey"], "residentKey must be required")
+		assert.Equal(t, true, sel["requireResidentKey"], "requireResidentKey must be true for Level 1 authenticators")
+		assert.Equal(t, "required", sel["userVerification"], "user verification stays required")
+	}
+
+	t.Run("FirstPasskeyEnrollment", func(t *testing.T) {
+		server, _, rawToken := setupEnrollServer(t, tvRPID, []string{tvOrigin}, "enroll-resident-user")
+		rec := doEnrollBegin(t, server, rawToken)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		assertResident(t, authenticatorSelectionOf(t, rec.Body.Bytes()))
+	})
+
+	t.Run("SelfServiceRegistration", func(t *testing.T) {
+		server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+		rec := doBegin(t, server, username)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		assertResident(t, authenticatorSelectionOf(t, rec.Body.Bytes()))
+	})
+}
