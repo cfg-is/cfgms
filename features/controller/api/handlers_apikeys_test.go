@@ -500,3 +500,32 @@ func TestHandleDeleteAPIKey_TenantScope_SiblingTenant_Returns404(t *testing.T) {
 	_, stillExists := server.apiKeys["cross-tenant-delete-secret"]
 	assert.True(t, stillExists, "a cross-tenant delete attempt must not remove the key")
 }
+
+// TestHandleDeleteAPIKey_SecretStoreFailure_LogsNoKeyOrHash proves a failed
+// DeleteSecret never puts the API key or its SHA-256 hash in the log output.
+func TestHandleDeleteAPIKey_SecretStoreFailure_LogsNoKeyOrHash(t *testing.T) {
+	logger := &captureAllLogger{}
+	server := setupTestServerWithLogger(t, logger)
+
+	key := &APIKey{
+		ID:          "log-leak-key-id",
+		Key:         "log-leak-key-secret-value",
+		Name:        "Log Leak Key",
+		Permissions: []string{"steward:read"},
+		CreatedAt:   time.Now().UTC(),
+		TenantID:    "agent-test/1",
+	}
+	injectAPIKey(server, key)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/log-leak-key-id", nil)
+	req = mux.SetURLVars(req, map[string]string{"id": "log-leak-key-id"})
+	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+	rec := httptest.NewRecorder()
+	server.handleDeleteAPIKey(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	out := logger.captured()
+	assert.Contains(t, out, "Failed to delete API key from secret store")
+	assert.NotContains(t, out, key.Key)
+	assert.NotContains(t, out, hashAPIKey(key.Key))
+}

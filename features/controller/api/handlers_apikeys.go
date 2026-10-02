@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -344,8 +345,13 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	// SecretStore lookup path, not the credential itself — see middleware.go.
 	credentialRef := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
 	if err := s.secretStore.DeleteSecret(r.Context(), credentialRef); err != nil {
+		// Log a category, never err.Error(): the secret ref embeds the key hash.
+		reason := "secret_store_error"
+		if errors.Is(err, secretsif.ErrSecretNotFound) {
+			reason = "not_found"
+		}
 		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
-			"error", logging.SanitizeLogValue(err.Error()), "id", logging.SanitizeLogValue(keyID))
+			"reason", reason, "id", logging.SanitizeLogValue(keyID))
 		// Continue anyway - key is removed from memory
 	}
 

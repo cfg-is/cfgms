@@ -653,9 +653,13 @@ func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
 
 	if err := s.configStore.DeleteConfig(ctx, configKey); err != nil {
 		if err == cfgconfig.ErrConfigNotFound {
-			return fmt.Errorf("secret not found: %s", key)
+			// The key (and any storage path derived from it) is deliberately
+			// omitted: callers log this error and the key may be a credential hash.
+			return secretsif.ErrSecretNotFound
 		}
-		return fmt.Errorf("failed to delete secret: %w", err)
+		// Not %w-wrapped: storage errors embed the filesystem path, which
+		// contains the secret key.
+		return errors.New("failed to delete secret: storage error")
 	}
 
 	// Remove from cache if enabled
