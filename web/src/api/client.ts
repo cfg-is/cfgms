@@ -258,7 +258,7 @@ export async function passkeyLoginBeginRequest(username?: string): Promise<Passk
   if (!response.ok) {
     return { ok: false, status: response.status }
   }
-  const options = (await response.json()) as PasskeyLoginOptions
+  const options = unwrapEnvelope<PasskeyLoginOptions>(await response.json())
   return { ok: true, status: response.status, options }
 }
 
@@ -293,6 +293,18 @@ export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promi
     // Body parse is best-effort; tenant scoping falls back to root (safest for UI).
   }
   return { ok: true, status: response.status, username, tenantId, rootScope }
+}
+
+/**
+ * Returns the payload of a controller JSON response. Every handler answers
+ * through the standard envelope `{ data, timestamp }` (Server.writeResponse);
+ * an unwrapped body is accepted too, matching CliPresence (Issue #4505).
+ */
+export function unwrapEnvelope<T>(body: unknown): T {
+  if (body !== null && typeof body === 'object' && 'data' in body) {
+    return (body as { data: T }).data
+  }
+  return body as T
 }
 
 // ── Passkey enrollment (Issue #2966 / #2968) ─────────────────────────────────
@@ -375,7 +387,7 @@ export async function passkeyEnrollBeginRequest(token: string): Promise<EnrollBe
   if (!response.ok) {
     return { ok: false, status: response.status }
   }
-  const options = (await response.json()) as PasskeyEnrollOptions
+  const options = unwrapEnvelope<PasskeyEnrollOptions>(await response.json())
   return { ok: true, status: response.status, options }
 }
 

@@ -14,6 +14,11 @@ function jsonResponse(status: number, body: unknown = {}): Response {
   })
 }
 
+/** Wraps a payload in the controller's response envelope (Server.writeResponse) — Issue #4505. */
+function envelope(data: unknown): { data: unknown; timestamp: string } {
+  return { data, timestamp: '2026-10-02T00:00:00Z' }
+}
+
 /** Minimal presence/begin options JSON (matches go-webauthn CredentialAssertion shape). */
 const MOCK_BEGIN_OPTIONS = {
   publicKey: {
@@ -85,7 +90,7 @@ describe('StepUpModal — initial states', () => {
   })
 
   it('shows "Verify with passkey" button after challenge arrives', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     render(
       <StepUpModal
         request={defaultRequest}
@@ -102,7 +107,7 @@ describe('StepUpModal — initial states', () => {
   })
 
   it('shows the principal username in the description', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     render(
       <StepUpModal
         request={defaultRequest}
@@ -137,7 +142,7 @@ describe('StepUpModal — initial states', () => {
 
 describe('StepUpModal — cancel', () => {
   it('calls onCancel when the cancel button is clicked', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     const onCancel = vi.fn()
     render(
       <StepUpModal
@@ -154,7 +159,7 @@ describe('StepUpModal — cancel', () => {
   })
 
   it('cancel button is disabled while ceremony is in progress', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     // credentials.get never resolves → keeps modal in 'running' phase.
     vi.stubGlobal('navigator', {
       credentials: { get: vi.fn(() => new Promise(() => undefined)) },
@@ -187,10 +192,10 @@ describe('StepUpModal — successful assertion', () => {
     const retryResponse = jsonResponse(200, { ok: true })
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('presence/finish')) {
         return Promise.resolve(
-          jsonResponse(200, { presence_token: 'tok-abc123', expires_in: 30 }),
+          jsonResponse(200, envelope({ presence_token: 'tok-abc123', expires_in: 30 })),
         )
       }
       // retry of the original request
@@ -223,7 +228,7 @@ describe('StepUpModal — successful assertion', () => {
 
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('presence/finish')) {
         return Promise.resolve(
           jsonResponse(200, { presence_token: 'test-presence-token', expires_in: 30 }),
@@ -269,7 +274,7 @@ describe('StepUpModal — assertion failure', () => {
       },
     })
 
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     render(
       <StepUpModal
         request={defaultRequest}
@@ -296,7 +301,7 @@ describe('StepUpModal — assertion failure', () => {
 
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('presence/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('presence/finish')) return Promise.resolve(jsonResponse(400, { error: 'WEBAUTHN_VERIFY_ERROR' }))
       return Promise.resolve(jsonResponse(200, {}))
     })
@@ -326,7 +331,7 @@ describe('StepUpModal — assertion failure', () => {
       },
     })
 
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     const onSuccess = vi.fn()
     const onCancel = vi.fn()
     render(
@@ -353,7 +358,7 @@ describe('StepUpModal — retry', () => {
   it('calls presence/begin again when Try again is clicked', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(403, { error: 'forbidden' }))
-      .mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      .mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
 
     render(
       <StepUpModal
@@ -387,7 +392,7 @@ const elevationRequest: StepUpRequest = {
 
 describe('StepUpModal — elevation path (presenceRequired: false)', () => {
   it('calls elevate/begin (not presence/begin) when presenceRequired is false', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     render(
       <StepUpModal
         request={elevationRequest}
@@ -411,7 +416,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
     const retryResponse = jsonResponse(200, { ok: true })
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('elevate/finish')) {
         return Promise.resolve(
           jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
@@ -447,7 +452,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
 
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('elevate/finish')) {
         return Promise.resolve(
           jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
@@ -490,7 +495,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
 
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('elevate/finish')) {
         return Promise.resolve(
           jsonResponse(200, { assurance: 'strong', elevated_at: '2026-01-01T00:00:00Z' }),
@@ -544,7 +549,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
 
     fetchMock.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      if (u.includes('elevate/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       if (u.includes('elevate/finish')) return Promise.resolve(jsonResponse(400, { error: 'WEBAUTHN_VERIFY_ERROR' }))
       return Promise.resolve(jsonResponse(200, {}))
     })
@@ -570,7 +575,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
   it('calls elevate/begin again on retry after elevate/begin failure', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(503, { error: 'WEBAUTHN_NOT_CONFIGURED' }))
-      .mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+      .mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
 
     render(
       <StepUpModal
@@ -596,7 +601,7 @@ describe('StepUpModal — elevation path (presenceRequired: false)', () => {
 
 describe('StepUpModal — security constraints', () => {
   it('clicking the backdrop does NOT call onCancel', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     const onCancel = vi.fn()
     render(
       <StepUpModal
@@ -614,7 +619,7 @@ describe('StepUpModal — security constraints', () => {
   })
 
   it('renders with role=dialog and aria-modal=true', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
     render(
       <StepUpModal
         request={defaultRequest}

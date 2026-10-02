@@ -260,6 +260,8 @@ describe('AccountsView — create panel (Issue #2974: no password; step-up; link
     // The raw token appears in the link input.
     const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
     expect(linkInput.value).toContain('aabbcc112233445566778899aabbcc1122334455aabb')
+    // The link must target the router's /enroll/:token route (Issue #4505).
+    expect(linkInput.value).toBe(`${window.location.origin}/enroll/aabbcc112233445566778899aabbcc1122334455aabb`)
     // Email toggle is present but disabled.
     const emailToggle = screen.getByTestId('enrollment-email-toggle') as HTMLInputElement
     expect(emailToggle.disabled).toBe(true)
@@ -1327,6 +1329,7 @@ describe('AccountsView — password reset (Issue #3132)', () => {
     await waitFor(() => expect(screen.getByTestId('enrollment-link-panel')).toBeInTheDocument())
     const linkInput = screen.getByTestId('enrollment-link-value') as HTMLInputElement
     expect(linkInput.value).toContain('aabbcc112233deadbeef')
+    expect(linkInput.value).toBe(`${window.location.origin}/enroll/aabbcc112233deadbeef`)
   })
 
   it('shows reset error when the PUT fails', async () => {
