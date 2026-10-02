@@ -3,10 +3,10 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"html/template"
 	"net"
 	"net/http"
@@ -194,9 +194,14 @@ func (h *CallbackHandler) handleCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Return HTML page for browser clients
-	html := h.generateCallbackHTML(response)
+	page, err := h.generateCallbackHTML(response)
+	if err != nil {
+		h.logger.Error("failed to render callback html", "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html")
-	if _, err := w.Write([]byte(html)); err != nil {
+	if _, err := w.Write([]byte(page)); err != nil {
 		h.logger.Error("failed to write callback html", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
@@ -283,33 +288,19 @@ func (h *CallbackHandler) getCallbackResult(state string) *CallbackResult {
 
 // HTML generation for browser clients
 
-func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) string {
-	success, _ := response["success"].(bool)
-	message, _ := response["message"].(string)
-	errorCode, _ := response["error"].(string)
-	errorDescription, _ := response["error_description"].(string)
+// callbackData is the template input for the callback page. Every
+// request-derived field is escaped by html/template for the context it lands in.
+type callbackData struct {
+	StatusClass      string
+	StatusIcon       string
+	Message          string
+	ErrorCode        string
+	ErrorDescription string
+	Success          bool
+	State            string
+}
 
-	// state is request-derived and is rendered inside a JS string literal.
-	state, _ := response["state"].(string)
-	jsState := template.JSEscapeString(state)
-	message = html.EscapeString(message)
-
-	var statusClass, statusIcon, details string
-	if success {
-		statusClass = "success"
-		statusIcon = "✅"
-		details = "<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup."
-	} else {
-		statusClass = "error"
-		statusIcon = "❌"
-		details = "<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup."
-		if errorCode != "" {
-			// errorCode and errorDescription come straight from the callback query string.
-			details = fmt.Sprintf("<strong>Error:</strong> %s<br>%s<br><br><strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.", html.EscapeString(errorCode), html.EscapeString(errorDescription))
-		}
-	}
-
-	return fmt.Sprintf(`
+var callbackPageTemplate = template.Must(template.New("callback").Parse(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -321,7 +312,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             margin: 0;
             padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -334,7 +325,7 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
             box-shadow: 0 20px 40px rgba(0,0,0,0.1);
             text-align: center;
             max-width: 500px;
-            width: 100%%;
+            width: 100%;
         }
         .status-icon {
             font-size: 4rem;
@@ -380,28 +371,28 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
 </head>
 <body>
     <div class="container">
-        <div class="status-icon %s">%s</div>
+        <div class="status-icon {{.StatusClass}}">{{.StatusIcon}}</div>
         <h1>Microsoft 365 Authorization</h1>
-        <p>%s</p>
+        <p>{{.Message}}</p>
         
         <button class="close-button" onclick="window.close()">
             Close Window
         </button>
         
         <div class="details">
-            %s
+            {{if .ErrorCode}}<strong>Error:</strong> {{.ErrorCode}}<br>{{.ErrorDescription}}<br><br>{{end}}<strong>Next Steps:</strong><br>Return to the CFGMS application to continue setup.
         </div>
     </div>
     
     <script>
         // Auto-close after successful authorization
-        if (%t) {
+        if ({{.Success}}) {
             setTimeout(() => {
                 if (window.opener) {
                     window.opener.postMessage({
                         type: 'cfgms-auth-complete',
-                        success: %t,
-                        state: '%s'
+                        success: {{.Success}},
+                        state: {{.State}}
                     }, '*');
                 }
                 window.close();
@@ -413,15 +404,33 @@ func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) 
             if (window.opener) {
                 window.opener.postMessage({
                     type: 'cfgms-auth-window-closed',
-                    success: %t,
-                    state: '%s'
+                    success: {{.Success}},
+                    state: {{.State}}
                 }, '*');
             }
         });
     </script>
 </body>
 </html>
-`, statusClass, statusIcon, message, details, success, success, jsState, success, jsState)
+`))
+
+func (h *CallbackHandler) generateCallbackHTML(response map[string]interface{}) (string, error) {
+	data := callbackData{StatusClass: "error", StatusIcon: "❌"}
+	data.Success, _ = response["success"].(bool)
+	data.Message, _ = response["message"].(string)
+	data.ErrorCode, _ = response["error"].(string)
+	data.ErrorDescription, _ = response["error_description"].(string)
+	data.State, _ = response["state"].(string)
+	if data.Success {
+		data.StatusClass = "success"
+		data.StatusIcon = "✅"
+	}
+
+	var buf bytes.Buffer
+	if err := callbackPageTemplate.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // GetCallbackURL returns the callback URL for the OAuth2 flow
