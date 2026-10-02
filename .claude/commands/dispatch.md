@@ -55,7 +55,7 @@ For each issue number:
       ```
       If the issue doesn't exist or is closed, skip with warning.
 
-   b. **Quality check** (warnings only, do not block):
+   b. **Quality check** (warnings only, do not block) — applies when accepting a pre-existing public issue by number; pipeline dev items are materialized locked + `internal` at decomposition (ADR-015; `--defer` drafts at dispatch) and validated by the Planning Team beforehand:
       - Check issue body has acceptance criteria (`- [ ]` checkboxes) — warn if missing
       - Check issue body length — warn if < 200 characters (likely under-specified)
       - Check for reference implementation mention — warn if absent
@@ -202,15 +202,8 @@ For each `acceptance-review <PR_NUM>`:
       ```
       Output is one of:
       - `REVIEW_DISPATCHED:<PR>:<STORY>:<container_id>` — running headless; check `/isoagents` for progress
-      - `REVIEW_REFUSED:<PR>:<reason>` — see reasons below
+      - `REVIEW_REFUSED:<PR>:<reason>: <hint>` — the reason line is self-explanatory; act on the trailing hint directly, no doc lookup needed (`resources` refusals come from the shared capacity gate and already embed their own reason). The full reason→hint table lives in `agent-dispatch.sh`'s `_review_refusal_hint()`, one place, so it can't drift from what the script actually does — don't duplicate it here.
       - `LAUNCH_FAILED:<container_name>:<error>` — Docker error; the script auto-strips the in-flight label
-
-      Refusal reasons and recovery:
-      - `pr_not_found` / `pr_state_<X>` — PR is closed/merged or doesn't exist
-      - `fork_branch_<owner>` — PR is from a fork; reviews of fork PRs aren't supported (no push rights)
-      - `no_story_link` — PR has no `Fixes #N` and no `feature/story-N` branch; manually associate or skip
-      - `already_in_flight` — review container `cfg-agent-review-pr-<N>` already exists; another review is running. Use `/isoagents` to check on it.
-      - `container_exists` — a stale container exists; run `./.claude/scripts/agent-dispatch.sh cleanup-stale-reviews` first
 
    d. **Tell the user**:
       "Acceptance Reviewer dispatched headless for PR #<NUM>. Container: cfg-agent-review-pr-<NUM>. The review comment will appear on the PR when it's done (~5-15 min). Use `/isoagents` to check progress."

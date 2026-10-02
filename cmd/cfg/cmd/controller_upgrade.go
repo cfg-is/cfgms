@@ -6,13 +6,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/cfgis/cfgms/cmd/controller/service"
 	"github.com/cfgis/cfgms/features/controller/cutover"
 	"github.com/spf13/cobra"
 )
+
+// upgradeRestartMgrFn creates the service.Manager used by cfg controller upgrade
+// restart to stage the binary and restart the supervisor. Overridable in tests.
+var upgradeRestartMgrFn = func() (service.Manager, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("restart: resolve executable path: %w", err)
+	}
+	return service.New(exe), nil
+}
+
+// upgradeRestartSpawnFn creates the ExecProcessHandle for the candidate
+// pre-restart probe subprocess. Overridable in tests.
+var upgradeRestartSpawnFn = func(binaryPath, configPath string) *cutover.ExecProcessHandle {
+	h := cutover.NewExecProcessHandle(binaryPath, configPath)
+	h.Stdout = os.Stdout
+	h.Stderr = os.Stderr
+	return h
+}
 
 // Flags / shared state for the cutover subcommands.
 var (
@@ -35,8 +56,13 @@ var controllerUpgradeCmd = &cobra.Command{
 	Long: `cfg controller upgrade orchestrates a blue/green controller upgrade
 via the port-ownership-swap pattern.
 
+EXPERIMENTAL — this is not the supported production upgrade path. The
+supported path is the smoketest-gated restart upgrade (cfg controller upgrade
+restart, Issue #2015). This port-swap orchestrator is frozen per ADR-007
+and will be removed once the restart-gated path is the documented default.
+
 Subcommands:
-  upgrade              Stage a new binary, smoketest it, and cut over.
+  upgrade run          Stage a new binary, smoketest it, and cut over (experimental).
   upgrade status       Show which binary is canonical and which is in quarantine.
   upgrade rollback     Restore the previously-quarantined binary as canonical.
 
@@ -49,8 +75,16 @@ Run --help on each subcommand for details.`,
 
 var controllerUpgradeRunCmd = &cobra.Command{
 	Use:   "run",
-	Short: "Stage a new controller binary, smoketest, and cut over",
-	Long: `Runs the full cutover orchestration synchronously:
+	Short: "Stage a new controller binary, smoketest, and cut over (EXPERIMENTAL — not the supported path)",
+	Long: `EXPERIMENTAL — this subcommand is not the supported production upgrade path.
+
+Use cfg controller upgrade restart (Issue #2015) for the supported
+smoketest-gated restart upgrade. This port-swap orchestrator is frozen per
+ADR-007 (docs/architecture/decisions/007-controller-upgrade-and-state-externalization.md)
+and will be removed once the restart-gated path is the documented default.
+Bugs in this subcommand are not prioritised.
+
+Runs the full port-swap cutover orchestration synchronously:
 
   1. Validate the new binary exists and is executable.
   2. Spawn it on the candidate listen addresses for smoketesting.
@@ -288,7 +322,199 @@ func newOrchestrator(initial *cutover.ExecProcessHandle) (*cutover.Orchestrator,
 		swap,
 		spawn,
 	)
+	// Story #1921: structured event emission for
+	// `cfg controller upgrade history`.
+	orch.History = cutover.NewHistory(defaultCutoverHistoryPath())
 	return orch, swap, nil
+}
+
+// controllerUpgradeRestartCmd is the supported production upgrade path (Issue
+// #2015). It replaces the experimental port-swap orchestrator as the
+// recommended upgrade procedure.
+var controllerUpgradeRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Smoketest-gated in-place restart upgrade for the local cfgms-controller (supported path)",
+	Long: `cfg controller upgrade restart is the supported production upgrade path (Issue #2015).
+
+Replaces the experimental port-swap orchestrator (cfg controller upgrade run)
+as the recommended upgrade procedure. The port-swap orchestrator is frozen per
+ADR-007 (docs/architecture/decisions/007-controller-upgrade-and-state-externalization.md)
+and will be removed once this restart-gated path is the documented default.
+
+The upgrade proceeds as follows:
+
+  1. Stage the new binary (validate it exists and is not a directory).
+  2. Start it on side ports (--candidate-api-addr / --candidate-transport-addr).
+  3. Probe GET /api/v1/ready — the real-state readiness gate (Issue #2012).
+     /api/v1/ready round-trips durable storage; a 200 proves the candidate can
+     actually serve. A 503 (storage unreachable) or any non-200 is a gate
+     failure; the orchestrator must not promote a binary that cannot serve.
+  4. If ready: copy the new binary to the service install path, then restart
+     the supervisor (e.g. systemctl restart cfgms-controller). The new binary
+     reloads the same durable storage; downtime is bounded by boot + warm-load.
+  5. If not ready (before or after restart): retain the previous binary at the
+     install path and return an error — keep-previous-binary rollback is automatic.
+
+A deliberately storage-broken binary is rejected at the /api/v1/ready gate and
+the previous binary keeps serving.
+
+Examples:
+  cfg controller upgrade restart --binary /opt/cfgms/cfgms-controller-v0.5.12 \
+      --config /etc/cfgms/controller.cfg`,
+	RunE: runControllerUpgradeRestart,
+}
+
+func init() {
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeBinaryPath, "binary", "", "Path to the new cfgms-controller binary (required)")
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeConfigPath, "config", "", "Path to controller.cfg (required)")
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeCanonicalAPIAddr, "canonical-api-addr", ":8080", "Canonical API address (probed after restart)")
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeCanonicalTransAdr, "canonical-transport-addr", ":4433", "Canonical transport address")
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeCandidateAPIAddr, "candidate-api-addr", ":8081", "Side port for pre-restart smoketest")
+	controllerUpgradeRestartCmd.Flags().StringVar(&upgradeCandidateTransAdr, "candidate-transport-addr", ":4434", "Side transport port for pre-restart smoketest")
+	controllerUpgradeRestartCmd.Flags().DurationVar(&upgradeSmoketestTimeout, "smoketest-timeout", 30*time.Second, "Cap on the readiness probe duration")
+	_ = controllerUpgradeRestartCmd.MarkFlagRequired("binary")
+	_ = controllerUpgradeRestartCmd.MarkFlagRequired("config")
+
+	controllerUpgradeCmd.AddCommand(controllerUpgradeRestartCmd)
+}
+
+// runControllerUpgradeRestart implements the supported smoketest-gated in-place
+// restart upgrade. See controllerUpgradeRestartCmd.Long for the full algorithm.
+func runControllerUpgradeRestart(_ *cobra.Command, _ []string) error {
+	if upgradeBinaryPath == "" {
+		return fmt.Errorf("--binary is required")
+	}
+	if upgradeConfigPath == "" {
+		return fmt.Errorf("--config is required")
+	}
+	info, err := os.Stat(upgradeBinaryPath)
+	if err != nil {
+		return fmt.Errorf("restart: --binary %s not accessible: %w", upgradeBinaryPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("restart: --binary %s is a directory, not an executable", upgradeBinaryPath)
+	}
+
+	mgr, err := upgradeRestartMgrFn()
+	if err != nil {
+		return err
+	}
+	installPath := mgr.InstallPath()
+
+	// Back up the current binary so we can restore it if the post-restart
+	// readiness check fails (keep-previous-binary rollback).
+	prevBinaryPath := ""
+	if _, statErr := os.Stat(installPath); statErr == nil {
+		prevBinaryPath = installPath + ".prev"
+		if copyErr := copyBinaryForRestart(installPath, prevBinaryPath); copyErr != nil {
+			return fmt.Errorf("restart: back up current binary at %s: %w", installPath, copyErr)
+		}
+	}
+
+	// Stage 1: start the new binary on side ports for the pre-restart probe.
+	candidate := upgradeRestartSpawnFn(upgradeBinaryPath, upgradeConfigPath)
+
+	ctx, cancel := makeUpgradeContext(2 * time.Minute)
+	defer cancel()
+
+	if err := candidate.Start(ctx, upgradeCandidateAPIAddr, upgradeCandidateTransAdr); err != nil {
+		cleanupRestartBackup(prevBinaryPath)
+		return fmt.Errorf("restart: start candidate on side ports: %w", err)
+	}
+
+	// Stage 2: probe GET /api/v1/ready on the side port. A 503 (storage
+	// unreachable) or any non-200 means the binary cannot serve — reject it.
+	smoketester := &cutover.HTTPSmoketester{
+		ReadyTimeout:   upgradeSmoketestTimeout,
+		RequestTimeout: 5 * time.Second,
+		SkipTLSVerify:  true,
+	}
+	preProbeErr := smoketester.Probe(ctx, candidate, upgradeCandidateAPIAddr, upgradeCandidateTransAdr)
+
+	// Stop the side-port subprocess regardless of probe outcome; it has done its job.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_ = candidate.Stop(stopCtx)
+	stopCancel()
+
+	if preProbeErr != nil {
+		// Pre-restart readiness check failed; install path is untouched.
+		cleanupRestartBackup(prevBinaryPath)
+		return fmt.Errorf("restart: readiness check failed (previous binary retained at %s): %w",
+			installPath, preProbeErr)
+	}
+
+	// Stage 3: readiness check passed — stage the binary and restart the service.
+	if err := mgr.StageBinaryAndRestart(upgradeBinaryPath, upgradeConfigPath); err != nil {
+		// Stage/restart failed; attempt to restore the previous binary.
+		if prevBinaryPath != "" {
+			if restoreErr := mgr.StageBinaryAndRestart(prevBinaryPath, upgradeConfigPath); restoreErr != nil {
+				return fmt.Errorf("restart: stage new binary failed AND restore of previous binary failed — manual intervention required: stage=%v restore=%w", err, restoreErr)
+			}
+			cleanupRestartBackup(prevBinaryPath)
+			return fmt.Errorf("restart: stage new binary failed (restored previous binary at %s): %w", installPath, err)
+		}
+		return fmt.Errorf("restart: stage new binary failed: %w", err)
+	}
+
+	// Stage 4: post-restart readiness check on the canonical port. Waits for
+	// the supervisor to bring up the new binary before declaring success.
+	postProbeErr := smoketester.Probe(ctx, nil, upgradeCanonicalAPIAddr, upgradeCanonicalTransAdr)
+	if postProbeErr != nil {
+		if prevBinaryPath != "" {
+			if restoreErr := mgr.StageBinaryAndRestart(prevBinaryPath, upgradeConfigPath); restoreErr != nil {
+				return fmt.Errorf("restart: post-restart readiness check failed AND restore of previous binary failed — manual intervention required: probe=%v restore=%w", postProbeErr, restoreErr)
+			}
+			cleanupRestartBackup(prevBinaryPath)
+			return fmt.Errorf("restart: post-restart readiness check failed (restored previous binary at %s): %w", installPath, postProbeErr)
+		}
+		return fmt.Errorf("restart: post-restart readiness check failed: %w", postProbeErr)
+	}
+
+	cleanupRestartBackup(prevBinaryPath)
+	fmt.Printf("controller restart upgrade complete\n")
+	fmt.Printf("  install path: %s\n", installPath)
+	fmt.Printf("  new binary:   %s\n", upgradeBinaryPath)
+	return nil
+}
+
+// copyBinaryForRestart copies src to dst preserving source permissions,
+// using an atomic temp-file + rename to avoid partial writes.
+func copyBinaryForRestart(src, dst string) error {
+	in, err := os.Open(src) //#nosec G304 -- caller validates src
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	srcInfo, err := in.Stat()
+	if err != nil {
+		return err
+	}
+
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcInfo.Mode().Perm()) //#nosec G304 -- tmp derived from install-path backup target, not user input
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// cleanupRestartBackup removes the backup file created before staging. Errors
+// are ignored — a stale .prev file is harmless; the important invariant is the
+// install-path binary itself.
+func cleanupRestartBackup(prevBinaryPath string) {
+	if prevBinaryPath != "" {
+		_ = os.Remove(prevBinaryPath)
+	}
 }
 
 func makeUpgradeContext(d time.Duration) (context.Context, context.CancelFunc) {

@@ -24,16 +24,28 @@ The Terminal module provides secure remote terminal access to managed Stewards t
 4. **RBAC System** (`features/rbac/manager.go`): Terminal access permissions
 5. **Certificate Management** (`pkg/cert/manager.go`): mTLS for terminal streams
 
+## Controller Relay (Issue #2761)
+
+The controller-side relay is wired as of Issue #2761:
+
+- `GET /api/v1/terminal/ws/{steward_id}` is registered by `features/controller/api/routes_terminal.go` behind `requirePermission("terminal", "create")` with `Min: AssuranceStrong` (ADR-021).
+- The browser leg authenticates via the ADR-018 session cookie and the assurance gate, **not client certificates**. `CreateBrowserSession` in `auth_integration.go` is the browser entry point and does not perform any mTLS or cert checks.
+- The steward leg (`HandleGRPC` in `features/controller/transport/terminal_handler.go`) extracts the mTLS peer CN and verifies it matches the relay's `steward_id`. The `AuthenticatedTerminalManager` mTLS settings (`RequireMTLS`, `ClientCertRequired`, `IPBindingEnabled`, `TLSFingerprintCheck`) are unchanged.
+- Session recording and audit events (start + end) are produced for every browser terminal session. The relay records **both** legs: steward output via `Session.HandleOutput`, and operator keystrokes and resizes via `Session.RecordInput` / `Session.RecordResize` before they are queued for the steward. Both are fail-closed — a frame that cannot be recorded tears the relay down, which ends the steward stream and therefore the endpoint's PTY.
+- Sessions are correlated by `session_id`, generated at WS-session creation and carried in the `COMMAND_TYPE_OPEN_TERMINAL` params to the steward.
+
 ## Security Model
 
 ### Authentication & Authorization
-- **REST API**: API key authentication for WebSocket upgrade
-- **RBAC Integration**: `terminal:access`, `terminal:record` permissions
-- **mTLS**: End-to-end encryption for all terminal data
+- **Browser WebSocket** (`GET /terminal/ws/{steward_id}`): ADR-018 session cookie + ADR-021 AssuranceStrong gate. No client certificate required.
+- **Steward gRPC** (`Terminal` bidi RPC): mTLS peer CN verified against relay's steward_id. RequireMTLS enforced.
+- **RBAC Integration**: `terminal.session.create` permission (resourceType `terminal`, action `create`)
 - **Session Isolation**: Per-user/per-steward session boundaries
 
 ### Audit & Compliance
-- **Session Recording**: All terminal I/O captured for audit
+- **Session Recording**: All terminal I/O captured for audit — input (keystrokes and resizes, recorded by the controller before they reach the shell) as well as shell output, so the audit trail is never composed solely of bytes a potentially compromised endpoint chose to return. Recording is fail-closed: if `RecordSessions` is true and the recorder cannot be initialized (bad storage path, symlink/permission hijack rejected by `ensureSecureRecordingDir`), `NewSessionManager` returns an error instead of running unrecorded; if an individual session's recording cannot be started, `CreateSession` fails rather than serving that shell without a captured audit trail.
+- **Recording Storage**: `Config.RecordingStoragePath` is **required** when `RecordSessions` is true — `NewSessionManager` fails rather than falling back to a shared path. Recordings hold cleartext keystrokes and output (passwords, tokens, key material), so the controller stores them under its data directory (`<data-dir>/terminal-recordings`) as an owner-only (`0700`) directory holding owner-only (`0600`) files, created with `O_EXCL` and rejected if the path is a symlink.
+- **Audited Client IP**: The `client_ip` detail on `terminal.session.start` is the TCP peer address. `X-Forwarded-For` / `X-Real-IP` are honored **only** when the peer is inside `registration.trusted_proxies` (controller.cfg), and then the rightmost non-proxy hop is used — so a client cannot forge the recorded source IP of a privileged shell. With no trusted proxies configured, forwarding headers are ignored entirely.
 - **Access Logging**: Who accessed which steward and when
 - **Command Filtering**: Optional command validation/blocking
 - **Session Timeout**: Automatic cleanup after inactivity

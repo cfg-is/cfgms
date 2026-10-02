@@ -6,8 +6,8 @@ The file module manages files, directories, and symlinks on managed endpoints. T
 
 ## Implementation References
 
-- Schema: [`features/modules/file/module.yaml`](../../features/modules/file/module.yaml)
-- Implementation: [`features/modules/file/implementation.go`](../../features/modules/file/implementation.go)
+- Schema: [`features/modules/stdlib/file/module.yaml`](../../features/modules/stdlib/file/module.yaml)
+- Implementation: [`features/modules/stdlib/file/implementation.go`](../../features/modules/stdlib/file/implementation.go)
 
 ## Platform Support
 

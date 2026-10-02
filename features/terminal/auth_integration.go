@@ -9,16 +9,117 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
+
+// BrowserSessionOptions configures a browser-originated terminal session.
+// The browser principal has been pre-authenticated via session cookie (ADR-018)
+// and authorized via requirePermission("terminal", "create") + AssuranceStrong
+// gate. No mTLS or client-certificate checks are performed here — those belong
+// exclusively to the steward-leg path (AuthenticatedTerminalManager).
+type BrowserSessionOptions struct {
+	UserID    string
+	TenantID  string
+	StewardID string
+	Shell     string
+	Cols      int
+	Rows      int
+	ClientIP  string
+}
+
+// CreateBrowserSession creates a terminal session for a browser-authenticated
+// principal and emits an audit start record. Authentication and RBAC are handled
+// upstream by the API middleware; this function does not check client certificates.
+//
+// The steward-leg's mTLS requirements (RequireMTLS, ClientCertRequired, IPBinding,
+// TLSFingerprintCheck) in AuthenticatedTerminalManager remain unchanged.
+func CreateBrowserSession(
+	ctx context.Context,
+	manager SessionManager,
+	auditManager *audit.Manager,
+	opts BrowserSessionOptions,
+	logger logging.Logger,
+) (*Session, error) {
+	req := &SessionRequest{
+		TenantID:  opts.TenantID,
+		StewardID: opts.StewardID,
+		UserID:    opts.UserID,
+		Shell:     opts.Shell,
+		Cols:      opts.Cols,
+		Rows:      opts.Rows,
+	}
+
+	sess, err := manager.CreateSession(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("terminal session creation failed: %w", err)
+	}
+
+	if auditManager != nil {
+		if auditErr := auditManager.RecordEvent(ctx,
+			audit.NewEventBuilder().
+				Tenant(opts.TenantID).
+				Type(business.AuditEventSystemAccess).
+				Action("terminal.session.start").
+				User(opts.UserID, business.AuditUserTypeHuman).
+				Session(sess.ID).
+				Resource("terminal", opts.StewardID, "").
+				Result(business.AuditResultSuccess).
+				Severity(business.AuditSeverityMedium).
+				Details(map[string]interface{}{
+					"origin":    "browser",
+					"client_ip": opts.ClientIP,
+				}),
+		); auditErr != nil && logger != nil {
+			logger.Warn("terminal: audit start record failed",
+				"session_id", logging.RedactedID(sess.ID),
+				"steward_id", logging.SanitizeLogValue(opts.StewardID),
+				"error", logging.SanitizeLogValue(auditErr.Error()))
+		}
+	}
+
+	return sess, nil
+}
+
+// EndBrowserSession records the terminal session end audit event.
+// Call this when the browser WebSocket closes, regardless of reason.
+func EndBrowserSession(
+	ctx context.Context,
+	auditManager *audit.Manager,
+	tenantID, userID, sessionID, stewardID, reason string,
+	logger logging.Logger,
+) {
+	if auditManager == nil {
+		return
+	}
+	if auditErr := auditManager.RecordEvent(ctx,
+		audit.NewEventBuilder().
+			Tenant(tenantID).
+			Type(business.AuditEventSystemAccess).
+			Action("terminal.session.end").
+			User(userID, business.AuditUserTypeHuman).
+			Session(sessionID).
+			Resource("terminal", stewardID, "").
+			Result(business.AuditResultSuccess).
+			Severity(business.AuditSeverityMedium).
+			Details(map[string]interface{}{
+				"reason": reason,
+			}),
+	); auditErr != nil && logger != nil {
+		logger.Warn("terminal: audit end record failed",
+			"session_id", logging.RedactedID(sessionID),
+			"steward_id", logging.SanitizeLogValue(stewardID),
+			"error", logging.SanitizeLogValue(auditErr.Error()))
+	}
+}
 
 // tokenRefreshNotifyTimeout is the maximum time rotateTokensIfNeeded will wait
 // to deliver a token-refresh message before dropping it for a slow client.
@@ -101,6 +202,15 @@ type SessionToken struct {
 	IssuedAt    time.Time `json:"issued_at"`
 	ExpiresAt   time.Time `json:"expires_at"`
 	LastRotated time.Time `json:"last_rotated"`
+
+	// StewardID and TenantID name the scope this token was minted for — the target
+	// steward and its tenant, taken from the SessionRequest that authenticated this
+	// session (Issue #4337). Recording them on the token itself lets later validation
+	// re-confirm the session is still being used against the steward and tenant it was
+	// granted for, without re-deriving that scope from whatever request happens to
+	// present the token.
+	StewardID string `json:"steward_id"`
+	TenantID  string `json:"tenant_id"`
 
 	// Security Properties
 	ClientIP        string `json:"client_ip"`
@@ -294,7 +404,7 @@ func (atm *AuthenticatedTerminalManager) AuthenticateAndCreateSession(ctx contex
 	}
 
 	// Generate session token with anti-hijacking properties
-	sessionToken, err := atm.generateSessionToken(session.ID, userID, r, clientCert)
+	sessionToken, err := atm.generateSessionToken(session.ID, userID, req.StewardID, tenantID, r, clientCert)
 	if err != nil {
 		return &AuthenticationResult{
 			Success:      false,
@@ -590,7 +700,7 @@ func (atm *AuthenticatedTerminalManager) getActiveSessionCount(userID string) in
 	return count
 }
 
-func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID string, r *http.Request, cert *x509.Certificate) (*SessionToken, error) {
+func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID, stewardID, tenantID string, r *http.Request, cert *x509.Certificate) (*SessionToken, error) {
 	tokenStr, err := generateSecureToken()
 	if err != nil {
 		return nil, err
@@ -601,6 +711,8 @@ func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID 
 		Token:         tokenStr,
 		SessionID:     sessionID,
 		UserID:        userID,
+		StewardID:     stewardID,
+		TenantID:      tenantID,
 		IssuedAt:      now,
 		ExpiresAt:     now.Add(atm.config.SessionTimeout),
 		LastRotated:   now,
@@ -622,25 +734,18 @@ func (atm *AuthenticatedTerminalManager) generateSessionToken(sessionID, userID 
 	return token, nil
 }
 
+// getClientIP resolves the client IP recorded on the session token and in audit
+// events — a record meant to be forensic. It intentionally never consults
+// X-Forwarded-For or X-Real-IP (Issue #4337): AuthenticatedTerminalManager has no
+// configured set of trusted reverse proxies (unlike terminalClientIP in
+// features/controller/transport, which only trusts those headers from a configured
+// proxy CIDR), so a client can set either header to any value it likes. r.RemoteAddr
+// is the TCP peer address, which the client cannot forge.
 func (atm *AuthenticatedTerminalManager) getClientIP(r *http.Request) string {
-	// Check X-Forwarded-For header first
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		return strings.TrimSpace(ips[0])
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
-
-	// Check X-Real-IP header
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return strings.TrimSpace(xri)
-	}
-
-	// Fall back to RemoteAddr
-	addr := r.RemoteAddr
-	if colon := strings.LastIndex(addr, ":"); colon != -1 {
-		addr = addr[:colon]
-	}
-
-	return addr
+	return r.RemoteAddr
 }
 
 func (atm *AuthenticatedTerminalManager) generateTLSFingerprint(connState *tls.ConnectionState) string {
@@ -836,6 +941,13 @@ func (atm *AuthenticatedTerminalManager) GetSessionRBACStatus(ctx context.Contex
 
 // extractTenantID extracts tenant ID from session token
 func extractTenantID(token *SessionToken) string {
+	// token.TenantID (Issue #4337) is set by generateSessionToken from the
+	// SessionRequest that authenticated the session — the authoritative scope.
+	// Metadata["tenant_id"] and the "default" fallback remain for any token built
+	// before that field existed (or directly, outside generateSessionToken).
+	if token.TenantID != "" {
+		return token.TenantID
+	}
 	if tenantID, exists := token.Metadata["tenant_id"]; exists {
 		return tenantID
 	}

@@ -268,8 +268,26 @@ func (s *Store) UpdateRole(ctx context.Context, role *common.Role) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.roles[role.Id]; !exists {
+	existing, exists := s.roles[role.Id]
+	if !exists {
 		return fmt.Errorf("role %s not found", role.Id)
+	}
+
+	// An update is a whole-record replacement, so tenant scope and system-role
+	// status are immutable here: re-tenanting a role would move it out of its
+	// owner's ListRoles view (which filters on tenant_id), and flipping
+	// IsSystemRole would make a tenant-owned role visible to every tenant.
+	// Callers that need to move a role delete and recreate it.
+	if role.TenantId != existing.TenantId {
+		return fmt.Errorf("role %s tenant cannot be changed", role.Id)
+	}
+	if role.IsSystemRole != existing.IsSystemRole {
+		return fmt.Errorf("role %s system-role status cannot be changed", role.Id)
+	}
+
+	// Preserve the creation timestamp when the caller supplies a partial record.
+	if role.CreatedAt == 0 {
+		role.CreatedAt = existing.CreatedAt
 	}
 
 	role.UpdatedAt = time.Now().Unix()

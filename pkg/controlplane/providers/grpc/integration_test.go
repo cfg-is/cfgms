@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -602,4 +603,115 @@ func TestModeValidation(t *testing.T) {
 
 	err = server.SendResponse(context.Background(), &types.Response{})
 	assert.Error(t, err)
+}
+
+// reserveUnusedUDPAddr binds an ephemeral UDP port and immediately releases
+// it, returning an address string that nothing is listening on. Used to
+// force a client's initial dial (see Provider.dialInitial) into a real,
+// non-simulated connection failure instead of racing a real listener.
+func reserveUnusedUDPAddr(t *testing.T) string {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	require.NoError(t, err)
+	addr := conn.LocalAddr().String()
+	require.NoError(t, conn.Close())
+	return addr
+}
+
+// TestClientStart_RetriesInitialDialUntilServerIsReady is a regression test
+// for Issue #3849: TestStewardSendsHeartbeat_ControllerReceives failed on the
+// macOS merge-queue leg because the client's initial ControlChannel dial
+// (dialAndOpenStream, called once from startClient) is a fail-fast gRPC call
+// with no retry -- a single attempt that hits gRPC-go's own internal connect
+// ceiling under CPU contention surfaced immediately as a hard failure, even
+// though the server was listening moments later. This test targets the peer
+// directly: the client starts dialing an address with nothing listening on
+// it at all, and the server only binds that exact address afterward. Before
+// the fix (Provider.dialInitial retrying until p.ctx is done), client.Start
+// would already have failed by the time the server came up.
+func TestClientStart_RetriesInitialDialUntilServerIsReady(t *testing.T) {
+	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-late-server-test")
+	addr := reserveUnusedUDPAddr(t)
+
+	client := New(ModeClient)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       addr,
+		"tls_config": clientTLS,
+		"steward_id": "steward-late-server-test",
+	}))
+
+	startErr := make(chan error, 1)
+	go func() { startErr <- client.Start(context.Background()) }()
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	// Give the client's first dial attempt(s) time to fail against the
+	// not-yet-bound address before the server binds it.
+	time.Sleep(100 * time.Millisecond)
+
+	reg := registry.NewRegistry()
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       addr,
+		"tls_config": serverTLS,
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	select {
+	case err := <-startErr:
+		require.NoError(t, err, "client.Start should retry the initial dial until the server becomes reachable")
+	case <-time.After(10 * time.Second):
+		t.Fatal("client.Start did not succeed after the server became reachable")
+	}
+
+	require.Eventually(t, func() bool {
+		_, ok := reg.Get("steward-late-server-test")
+		return ok
+	}, 5*time.Second, 10*time.Millisecond, "steward should be registered")
+}
+
+// TestClientStop_DuringInitialDialDoesNotDeadlock is a regression test for
+// the concurrency hazard introduced alongside Provider.dialInitial (Issue
+// #3849): since the initial dial now retries until p.ctx is done instead of
+// failing after one attempt, startClient must not hold p.mu across that
+// retry -- otherwise a concurrent Stop() can never acquire p.mu to reach
+// p.cancel(), which is the only thing that can end the retry, and the two
+// calls deadlock permanently instead of just running slowly.
+func TestClientStop_DuringInitialDialDoesNotDeadlock(t *testing.T) {
+	_, clientTLS := newTestTLSConfigs(t, "steward-stop-during-dial-test")
+	addr := reserveUnusedUDPAddr(t)
+
+	client := New(ModeClient)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       addr,
+		"tls_config": clientTLS,
+		"steward_id": "steward-stop-during-dial-test",
+	}))
+
+	startErr := make(chan error, 1)
+	go func() { startErr <- client.Start(context.Background()) }()
+
+	// Give Start time to acquire p.mu, set p.cancel, and enter the retry loop.
+	time.Sleep(50 * time.Millisecond)
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- client.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopErr:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Stop did not return -- startClient may be holding p.mu across the initial dial retry, deadlocking Stop's p.cancel() call")
+	}
+
+	select {
+	case err := <-startErr:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Start did not return after Stop cancelled its context")
+	}
 }

@@ -3,13 +3,23 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // RotateSigningCertRequest is the optional JSON body for the rotate endpoint.
@@ -39,8 +49,10 @@ type RotateSigningCertResponse struct {
 }
 
 // handleRotateSigningCert handles POST /api/v1/certificates/signing/rotate.
-// Requires mTLS admin cert (IsAdmin=true); non-admin principals are rejected with 403
-// even when rbacService is nil, preventing the RBAC-nil bypass.
+// Requires AssuranceStrong (mTLS admin cert); weaker principals are rejected with 403
+// even when rbacService is nil, preventing the RBAC-nil bypass. certificate:rotate is
+// AssuranceStrong-gated in permissionAssurance — this guard mirrors that bar so the
+// defense holds even if rbacService is nil.
 func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request) {
 	principal, ok := r.Context().Value(principalContextKey).(*Principal)
 	if !ok || principal == nil {
@@ -48,16 +60,32 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Explicit IsAdmin guard — must precede any RBAC or rotation logic.
+	// Defense-in-depth: mirror the AssuranceStrong bar for certificate:rotate.
 	// requirePermission skips checks when rbacService is nil (RBAC-nil bypass);
-	// a CA-key operation must NEVER be reachable by a non-admin principal.
-	if !principal.IsAdmin {
+	// a CA-key operation must NEVER be reachable by a sub-Strong-assurance principal.
+	if principal.Assurance < session.AssuranceStrong {
 		s.writeErrorResponse(w, http.StatusForbidden, "Admin certificate required", "FORBIDDEN")
 		return
 	}
 
 	if s.signingRotationService == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Signing rotation service not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	// Issue #4334: the signing CA is a single fleet-wide resource, not owned by any
+	// one tenant — rotating it replaces the chain every tenant's certificates verify
+	// against. Only an unscoped (root) caller may perform it, mirroring
+	// handleGetRevocationManifest's unscoped-only rule for the other fleet-wide
+	// certificate surface. An unset scope is refused by the same IsRoot() check
+	// (Issue #4316 fail-closed contract) — the AssuranceStrong gate above proves the
+	// credential, never the caller's tenant scope.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !scope.IsRoot() {
+		s.logger.Warn("Denied tenant-scoped signing certificate rotation",
+			"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Signing certificate rotation is available to unscoped administrators only", "FORBIDDEN")
 		return
 	}
 
@@ -91,7 +119,7 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 		}
 		s.logger.Error("Signing certificate rotation failed",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial),
-			"error", err)
+			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Rotation failed", "ROTATION_ERROR")
 		return
 	}
@@ -121,16 +149,30 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		// Filter by steward ID (common name)
 		certInfos, err := s.certManager.GetCertificateByCommonName(stewardID)
 		if err != nil {
-			s.logger.Error("Failed to get certificates for steward", "steward_id", logging.SanitizeLogValue(stewardID), "error", err)
+			s.logger.Error("Failed to get certificates for steward", "steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificates", "INTERNAL_ERROR")
 			return
 		}
 
 		for _, certInfo := range certInfos {
+			// The owning steward is the certificate's recorded ClientID, never the
+			// caller-supplied query param. GetCertificateByCommonName matches on
+			// COMMON NAME, which is independent of the owner (a cert may be issued
+			// with an FQDN common name while ClientID is the steward ID — see
+			// service.CertificateProvisioningRequest). Labelling the result with the
+			// query param would make the tenant-scope filter below evaluate a
+			// caller-controlled string instead of the resource's actual owner,
+			// disclosing other tenants' certificates. Fall back to the query param
+			// only when the cert carries no ClientID at all, in which case it is a
+			// controller-internal cert that the scope filter treats as unattributable.
+			ownerStewardID := certInfo.ClientID
+			if ownerStewardID == "" {
+				ownerStewardID = stewardID
+			}
 			certificates = append(certificates, CertificateInfo{
 				SerialNumber:        certInfo.SerialNumber,
 				CommonName:          certInfo.CommonName,
-				StewardID:           stewardID,
+				StewardID:           ownerStewardID,
 				IsValid:             certInfo.IsValid,
 				ExpiresAt:           certInfo.ExpiresAt,
 				DaysUntilExpiration: safeInt32(certInfo.DaysUntilExpiration), // Safe conversion with bounds validation
@@ -140,7 +182,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	} else {
 		certInfos, err := s.certManager.ListCertificates()
 		if err != nil {
-			s.logger.Error("Failed to list certificates", "error", err)
+			s.logger.Error("Failed to list certificates", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
 			return
 		}
@@ -157,7 +199,275 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Apply tenant-scope filter: scoped callers only see certs for stewards
+	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
+	// skips filtering; every scoped caller requires an evaluable steward store.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		if s.stewardStore == nil {
+			// Without the steward store, subtree membership cannot be evaluated at
+			// all. Returning the unfiltered list would disclose every tenant's
+			// certificates, so fail closed the same way handleDecommissionSteward
+			// and the registration-refresh handlers do.
+			s.logger.Error("certificate list failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		scoped, err := s.filterCertsByTenantScope(r.Context(), certificates, callerTenant)
+		if err != nil {
+			// The scope filter could not be evaluated. Returning the unfiltered
+			// list would disclose other tenants' certificates, so fail the request.
+			s.logger.Error("Failed to apply tenant scope to certificate list",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant), "error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list certificates", "INTERNAL_ERROR")
+			return
+		}
+		certificates = scoped
+	}
+
 	s.writeSuccessResponse(w, certificates)
+}
+
+// filterCertsByTenantScope keeps only the certificates a caller scoped to
+// callerTenant is entitled to see. A certificate is dropped only when its owning
+// steward is demonstrably outside callerTenant's subtree; certificates that
+// cannot be attributed to any tenant are left visible rather than dropped.
+//
+//   - Empty StewardID: controller-internal cert (CA/signing/server). Not a
+//     tenant-scoped resource, so always kept.
+//   - business.ErrStewardNotFound: the certificate has no owning steward record
+//     to check a tenant against (e.g. controller-internal certs, or a steward
+//     that exists only in the in-memory registry and not yet in the durable
+//     store — Issue #2929), so per story AC it is kept and visible fleet-wide,
+//     same as today.
+//   - Any other store error: returned to the caller so the request fails instead of
+//     degrading to no filtering at all during a storage outage.
+//
+// callerTenant == "" is an unscoped admin: the certificates are returned unchanged,
+// including unattributable ones. GetSteward lookups are deduped by StewardID
+// within the request.
+func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []CertificateInfo, callerTenant string) ([]CertificateInfo, error) {
+	if callerTenant == "" {
+		// Unscoped admin — no subtree to restrict to.
+		return certs, nil
+	}
+
+	// scopeCache maps StewardID → whether that steward is within the caller's subtree.
+	scopeCache := make(map[string]bool)
+
+	filtered := make([]CertificateInfo, 0, len(certs))
+	for _, c := range certs {
+		if c.StewardID == "" {
+			// No owning steward — controller-internal or signing cert.
+			// Not a tenant-scoped resource; always visible.
+			filtered = append(filtered, c)
+			continue
+		}
+
+		if inScope, cached := scopeCache[c.StewardID]; cached {
+			if inScope {
+				filtered = append(filtered, c)
+			}
+			continue
+		}
+
+		record, err := s.stewardStore.GetSteward(ctx, c.StewardID)
+		if err != nil {
+			if errors.Is(err, business.ErrStewardNotFound) {
+				// No durable record — no tenant owner to check against, so the
+				// cert is kept and visible fleet-wide, per story AC.
+				scopeCache[c.StewardID] = true
+				filtered = append(filtered, c)
+				continue
+			}
+			// Genuine store fault: the scope decision cannot be made at all.
+			return nil, fmt.Errorf("steward lookup for tenant scope failed: %w", err)
+		}
+
+		inScope := isWithinTenantScope(callerTenant, record.TenantID)
+		scopeCache[c.StewardID] = inScope
+		if inScope {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered, nil
+}
+
+// RevokeCertificateResponse is returned by POST /api/v1/certificates/{serial}/revoke.
+// IsValid reflects the post-revocation state (always false after a successful revoke).
+// IsRevoked confirms the serial is on the revocation list so the UI can update
+// without a second round-trip.
+type RevokeCertificateResponse struct {
+	SerialNumber string `json:"serial_number"`
+	IsValid      bool   `json:"is_valid"`
+	IsRevoked    bool   `json:"is_revoked"`
+}
+
+// handleGetCertificate handles GET /api/v1/certificates/{serial}.
+// Returns CertificateInfo for the given serial number. Callers scoped to a tenant
+// may only see certificates whose owning steward lives within their subtree — an
+// out-of-scope serial returns 404 (same as unknown serial) to avoid disclosing
+// cross-tenant certificate existence.
+func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.certManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	vars := mux.Vars(r)
+	serial := vars["serial"]
+
+	certData, err := s.certManager.GetCertificate(serial)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get certificate",
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificate", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	// Tenant-scope check: callers scoped to a tenant subtree may only see
+	// certificates whose owning steward lives within that subtree.
+	// Unscoped admins (callerTenant == "") see everything.
+	// Controller-internal certs (ClientID == "") have no tenant owner and are always visible.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" && certData.ClientID != "" {
+		if s.stewardStore == nil {
+			s.logger.Error("certificate get failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		record, err := s.stewardStore.GetSteward(r.Context(), certData.ClientID)
+		if err != nil {
+			if !errors.Is(err, business.ErrStewardNotFound) {
+				s.logger.Error("Failed to resolve certificate owner for tenant scope",
+					"serial", logging.SanitizeLogValue(serial),
+					"client_id", logging.SanitizeLogValue(certData.ClientID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get certificate", "INTERNAL_ERROR")
+				return
+			}
+			// ErrStewardNotFound: no durable record — unattributable, visible fleet-wide
+			// (same rule as filterCertsByTenantScope for the list endpoint).
+		} else if !isWithinTenantScope(callerTenant, record.TenantID) {
+			// Out-of-scope: return 404 to avoid leaking cross-tenant serial existence.
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+	}
+
+	daysUntil := int(time.Until(certData.ExpiresAt).Hours() / 24)
+	s.writeSuccessResponse(w, CertificateInfo{
+		SerialNumber:        certData.SerialNumber,
+		CommonName:          certData.CommonName,
+		StewardID:           certData.ClientID,
+		IsValid:             certData.IsValid,
+		ExpiresAt:           certData.ExpiresAt,
+		DaysUntilExpiration: safeInt32(daysUntil),
+		NeedsRenewal:        daysUntil < 30,
+	})
+}
+
+// handleRevokeCertificate handles POST /api/v1/certificates/{serial}/revoke.
+// Tenant-scope check runs BEFORE calling Revoke — an out-of-scope revoke is a
+// denial-of-service against the owning steward's mTLS connectivity.
+func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.certManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Certificate manager not available", "SERVICE_UNAVAILABLE")
+		return
+	}
+
+	vars := mux.Vars(r)
+	serial := vars["serial"]
+
+	// Resolve the cert first to verify existence and get the owning steward.
+	certData, err := s.certManager.GetCertificate(serial)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+		} else {
+			s.logger.Error("Failed to get certificate for revocation",
+				"serial", logging.SanitizeLogValue(serial),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+		}
+		return
+	}
+
+	// Tenant-scope check before revoking. A cross-tenant revoke is sabotage:
+	// it kills a steward's mTLS connectivity without the owning tenant's consent.
+	//
+	// Revoke fails closed: unlike the read/list path, a tenant-scoped caller may
+	// revoke only certificates POSITIVELY attributed to its own subtree. A cert
+	// with an empty ClientID is controller-internal (CA, signing, server) and a
+	// cert whose steward has no durable record is unattributable — revoking
+	// either would let a client-level admin sever mTLS for the whole fleet or
+	// for another tenant's steward. Both are denied with the same 404 used for
+	// out-of-scope certs so no cross-tenant existence is leaked. Only an
+	// unscoped admin (empty caller tenant) may revoke those.
+	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	if callerTenant != "" {
+		if certData.ClientID == "" {
+			s.logger.Warn("Denied tenant-scoped revoke of unattributable certificate",
+				"serial", logging.SanitizeLogValue(serial),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+
+		if s.stewardStore == nil {
+			s.logger.Error("certificate revoke failed: steward store not configured",
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+
+		record, err := s.stewardStore.GetSteward(r.Context(), certData.ClientID)
+		if err != nil {
+			if !errors.Is(err, business.ErrStewardNotFound) {
+				s.logger.Error("Failed to resolve certificate owner for revocation scope",
+					"serial", logging.SanitizeLogValue(serial),
+					"client_id", logging.SanitizeLogValue(certData.ClientID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+				return
+			}
+			// ErrStewardNotFound: no durable record, so the cert cannot be
+			// attributed to this caller's subtree — deny.
+			s.logger.Warn("Denied tenant-scoped revoke of certificate with no steward record",
+				"serial", logging.SanitizeLogValue(serial),
+				"client_id", logging.SanitizeLogValue(certData.ClientID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+		if !isWithinTenantScope(callerTenant, record.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			return
+		}
+	}
+
+	if err := s.certManager.Revoke(serial); err != nil {
+		s.logger.Error("Failed to revoke certificate",
+			"serial", logging.SanitizeLogValue(serial),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to revoke certificate", "INTERNAL_ERROR")
+		return
+	}
+
+	s.writeSuccessResponse(w, RevokeCertificateResponse{
+		SerialNumber: serial,
+		IsValid:      false,
+		IsRevoked:    true,
+	})
 }
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
@@ -180,6 +490,90 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Issue #4334: tenant containment. A tenant-scoped caller may provision a
+	// certificate only for a steward with a durable record inside its own subtree.
+	// An unset scope is refused outright regardless of the target (Issue #4316
+	// fail-closed contract): the certificate:provision permission grant does not by
+	// itself prove a valid caller scope was established.
+	//
+	// Fails closed on an absent record, exactly like the revoke path above: with no
+	// durable record the requested steward_id cannot be attributed to this caller's
+	// subtree, and this endpoint returns a CA-signed client certificate *and its
+	// private key*, so "not yet attributable" must not mean "allowed". Otherwise any
+	// unused steward_id is a free pass through the containment check. New-device
+	// onboarding therefore runs as a root/unscoped operation (or after the steward is
+	// registered to a tenant), not as an unattributable tenant-scoped provision.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsUnset() {
+		s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		return
+	}
+	if !scope.IsRoot() {
+		if s.stewardStore == nil {
+			s.logger.Error("certificate provision failed: steward store not configured")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return
+		}
+		record, err := s.stewardStore.GetSteward(r.Context(), provisionReq.StewardID)
+		if err != nil && !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Error("Failed to resolve steward for provisioning tenant scope",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+			return
+		}
+		// errors.Is(err, ErrStewardNotFound), or a store that reports success with no
+		// record: unattributable either way. Denied with the same message and status as
+		// an out-of-subtree steward so the endpoint is not a fleet-existence oracle.
+		if err != nil || record == nil || record.ID == "" {
+			s.logger.Warn("Denied tenant-scoped provision for steward with no durable record",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID))
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			return
+		}
+		if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/certificates/provision") {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			return
+		}
+
+		// The containment check above resolves the steward by steward_id, but the
+		// identity that consumers actually authenticate on is the certificate Subject,
+		// which the service copies from the request body
+		// (certificate_provisioning_service.go → cert.ClientCertConfig): PeerStewardID
+		// (pkg/transport/quic/tls.go) derives control-plane steward identity from
+		// CommonName alone, and the internal-delivery peer authorizer
+		// (pkg/controlplane/internaldelivery/peer_auth.go) refuses steward leaves on the
+		// Subject Organization marker while accepting a CommonName that matches a cluster
+		// node ID. A caller-supplied CommonName/Organization would therefore let a
+		// tenant-scoped caller pass containment with its own steward_id and still receive
+		// a certificate impersonating another tenant's steward — or a cluster node. So for
+		// a non-root caller the Subject is taken from the resolved record, and an explicit
+		// request value is honoured only when it already matches. Root/unscoped callers,
+		// who hold fleet-wide authority by definition, keep the free-form Subject.
+		if provisionReq.CommonName != "" && provisionReq.CommonName != record.ID {
+			s.logger.Warn("Denied tenant-scoped provision with a common_name that is not the steward's identity",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"common_name", logging.SanitizeLogValue(provisionReq.CommonName))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"common_name must match the steward's identity", "FORBIDDEN")
+			return
+		}
+		if provisionReq.Organization != "" && provisionReq.Organization != internaldelivery.StewardCertOrganization {
+			s.logger.Warn("Denied tenant-scoped provision with a non-steward organization",
+				"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+				"organization", logging.SanitizeLogValue(provisionReq.Organization))
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"organization must be the steward certificate organization", "FORBIDDEN")
+			return
+		}
+		provisionReq.StewardID = record.ID
+		provisionReq.CommonName = record.ID
+		// Set explicitly rather than left empty: the service's default organization is
+		// deployment-configurable (SetCertificateDefaults), and the steward marker is what
+		// keeps this leaf out of the internal-delivery cluster-node path.
+		provisionReq.Organization = internaldelivery.StewardCertOrganization
+	}
+
 	if provisionReq.CommonName == "" {
 		provisionReq.CommonName = provisionReq.StewardID // Default to steward ID
 	}
@@ -192,20 +586,32 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		ValidityDays: int(provisionReq.ValidityDays),
 	}
 
-	// Call provisioning service
-	provisionResp, err := s.certProvisioningService.ProvisionCertificate(req)
-	if err != nil {
+	// Call provisioning service. Today's service reports every failure as both a
+	// non-nil error and Success == false, but that pairing is a service convention,
+	// not something this handler may assume: a nil response or an unsuccessful
+	// response is a failure on its own, and the log detail is derived by
+	// provisionFailureDetail so no branch dereferences a possibly-nil error. The
+	// service's Message field carries internal error text (CA state, filesystem
+	// paths) and is deliberately logged rather than returned to the caller.
+	provisionResp, err := s.certProvisioningService.ProvisionCertificate(r.Context(), req)
+	if err != nil || provisionResp == nil || !provisionResp.Success {
 		s.logger.Error("Failed to provision certificate",
 			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
 			"common_name", logging.SanitizeLogValue(provisionReq.CommonName),
-			"error", err)
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
-		return
-	}
-
-	// Check response success
-	if !provisionResp.Success {
-		s.writeErrorResponse(w, http.StatusBadRequest, provisionResp.Message, "PROVISION_ERROR")
+			"error", logging.SanitizeLogValue(provisionFailureDetail(provisionResp, err)))
+		// Issue #4346: the two service-layer refusals below are client input/
+		// authorization errors, not internal failures — map them to their own
+		// status rather than the generic 500 every other provisioning failure gets.
+		switch {
+		case errors.Is(err, service.ErrValidityCeilingExceeded):
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("validity_days must not exceed %d", service.MaxCertificateValidityDays),
+				"VALIDITY_DAYS_EXCEEDS_MAXIMUM")
+		case errors.Is(err, service.ErrCrossTenantCertificateAccess):
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		default:
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+		}
 		return
 	}
 
@@ -219,6 +625,25 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 	}
 
 	s.writeResponse(w, http.StatusCreated, result)
+}
+
+// provisionFailureDetail renders the log detail for a failed certificate
+// provisioning attempt. Each failure condition checked by the caller gets its own
+// branch — service error, absent response, unsuccessful response — so a service
+// that reports failure without returning an error (or returns nothing at all) is
+// logged accurately instead of panicking on a nil err.Error() call. The returned
+// text is internal detail for the log only; callers receive a generic message.
+func provisionFailureDetail(resp *service.CertificateProvisioningResponse, err error) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case resp == nil:
+		return "provisioning service returned no response and no error"
+	case resp.Message != "":
+		return "provisioning service reported failure without an error: " + resp.Message
+	default:
+		return "provisioning service reported failure without an error"
+	}
 }
 
 // safeInt32 safely converts an int to int32 with bounds validation

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -27,6 +28,9 @@ type WorkflowHandler struct {
 	triggerAPI     *trigger.APIHandler
 	logger         logging.Logger
 	fleetQuery     fleet.FleetQuery // Issue #609: fleet query for script dispatch targeting
+	// requirePermFn gates workflow routes by permission. When nil, routes are ungated (test use only).
+	// Wired from Server.requirePermission via SetRequirePermFn in SetWorkflowHandler (Issue #2725).
+	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -54,15 +58,40 @@ func (h *WorkflowHandler) SetFleetQuery(q fleet.FleetQuery) {
 	h.fleetQuery = q
 }
 
+// SetRequirePermFn wires the server's permission-check factory into WorkflowHandler so
+// RegisterWorkflowRoutes can gate each route without importing the concrete Server type (Issue #2725).
+func (h *WorkflowHandler) SetRequirePermFn(fn func(resourceType, action string) func(http.Handler) http.Handler) {
+	h.requirePermFn = fn
+}
+
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.
-func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) {
-	router.HandleFunc("", h.handleListWorkflows).Methods("GET")
-	router.HandleFunc("", h.handleCreateWorkflow).Methods("POST")
-	router.HandleFunc("/{id}", h.handleGetWorkflow).Methods("GET")
-	router.HandleFunc("/{id}", h.handleUpdateWorkflow).Methods("PUT")
-	router.HandleFunc("/{id}", h.handleDeleteWorkflow).Methods("DELETE")
-	router.HandleFunc("/{id}/execute", h.handleExecuteWorkflow).Methods("POST")
-	router.HandleFunc("/{id}/executions", h.handleGetWorkflowExecutions).Methods("GET")
+// Each route is wrapped with the permission gate set by SetRequirePermFn (Issue #2725).
+//
+// Fails closed (Issue #4316): a nil requirePermFn returns an error and registers no
+// routes at all, instead of the previous behavior of silently registering every
+// workflow route ungated. A misconfigured gate is a startup-time programming error —
+// SetWorkflowHandler always calls SetRequirePermFn before this method in production —
+// not a condition a live server should ever serve requests under. Callers that
+// deliberately want ungated routes for a unit test must wire an explicit
+// always-allow gate via SetRequirePermFn rather than relying on nil to mean that.
+func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) error {
+	gate := h.requirePermFn
+	if gate == nil {
+		return fmt.Errorf("workflow routes: no permission gate wired; call SetRequirePermFn before RegisterWorkflowRoutes")
+	}
+	wrap := func(action string, fn http.HandlerFunc) http.Handler {
+		return gate("workflow", action)(fn)
+	}
+	router.Handle("", wrap("list", h.handleListWorkflows)).Methods("GET")
+	router.Handle("", wrap("write", h.handleCreateWorkflow)).Methods("POST")
+	router.Handle("/{id}", wrap("read", h.handleGetWorkflow)).Methods("GET")
+	router.Handle("/{id}", wrap("write", h.handleUpdateWorkflow)).Methods("PUT")
+	router.Handle("/{id}", wrap("write", h.handleDeleteWorkflow)).Methods("DELETE")
+	router.Handle("/{id}/execute", wrap("execute", h.handleExecuteWorkflow)).Methods("POST")
+	router.Handle("/{id}/executions", wrap("read", h.handleGetWorkflowExecutions)).Methods("GET")
+	router.Handle("/{id}/executions/{exec_id}", wrap("read", h.handleGetExecution)).Methods("GET")
+	router.Handle("/{id}/executions/{exec_id}/cancel", wrap("cancel", h.handleCancelExecution)).Methods("POST")
+	return nil
 }
 
 // NewRegistrationApprovalHook creates a RegistrationApprovalHook backed by this handler's
@@ -83,10 +112,26 @@ func (h *WorkflowHandler) RegisterTriggerRoutes(router *mux.Router) {
 	h.triggerAPI.RegisterRoutes(router)
 }
 
-// workflowStoreForRequest returns a WorkflowStore scoped to the tenant in the request context.
-func (h *WorkflowHandler) workflowStoreForRequest(r *http.Request) *workflow.WorkflowStore {
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	return workflow.NewWorkflowStore(h.configStore, tenantID)
+// workflowStoreForRequest returns a WorkflowStore scoped to the caller's
+// ctxkeys.TenantScope (Issue #4335), or writes a 404 and returns ok=false when the
+// scope is unset. An unset scope must never be silently treated as the caller's own
+// isolated "" bucket: that bucket is also where a genuinely root-scoped admin's
+// workflows live (root maps to the same "" tenant key an unscoped admin has always
+// used), so collapsing "no scope was ever established" into it would let a request
+// that lost its tenant scope collide with — and potentially read or modify —
+// another caller's workflows.
+func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http.Request) (*workflow.WorkflowStore, bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	switch {
+	case scope.IsRoot():
+		return workflow.NewWorkflowStore(h.configStore, ""), true
+	case scope.IsTenant() && scope.Path() != "":
+		return workflow.NewWorkflowStore(h.configStore, scope.Path()), true
+	default:
+		h.logger.Warn("Workflow request refused: caller tenant scope is unset")
+		h.sendError(w, http.StatusNotFound, "not found")
+		return nil, false
+	}
 }
 
 // handleListWorkflows handles GET /api/v1/workflows
@@ -96,12 +141,19 @@ func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 	workflows, err := store.ListWorkflows(r.Context())
 	if err != nil {
 		h.logger.Error("Failed to list workflows", "error", err)
 		h.sendError(w, http.StatusInternalServerError, "failed to list workflows")
 		return
+	}
+
+	for i := range workflows {
+		workflow.AssignStepIDs(workflows[i].Steps)
 	}
 
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
@@ -164,10 +216,13 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 		SemanticVersion: *semver,
 	}
 
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 	nameForLog := logging.SanitizeLogValue(req.Name)
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
-		h.logger.Error("Failed to create workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to create workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to create workflow")
 		return
 	}
@@ -189,14 +244,18 @@ func (h *WorkflowHandler) handleGetWorkflow(w http.ResponseWriter, r *http.Reque
 	}
 
 	nameForLog := logging.SanitizeLogValue(name)
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 	vw, err := store.GetLatestWorkflow(r.Context(), name)
 	if err != nil {
-		h.logger.Error("Failed to get workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to get workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("workflow %q not found", name))
 		return
 	}
 
+	workflow.AssignStepIDs(vw.Steps)
 	h.sendJSON(w, http.StatusOK, vw)
 }
 
@@ -247,9 +306,12 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 	}
 
 	nameForLog := logging.SanitizeLogValue(name)
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 	if err := store.StoreWorkflow(r.Context(), vw); err != nil {
-		h.logger.Error("Failed to update workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to update workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to update workflow")
 		return
 	}
@@ -271,12 +333,15 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 	}
 
 	nameForLog := logging.SanitizeLogValue(name)
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 
 	// Retrieve all versions to delete
 	versions, err := store.ListWorkflowVersions(r.Context(), name)
 	if err != nil {
-		h.logger.Error("Failed to list workflow versions for deletion", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to list workflow versions for deletion", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to delete workflow")
 		return
 	}
@@ -288,7 +353,7 @@ func (h *WorkflowHandler) handleDeleteWorkflow(w http.ResponseWriter, r *http.Re
 	for _, vw := range versions {
 		if err := store.DeleteWorkflow(r.Context(), name, vw.SemanticVersion); err != nil {
 			versionForLog := logging.SanitizeLogValue(vw.SemanticVersion.String())
-			h.logger.Error("Failed to delete workflow version", "name", nameForLog, "version", versionForLog, "error", err)
+			h.logger.Error("Failed to delete workflow version", "name", nameForLog, "version", versionForLog, "error", logging.SanitizeLogValue(err.Error()))
 			h.sendError(w, http.StatusInternalServerError, "failed to delete workflow")
 			return
 		}
@@ -324,7 +389,10 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 		req.Variables = nil
 	}
 
-	store := h.workflowStoreForRequest(r)
+	store, ok := h.workflowStoreForRequest(w, r)
+	if !ok {
+		return
+	}
 	vw, err := store.GetLatestWorkflow(r.Context(), name)
 	if err != nil {
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("workflow %q not found", name))
@@ -334,7 +402,7 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	nameForLog := logging.SanitizeLogValue(name)
 	execution, err := h.engine.ExecuteWorkflow(r.Context(), vw.Workflow, req.Variables)
 	if err != nil {
-		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", err)
+		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to start workflow execution")
 		return
 	}
@@ -379,9 +447,171 @@ func (h *WorkflowHandler) handleGetWorkflowExecutions(w http.ResponseWriter, r *
 		executions = []*workflow.WorkflowExecution{}
 	}
 
+	// Tenant isolation (Issue #4316): the engine's execution list is not itself
+	// tenant-scoped, so a caller guessing another tenant's workflow name could
+	// otherwise read its execution history. Gate only when there is something to
+	// leak — a name with no matching executions (including one nobody has created
+	// yet) legitimately answers with an empty list without a store round trip,
+	// mirroring handleGetExecution/handleCancelExecution's check on this handler's
+	// sibling routes.
+	if len(executions) > 0 && h.configStore != nil {
+		store, ok := h.workflowStoreForRequest(w, r)
+		if !ok {
+			return
+		}
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for workflow executions list", "name", nameForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
 		"executions": executions,
 		"count":      len(executions),
+	})
+}
+
+// handleGetExecution handles GET /api/v1/workflows/{id}/executions/{exec_id}
+func (h *WorkflowHandler) handleGetExecution(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.sendError(w, http.StatusServiceUnavailable, "workflow engine not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["id"]
+	execID := vars["exec_id"]
+
+	if name == "" || execID == "" {
+		h.sendError(w, http.StatusBadRequest, "workflow name and execution ID are required")
+		return
+	}
+
+	// Sequential-reassignment form required for CodeQL's ReplaceSanitizer to recognise
+	// these values as sanitized (logging.SanitizeLogValue alone is not modelled by CodeQL).
+	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog = strings.ReplaceAll(nameForLog, "\n", "_")
+	nameForLog = strings.ReplaceAll(nameForLog, "\r", "_")
+	execIDForLog := logging.SanitizeLogValue(execID)
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\n", "_")
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\r", "_")
+
+	execution, err := h.engine.GetExecution(execID)
+	if err != nil || execution == nil {
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = logging.SanitizeLogValue(err.Error())
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		return
+	}
+
+	if execution.WorkflowName != name {
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found for workflow %q", execID, name))
+		return
+	}
+
+	// Tenant isolation: verify the workflow exists in the calling tenant's namespace.
+	// A future GET /api/v1/executions/{exec_id} lookup-by-ID endpoint can bypass this
+	// once executions carry a tenant_id field.
+	if h.configStore != nil {
+		store, ok := h.workflowStoreForRequest(w, r)
+		if !ok {
+			return
+		}
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for execution get",
+				"name", nameForLog, "exec_id", execIDForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
+	h.sendJSON(w, http.StatusOK, execution)
+}
+
+// handleCancelExecution handles POST /api/v1/workflows/{id}/executions/{exec_id}/cancel
+func (h *WorkflowHandler) handleCancelExecution(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		h.sendError(w, http.StatusServiceUnavailable, "workflow engine not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["id"]
+	execID := vars["exec_id"]
+
+	if name == "" || execID == "" {
+		h.sendError(w, http.StatusBadRequest, "workflow name and execution ID are required")
+		return
+	}
+
+	// Sequential-reassignment form required for CodeQL's ReplaceSanitizer to recognise
+	// these values as sanitized (logging.SanitizeLogValue alone is not modelled by CodeQL).
+	nameForLog := logging.SanitizeLogValue(name)
+	nameForLog = strings.ReplaceAll(nameForLog, "\n", "_")
+	nameForLog = strings.ReplaceAll(nameForLog, "\r", "_")
+	execIDForLog := logging.SanitizeLogValue(execID)
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\n", "_")
+	execIDForLog = strings.ReplaceAll(execIDForLog, "\r", "_")
+
+	// Pre-check existence before acting. CancelExecution returns nil for already-terminal
+	// executions (it skips the cancel when Cancel func is nil) and a plain error string for
+	// not-found — neither signal is suitable for HTTP status mapping, so we gate here.
+	execution, err := h.engine.GetExecution(execID)
+	if err != nil || execution == nil {
+		// err may embed execID (user-tainted) via engine format strings — sanitize before logging.
+		safeErrStr := ""
+		if err != nil {
+			safeErrStr = logging.SanitizeLogValue(err.Error())
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\n", "_")
+			safeErrStr = strings.ReplaceAll(safeErrStr, "\r", "_")
+		}
+		h.logger.Error("Execution not found for cancel", "name", nameForLog, "exec_id", execIDForLog, "error", safeErrStr)
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found", execID))
+		return
+	}
+
+	if execution.WorkflowName != name {
+		h.sendError(w, http.StatusNotFound, fmt.Sprintf("execution %q not found for workflow %q", execID, name))
+		return
+	}
+
+	// Tenant isolation: reject cross-tenant cancellation.
+	if h.configStore != nil {
+		store, ok := h.workflowStoreForRequest(w, r)
+		if !ok {
+			return
+		}
+		if _, storeErr := store.GetLatestWorkflow(r.Context(), name); storeErr != nil {
+			h.logger.Error("Tenant isolation check failed for execution cancel",
+				"name", nameForLog, "exec_id", execIDForLog)
+			h.sendError(w, http.StatusForbidden, "access denied")
+			return
+		}
+	}
+
+	// Reject already-terminal executions before calling CancelExecution.
+	status := execution.GetStatus()
+	if status == workflow.StatusCompleted || status == workflow.StatusFailed || status == workflow.StatusCancelled {
+		h.sendError(w, http.StatusConflict, "execution is already in a terminal state")
+		return
+	}
+
+	if cancelErr := h.engine.CancelExecution(execID); cancelErr != nil {
+		h.logger.Error("Failed to cancel execution", "name", nameForLog, "exec_id", execIDForLog,
+			"error", logging.SanitizeLogValue(cancelErr.Error()))
+		h.sendError(w, http.StatusInternalServerError, "failed to cancel execution")
+		return
+	}
+
+	h.sendJSON(w, http.StatusOK, map[string]interface{}{
+		"cancelled": execID,
 	})
 }
 

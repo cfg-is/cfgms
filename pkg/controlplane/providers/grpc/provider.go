@@ -93,13 +93,26 @@ type Provider struct {
 	tlsConfig       *tls.Config
 	keepalivePeriod time.Duration // 0 = use QUIC default (25s)
 	idleTimeout     time.Duration // 0 = use QUIC default (90s)
+	maxConnections  int
 	stewardID       string
 	tenantID        string
 	logger          logging.Logger
 	startTime       time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
-	backoffOverride    *backoff
+	backoffOverride *backoff
+	// reconnectBackoff persists across reconnectLoop invocations so successive
+	// refused cycles keep escalating. It must NOT be rebuilt per call: a stream
+	// that opens and is then rejected on its first Recv re-enters reconnectLoop,
+	// so a per-call backoff restarts at the initial interval every cycle and
+	// never grows (Issue #3481).
+	//
+	// Guarded by its own backoffMu rather than reconnectMu, because reconnectMu
+	// is TryLock-ed to mean "a reconnect is already running": briefly holding it
+	// to reset the backoff would make a concurrent reconnectLoop see a false
+	// positive and skip reconnecting altogether.
+	backoffMu          sync.Mutex
+	reconnectBackoff   *backoff
 	quicConfigOverride *quicgo.Config
 
 	// approvalChecker gates reconnecting stewards on the ControlChannel path.
@@ -112,6 +125,17 @@ type Provider struct {
 	// for refresh-on-connect cert delivery (Issue #1817).
 	onConnectHook StewardOnConnectHook
 
+	// tenantAdmission gates the Register (connect) and ControlChannel heartbeat
+	// paths with a per-tenant concurrency limit. Nil means no admission control
+	// (default). Injected via WithTenantAdmission (Issue #3759, ADR-031 Decision 6).
+	tenantAdmission TenantAdmission
+
+	// stewardTenantResolver maps an mTLS-verified steward identity to its tenant
+	// using server-side fleet records, so admission buckets are never keyed on a
+	// caller-supplied tenant field. Nil falls back to per-steward buckets.
+	// Injected via WithStewardTenantResolver.
+	stewardTenantResolver StewardTenantResolver
+
 	// Subscription handlers (client mode)
 	commandHandler interfaces.CommandHandler
 
@@ -119,6 +143,7 @@ type Provider struct {
 	// the registration token (creds.ClientId) maps to a tenant matching creds.TenantId.
 	// Injected via Initialize config key "registration_token_store".
 	registrationTokenStore business.RegistrationTokenStore
+	requireSecurityStores  bool
 
 	// Subscription handlers (server mode)
 	eventHandlers     []eventSubscription
@@ -160,6 +185,7 @@ func New(mode Mode, opts ...option) *Provider {
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
 		logger:            logging.NewNoopLogger(),
+		maxConnections:    50000,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -227,6 +253,12 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 	if it, ok := config["idle_timeout"].(time.Duration); ok {
 		p.idleTimeout = it
 	}
+	if max, ok := config["max_connections"].(int); ok {
+		if max < 1 {
+			return fmt.Errorf("max_connections must be at least 1")
+		}
+		p.maxConnections = max
+	}
 	if cb, ok := config["on_state_change"].(func(ConnectionState)); ok {
 		p.onStateChange = cb
 	}
@@ -268,6 +300,18 @@ func (p *Provider) initializeServer(config map[string]interface{}) error {
 	if ts, ok := config["registration_token_store"].(business.RegistrationTokenStore); ok {
 		p.registrationTokenStore = ts
 	}
+	if required, _ := config["require_security_stores"].(bool); required {
+		p.requireSecurityStores = true
+		if p.approvalChecker == nil {
+			return fmt.Errorf("server mode requires an approval checker")
+		}
+		if p.registrationTokenStore == nil {
+			return fmt.Errorf("server mode requires a registration token store")
+		}
+		if _, ok := p.registrationTokenStore.(business.RegistrationTokenClaimer); !ok {
+			return fmt.Errorf("server mode requires atomic registration token claiming")
+		}
+	}
 
 	return nil
 }
@@ -296,17 +340,21 @@ func (p *Provider) initializeClient(config map[string]interface{}) error {
 // Start begins control plane operation.
 func (p *Provider) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	p.startTime = time.Now()
+	mode := p.mode
 
-	switch p.mode {
+	switch mode {
 	case ModeServer:
+		defer p.mu.Unlock()
 		return p.startServer()
 	case ModeClient:
+		// startClient manages its own locking rather than holding mu for the
+		// duration of this call -- see its doc comment.
+		p.mu.Unlock()
 		return p.startClient()
 	default:
+		p.mu.Unlock()
 		return fmt.Errorf("provider not initialized")
 	}
 }
@@ -333,7 +381,12 @@ func (p *Provider) startServer() error {
 	p.serverImpl = &transportServer{provider: p}
 
 	if p.ownGRPCServer {
-		ql, err := quictransport.Listen(p.addr, p.tlsConfig, p.quicConfig())
+		ql, err := quictransport.ListenWithLimits(
+			p.addr,
+			p.tlsConfig,
+			p.quicConfig(),
+			quictransport.LimitsForMaxConnections(p.maxConnections),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to start QUIC listener: %w", err)
 		}
@@ -344,8 +397,12 @@ func (p *Provider) startServer() error {
 		)
 		transportpb.RegisterStewardTransportServer(p.grpcServer, p.serverImpl)
 
+		// Capture local references: ForceStop/stopServer may nil the shared
+		// fields before this goroutine runs, and reading p.grpcServer inside
+		// the goroutine would then panic.
+		grpcSrv := p.grpcServer
 		go func() {
-			if err := p.grpcServer.Serve(ql); err != nil {
+			if err := grpcSrv.Serve(ql); err != nil {
 				p.logger.Error("gRPC server stopped", "error", err)
 			}
 		}()
@@ -361,22 +418,66 @@ func (p *Provider) startServer() error {
 	return nil
 }
 
-// startClient must be called with p.mu held.
+// startClient performs the initial ControlChannel dial. Unlike startServer,
+// it is NOT called with p.mu held: dialInitial retries the dial until p.ctx
+// is done, and a concurrent Stop() needs p.mu.Lock() to reach p.cancel() and
+// unblock that retry. Holding mu here would make Stop() wait on the very
+// thing only Stop() can end -- the same reason reconnectLoop never holds mu
+// across dialAndOpenStream or its own backoff wait.
 func (p *Provider) startClient() error {
 	p.setState(StateConnecting)
 
-	if err := p.dialAndOpenStream(); err != nil {
+	if err := p.dialInitial(); err != nil {
 		p.setState(StateDisconnected)
 		return err
 	}
 
+	p.mu.Lock()
+	p.lastConnectedAt = time.Now()
+	p.mu.Unlock()
 	p.setState(StateConnected)
-	p.lastConnectedAt = time.Now() // mu already held by caller
 
 	go p.clientReceiveLoop()
 
 	p.logger.Info("gRPC control plane client connected", "addr", logging.SanitizeLogValue(p.addr), "steward_id", logging.SanitizeLogValue(p.stewardID))
 	return nil
+}
+
+// dialInitial repeats dialAndOpenStream, using the same escalating backoff as
+// reconnectLoop, until it succeeds or p.ctx is done.
+//
+// A single dialAndOpenStream attempt can hit gRPC-go's own per-attempt
+// connect ceiling (MinConnectTimeout, 20s by default) before a QUIC+TLS
+// handshake completes under CPU contention -- even though the peer is
+// already listening -- and because ControlChannel is a fail-fast call (no
+// WaitForReady), that one failed attempt surfaces immediately as Unavailable.
+// Bumping the per-attempt ceiling would only move the same race to a bigger
+// number. Retrying against the caller's own context instead makes the
+// initial connect deterministic under load: as long as the caller does not
+// impose its own deadline, the dial keeps trying until the peer is reachable
+// (Issue #3849).
+func (p *Provider) dialInitial() error {
+	b := defaultBackoff()
+	for {
+		err := p.dialAndOpenStream()
+		if err == nil {
+			return nil
+		}
+
+		select {
+		case <-p.ctx.Done():
+			return err
+		default:
+		}
+
+		timer := time.NewTimer(b.next())
+		select {
+		case <-p.ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+	}
 }
 
 // dialAndOpenStream creates a new gRPC client connection over QUIC and opens the
@@ -439,6 +540,14 @@ func (p *Provider) clientReceiveLoop() {
 
 	for {
 		msg, err := stream.Recv()
+		if err == nil {
+			// The stream has proven it can carry traffic, so this connection
+			// counts as a genuine success and the escalating backoff is cleared.
+			// Doing it here rather than at stream-open is what keeps a
+			// persistently-refused steward escalating while leaving an ordinary
+			// transport drop reconnecting promptly (Issue #3481).
+			p.resetReconnectBackoff()
+		}
 		if err != nil {
 			select {
 			case <-p.ctx.Done():
@@ -477,6 +586,42 @@ func (p *Provider) clientReceiveLoop() {
 	}
 }
 
+// nextReconnectBackoff returns the next reconnect delay and the attempt number
+// it corresponds to, lazily creating the provider-scoped backoff on first use.
+//
+// The backoff deliberately lives on the Provider: an admission refusal does not
+// fail dialAndOpenStream (the stream opens; the rejection surfaces on the first
+// Recv), so clientReceiveLoop re-enters reconnectLoop on every refusal. A backoff
+// built per reconnectLoop call therefore restarted at its initial interval every
+// cycle and never grew — measured live at "attempt 1, backoff 1s" indefinitely,
+// 78 MB of controller log in a day from three refused stewards (Issue #3481).
+func (p *Provider) nextReconnectBackoff() (time.Duration, int) {
+	p.backoffMu.Lock()
+	defer p.backoffMu.Unlock()
+	if p.reconnectBackoff == nil {
+		p.reconnectBackoff = defaultBackoff()
+		if p.backoffOverride != nil {
+			p.reconnectBackoff = &backoff{
+				initial:    p.backoffOverride.initial,
+				max:        p.backoffOverride.max,
+				multiplier: p.backoffOverride.multiplier,
+				jitter:     p.backoffOverride.jitter,
+			}
+		}
+	}
+	return p.reconnectBackoff.next(), p.reconnectBackoff.attempt
+}
+
+// resetReconnectBackoff clears the escalating reconnect backoff after a stream
+// has demonstrably carried a message.
+func (p *Provider) resetReconnectBackoff() {
+	p.backoffMu.Lock()
+	defer p.backoffMu.Unlock()
+	if p.reconnectBackoff != nil {
+		p.reconnectBackoff.reset()
+	}
+}
+
 // reconnectLoop attempts to re-establish the ControlChannel with exponential backoff.
 // It runs until either a connection is established or the provider context is cancelled.
 // TryLock ensures only one reconnectLoop is active at a time: when Reconnect() closes
@@ -487,16 +632,6 @@ func (p *Provider) reconnectLoop() {
 		return
 	}
 	defer p.reconnectMu.Unlock()
-
-	bo := defaultBackoff()
-	if p.backoffOverride != nil {
-		bo = &backoff{
-			initial:    p.backoffOverride.initial,
-			max:        p.backoffOverride.max,
-			multiplier: p.backoffOverride.multiplier,
-			jitter:     p.backoffOverride.jitter,
-		}
-	}
 
 	for {
 		select {
@@ -509,7 +644,7 @@ func (p *Provider) reconnectLoop() {
 		p.setState(StateReconnecting)
 		p.reconnectAttempts.Add(1)
 
-		wait := bo.next()
+		wait, attempt := p.nextReconnectBackoff()
 
 		// Read addr under sendMu — restartServerAndRepoint writes p.addr under sendMu,
 		// so reads outside sendMu are a data race (same pattern as dialAndOpenStream).
@@ -518,7 +653,7 @@ func (p *Provider) reconnectLoop() {
 		p.sendMu.Unlock()
 
 		p.logger.Info("reconnecting to controller",
-			"attempt", bo.attempt,
+			"attempt", attempt,
 			"backoff", wait,
 			"addr", logging.SanitizeLogValue(addr),
 		)
@@ -535,12 +670,16 @@ func (p *Provider) reconnectLoop() {
 
 		// Attempt to reconnect
 		if err := p.dialAndOpenStream(); err != nil {
-			p.logger.Warn("reconnection failed", "error", err, "attempt", bo.attempt)
+			p.logger.Warn("reconnection failed", "error", err, "attempt", attempt)
 			continue
 		}
 
-		// Success — reset backoff and restart receive loop
-		bo.reset()
+		// The stream is OPEN, which is not the same as usable: a server-side
+		// admission refusal is delivered on the first Recv, not by
+		// dialAndOpenStream. Resetting the backoff here therefore rewarded a
+		// connection that was about to be rejected. The reset now happens in
+		// clientReceiveLoop once a message has actually been received, so a
+		// stream that never carries one keeps escalating (Issue #3481).
 		p.setState(StateConnected)
 		p.mu.Lock()
 		p.lastConnectedAt = time.Now()
@@ -591,6 +730,8 @@ func (p *Provider) closeClientConn() {
 
 // setState updates the connection state and fires the on_state_change callback.
 func (p *Provider) setState(state ConnectionState) {
+	// #nosec G115 -- ConnectionState is a closed enum whose constants are all
+	// within int32; callers cannot construct an out-of-range enum value here.
 	old := ConnectionState(p.connState.Swap(int32(state)))
 	if old == state {
 		return
@@ -631,13 +772,16 @@ func (p *Provider) checkClientConnected() error {
 // Stop gracefully shuts down the control plane.
 func (p *Provider) Stop(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.cancel != nil {
 		p.cancel()
 	}
+	mode := p.mode
+	p.mu.Unlock()
+	// mu is released before the blocking teardown so that ControlChannel
+	// handlers (which acquire mu.RLock in dispatchEvent/dispatchHeartbeat)
+	// can exit without deadlocking against GracefulStop.
 
-	switch p.mode {
+	switch mode {
 	case ModeServer:
 		return p.stopServer()
 	case ModeClient:
@@ -648,21 +792,31 @@ func (p *Provider) Stop(ctx context.Context) error {
 }
 
 func (p *Provider) stopServer() error {
-	if p.ownGRPCServer {
-		if p.grpcServer != nil {
-			p.grpcServer.GracefulStop()
-		}
-		if p.listener != nil {
-			_ = p.listener.Close()
-		}
-	}
-	// Clear server state so the singleton can be re-initialized cleanly
-	// (e.g., when multiple integration tests create separate controllers)
-	p.grpcServer = nil
+	// Snapshot and clear fields under mu so concurrent calls and
+	// ForceStop() see nil fields and skip double-teardown.
+	p.mu.Lock()
+	ownGRPC := p.ownGRPCServer
+	listener := p.listener
+	grpcServer := p.grpcServer
 	p.listener = nil
+	p.grpcServer = nil
 	p.serverImpl = nil
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
+	p.mu.Unlock()
+
+	if ownGRPC {
+		// Close the QUIC listener first so that all active ControlChannel
+		// streams receive an error from stream.Recv(). This unblocks
+		// GracefulStop, which would otherwise wait forever for persistent
+		// bidirectional streams to close on their own.
+		if listener != nil {
+			_ = listener.Close()
+		}
+		if grpcServer != nil {
+			grpcServer.GracefulStop()
+		}
+	}
 	return nil
 }
 
@@ -687,7 +841,7 @@ func (p *Provider) SendCommand(ctx context.Context, cmd *types.SignedCommand) er
 	conn, ok := p.registry.Get(cmd.Command.StewardID)
 	if !ok {
 		p.deliveryFailures.Add(1)
-		return fmt.Errorf("steward %s not connected", cmd.Command.StewardID)
+		return fmt.Errorf("steward %s not connected: %w", cmd.Command.StewardID, interfaces.ErrStewardNotConnected)
 	}
 
 	msg := &transportpb.ControlMessage{
@@ -724,7 +878,7 @@ func (p *Provider) FanOutCommand(ctx context.Context, cmd *types.SignedCommand, 
 	for _, id := range stewardIDs {
 		conn, ok := conns[id]
 		if !ok {
-			result.Failed[id] = fmt.Errorf("steward not connected")
+			result.Failed[id] = fmt.Errorf("steward %s not connected: %w", id, interfaces.ErrStewardNotConnected)
 			p.deliveryFailures.Add(1)
 			continue
 		}
@@ -980,12 +1134,27 @@ func (p *Provider) ListenAddr() string {
 // waiting for in-progress RPCs to complete. Use in tests when GracefulStop
 // would hang on long-lived ControlChannel streams.
 func (p *Provider) ForceStop() {
-	if p.ownGRPCServer {
-		if p.listener != nil {
-			_ = p.listener.Close()
+	// Cancel the provider context and snapshot+clear shared fields under mu
+	// so that concurrent Stop() calls and multiple ForceStop() invocations
+	// are safe (mu also guards p.listener and p.grpcServer against races).
+	p.mu.Lock()
+	if p.cancel != nil {
+		p.cancel()
+	}
+	ownGRPC := p.ownGRPCServer
+	listener := p.listener
+	grpcServer := p.grpcServer
+	p.listener = nil
+	p.grpcServer = nil
+	p.serverImpl = nil
+	p.mu.Unlock()
+
+	if ownGRPC {
+		if listener != nil {
+			_ = listener.Close()
 		}
-		if p.grpcServer != nil {
-			p.grpcServer.Stop()
+		if grpcServer != nil {
+			grpcServer.Stop()
 		}
 	}
 }
@@ -998,6 +1167,15 @@ func (p *Provider) ServerHandler() transportpb.StewardTransportServer {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.serverImpl
+}
+
+// TransportClient returns the gRPC StewardTransportClient used by this provider.
+// This client shares the same gRPC-over-QUIC connection as the ControlChannel.
+// Returns nil when the provider is running in server mode or before Start().
+func (p *Provider) TransportClient() transportpb.StewardTransportClient {
+	p.sendMu.Lock()
+	defer p.sendMu.Unlock()
+	return p.grpcClient
 }
 
 // --- gRPC StewardTransportServer implementation ---
@@ -1022,6 +1200,11 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 	// The authoritative tenant comes from the server-side RegistrationTokenStore lookup
 	// using the token string the steward supplies in creds.ClientId. creds.TenantId is only
 	// a post-derivation consistency check and must never be the source of truth.
+	//
+	// This block runs BEFORE the admission gate below (Issue #3759 security
+	// review): the gate's bucket key must be a tenant the caller has proven, so
+	// the proof has to come first.
+	var verifiedTenantID string
 	if ts := s.provider.registrationTokenStore; ts != nil {
 		creds := req.GetCredentials()
 
@@ -1049,6 +1232,34 @@ func (s *transportServer) Register(ctx context.Context, req *controllerpb.Regist
 				"claimed_tenant", logging.SanitizeLogValue(claimedTenantID))
 			return nil, status.Error(codes.PermissionDenied, "registration rejected: creds.tenant_id does not match registration token")
 		}
+
+		// The token is not spent here. Registration tokens are perennial
+		// (Issue #1690) — one enrolment token is what an RMM or GPO deployment
+		// bakes into a script for a whole fleet, so revoking it on first use
+		// would lock out every remaining endpoint. At this point the caller has
+		// already presented an mTLS client certificate that only the REST
+		// issuance boundary can mint, and that boundary holds the per-device
+		// single-issuance guard (RegistrationTokenClaimer). The token's role
+		// here is tenant binding, which the checks above enforce.
+		verifiedTenantID = tokenData.TenantID
+	}
+
+	// Per-tenant admission control (Issue #3759, ADR-031 Decision 6): the same
+	// mechanism the DNA ingest path uses (TenantQueue, same per-tenant limit),
+	// on its own instance, so a single tenant cannot exhaust connect capacity on
+	// a shared cell.
+	//
+	// The bucket is keyed on server-verified state only — the tenant the
+	// registration token is bound to, else the tenant on this steward's fleet
+	// record, else the mTLS-verified certificate CN. creds.tenant_id is never an
+	// input: it is caller-supplied, so keying on it would let any steward with a
+	// valid certificate pin all of a victim tenant's connect and heartbeat slots.
+	if s.provider.tenantAdmission != nil {
+		bucket := s.provider.admissionBucket(ctx, stewardID, verifiedTenantID)
+		if aErr := s.provider.tenantAdmission.Acquire(bucket); aErr != nil {
+			return nil, status.Error(codes.ResourceExhausted, "tenant connect queue full")
+		}
+		defer s.provider.tenantAdmission.Release(bucket)
 	}
 
 	s.provider.logger.Info("steward registered", "steward_id", logging.SanitizeLogValue(stewardID), "version", logging.SanitizeLogValue(req.GetVersion()))
@@ -1082,19 +1293,32 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 	}
 
 	// Approval gate hook (Issue #1719): checked before admitting the stream.
-	// Fail-open on checker error to match the HTTP registration hook policy and
-	// avoid taking endpoints offline during transient controller-side failures.
-	// The #1690–#1698 epic wires in the real implementation via WithApprovalChecker.
+	// Store and service failures deny admission; an unavailable authorization
+	// dependency must not turn into fleet-wide implicit approval.
 	if s.provider.approvalChecker != nil {
 		admitted, checkErr := s.provider.approvalChecker.IsApproved(stream.Context(), stewardID)
 		if checkErr != nil {
-			s.provider.logger.Error("steward approval check error, admitting (fail-open)",
-				"steward_id", logging.SanitizeLogValue(stewardID), "error", checkErr)
-		} else if !admitted {
+			s.provider.logger.Error("steward approval check error, rejecting (fail-closed)",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"error", logging.SanitizeLogValue(checkErr.Error()))
+			return status.Error(codes.Unavailable, "steward approval service unavailable")
+		}
+		if !admitted {
 			s.provider.logger.Warn("steward ControlChannel rejected by approval checker",
 				"steward_id", logging.SanitizeLogValue(stewardID))
 			return status.Error(codes.PermissionDenied, "steward reconnect not approved")
 		}
+	}
+
+	// Per-tenant admission bucket for every heartbeat on this stream (Issue
+	// #3759). Resolved ONCE here, at connect, from the server-side fleet record
+	// for the mTLS-verified CN — never from heartbeat.tenant_id, which is
+	// caller-supplied and unverified, and which a saturated bucket would let a
+	// steward use to silently drop an entire victim tenant's liveness traffic.
+	// Resolving once also keeps the per-heartbeat path free of store lookups.
+	var heartbeatBucket string
+	if s.provider.tenantAdmission != nil {
+		heartbeatBucket = s.provider.admissionBucket(stream.Context(), stewardID, "")
 	}
 
 	// Create a stream sender adapter for the registry
@@ -1165,6 +1389,27 @@ func (s *transportServer) ControlChannel(stream grpc.BidiStreamingServer[transpo
 					"authenticated_cn", logging.SanitizeLogValue(stewardID),
 					"payload_steward_id", logging.SanitizeLogValue(hb.StewardID))
 				s.provider.identityMismatches.Add(1)
+				continue
+			}
+
+			// Per-tenant admission control (Issue #3759, ADR-031 Decision 6): the
+			// same queue instance as the connect gate above — and the same
+			// mechanism the DNA path runs on its own instance, since that path's
+			// key is wire data. Acquire/Release bracket only this one heartbeat's
+			// dispatch — never deferred to stream teardown — so a saturated
+			// tenant sheds its own excess heartbeats without blocking the
+			// receive loop or other tenants' concurrently-connected streams.
+			// The bucket is heartbeatBucket, resolved server-side at connect;
+			// hb.TenantID is payload data and never selects a bucket.
+			if s.provider.tenantAdmission != nil {
+				if aErr := s.provider.tenantAdmission.Acquire(heartbeatBucket); aErr != nil {
+					s.provider.logger.Warn("controlchannel heartbeat dropped — tenant admission queue full",
+						"steward_id", logging.SanitizeLogValue(stewardID),
+						"admission_bucket", logging.SanitizeLogValue(heartbeatBucket))
+					continue
+				}
+				s.provider.dispatchHeartbeat(hb)
+				s.provider.tenantAdmission.Release(heartbeatBucket)
 				continue
 			}
 			s.provider.dispatchHeartbeat(hb)

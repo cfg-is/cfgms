@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,16 +148,41 @@ func (s *FleetTestSuite) ensureContainerRunning(t *testing.T, container string, 
 	}
 }
 
-// waitForStewardLogEntry polls the steward log for a line containing want until timeout.
+// waitForStewardLogEntry polls all steward log files for a line containing want until timeout.
+// It uses docker cp rather than docker exec so it can read logs even when the container is
+// stopped between restart cycles (e.g., steward exiting immediately after ErrRefreshRejected).
 func (s *FleetTestSuite) waitForStewardLogEntry(t *testing.T, container, want string, timeout time.Duration) bool {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		log, err := s.readStewardLog(t, container)
-		if err == nil && strings.Contains(log, want) {
+		if s.stewardLogsContain(t, container, want) {
 			return true
 		}
 		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+// stewardLogsContain copies all steward log files from the container (docker cp works on
+// running AND stopped containers) and returns true if any file contains want.
+func (s *FleetTestSuite) stewardLogsContain(t *testing.T, container, want string) bool {
+	t.Helper()
+	tmpDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := exec.CommandContext(ctx, "docker", "cp",
+		container+":/tmp/cfgms/.", tmpDir).CombinedOutput(); err != nil {
+		return false
+	}
+	entries, _ := os.ReadDir(tmpDir)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err == nil && strings.Contains(string(content), want) {
+			return true
+		}
 	}
 	return false
 }

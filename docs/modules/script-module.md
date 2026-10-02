@@ -6,10 +6,10 @@ The Script Module provides cross-platform script execution capabilities for CFGM
 
 ## Implementation References
 
-- Schema: [`features/modules/script/module.yaml`](../../features/modules/script/module.yaml)
-- Implementation: [`features/modules/script/module.go`](../../features/modules/script/module.go)
-- Configuration type: [`features/modules/script/config.go`](../../features/modules/script/config.go)
-- Execution monitor: [`features/modules/script/execution_monitor.go`](../../features/modules/script/execution_monitor.go)
+- Schema: [`features/modules/stdlib/script/module.yaml`](../../features/modules/stdlib/script/module.yaml)
+- Implementation: [`features/modules/stdlib/script/module.go`](../../features/modules/stdlib/script/module.go)
+- Configuration type: [`features/modules/stdlib/script/config.go`](../../features/modules/stdlib/script/config.go)
+- Execution monitor: [`features/modules/stdlib/script/execution_monitor.go`](../../features/modules/stdlib/script/execution_monitor.go)
 
 ## Platform Support
 

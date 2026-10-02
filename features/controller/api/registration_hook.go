@@ -5,11 +5,16 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -42,7 +47,41 @@ const (
 	// registrationRejectionReasonVar is an optional workflow output variable for a human-readable
 	// rejection reason. Only meaningful when the decision is "reject".
 	registrationRejectionReasonVar = "registration_rejection_reason"
+
+	// maxRejectionReasonLength bounds the workflow-supplied reason. The value is
+	// produced by workflow steps that call out to modules and external APIs, so
+	// it must be treated as untrusted text rather than an operator-authored
+	// message before it crosses the registration boundary.
+	maxRejectionReasonLength = 200
 )
+
+// boundRejectionReason constrains workflow-supplied rejection text to a short,
+// printable, single-line value. A workflow can otherwise route arbitrary module
+// and API error output — of unbounded length, and carrying whatever internal
+// detail those errors happen to contain — into the controller's registration
+// records.
+func boundRejectionReason(reason string) string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
+		if !unicode.IsPrint(r) {
+			return -1
+		}
+		return r
+	}, reason)
+	cleaned = strings.TrimSpace(cleaned)
+
+	if len(cleaned) > maxRejectionReasonLength {
+		// Cut on a rune boundary so the result stays valid UTF-8.
+		truncated := cleaned[:maxRejectionReasonLength]
+		for len(truncated) > 0 && !utf8.ValidString(truncated) {
+			truncated = truncated[:len(truncated)-1]
+		}
+		cleaned = truncated + "…"
+	}
+	return cleaned
+}
 
 // RegistrationInput contains the data available to a registration approval hook.
 type RegistrationInput struct {
@@ -56,8 +95,8 @@ type RegistrationInput struct {
 // RegistrationApprovalHook evaluates whether a registration request should be approved.
 //
 // The hook is called after token validation and before certificate issuance.
-// Returning an error is non-fatal: the registration handler logs the error and
-// falls back to approve so that transient hook failures do not block registrations.
+// Returning an error causes the registration handler to quarantine the request.
+// Admission-service failures must never grant unrestricted fleet access.
 type RegistrationApprovalHook interface {
 	Evaluate(ctx context.Context, input RegistrationInput) (decision ApprovalDecision, reason string, err error)
 }
@@ -205,7 +244,7 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 	var reason string
 	if reasonVal, ok := exec.GetVariable(registrationRejectionReasonVar); ok {
 		if r, ok := reasonVal.(string); ok {
-			reason = r
+			reason = boundRejectionReason(r)
 		}
 	}
 
@@ -222,37 +261,61 @@ func (h *WorkflowApprovalHook) Evaluate(ctx context.Context, input RegistrationI
 // is automatically rejected if no operator action is taken.
 const defaultManualReviewTimeout = 24 * time.Hour
 
+// ManualReviewApprovalHookStoreRequirements declares the stores that the manual-review
+// registration subsystem requires at composition time. It is collected by the
+// controller's collectActiveStorageRequirements (features/controller/server/server.go)
+// whenever the effective registration.workflow is "manual-review", and passed with the
+// other enabled subsystems' requirements to interfaces.ValidateStorageRequirements
+// immediately after the StorageManager is composed — so a provider gap fails at startup
+// rather than silently at request time (guards against the #3400 condition).
+var ManualReviewApprovalHookStoreRequirements = []interfaces.StoreRequirement{
+	{
+		Subsystem: "registration",
+		Store:     interfaces.StoreNamePendingRegistration,
+		Severity:  interfaces.RequirementRequired,
+	},
+}
+
 // ManualReviewApprovalHook stores incoming registration requests in the durable
 // PendingRegistrationStore and returns DecisionQuarantine so the steward is held
 // in a restricted state until an operator approves or denies via the CLI (#1522-B).
 //
 // A background goroutine sweeps for expired records every minute and marks them
-// as timed-out so operators can distinguish expired requests from active ones.
+// as timed-out so operators can distinguish expired requests from active ones. In
+// a multi-node cluster, only the node holding leaseJob's lease runs a given sweep
+// cycle (ADR-031 Decision 4).
 type ManualReviewApprovalHook struct {
-	store   business.PendingRegistrationStore
-	timeout time.Duration
-	logger  logging.Logger
-	cancel  context.CancelFunc
-	done    chan struct{}
+	store    business.PendingRegistrationStore
+	timeout  time.Duration
+	logger   logging.Logger
+	leaseJob lease.SingletonJob
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 // NewManualReviewApprovalHook creates a ManualReviewApprovalHook and starts
 // the background expiry goroutine. Call Stop() when the server shuts down.
+// leaseJob claims the cluster-singleton lease the expiry sweep runs behind; a
+// zero-value lease.SingletonJob (nil Manager) runs every cycle unconditionally
+// — the correct behavior for a single-node deployment. Callers construct it via
+// ha.Manager.NewBackgroundLoopLease, which is nil-receiver-safe.
 func NewManualReviewApprovalHook(
 	store business.PendingRegistrationStore,
 	timeout time.Duration,
 	logger logging.Logger,
+	leaseJob lease.SingletonJob,
 ) *ManualReviewApprovalHook {
 	if timeout <= 0 {
 		timeout = defaultManualReviewTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &ManualReviewApprovalHook{
-		store:   store,
-		timeout: timeout,
-		logger:  logger,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		store:    store,
+		timeout:  timeout,
+		logger:   logger,
+		leaseJob: leaseJob,
+		cancel:   cancel,
+		done:     make(chan struct{}),
 	}
 	go h.runExpiry(ctx)
 	return h
@@ -299,7 +362,7 @@ func (h *ManualReviewApprovalHook) runExpiry(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			h.expireTimedOut(ctx)
+			h.leaseJob.RunIfLeader(ctx, h.expireTimedOut)
 		}
 	}
 }

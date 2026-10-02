@@ -31,6 +31,10 @@ func (p *StewardProvider) GetVersion() string {
 	return "1.0.0"
 }
 
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *StewardProvider) ClusterCapable() bool { return false }
+
 // Available reports whether the provider can be used on the current platform.
 func (p *StewardProvider) Available() (bool, error) {
 	return true, nil

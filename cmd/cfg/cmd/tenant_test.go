@@ -196,7 +196,7 @@ func TestGetTenantViaAPI_Exists(t *testing.T) {
 	server := newTenantServer(t)
 	defer server.Close()
 
-	client, err := newClientFromFlags(server.URL, "", "", true)
+	client, err := newClientFromFlags(server.URL, "", true)
 	require.NoError(t, err)
 
 	td, err := client.GetTenantViaAPI(t.Context(), "team-root")
@@ -211,7 +211,7 @@ func TestGetTenantViaAPI_NotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newClientFromFlags(server.URL, "", "", true)
+	client, err := newClientFromFlags(server.URL, "", true)
 	require.NoError(t, err)
 
 	_, err = client.GetTenantViaAPI(t.Context(), "missing-tenant")

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	_ "modernc.org/sqlite"
 )
 
@@ -111,6 +111,10 @@ type RunStore interface {
 	CreateRun(*RunRecord) error
 	CreateJob(*JobRecord) error
 	GetRun(runID string) (*RunRecord, error)
+	// ListRuns returns runs ordered by created_at DESC with pagination. When tenantID is
+	// non-empty only runs belonging to that tenant are returned. An empty tenantID returns
+	// all runs across tenants (for use by global-scope admin callers).
+	ListRuns(tenantID string, limit, offset int) ([]*RunRecord, error)
 	ListRunJobs(runID string) ([]*JobRecord, error)
 	UpdateJobStatus(jobID string, status JobStatus, executionID string) error
 	// UpdateJobResult sets the terminal status, executionID, and captured execution
@@ -368,6 +372,67 @@ WHERE run_id = ?`
 	return r, nil
 }
 
+// ListRuns returns run records ordered by created_at DESC with pagination.
+// When tenantID is non-empty only runs belonging to that tenant are returned.
+// An empty tenantID returns all runs (for global-scope admin callers).
+func (s *RunStoreSQL) ListRuns(tenantID string, limit, offset int) ([]*RunRecord, error) {
+	const selectCols = `
+SELECT run_id, tenant_id, created_by, created_at, status, filter_json,
+       script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs
+FROM script_runs`
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.Query(selectCols+`
+WHERE tenant_id = ?
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, tenantID, limit, offset)
+	} else {
+		rows, err = s.db.Query(selectCols+`
+ORDER BY created_at DESC
+LIMIT ? OFFSET ?`, limit, offset)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("run store list runs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var runs []*RunRecord
+	for rows.Next() {
+		r := &RunRecord{}
+		var (
+			createdBy     sql.NullString
+			filterJSON    sql.NullString
+			scriptRef     sql.NullString
+			inlineContent sql.NullString
+			shell         sql.NullString
+		)
+		if err := rows.Scan(
+			&r.RunID, &r.TenantID, &createdBy, &r.CreatedAt,
+			(*string)(&r.Status), &filterJSON,
+			&scriptRef, &inlineContent, &shell,
+			&r.JobCount, &r.CompletedJobs, &r.FailedJobs,
+		); err != nil {
+			return nil, fmt.Errorf("run store list runs scan: %w", err)
+		}
+		r.CreatedBy = createdBy.String
+		r.ScriptRef = scriptRef.String
+		r.InlineContent = inlineContent.String
+		r.Shell = scriptmodule.ShellType(shell.String)
+		if filterJSON.Valid && filterJSON.String != "" {
+			_ = json.Unmarshal([]byte(filterJSON.String), &r.Filter)
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run store list runs rows: %w", err)
+	}
+	return runs, nil
+}
+
 // ListRunJobs returns all job records for runID ordered by created_at ASC.
 func (s *RunStoreSQL) ListRunJobs(runID string) ([]*JobRecord, error) {
 	const q = `
@@ -535,11 +600,23 @@ func nullableStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }
 
+// DeviceLockReleaser releases a per-device dispatcher lock for a cancelled
+// execution. It is implemented by *dispatcher.Dispatcher. The Manager depends on
+// this narrow interface rather than importing the dispatcher package directly.
+type DeviceLockReleaser interface {
+	// ReleaseDeviceForCancelledExecution releases the device lock only if the
+	// currently-held execution matches executionID, preventing a late cancel from
+	// freeing a lock now held by a newer execution for the same device.
+	// Returns true if the lock was released.
+	ReleaseDeviceForCancelledExecution(deviceID, executionID string) bool
+}
+
 // Manager coordinates the lifecycle of run records: retrieval and cancellation.
 // Run creation is performed by the synthesis functions in synthesis.go.
 type Manager struct {
 	store          RunStore
 	executionQueue *scriptmodule.ExecutionQueue
+	lockReleaser   DeviceLockReleaser
 }
 
 // NewManager creates a Manager backed by store and executionQueue.
@@ -548,10 +625,23 @@ func NewManager(store RunStore, executionQueue *scriptmodule.ExecutionQueue) *Ma
 	return &Manager{store: store, executionQueue: executionQueue}
 }
 
+// SetDeviceLockReleaser wires the dispatcher's cancel-release path so CancelRun
+// immediately frees the per-device dispatcher lock for cancelled jobs. Must be
+// called before any CancelRun call. Nil removes the wiring.
+func (m *Manager) SetDeviceLockReleaser(r DeviceLockReleaser) {
+	m.lockReleaser = r
+}
+
 // GetRun returns the run record for runID.
 // Returns ErrNotFound when no run exists with that ID.
 func (m *Manager) GetRun(_ context.Context, runID string) (*RunRecord, error) {
 	return m.store.GetRun(runID)
+}
+
+// ListRuns returns runs with pagination, optionally scoped to tenantID.
+// An empty tenantID returns runs across all tenants (global-scope admin callers).
+func (m *Manager) ListRuns(_ context.Context, tenantID string, limit, offset int) ([]*RunRecord, error) {
+	return m.store.ListRuns(tenantID, limit, offset)
 }
 
 // ListRunJobs returns all job records for the given run.
@@ -589,6 +679,9 @@ func (m *Manager) CancelRun(_ context.Context, runID string) error {
 		}
 		if m.executionQueue != nil && job.ExecutionID != "" {
 			_ = m.executionQueue.CancelExecution(job.DeviceID, job.ExecutionID)
+		}
+		if m.lockReleaser != nil && job.ExecutionID != "" {
+			m.lockReleaser.ReleaseDeviceForCancelledExecution(job.DeviceID, job.ExecutionID)
 		}
 		if updateErr := m.store.UpdateJobStatus(job.JobID, JobStatusCancelled, ""); updateErr != nil {
 			return fmt.Errorf("cancel run: update job %s: %w", job.JobID, updateErr)

@@ -1,0 +1,41 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Evidence Canvas layout (Story #3607) — mirrors the .canvas grid region of
+ * docs/design/mockups/troubleshooting-cockpit.html. Spacing/colour use design
+ * tokens (var()) where a token exists; literal px values below (gap: 14px,
+ * min-height: 120px) are drawn directly from the mockup spec and have no
+ * equivalent token in web-ui-design-tokens.css.
+ */
+
+.evidence-canvas {
+  overflow: auto;
+  padding: var(--space-4);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-content: start;
+}
+
+/* Canvas-level empty state — shown only when pins=[] (sparse case is valid). */
+.evidence-canvas--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+}
+
+.evidence-canvas__empty-message {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Two-column grid above 1024px — mirrors .canvas @media (min-width:1024px) in mockup. */
+@media (min-width: 1024px) {
+  .evidence-canvas {
+    grid-template-columns: 1fr 1fr;
+    padding: var(--space-5);
+  }
+}

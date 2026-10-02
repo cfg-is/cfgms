@@ -4,10 +4,13 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -19,12 +22,178 @@ import (
 // It excludes ${VAR:-default} and ${VAR:=default} patterns
 var envVarPattern = regexp.MustCompile(`\$\{([^}:]+)\}`)
 
+// ringNamePattern validates deployment ring names:
+// lowercase letter followed by up to 31 lowercase letters, digits, or hyphens.
+var ringNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// DefaultRingNames is the ordered default deployment ring set applied when
+// deployment_rings is absent from controller config.
+var DefaultRingNames = []string{"pre-release", "early", "default", "stable"}
+
+// DefaultFallbackRing is the ring used when a steward has no or invalid
+// deployment_ring DNA attribute and no explicit fallback_ring is configured.
+const DefaultFallbackRing = "default"
+
+// RingSpec defines a single deployment ring within the ordered ring set.
+type RingSpec struct {
+	// Name is the ring identifier matched against the deployment_ring DNA attribute.
+	// Must match ^[a-z][a-z0-9-]{0,31}$.
+	Name string `yaml:"name"`
+
+	// DesiredVersion is the target steward binary version for this ring (e.g. "v0.5.21").
+	// When non-empty, overrides any tenant-path desired_version for stewards in this ring.
+	// Empty means no ring-level version override applies.
+	DesiredVersion string `yaml:"desired_version,omitempty"`
+
+	// Soak is the minimum time a version must run in this ring before Story S3 advances it.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	Soak Duration `yaml:"soak,omitempty"`
+
+	// HaltThreshold is the error-rate (0.0–1.0) above which S3 halts promotion.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	HaltThreshold float64 `yaml:"halt_threshold,omitempty"`
+
+	// ConcurrencyLimit caps simultaneous steward upgrades in this ring.
+	// Declared here to avoid a second structural migration when S3 adds the rollout workflow.
+	ConcurrencyLimit int `yaml:"concurrency_limit,omitempty"`
+}
+
+// DeploymentRingConfig holds the ordered set of deployment rings and fallback policy.
+// It is a controller-global governance object; individual tenant configs carry only
+// desired_version (from the inheritance resolver or ring resolution).
+type DeploymentRingConfig struct {
+	// Rings is the ordered list of ring specs. Earlier rings receive updates first.
+	Rings []RingSpec `yaml:"rings,omitempty"`
+
+	// FallbackRing is the ring name used when a steward has no or invalid
+	// deployment_ring DNA attribute. Must be a declared ring name.
+	// Defaults to "default" when empty.
+	FallbackRing string `yaml:"fallback_ring,omitempty"`
+}
+
+// DefaultDeploymentRingConfig returns the default four-ring configuration with
+// empty desired_version fields (no version override until the operator sets one).
+func DefaultDeploymentRingConfig() DeploymentRingConfig {
+	rings := make([]RingSpec, len(DefaultRingNames))
+	for i, name := range DefaultRingNames {
+		rings[i] = RingSpec{Name: name}
+	}
+	return DeploymentRingConfig{
+		Rings:        rings,
+		FallbackRing: DefaultFallbackRing,
+	}
+}
+
+// ValidateDeploymentRingConfig validates a DeploymentRingConfig for controller startup.
+// Returns nil when rings is the zero value (absent in config — defaults apply).
+func ValidateDeploymentRingConfig(rc DeploymentRingConfig) error {
+	seen := make(map[string]struct{}, len(rc.Rings))
+	for i, ring := range rc.Rings {
+		if ring.Name == "" {
+			return fmt.Errorf("deployment_rings.rings[%d]: name must not be empty", i)
+		}
+		if !ringNamePattern.MatchString(ring.Name) {
+			return fmt.Errorf("deployment_rings.rings[%d]: name %q must match ^[a-z][a-z0-9-]{0,31}$", i, ring.Name)
+		}
+		if _, dup := seen[ring.Name]; dup {
+			return fmt.Errorf("deployment_rings.rings[%d]: duplicate ring name %q", i, ring.Name)
+		}
+		seen[ring.Name] = struct{}{}
+	}
+	if rc.FallbackRing != "" {
+		if _, ok := seen[rc.FallbackRing]; !ok {
+			return fmt.Errorf("deployment_rings.fallback_ring: %q is not a declared ring name", rc.FallbackRing)
+		}
+	}
+	return nil
+}
+
 // envVarWithDefaultPattern matches ${VAR:-default} and ${VAR:=default} patterns
 var envVarWithDefaultPattern = regexp.MustCompile(`\$\{([^}:]+):-([^}]*)\}`)
+
+// EnvFileSuffix is appended to an environment variable's name to name the
+// companion variable that holds a *path* to the value instead of the value
+// itself: ${CFGMS_STORAGE_DB_PASSWORD} resolves from CFGMS_STORAGE_DB_PASSWORD
+// when that is set, and otherwise from the file named by
+// CFGMS_STORAGE_DB_PASSWORD_FILE.
+//
+// This is what lets a secret reach the controller without ever entering the
+// process environment. systemd's LoadCredentialEncrypted= decrypts a sealed
+// blob into a per-invocation tmpfs under /run/credentials/<unit>/ and the unit
+// carries only Environment=<VAR>_FILE=%d/<credential-name> — a path, not a
+// secret. The environment of a running process is readable through
+// /proc/<pid>/environ and is inherited by every child it spawns; the
+// credentials directory is neither (ADR-030).
+const EnvFileSuffix = "_FILE"
+
+// ResolveEnvValue is the exported entry point for resolveEnvValue, for callers
+// outside this package that need the same <VAR>/<VAR>_FILE resolution — e.g.
+// pkg/fleet/storage's DNA database connection secret, which is not itself
+// part of the ${VAR} config-file templating this package otherwise owns.
+func ResolveEnvValue(name string) (string, bool, error) {
+	return resolveEnvValue(name)
+}
+
+// resolveEnvValue returns the value of the named environment variable,
+// falling back to the contents of the file named by <name>_FILE.
+//
+// The direct variable wins when both are set, so an operator can always
+// override a file-delivered value. A trailing newline is stripped: writing a
+// secret with `echo` is common enough that carrying the newline into a
+// password or HMAC key would be a confusing failure.
+func resolveEnvValue(name string) (string, bool, error) {
+	if value, exists := os.LookupEnv(name); exists {
+		return value, true, nil
+	}
+
+	path, exists := os.LookupEnv(name + EnvFileSuffix)
+	if !exists || strings.TrimSpace(path) == "" {
+		return "", false, nil
+	}
+
+	// #nosec G703 -- this path is a process-start configuration value supplied
+	// by the operator's systemd unit (Environment=<VAR>_FILE=%d/...), the same
+	// trust class as the config file path itself; it is not request data. The
+	// checks immediately below constrain what may be read through it.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", false, fmt.Errorf("%s%s references %s: %w", name, EnvFileSuffix, path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", false, fmt.Errorf("%s%s references %s: symlinks are not accepted for secret material", name, EnvFileSuffix, path)
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, fmt.Errorf("%s%s references %s: not a regular file", name, EnvFileSuffix, path)
+	}
+	// Group read is expected — systemd exposes credentials at mode 0440 with a
+	// POSIX ACL scoping access to the single unit invocation. World access
+	// never is. Windows is exempt for the same reason pkg/secrets/providers/sops
+	// exempts it: the POSIX permission bits Go reports there are synthesised
+	// from the read-only attribute and say nothing about the real ACL.
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o007 != 0 {
+		return "", false, fmt.Errorf("%s%s references %s: file is world-accessible (mode %04o); secret files must not be readable by other users",
+			name, EnvFileSuffix, path, info.Mode().Perm())
+	}
+
+	// #nosec G304,G703 -- path comes from the operator-controlled unit
+	// environment, the documented delivery channel for credential material, and
+	// has just been lstat-validated as a private, regular, non-symlink file.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, fmt.Errorf("%s%s references %s: %w", name, EnvFileSuffix, path, err)
+	}
+
+	return strings.TrimRight(string(data), "\r\n"), true, nil
+}
 
 // validateEnvVars checks that all referenced environment variables (without defaults) are set.
 // This provides fail-safe behavior: if a config references ${VAR} and VAR is not set,
 // the application fails fast instead of silently using an empty value.
+//
+// A variable is "set" when either the variable itself or its <VAR>_FILE
+// companion resolves (see resolveEnvValue). An unreadable or world-accessible
+// <VAR>_FILE is an error rather than a miss — silently falling through to
+// "missing" would hide a misconfigured credential behind a confusing message.
 func validateEnvVars(content string) error {
 	matches := envVarPattern.FindAllStringSubmatch(content, -1)
 	var missing []string
@@ -34,21 +203,36 @@ func validateEnvVars(content string) error {
 			continue
 		}
 		varName := match[1]
-		if _, exists := os.LookupEnv(varName); !exists {
+		_, exists, err := resolveEnvValue(varName)
+		if err != nil {
+			return err
+		}
+		if !exists {
 			missing = append(missing, varName)
 		}
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults)", missing)
+		return fmt.Errorf("missing required environment variables: %v (use ${VAR:-default} syntax to provide defaults, or deliver the value via <VAR>%s)", missing, EnvFileSuffix)
 	}
 
 	return nil
 }
 
 // expandEnvWithDefaults expands environment variables with support for ${VAR:-default} syntax.
-// This extends Go's os.ExpandEnv to support shell-style defaults.
-func expandEnvWithDefaults(content string) string {
+// This extends Go's os.ExpandEnv to support shell-style defaults and <VAR>_FILE
+// indirection.
+func expandEnvWithDefaults(content string) (string, error) {
+	var resolveErr error
+
+	resolve := func(varName string) (string, bool) {
+		value, exists, err := resolveEnvValue(varName)
+		if err != nil && resolveErr == nil {
+			resolveErr = err
+		}
+		return value, exists
+	}
+
 	// First, expand ${VAR:-default} patterns
 	result := envVarWithDefaultPattern.ReplaceAllStringFunc(content, func(match string) string {
 		parts := envVarWithDefaultPattern.FindStringSubmatch(match)
@@ -57,14 +241,23 @@ func expandEnvWithDefaults(content string) string {
 		}
 		varName := parts[1]
 		defaultValue := parts[2]
-		if value, exists := os.LookupEnv(varName); exists {
+		if value, exists := resolve(varName); exists {
 			return value
 		}
 		return defaultValue
 	})
 
-	// Then expand remaining ${VAR} patterns using os.ExpandEnv
-	return os.ExpandEnv(result)
+	// Then expand remaining ${VAR} and $VAR patterns, matching os.ExpandEnv's
+	// syntax but resolving through <VAR>_FILE as well.
+	expanded := os.Expand(result, func(varName string) string {
+		value, _ := resolve(varName)
+		return value
+	})
+
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	return expanded, nil
 }
 
 // BlobStorageConfig holds configuration for the blob storage backend (Issue #1702).
@@ -74,10 +267,123 @@ type BlobStorageConfig struct {
 	Root string `yaml:"root"`
 }
 
+const (
+	SecurityProfileDevelopment = "development"
+	SecurityProfileTest        = "test"
+	SecurityProfilePublicBeta  = "public-beta"
+)
+
+// ExecutionSecurityConfig controls security requirements for controller-issued
+// execution commands.
+type ExecutionSecurityConfig struct {
+	// RequireSignedAdhoc requires both the operator's inline-content signature
+	// and the controller's signed command envelope for every ad-hoc execution.
+	RequireSignedAdhoc bool `yaml:"require_signed_adhoc"`
+}
+
+// WebAuthnConfig holds the WebAuthn relying-party settings the controller uses for
+// browser passkey login and passkey step-up (Issue #3713). There is no default: an
+// absent or empty RPID leaves the passkey endpoints answering 503, exactly as before
+// this config block existed — a plausible-looking fallback identifier would make a
+// phishing-resistant authenticator verify against the wrong origin.
+type WebAuthnConfig struct {
+	// RPID is the relying-party identifier: the controller's effective domain
+	// (e.g. "cfgms.example.com"). Must not include a scheme or port.
+	RPID string `yaml:"rp_id"`
+
+	// RPDisplayName is the human-readable name shown by the authenticator/browser
+	// during the ceremony. Defaults to RPID when empty.
+	RPDisplayName string `yaml:"rp_display_name,omitempty"`
+
+	// RPOrigins lists the fully qualified origins permitted to complete a WebAuthn
+	// ceremony against this relying party (e.g. "https://cfgms.example.com").
+	// Required and must be HTTPS when RPID is set — see ValidateWebAuthn.
+	RPOrigins []string `yaml:"rp_origins,omitempty"`
+}
+
+// ValidateWebAuthn enforces the WebAuthn relying-party configuration contract at
+// controller startup: unset is always valid (endpoints stay 503); once RPID is set,
+// at least one origin is required and every origin must be HTTPS. There is no
+// local-development bypass — a plausible-looking insecure default here would make a
+// phishing-resistant authenticator verify against the wrong origin (Issue #3713).
+func (c *Config) ValidateWebAuthn() error {
+	if c.WebAuthn == nil || c.WebAuthn.RPID == "" {
+		if c.WebAuthn != nil && len(c.WebAuthn.RPOrigins) > 0 {
+			return fmt.Errorf("webauthn.rp_id must be set when webauthn.rp_origins is provided")
+		}
+		return nil
+	}
+	if len(c.WebAuthn.RPOrigins) == 0 {
+		return fmt.Errorf("webauthn.rp_origins must not be empty when webauthn.rp_id is set")
+	}
+	for _, origin := range c.WebAuthn.RPOrigins {
+		if !strings.HasPrefix(origin, "https://") {
+			return fmt.Errorf("webauthn.rp_origins: origin %q must use https", origin)
+		}
+	}
+	return nil
+}
+
+// TenantAdminConfig holds global tenant-administration policy settings (ADR-027, Issue #3182).
+type TenantAdminConfig struct {
+	// DeleteHoldPeriod is the minimum time between RequestTenantDeletion and
+	// ApproveTenantDeletion. Defaults to 720h (30 days) when absent.
+	DeleteHoldPeriod Duration `yaml:"delete_hold_period,omitempty"`
+
+	// DeleteRequiresDualControl controls whether the operator who requested a
+	// tenant deletion may also approve it. Defaults to true (dual-control required).
+	DeleteRequiresDualControl *bool `yaml:"delete_requires_dual_control,omitempty"`
+}
+
+// GetDeleteHoldPeriod returns the configured hold period, defaulting to 30 days.
+func (c *TenantAdminConfig) GetDeleteHoldPeriod() time.Duration {
+	if c == nil || time.Duration(c.DeleteHoldPeriod) == 0 {
+		return 30 * 24 * time.Hour // 720h default
+	}
+	return time.Duration(c.DeleteHoldPeriod)
+}
+
+// GetDeleteRequiresDualControl returns whether dual-control is required, defaulting to true.
+func (c *TenantAdminConfig) GetDeleteRequiresDualControl() bool {
+	if c == nil || c.DeleteRequiresDualControl == nil {
+		return true
+	}
+	return *c.DeleteRequiresDualControl
+}
+
 // Config holds the controller configuration
 type Config struct {
+	// SecurityProfile selects deployment security invariants. Public-beta is a
+	// fail-closed production profile; development and test are explicit,
+	// non-public profiles.
+	SecurityProfile string `yaml:"security_profile"`
+
+	// Execution contains controller-issued execution security policy.
+	Execution ExecutionSecurityConfig `yaml:"execution"`
+
 	// Controller listen address
 	ListenAddr string `yaml:"listen_addr"`
+
+	// MetricsListenAddr is the dedicated HTTPS listener for product metrics.
+	// It is intentionally required rather than defaulted: operators must choose
+	// an explicit loopback or private IP address and a fixed port.
+	MetricsListenAddr string `yaml:"metrics_listen_addr"`
+
+	// InternalListenAddr is the private HTTPS listener used only for
+	// controller-to-controller Raft traffic in cluster mode. It must bind a
+	// loopback or private IP address and must never be Internet-published.
+	InternalListenAddr string `yaml:"internal_listen_addr,omitempty"`
+
+	// InternalDeliveryListenAddr is the private gRPC listener for the internal
+	// controller-to-controller delivery service (ADR-031 Decision 3, Issue
+	// #3764) — the first inter-node RPC other than Raft's own transport. It is
+	// mTLS-secured with the same certificate infrastructure as
+	// InternalListenAddr (the HA peer CA) but binds a separate port: gRPC
+	// requires ownership of its listener's connections, so it cannot share
+	// InternalListenAddr's plain-HTTP Raft listener. Like InternalListenAddr it
+	// must bind a loopback or private IP address and must never be
+	// Internet-published.
+	InternalDeliveryListenAddr string `yaml:"internal_delivery_listen_addr,omitempty"`
 
 	// External URL for controller API callbacks (used by scripts and external integrations)
 	ExternalURL string `yaml:"external_url"`
@@ -97,6 +403,10 @@ type Config struct {
 	// Storage configuration for global storage provider system
 	Storage *StorageConfig `yaml:"storage"`
 
+	// Audit selects the audit sink (ADR-033). Nil or empty Sink resolves to
+	// AuditSinkLocal — zero extra infrastructure required.
+	Audit *AuditSinkConfig `yaml:"audit,omitempty"`
+
 	// Logging configuration for global logging provider system
 	Logging *LoggingConfig `yaml:"logging"`
 
@@ -115,6 +425,72 @@ type Config struct {
 
 	// BlobStorage configures the blob storage backend for installer artifacts (Issue #1702).
 	BlobStorage BlobStorageConfig `yaml:"blob_storage,omitempty"`
+
+	// HA configures the deployment mode for storage selection.
+	// Set ha.mode to "cluster" to activate cluster-mode storage (Postgres + S3).
+	// Override ha.mode via CFGMS_HA_MODE environment variable.
+	// Valid modes: "single" (default), "blue-green", "cluster".
+	HA *HAConfig `yaml:"ha,omitempty"`
+
+	// DeploymentRings configures the ordered deployment ring set for fleet version management.
+	// When absent, the default four-ring set (pre-release, early, default, stable) is applied
+	// with "default" as the fallback ring.
+	DeploymentRings *DeploymentRingConfig `yaml:"deployment_rings,omitempty"`
+
+	// TenantAdmin holds global tenant-administration policy (ADR-027 Decisions 3-4, Issue #3182).
+	TenantAdmin *TenantAdminConfig `yaml:"tenant_admin,omitempty"`
+
+	// WebAuthn configures the browser passkey relying party (Issue #3713). Absent by
+	// default — browser passkey login and passkey step-up answer 503 until an operator
+	// explicitly sets rp_id and rp_origins.
+	WebAuthn *WebAuthnConfig `yaml:"webauthn,omitempty"`
+
+	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
+	// Decision 3, Issue #3782). Empty by default (self-hosted: no realm concept).
+	// A SaaS cluster deployment (ha.mode: cluster) refuses to start in production
+	// with this unset — see tenant.EnforceRealmGuard.
+	RealmID string `yaml:"realm_id,omitempty"`
+
+	// ModuleSources maps a module publisher name to the git repository namespace
+	// it resolves against (Issue #1884, #4409). Consumed by the git source
+	// resolver to fetch modules that are declared in required_modules: but not
+	// yet cached. Absent or empty: no publisher can be resolved via git, and the
+	// controller starts with a nil resolver — required_modules enforcement on
+	// cfg push stays inert regardless, since it also needs the (separately
+	// wired) approver and trust store.
+	ModuleSources map[string]ModuleSourceConfig `yaml:"module_sources,omitempty"`
+}
+
+// ModuleSourceConfig describes a single publisher's module source repository
+// namespace, consumed by the git source resolver (Issue #4409).
+type ModuleSourceConfig struct {
+	// Type selects the source backend. Only "git" is currently supported.
+	Type string `yaml:"type"`
+	// Base is the base URL; the module name is appended as a path segment.
+	// e.g. "https://git.example.com/cfgms" → clone URL ".../cfgms/<name>"
+	Base string `yaml:"base"`
+}
+
+// EffectiveRings returns the deployment ring configuration with defaults applied.
+// When DeploymentRings is nil or has no rings, the default four-ring set is returned.
+func (c *Config) EffectiveRings() DeploymentRingConfig {
+	if c.DeploymentRings != nil && len(c.DeploymentRings.Rings) > 0 {
+		rc := *c.DeploymentRings
+		if rc.FallbackRing == "" {
+			rc.FallbackRing = DefaultFallbackRing
+		}
+		return rc
+	}
+	return DefaultDeploymentRingConfig()
+}
+
+// ValidateDeploymentRings validates the ring configuration at controller startup.
+// Returns nil when DeploymentRings is absent (defaults apply and are always valid).
+func (c *Config) ValidateDeploymentRings() error {
+	if c.DeploymentRings == nil || len(c.DeploymentRings.Rings) == 0 {
+		return nil
+	}
+	return ValidateDeploymentRingConfig(*c.DeploymentRings)
 }
 
 // RegistrationConfig holds registration approval workflow settings.
@@ -132,9 +508,10 @@ type RegistrationConfig struct {
 	Workflow string `yaml:"workflow"`
 
 	// TrustedProxies is a list of CIDR ranges identifying reverse proxies that are
-	// trusted to set the X-Forwarded-For header. When empty (the default),
-	// X-Forwarded-For is never trusted and the TCP peer address is always used
-	// for the IP-trust decision. Parse once at startup, not per-request (Issue #1695).
+	// trusted to append the upstream address to X-Forwarded-For. The controller
+	// walks the chain right-to-left and uses the first untrusted hop. When empty
+	// (the default), X-Forwarded-For is never trusted and the TCP peer address is
+	// always used for source controls. Parse once at startup, not per request.
 	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 
 	// ApprovalMode selects the registration approval hook implementation.
@@ -160,6 +537,12 @@ type RegistrationConfig struct {
 	// for operator action before it is automatically expired (Issue #1697).
 	// Default: 5 days.
 	PendingReviewTimeout Duration `yaml:"pending_review_timeout,omitempty"`
+
+	// EnrollmentLinkTTL is the validity window for a single-use passkey
+	// enrollment magic link minted on web-account creation/reset (Issue #2974,
+	// #2966). Default: 72 hours — long enough for an admin to hand the link off
+	// out-of-band, short enough to bound a leaked link's blast radius.
+	EnrollmentLinkTTL Duration `yaml:"enrollment_link_ttl,omitempty"`
 }
 
 // CertificateConfig contains certificate management settings
@@ -218,6 +601,11 @@ type CertificateConfig struct {
 
 	// Signing contains configuration for the config signing certificate
 	Signing *SigningCertificateConfig `yaml:"signing"`
+
+	// ClusterCA configures CA material sourcing from OpenBao in cluster-mode
+	// deployments. When set and ha.mode is "cluster", the controller loads
+	// the CA from the vault rather than generating or loading it from local disk.
+	ClusterCA *ClusterCAConfig `yaml:"cluster_ca,omitempty"`
 }
 
 // PublicAPICertConfig contains configuration for the public-facing API certificate
@@ -261,6 +649,53 @@ type SigningCertificateConfig struct {
 	Organization string `yaml:"organization"`
 }
 
+// ClusterCAConfig configures CA material sourcing from a shared OpenBao secret store
+// in cluster-mode deployments. The CA private key never resides on the node disk;
+// it is retrieved from the vault at boot and held in-process only.
+//
+// The vault token must be supplied via the OPENBAO_TOKEN or BAO_TOKEN environment
+// variable — never in the configuration file.
+type ClusterCAConfig struct {
+	// VaultAddress is the OpenBao server URL. Must be HTTPS in production.
+	// Example: "https://vault.example.com:8200"
+	// Override via CFGMS_CLUSTER_CA_VAULT_ADDRESS environment variable.
+	VaultAddress string `yaml:"vault_address"`
+
+	// VaultKeyPath is the secret path in the format "tenantID/key-name" where
+	// the cluster CA cert and key PEM are stored in the KV v2 engine.
+	// Example: "root/cluster-ca"
+	// Override via CFGMS_CLUSTER_CA_VAULT_KEY_PATH environment variable.
+	VaultKeyPath string `yaml:"vault_key_path"`
+
+	// VaultTLSCert is the path to a PEM CA certificate for vault TLS verification.
+	// Optional; required when the vault uses a private CA.
+	VaultTLSCert string `yaml:"vault_tls_cert,omitempty"`
+
+	// VaultMountPath is the KV v2 mount path (default: "secret").
+	VaultMountPath string `yaml:"vault_mount_path,omitempty"`
+
+	// ExternalIntermediateCertPath, ExternalIntermediateKeyPath, and
+	// ExternalIntermediateChainPath name PEM files holding a regional
+	// intermediate CA certificate, its private key, and its issuer chain up to
+	// the offline root, obtained out-of-band from the root ceremony (ADR-032
+	// Decision 2: "cell init requests an intermediate from the root ceremony
+	// instead of self-generating the fleet root"). When set, cluster CA init
+	// imports this material instead of self-generating a fleet root; all three
+	// must be set together. Optional — omitting them preserves today's
+	// self-generate-and-store-in-vault behavior. The private key file is read
+	// once at import time and is never written to any node's local disk; only
+	// the vault holds a durable copy, same as the self-generated case.
+	ExternalIntermediateCertPath string `yaml:"external_intermediate_cert_path,omitempty"`
+
+	// ExternalIntermediateKeyPath is the private key counterpart to
+	// ExternalIntermediateCertPath. See that field's doc for the full picture.
+	ExternalIntermediateKeyPath string `yaml:"external_intermediate_key_path,omitempty"`
+
+	// ExternalIntermediateChainPath is the issuer chain (root-terminal) for
+	// ExternalIntermediateCertPath. See that field's doc for the full picture.
+	ExternalIntermediateChainPath string `yaml:"external_intermediate_chain_path,omitempty"`
+}
+
 // ServerCertificateConfig contains server certificate settings
 type ServerCertificateConfig struct {
 	// Common name for server certificate
@@ -274,6 +709,84 @@ type ServerCertificateConfig struct {
 
 	// Organization name
 	Organization string `yaml:"organization"`
+}
+
+// HAConfig selects the controller deployment mode for storage backend selection.
+// Only the Mode field is used at init/startup; full cluster coordination lives in pkg/ha.
+// This thin config type avoids a pkg/ha import cycle through pkg/testing/storage.
+type HAConfig struct {
+	// Mode is the deployment mode: "single" (default), "blue-green", or "cluster".
+	Mode string `yaml:"mode"`
+}
+
+// IsClusterMode returns true when ha.mode is "cluster".
+func (h *HAConfig) IsClusterMode() bool {
+	return h != nil && h.Mode == "cluster"
+}
+
+const (
+	// AuditSinkLocal is the zero-extra-infrastructure default audit sink (ADR-033).
+	// Carries the same adversary bound as ADR-004: a host-compromised controller
+	// holds the audit HMAC key and can rewrite history.
+	AuditSinkLocal = "local"
+
+	// AuditSinkWORM is the recommended production audit sink (ADR-033): an
+	// append-only object-lock target outside the controller's trust boundary.
+	// A WORM outage never blocks or fails a caller — entries stay durable in
+	// the local sequence authority and a background reconciliation loop ships
+	// whatever the WORM target is missing once it recovers (Issue #4039).
+	AuditSinkWORM = "worm"
+)
+
+// AuditSinkConfig selects the audit store backing sink (ADR-033, Issue #4036).
+type AuditSinkConfig struct {
+	// Sink selects the audit sink: "local" (default, zero extra infrastructure)
+	// or "worm" (recommended production option, an append-only object-lock
+	// target). Override via CFGMS_AUDIT_SINK.
+	Sink string `yaml:"sink"`
+
+	// WORM holds the WORM sink's connection details (bucket/region/endpoint/
+	// credentials), same shape as ClusterStorageConfig.S3. Credentials follow
+	// the ${ENV_VAR}/_FILE resolution pattern documented above — never a
+	// hardcoded value. Ignored unless Sink is "worm".
+	WORM map[string]interface{} `yaml:"worm,omitempty"`
+
+	// MarkerRoot is the filesystem directory for the worm sink's local
+	// pending-entry marker store (Issue #4039) — bookkeeping only (entry IDs),
+	// never audit content. Defaults to <DataDir>/audit-worm-pending when not
+	// explicitly set, matching the BlobStorageConfig.Root precedent above.
+	// Ignored unless Sink is "worm".
+	MarkerRoot string `yaml:"marker_root,omitempty"`
+}
+
+// ResolvedSink returns the configured sink name, defaulting to AuditSinkLocal
+// when a is nil or Sink is unset.
+func (a *AuditSinkConfig) ResolvedSink() string {
+	if a == nil || a.Sink == "" {
+		return AuditSinkLocal
+	}
+	return a.Sink
+}
+
+// ClusterStorageConfig holds Postgres + S3 connection details for cluster-mode deployments.
+// Set under storage.cluster.* in controller.cfg when ha.mode is cluster.
+type ClusterStorageConfig struct {
+	// PostgresDSN is the libpq connection string for the shared Postgres backend.
+	// All controller nodes in the cluster must point at the same Postgres instance.
+	// Example: "host=pg.example.com port=5432 dbname=cfgms user=cfgms password=... sslmode=require"
+	// Override via CFGMS_STORAGE_CLUSTER_POSTGRES_DSN environment variable.
+	PostgresDSN string `yaml:"postgres_dsn"`
+
+	// SessionHMACKey backs the Postgres-backed session store's bearer-token hashing
+	// (DatabaseSessionStore fails closed when empty). All controller nodes in the cluster
+	// must use the same key so a token issued on one node validates on any peer node.
+	// Override via CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY environment variable.
+	SessionHMACKey string `yaml:"session_hmac_key"`
+
+	// S3 holds S3-compatible blob store configuration keys used for installer artifact storage.
+	// Required keys: "bucket". Optional: "region", "endpoint_url", "access_key_id", "secret_access_key".
+	// When empty, the S3 bucket name is read from CFGMS_S3_INSTALLER_BUCKET at startup.
+	S3 map[string]interface{} `yaml:"s3,omitempty"`
 }
 
 // StorageConfig contains global storage provider configuration
@@ -297,6 +810,10 @@ type StorageConfig struct {
 	// storage manager. Caller-controlled DSN — use a file path such as
 	// "/var/lib/cfgms/cfgms.db". Only used when FlatfileRoot is set.
 	SQLitePath string `yaml:"sqlite_path,omitempty"`
+
+	// Cluster holds Postgres + S3 connection details for cluster-mode deployments.
+	// Required when ha.mode is cluster. Ignored in single-node deployments.
+	Cluster *ClusterStorageConfig `yaml:"cluster,omitempty"`
 }
 
 // LoggingConfig contains global logging provider configuration
@@ -372,6 +889,11 @@ type TransportConfig struct {
 	// ListenAddr is the address for the unified transport server (e.g., "0.0.0.0:4433")
 	ListenAddr string `yaml:"listen_addr"`
 
+	// ExternalAddress is the hostname or IP address advertised to stewards when
+	// ListenAddr binds 0.0.0.0. Required when ListenAddr starts with "0.0.0.0" and
+	// CFGMS_EXTERNAL_HOSTNAME env var is not set. Example: "controller.example.com"
+	ExternalAddress string `yaml:"external_address,omitempty"`
+
 	// UseCertManager enables the controller's certificate manager for TLS.
 	// When true (default), certificates are managed automatically.
 	UseCertManager bool `yaml:"use_cert_manager"`
@@ -409,11 +931,13 @@ func (t *TransportConfig) Validate() error {
 // DefaultConfig returns a Config with reasonable defaults
 func DefaultConfig() *Config {
 	cfg := &Config{
-		ListenAddr:  "127.0.0.1:8080",
-		ExternalURL: "https://localhost:8080", // Default external URL
-		CertPath:    "certs/",
-		DataDir:     "data/",
-		LogLevel:    "info",
+		SecurityProfile:   SecurityProfileDevelopment,
+		ListenAddr:        "127.0.0.1:8080",
+		MetricsListenAddr: "", // Required explicitly; startup fails closed when absent.
+		ExternalURL:       "", // Intentionally empty — operators must set this explicitly. A plausible-looking default silently produces wrong admin bundles on any non-localhost deployment.
+		CertPath:          "certs/",
+		DataDir:           "data/",
+		LogLevel:          "info",
 		Certificate: &CertificateConfig{
 			EnableCertManagement:   true,
 			CAPath:                 "certs/ca",
@@ -463,7 +987,6 @@ func DefaultConfig() *Config {
 			IdleTimeout:     Duration(5 * time.Minute),
 		},
 	}
-	cfg.BlobStorage.Root = filepath.Join(cfg.DataDir, "installers")
 	return cfg
 }
 
@@ -486,6 +1009,8 @@ func findConfigFile(explicitPath string) (string, error) {
 
 	// Priority 2: Environment variable
 	if envPath := os.Getenv("CFGMS_CONTROLLER_CONFIG"); envPath != "" {
+		// #nosec G703 -- this process-start configuration path is controlled by
+		// the controller administrator/service definition, not a remote request.
 		if _, err := os.Stat(envPath); err == nil {
 			return envPath, nil
 		}
@@ -519,6 +1044,27 @@ func isWindows() bool {
 	return os.PathSeparator == '\\' && os.PathListSeparator == ';'
 }
 
+// IsRootedPath reports whether p is already anchored to a filesystem root, and so must
+// not be joined to a directory to make it CWD-independent (Issue #3460).
+//
+// filepath.IsAbs alone is not sufficient here. It answers for the running platform only:
+// on Windows a path needs a volume name, so IsAbs("/var/lib/cfgms/certs") is false. A
+// controller/steward config is a reviewed, hand-authored artefact that uses POSIX paths
+// and is parsed on every platform CFGMS builds for, including by the deployment contract
+// tests. Deciding rootedness with IsAbs alone silently rewrote such a path to
+// <base dir>/var/lib/cfgms/certs on Windows.
+//
+// A leading slash of either flavour therefore counts as rooted everywhere. Genuinely
+// relative paths ("certs/", "./certs") still fall through to CWD-independence anchoring.
+// Exported for reuse by other packages facing the same operator-declared-path class of
+// defect (features/controller/server's resolveDNADataRoot, #3460 Scope item 2).
+func IsRootedPath(p string) bool {
+	if filepath.IsAbs(p) {
+		return true
+	}
+	return strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`)
+}
+
 // LoadWithPath loads the configuration from the specified file path (or searches for it)
 // and applies environment variable overrides.
 //
@@ -535,6 +1081,8 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 	// Load from config file if found
 	if foundPath != "" {
+		// #nosec G304 -- foundPath is selected by findConfigFile from the
+		// operator's explicit configuration path or fixed CFGMS search paths.
 		data, err := os.ReadFile(foundPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read config file %s: %w", foundPath, err)
@@ -550,18 +1098,49 @@ func LoadWithPath(configPath string) (*Config, error) {
 
 		// Expand environment variables in the configuration content
 		// This supports ${VAR} and ${VAR:-default} syntax for explicit env var references
-		expandedData := expandEnvWithDefaults(content)
+		expandedData, err := expandEnvWithDefaults(content)
+		if err != nil {
+			return nil, fmt.Errorf("configuration validation failed in %s: %w", foundPath, err)
+		}
 		expandedBytes := []byte(expandedData)
 
 		if err := yaml.Unmarshal(expandedBytes, cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse config file %s: %w", foundPath, err)
 		}
 
+		// Resolve cert_path to absolute relative to the config file directory.
+		// A relative cert_path is CWD-dependent at runtime; anchoring it to the
+		// config file removes that dependency (Issue #3197).
+		if !IsRootedPath(cfg.CertPath) {
+			cfg.CertPath = filepath.Join(filepath.Dir(foundPath), cfg.CertPath)
+		}
+
 	}
 
 	// Override with environment variables if set
+	if securityProfile := strings.TrimSpace(os.Getenv("CFGMS_SECURITY_PROFILE")); securityProfile != "" {
+		// An environment variable may tighten a development/test configuration
+		// to public-beta, but it may never downgrade a reviewed public-beta file.
+		if cfg.SecurityProfile == SecurityProfilePublicBeta && securityProfile != SecurityProfilePublicBeta {
+			return nil, fmt.Errorf("CFGMS_SECURITY_PROFILE cannot downgrade configured public-beta security profile to %q", securityProfile)
+		}
+		cfg.SecurityProfile = securityProfile
+	}
+
+	if requireSignedAdhoc := strings.TrimSpace(os.Getenv("CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC")); requireSignedAdhoc != "" {
+		val, parseErr := strconv.ParseBool(requireSignedAdhoc)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid CFGMS_EXECUTION_REQUIRE_SIGNED_ADHOC value %q: %w", requireSignedAdhoc, parseErr)
+		}
+		cfg.Execution.RequireSignedAdhoc = val
+	}
+
 	if addr := os.Getenv("CFGMS_LISTEN_ADDR"); addr != "" {
 		cfg.ListenAddr = addr
+	}
+
+	if metricsListenAddr := os.Getenv("CFGMS_METRICS_LISTEN_ADDR"); metricsListenAddr != "" {
+		cfg.MetricsListenAddr = metricsListenAddr
 	}
 
 	if externalURL := os.Getenv("CFGMS_EXTERNAL_URL"); externalURL != "" {
@@ -807,7 +1386,143 @@ func LoadWithPath(configPath string) (*Config, error) {
 		cfg.Registration.Workflow = regWorkflow
 	}
 
+	// HA mode environment variable (Issue #2119).
+	// CFGMS_HA_MODE overrides ha.mode from the config file.
+	// Valid values: "single", "blue-green", "cluster".
+	if haMode := os.Getenv("CFGMS_HA_MODE"); haMode != "" {
+		if cfg.HA == nil {
+			cfg.HA = &HAConfig{}
+		}
+		cfg.HA.Mode = strings.ToLower(haMode)
+	}
+
+	// Cluster storage DSN environment variable (Issue #2119).
+	// CFGMS_STORAGE_CLUSTER_POSTGRES_DSN overrides storage.cluster.postgres_dsn.
+	if pgDSN := os.Getenv("CFGMS_STORAGE_CLUSTER_POSTGRES_DSN"); pgDSN != "" {
+		if cfg.Storage.Cluster == nil {
+			cfg.Storage.Cluster = &ClusterStorageConfig{}
+		}
+		cfg.Storage.Cluster.PostgresDSN = pgDSN
+	}
+
+	// CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY overrides storage.cluster.session_hmac_key.
+	if hmacKey := os.Getenv("CFGMS_STORAGE_CLUSTER_SESSION_HMAC_KEY"); hmacKey != "" {
+		if cfg.Storage.Cluster == nil {
+			cfg.Storage.Cluster = &ClusterStorageConfig{}
+		}
+		cfg.Storage.Cluster.SessionHMACKey = hmacKey
+	}
+
+	// Audit sink environment variable (Issue #4036, ADR-033).
+	// CFGMS_AUDIT_SINK overrides audit.sink ("local" or "worm").
+	if auditSink := os.Getenv("CFGMS_AUDIT_SINK"); auditSink != "" {
+		if cfg.Audit == nil {
+			cfg.Audit = &AuditSinkConfig{}
+		}
+		cfg.Audit.Sink = strings.ToLower(auditSink)
+	}
+
+	// Cluster CA vault configuration environment variables (Issue #2018).
+	// Vault token is intentionally NOT configurable here — it must come from
+	// OPENBAO_TOKEN or BAO_TOKEN environment variables, never from a config file.
+	if vaultAddr := os.Getenv("CFGMS_CLUSTER_CA_VAULT_ADDRESS"); vaultAddr != "" {
+		if cfg.Certificate.ClusterCA == nil {
+			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+		}
+		cfg.Certificate.ClusterCA.VaultAddress = vaultAddr
+	}
+	if vaultKeyPath := os.Getenv("CFGMS_CLUSTER_CA_VAULT_KEY_PATH"); vaultKeyPath != "" {
+		if cfg.Certificate.ClusterCA == nil {
+			cfg.Certificate.ClusterCA = &ClusterCAConfig{}
+		}
+		cfg.Certificate.ClusterCA.VaultKeyPath = vaultKeyPath
+	}
+
+	if err := cfg.ValidateExecutionSecurity(); err != nil {
+		return nil, err
+	}
+
+	if cfg.Certificate != nil && cfg.Certificate.CAPath != "" {
+		if err := ValidateCAPath(cfg.Certificate.CAPath); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := cfg.ValidateWebAuthn(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// ValidateCAPath returns an error when caPath's final component is not "ca".
+// cert.NewManager always derives its real CA directory as filepath.Join(StoragePath,"ca"),
+// so every caller must pass StoragePath = filepath.Dir(caPath). If the final component
+// is not "ca", that derivation produces the wrong parent and the CA lands in the wrong
+// place — or fails to load — without any obvious error message.
+func ValidateCAPath(caPath string) error {
+	clean := filepath.Clean(caPath)
+	if filepath.Base(clean) != "ca" {
+		return fmt.Errorf(
+			"invalid certificate.ca_path %q: the final path component must be \"ca\" "+
+				"(configured path would derive wrong CA storage parent %q; "+
+				"rename the directory or update ca_path to end in /ca)",
+			caPath, filepath.Dir(clean),
+		)
+	}
+	return nil
+}
+
+// ValidateExecutionSecurity enforces the public-beta connected-execution
+// contract after all file and environment paths have been resolved.
+func (c *Config) ValidateExecutionSecurity() error {
+	switch c.SecurityProfile {
+	case "", SecurityProfileDevelopment, SecurityProfileTest:
+		return nil
+	case SecurityProfilePublicBeta:
+		if !c.Execution.RequireSignedAdhoc {
+			return fmt.Errorf("public-beta security profile requires execution.require_signed_adhoc: true")
+		}
+		if c.Transport == nil {
+			return fmt.Errorf("public-beta security profile requires connected transport configuration")
+		}
+		if c.Certificate == nil || !c.Certificate.EnableCertManagement {
+			return fmt.Errorf("public-beta security profile requires certificate management and signing roots")
+		}
+		if !c.Transport.UseCertManager {
+			return fmt.Errorf("public-beta security profile requires transport.use_cert_manager: true")
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid security_profile %q: must be development, test, or public-beta", c.SecurityProfile)
+	}
+}
+
+// ValidatePrivateListenerAddress requires a fixed numeric loopback or private
+// address. Hostnames are rejected so DNS changes cannot turn a listener that
+// passed startup validation into an Internet-facing listener later.
+func ValidatePrivateListenerAddress(address string) error {
+	if address == "" {
+		return fmt.Errorf("address is required")
+	}
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("must be a host:port address: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("host must be an explicit loopback or private IP address")
+	}
+	if !ip.IsLoopback() && !ip.IsPrivate() {
+		return fmt.Errorf("host %q is not a loopback or private IP address", host)
+	}
+
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("a fixed numeric port from 1 to 65535 is required")
+	}
+	return nil
 }
 
 // Load loads the configuration using default search paths.
@@ -914,4 +1629,13 @@ func (rc *RegistrationConfig) GetPendingReviewTimeout() time.Duration {
 		return 5 * 24 * time.Hour
 	}
 	return rc.PendingReviewTimeout.AsDuration()
+}
+
+// GetEnrollmentLinkTTL returns the validity window for a single-use passkey
+// enrollment magic link, defaulting to 72 hours when not configured (Issue #2966).
+func (rc *RegistrationConfig) GetEnrollmentLinkTTL() time.Duration {
+	if rc == nil || rc.EnrollmentLinkTTL == 0 {
+		return 72 * time.Hour
+	}
+	return rc.EnrollmentLinkTTL.AsDuration()
 }

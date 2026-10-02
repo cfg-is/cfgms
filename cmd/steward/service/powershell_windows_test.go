@@ -6,46 +6,16 @@
 package service
 
 import (
-	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// psCall records a single RunPS invocation for test inspection.
-type psCall struct {
-	ScriptBlock string
-	Args        []string
-	StdinData   string
-	Cmd         *exec.Cmd
-}
-
-// recordingPSRunner captures RunPS calls without executing them.
-// Used by tests to verify injection safety and argument construction.
-type recordingPSRunner struct {
-	Calls []psCall
-}
-
-func (r *recordingPSRunner) RunPS(scriptBlock string, args []string, stdinData string) (string, error) {
-	cmd := buildPSCmd(scriptBlock, args)
-	if stdinData != "" {
-		cmd.Stdin = strings.NewReader(stdinData)
-	}
-	r.Calls = append(r.Calls, psCall{
-		ScriptBlock: scriptBlock,
-		Args:        args,
-		StdinData:   stdinData,
-		Cmd:         cmd,
-	})
-	return "ok", nil
-}
-
-// TestInstallHyperVPSHelper_InjectionSafe verifies that user-supplied values —
+// TestPSHelper_InjectionSafe verifies that user-supplied values —
 // including values with spaces, quotes, and semicolons — are passed as separate
 // os/exec arguments and are never concatenated into the script block string.
-func TestInstallHyperVPSHelper_InjectionSafe(t *testing.T) {
+func TestPSHelper_InjectionSafe(t *testing.T) {
 	cases := []struct {
 		name        string
 		scriptBlock string
@@ -124,7 +94,7 @@ func TestInstallHyperVPSHelper_InjectionSafe(t *testing.T) {
 }
 
 // TestBuildPSCmd_StructureIsCorrect verifies the fixed argument positions
-// that TestInstallHyperV_PassNotInArgv relies on.
+// produced by buildPSCmd so injection-safety tests can assert on them.
 func TestBuildPSCmd_StructureIsCorrect(t *testing.T) {
 	cmd := buildPSCmd("Write-Output 'hello'", []string{"arg1", "arg2"})
 

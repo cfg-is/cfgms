@@ -14,6 +14,49 @@ import (
 // with the given ID already exists. Handlers must use errors.Is to detect it.
 var ErrTenantAlreadyExists = errors.New("tenant already exists")
 
+// ErrTenantDoesNotExist is returned by every TenantStore operation that
+// addresses a tenant which has no row: GetTenant, UpdateTenant and
+// DeleteTenant. Providers wrap it with %w so the message may carry the tenant
+// ID and provider-specific phrasing; callers MUST use errors.Is and MUST NOT
+// classify on message text. Matching on a substring silently binds a caller to
+// one provider's phrasing — a handler that classifies "tenant not found" would
+// treat a missing tenant as a backend fault on any provider that phrases the
+// same condition differently, turning the resulting status-code difference into
+// a cross-tenant existence oracle.
+//
+// Named for symmetry with ErrTenantAlreadyExists rather than "NotFound",
+// because ErrTenantNotFound in this package is the unrelated
+// *ClientTenantValidationError for the M365 client-tenant surface.
+var ErrTenantDoesNotExist = errors.New("tenant does not exist")
+
+// Pending-deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
+var (
+	ErrPendingDeletionExists   = errors.New("pending deletion already exists for this subtree root")
+	ErrPendingDeletionNotFound = errors.New("no pending deletion found for this subtree root")
+	ErrHoldNotElapsed          = errors.New("deletion hold period has not yet elapsed")
+	ErrMembershipChanged       = errors.New("subtree membership has changed since deletion was requested")
+	ErrSameApprover            = errors.New("approver must differ from the principal who requested deletion")
+)
+
+// DeletionState is the phase of a pending-deletion pipeline entry.
+type DeletionState string
+
+const (
+	DeletionStateHold     DeletionState = "hold"
+	DeletionStateEligible DeletionState = "eligible"
+)
+
+// PendingDeletion records an in-progress deletion pipeline entry for a subtree.
+// Created by RequestDeletion; removed atomically by ApproveDeletion or CancelDeletion.
+type PendingDeletion struct {
+	SubtreeRootID   string        `json:"subtree_root_id"`
+	RequestedBy     string        `json:"requested_by"`
+	RequestedAt     time.Time     `json:"requested_at"`
+	EligibleAt      time.Time     `json:"eligible_at"`
+	State           DeletionState `json:"state"`
+	PinnedMemberIDs []string      `json:"pinned_member_ids"`
+}
+
 // TenantStore defines storage interface for CFGMS tenant data persistence
 // All tenant modules use this interface - storage provider is chosen by controller
 type TenantStore interface {
@@ -30,6 +73,23 @@ type TenantStore interface {
 	GetTenantPath(ctx context.Context, tenantID string) ([]string, error)
 	IsTenantAncestor(ctx context.Context, ancestorID, descendantID string) (bool, error)
 
+	// Pending-deletion pipeline (ADR-027 Decisions 3-4, Issue #3182).
+	// RequestDeletion records a new pending-deletion entry. Returns
+	// ErrPendingDeletionExists when a pending record already exists for the root.
+	RequestDeletion(ctx context.Context, pending *PendingDeletion) error
+	// CancelDeletion removes the pending-deletion record regardless of phase.
+	// Returns ErrPendingDeletionNotFound when no record exists.
+	CancelDeletion(ctx context.Context, subtreeRootID string) error
+	// ApproveDeletion atomically verifies eligibility, dual-control, and subtree
+	// membership match, then hard-deletes every tenant in the pinned member set.
+	// The transaction includes a row-lock on the pending-deletion record.
+	// Returns the IDs that were deleted so the caller can perform RBAC cleanup.
+	// Errors: ErrHoldNotElapsed, ErrSameApprover, ErrMembershipChanged, ErrPendingDeletionNotFound.
+	ApproveDeletion(ctx context.Context, subtreeRootID, approvedBy string, requireDualControl bool, now time.Time) ([]string, error)
+	// GetPendingDeletion returns the current pending-deletion record, if any.
+	// Returns ErrPendingDeletionNotFound when none exists.
+	GetPendingDeletion(ctx context.Context, subtreeRootID string) (*PendingDeletion, error)
+
 	// Initialize and cleanup
 	Initialize(ctx context.Context) error
 	Close() error
@@ -43,8 +103,15 @@ type TenantData struct {
 	ParentID    string            `json:"parent_id,omitempty" yaml:"parent_id,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 	Status      TenantStatus      `json:"status" yaml:"status"`
-	CreatedAt   time.Time         `json:"created_at" yaml:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at" yaml:"updated_at"`
+
+	// Suspension provenance (ADR-027 Decision 2). Both can be set simultaneously:
+	// a tenant independently suspended that is also cascade-suspended by an ancestor
+	// carries both flags so restoring the ancestor only removes the cascade effect.
+	DirectlySuspended    bool    `json:"directly_suspended,omitempty" yaml:"directly_suspended,omitempty"`
+	CascadeSuspendedFrom *string `json:"cascade_suspended_from,omitempty" yaml:"cascade_suspended_from,omitempty"`
+
+	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
 }
 
 // TenantStatus represents the status of a tenant

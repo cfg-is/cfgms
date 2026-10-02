@@ -21,9 +21,10 @@ developer pushes script  ──CI──►  sign-scripts action runs
                                   script executes  ✓
 ```
 
-CFGMS stewards configured with `policy: required` will refuse to execute any
-script that lacks a valid `.sig` sidecar, ensuring only CI-approved scripts
-reach your endpoints.
+Each script resource can require a valid `.sig` sidecar via its own
+`signing_policy: required` setting (see [Signing policies](#signing-policies)
+below); CI-signed scripts satisfy that requirement once the steward trusts the
+signing key (Step 4).
 
 ## Prerequisites
 
@@ -95,21 +96,34 @@ jobs:
 Commit and push this file.  On the next push to `main`, the action will
 automatically sign any changed scripts and commit the `.sig` sidecars.
 
-## Step 4: Configure CFGMS stewards to enforce signatures
+## Step 4: Configure CFGMS stewards to trust your signing key
 
-Register the public key thumbprint with each steward that should enforce
+Register the public key thumbprint with each steward that should verify
 signatures from this repository.  Add the following to your steward
 configuration (typically managed via the CFGMS controller):
 
 ```yaml
 steward:
   script_signing:
-    policy: required          # reject unsigned scripts
     trust_mode: trusted_keys  # only accept keys in the list below
     trusted_keys:
       - name: "MSP Production Signer"
         thumbprint: "<sha256-thumbprint>"   # see below
 ```
+
+`trust_mode`, `trusted_keys` and `policy` are all carried into the script
+module's runtime signing config (`BuildModuleSigningConfig`,
+`features/steward/config/config.go`). **`script_signing.policy` at the
+steward level is a fleet-wide enforcement floor.** Setting it to `required`
+means every script the steward executes must carry a valid signature,
+regardless of that script's own `signing_policy` — a per-script setting may
+raise the bar further (e.g. pin a specific trusted key) but can never lower
+it below the steward's floor. The field is validated and cascades through
+tenant configuration inheritance (a child tenant may only tighten it, never
+loosen it — Story #4324), and the resolved floor is enforced on every
+execution (Issue #4399). Leaving `policy` unset imposes no floor: whether a
+given script requires a signature is then controlled entirely per script —
+see [Signing policies](#signing-policies) below.
 
 To obtain the thumbprint:
 
@@ -127,8 +141,8 @@ Copy the hex output as the `thumbprint` value.
 1. Add a test script to your repository and push to `main`.
 2. Confirm the signing workflow runs and a corresponding `.sig` file appears
    in the repository.
-3. On a steward with `policy: required`, trigger a script run and confirm it
-   executes without a signature error.
+3. On a script resource with `signing_policy: required`, trigger a script run
+   and confirm it executes without a signature error.
 4. Manually corrupt the `.sig` file content and confirm the steward rejects
    execution.
 
@@ -158,16 +172,25 @@ The algorithm value must match what is configured in the steward
 
 ### Signing policies
 
-Set `steward.script_signing.policy` on your stewards to control enforcement:
+Whether a given script requires a valid signature is decided by two settings
+together: the steward-wide `script_signing.policy` floor (Step 4 above) and
+the script's own resource-level `signing_policy` (the `script:` block a
+config pushes to the steward — see the `signing_policy` field in the
+[script module documentation](../modules/script-module.md)). The steward
+executes each script under whichever of the two is more restrictive; a
+per-script setting can tighten the floor but can never loosen it.
 
 | Policy | Behaviour |
 |--------|-----------|
-| `none` | Signatures are ignored (default; use during initial rollout) |
+| `none` | Signatures are ignored (default when neither the steward floor nor `signing_policy` is set) |
 | `optional` | Signatures are verified when present, unsigned scripts are allowed |
-| `required` | Scripts without a valid `.sig` sidecar are rejected |
+| `required` | The script is rejected unless it carries a valid `.sig` sidecar signed by a key in the steward's `trusted_keys` |
 
-**Recommended rollout:** start with `optional`, verify signatures are being
-generated and verified correctly, then switch to `required`.
+**Recommended rollout:** start with the steward floor at `optional` (or
+unset), verify signatures are being generated and verified correctly, then
+set `script_signing.policy: required` on the steward — or `signing_policy:
+required` on individual script resources first, if you want to enforce
+signing incrementally before raising the fleet-wide floor.
 
 ## Windows runners
 

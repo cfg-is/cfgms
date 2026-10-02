@@ -48,7 +48,9 @@ func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
 		return "", fmt.Errorf("create module socket dir %q: %w", sockDir, err)
 	}
 	// Re-assert mode in case the directory already existed with looser permissions.
-	if err := os.Chmod(sockDir, 0o700); err != nil { // #nosec G302 -- 0700 on a directory is intentional hardening; execute bit is required for traversal
+	// #nosec G302 -- this is a directory; 0700 is restrictive and its execute
+	// bit is required for the owning process to traverse to the Unix socket.
+	if err := os.Chmod(sockDir, 0o700); err != nil {
 		return "", fmt.Errorf("chmod module socket dir %q: %w", sockDir, err)
 	}
 
@@ -78,7 +80,13 @@ func makeSocketPath(runtimeDir, moduleName string, id int64) (string, error) {
 
 // waitForSocket polls the Unix socket at socketPath until it accepts a
 // connection or ctx is cancelled.
-func waitForSocket(ctx context.Context, socketPath string) error {
+//
+// serverPID (the fork/exec'd module's pid) is unused here: the socket lives in a
+// mode-0700 directory owned by the steward, so no other user can create the
+// socket in the first place and no identity check on the peer is needed. The
+// Windows implementation has no such directory and must verify the pipe's server
+// process instead (socket_windows.go).
+func waitForSocket(ctx context.Context, socketPath string, serverPID int) error {
 	for {
 		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
 		if err == nil {
@@ -94,7 +102,10 @@ func waitForSocket(ctx context.Context, socketPath string) error {
 }
 
 // dialGRPCSocket creates a gRPC client connection over the Unix socket at socketPath.
-func dialGRPCSocket(socketPath string) (*grpc.ClientConn, error) {
+//
+// serverPID is unused here for the same reason as in waitForSocket: the
+// mode-0700 socket directory already restricts who can bind the socket.
+func dialGRPCSocket(socketPath string, serverPID int) (*grpc.ClientConn, error) {
 	return grpc.NewClient(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

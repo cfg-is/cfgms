@@ -10,7 +10,14 @@ package client
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"runtime"
 	"testing"
 	"time"
@@ -19,6 +26,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/steward/execution"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 )
 
 // platformShell returns a shell supported by the current OS. bash is unavailable
@@ -38,6 +46,54 @@ func echoScriptBody(s string) string {
 		return "Write-Output '" + s + "'"
 	}
 	return "echo '" + s + "'"
+}
+
+// signedInlineExecuteScriptParams builds the cmd.Params entries
+// preflightScriptSignature requires for an inline (ad-hoc) command as of Issue
+// #3694: script_content, shell, execution_id, plus a valid operator envelope —
+// targeted at stewardID, a fresh nonce, and a 5-minute expiry — signed with a
+// freshly generated (untrusted-CA) RSA key. This package tests dispatch through
+// setupCommandHandler, not signature-rejection specifics, so an ad-hoc, valid
+// signature is sufficient (no controllerCARoots are wired here, so cert-chain
+// verification does not apply).
+func signedInlineExecuteScriptParams(t *testing.T, content []byte, shell, stewardID, executionID string) map[string]interface{} {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	nonceBytes := make([]byte, 16)
+	_, err = rand.Read(nonceBytes)
+	require.NoError(t, err)
+
+	env := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   []string{stewardID},
+		Nonce:     hex.EncodeToString(nonceBytes),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	canonical, err := operatorpayload.CanonicalBytes(env)
+	require.NoError(t, err)
+
+	digest := sha256.Sum256(canonical)
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	require.NoError(t, err)
+
+	der, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	require.NoError(t, err)
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+
+	return map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                shell,
+		"execution_id":         executionID,
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      base64.StdEncoding.EncodeToString(sigBytes),
+		"signature_public_key": string(pubPEM),
+		"targets":              env.Targets,
+		"nonce":                env.Nonce,
+		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
+	}
 }
 
 // TestSetupCommandHandler_RegistersExecuteScript verifies that the command
@@ -60,11 +116,8 @@ func TestSetupCommandHandler_RegistersExecuteScript(t *testing.T) {
 		StewardID: "steward-exec-script",
 		TenantID:  "tenant-exec-script",
 		Timestamp: time.Now(),
-		Params: map[string]interface{}{
-			"script_content": base64.StdEncoding.EncodeToString([]byte(echoScriptBody("hello"))),
-			"shell":          platformShell(),
-			"execution_id":   "exec-1669-test",
-		},
+		Params: signedInlineExecuteScriptParams(t, []byte(echoScriptBody("hello")), platformShell(),
+			"steward-exec-script", "exec-1669-test"),
 	}}
 	require.NoError(t, handler.HandleCommand(context.Background(), cmd))
 	handler.Wait()

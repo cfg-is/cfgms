@@ -57,7 +57,7 @@ func (s *DatabaseRBACStore) StoreRole(ctx context.Context, role *common.Role) er
 		permissionIDsJSON,
 		role.IsSystemRole,
 		role.TenantId,
-		role.ParentRoleId,
+		nullStringOrEmpty(role.ParentRoleId), // empty means "no parent"; the column has a self-referential FK, so "" must become NULL, not a literal empty-string match
 		int32(role.InheritanceType),
 	)
 
@@ -78,6 +78,14 @@ func (s *DatabaseRBACStore) GetRole(ctx context.Context, id string) (*common.Rol
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
+	return s.getRoleLocked(ctx, id)
+}
+
+// getRoleLocked performs the GetRole query and tenant-access check without
+// acquiring s.mutex. Callers must already hold either the read or write lock
+// (Issue #4322: DeleteRole holds the write lock and cannot call the exported
+// GetRole, which re-acquires a read lock on the same non-reentrant sync.RWMutex).
+func (s *DatabaseRBACStore) getRoleLocked(ctx context.Context, id string) (*common.Role, error) {
 	query := `
 		SELECT id, name, description, permission_ids, is_system_role, tenant_id, parent_role_id, inheritance_type
 		FROM rbac_roles
@@ -217,13 +225,16 @@ func (s *DatabaseRBACStore) DeleteRole(ctx context.Context, id string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// H-TENANT-1: Fetch role first to validate tenant access (security audit finding)
-	_, err := s.GetRole(ctx, id)
+	// H-TENANT-1: Fetch role first to validate tenant access (security audit finding).
+	// Uses getRoleLocked, not GetRole: GetRole takes a read lock, and this method
+	// already holds the write lock above — sync.RWMutex is not reentrant, so calling
+	// GetRole here deadlocked every DeleteRole call (Issue #4322).
+	_, err := s.getRoleLocked(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	// Tenant validation already performed in GetRole
+	// Tenant validation already performed in getRoleLocked
 	// Proceed with deletion
 
 	// Begin transaction

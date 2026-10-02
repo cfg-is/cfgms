@@ -1,0 +1,584 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+package sqlite
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
+	"github.com/cfgis/cfgms/pkg/entitygraph/types"
+)
+
+// newTestProvider returns a file-backed provider in a temp dir. File-backed
+// (not :memory:) so RebuildProjections and multi-statement flows exercise the
+// real WAL path.
+func newTestProvider(t *testing.T) *SQLiteEntityGraphProvider {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "eg.db")
+	p, err := NewSQLiteEntityGraphProvider(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
+func mustEID(t *testing.T, s string) types.EID {
+	t.Helper()
+	eid, err := types.ParseEID(s)
+	require.NoError(t, err)
+	return eid
+}
+
+func obs(subject, source string, kind types.ObservationKind, at time.Time, payload map[string]interface{}) types.Observation {
+	return types.Observation{
+		Source:     source,
+		ObservedAt: at,
+		RecordedAt: at,
+		Subject:    subject,
+		Kind:       kind,
+		Confidence: types.ConfidenceHigh,
+		Payload:    payload,
+	}
+}
+
+func TestReportAndGetEntity(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:abc123")
+
+	err := p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:file",
+		Observations: []types.Observation{
+			obs(eid.String(), "enforcing-module:file", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind":   "host",
+				"owning_tenant": "root/msp-a/client-1",
+				"hostname":      "web01",
+				"cpu_count":     float64(8),
+			}),
+		},
+	})
+	require.NoError(t, err)
+
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	require.Equal(t, "host", view.Entity.Kind)
+	require.Equal(t, "root/msp-a/client-1", view.Entity.OwningTenant)
+	require.Equal(t, "web01", view.Entity.Attributes["hostname"])
+	require.Equal(t, float64(8), view.Entity.Attributes["cpu_count"])
+	require.Len(t, view.Sources, 1)
+}
+
+func TestGetEntityNotFound(t *testing.T) {
+	p := newTestProvider(t)
+	_, err := p.GetEntity(context.Background(), mustEID(t, "host:nope"), interfaces.GetEntityOpts{})
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestContentHashDedup(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:dedup")
+	payload := map[string]interface{}{"entity_kind": "host", "hostname": "h1"}
+
+	batch := interfaces.ObservationBatch{
+		Source:       "observer:scan",
+		Observations: []types.Observation{obs(eid.String(), "observer:scan", types.ObservationKindState, now, payload)},
+	}
+	require.NoError(t, p.ReportObservations(ctx, batch))
+	require.NoError(t, p.ReportObservations(ctx, batch)) // identical → no new log row
+
+	var count int
+	require.NoError(t, p.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM eg_observation_log WHERE subject = ?`, eid.String()).Scan(&count))
+	require.Equal(t, 1, count, "bit-identical re-observation must not append a log row")
+}
+
+func TestPrecedenceMerge(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:prec")
+
+	// Observer says color=blue; enforcing module says color=red. Enforcing wins.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(eid.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "color": "blue", "only_observer": "x",
+			}),
+		},
+	}))
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:paint",
+		Observations: []types.Observation{
+			obs(eid.String(), "enforcing-module:paint", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "color": "red",
+			}),
+		},
+	}))
+
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	require.Equal(t, "red", view.Entity.Attributes["color"], "enforcing module overrides observer")
+	require.Equal(t, "x", view.Entity.Attributes["only_observer"], "lower-precedence-only keys survive")
+}
+
+func TestTenantFilter(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:tenant")
+
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(eid.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/msp-a/client-1",
+			}),
+		},
+	}))
+
+	_, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/msp-a"})
+	require.NoError(t, err, "matching tenant subtree is visible")
+
+	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{TenantFilter: "root/msp-b"})
+	require.ErrorIs(t, err, ErrNotFound, "other tenant subtree is invisible")
+
+	// Prefix-collision guard: "root/msp-a" must not match "root/msp-a-other" or "root/msp-ab".
+	eid2 := mustEID(t, "host:prefix-tenant")
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(eid2.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "owning_tenant": "root/msp-ab",
+			}),
+		},
+	}))
+	_, err = p.GetEntity(ctx, eid2, interfaces.GetEntityOpts{TenantFilter: "root/msp-a"})
+	require.ErrorIs(t, err, ErrNotFound, "sibling tenant sharing a name prefix must not be visible")
+}
+
+func TestQueryEntitiesPaging(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, name := range []string{"a", "b", "c"} {
+		eid := mustEID(t, "host:"+name)
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(eid.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root/t",
+				}),
+			},
+		}))
+	}
+
+	page1, err := p.QueryEntities(ctx, interfaces.EntityFilter{Kind: "host"}, interfaces.PageToken{PageSize: 2})
+	require.NoError(t, err)
+	require.Len(t, page1.Entities, 2)
+	require.NotEmpty(t, page1.NextToken)
+
+	page2, err := p.QueryEntities(ctx, interfaces.EntityFilter{Kind: "host"}, interfaces.PageToken{PageSize: 2, Token: page1.NextToken})
+	require.NoError(t, err)
+	require.Len(t, page2.Entities, 1)
+	require.Empty(t, page2.NextToken)
+}
+
+func TestResolveIdentity(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:ident")
+
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "observer:scan",
+		Observations: []types.Observation{
+			obs(eid.String(), "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host",
+				"machine_sid": "S-1-5-21-XYZ",
+				"mac_addrs":   []interface{}{"00:11:22:33:44:55", "aa:bb:cc:dd:ee:ff"},
+			}),
+		},
+	}))
+
+	got, err := p.ResolveIdentity(ctx, interfaces.IdentityClaims{MachineSID: "S-1-5-21-XYZ"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, eid.String(), got[0].String())
+
+	got, err = p.ResolveIdentity(ctx, interfaces.IdentityClaims{MACAddrs: []string{"aa:bb:cc:dd:ee:ff"}})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	// Empty claims → empty result, not an error.
+	got, err = p.ResolveIdentity(ctx, interfaces.IdentityClaims{})
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
+func TestRebuildProjections(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	eid := mustEID(t, "host:rebuild")
+
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "enforcing-module:file",
+		Observations: []types.Observation{
+			obs(eid.String(), "enforcing-module:file", types.ObservationKindState, now, map[string]interface{}{
+				"entity_kind": "host", "hostname": "rb01",
+			}),
+		},
+	}))
+
+	// Corrupt the projections; the log remains the source of truth.
+	_, err := p.db.ExecContext(ctx, `DELETE FROM eg_entity_current`)
+	require.NoError(t, err)
+	_, err = p.db.ExecContext(ctx, `DELETE FROM eg_entity_index`)
+	require.NoError(t, err)
+
+	_, err = p.GetEntity(ctx, eid, interfaces.GetEntityOpts{})
+	require.ErrorIs(t, err, ErrNotFound)
+
+	require.NoError(t, p.RebuildProjections(ctx))
+
+	view, err := p.GetEntity(ctx, eid, interfaces.GetEntityOpts{})
+	require.NoError(t, err)
+	require.Equal(t, "rb01", view.Entity.Attributes["hostname"])
+}
+
+func TestGetDesiredStateNotFound(t *testing.T) {
+	p := newTestProvider(t)
+	ds, err := p.GetDesiredState(context.Background(), mustEID(t, "host:x"))
+	require.NoError(t, err)
+	require.Nil(t, ds)
+}
+
+func TestUpdateDriftLifecycleInvalidTransition(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.UpdateDriftLifecycle(context.Background(), interfaces.DriftLifecycleUpdate{
+		EID:        mustEID(t, "host:x"),
+		Transition: "fly",
+	})
+	require.Error(t, err)
+}
+
+// TestUpdateDriftLifecycleMissingRecord exercises the sql.ErrNoRows -> ErrNotFound
+// branch: a valid transition ("acknowledge") passes transitionLifecycleStatus but
+// the subject has no row in eg_drift_projection, so the projection lookup must
+// surface ErrNotFound rather than an opaque error.
+func TestUpdateDriftLifecycleMissingRecord(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.UpdateDriftLifecycle(context.Background(), interfaces.DriftLifecycleUpdate{
+		EID:        mustEID(t, "host:no-drift"),
+		Transition: "acknowledge",
+		Actor:      "operator:alice",
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestGetEdgesEmpty(t *testing.T) {
+	// GetEdges on an empty provider returns empty slice, not ErrNotImplemented.
+	p := newTestProvider(t)
+	edges, err := p.GetEdges(context.Background(), interfaces.EdgeFilter{})
+	require.NoError(t, err)
+	require.Empty(t, edges)
+}
+
+func TestSubjectKind(t *testing.T) {
+	require.Equal(t, "entity", subjectKind("host:abc"))
+	require.Equal(t, "edge", subjectKind("contains|host:a|host:b"))
+}
+
+// TestRFC3339_LexicographicallySortable is the Issue #3707 root-cause guard:
+// GetHistory and every other time-range read in this package compares rfc3339
+// output as raw SQLite TEXT (`observed_at >= ? AND observed_at <= ?`), so text
+// order must equal chronological order for every pair of timestamps a caller
+// could plausibly compare, not just ones that happen to share the same
+// fractional-second width.
+//
+// time.RFC3339Nano trims trailing zero fractional digits: an exact second (e.g.
+// UTC midnight) formats with no fractional part at all ("...T00:00:00Z"), while
+// a timestamp a fraction of a second later in the *same* second keeps its
+// fraction ("...T00:00:00.5Z"). Byte-wise, '.' (0x2E) sorts before 'Z' (0x5A),
+// so the chronologically later string sorts first — a query bounded by the
+// exact-second value wrongly matches the later one too. Reproduced via
+// features/reports/provider's device_count trend, which queries this provider
+// with a UTC-midnight bucket boundary.
+func TestRFC3339_LexicographicallySortable(t *testing.T) {
+	midnight := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name   string
+		before time.Time
+		after  time.Time
+	}{
+		{"exact second vs sub-second later in the same second", midnight, midnight.Add(500 * time.Millisecond)},
+		{"exact second vs one nanosecond later", midnight, midnight.Add(1 * time.Nanosecond)},
+		{"sub-second vs a later sub-second in the same second", midnight.Add(100 * time.Millisecond), midnight.Add(900 * time.Millisecond)},
+		{"whole second vs the next whole second", midnight, midnight.Add(1 * time.Second)},
+		{"across a day boundary", midnight.Add(-1 * time.Nanosecond), midnight},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.True(t, tc.before.Before(tc.after), "test case invariant: before must precede after")
+			require.Less(t, rfc3339(tc.before), rfc3339(tc.after),
+				"rfc3339(%s)=%q must sort before rfc3339(%s)=%q to match chronological order",
+				tc.before, rfc3339(tc.before), tc.after, rfc3339(tc.after))
+		})
+	}
+}
+
+func TestParseEdgeSubject(t *testing.T) {
+	edgeType, from, to, err := parseEdgeSubject("contains|host:a|host:b")
+	require.NoError(t, err)
+	require.Equal(t, "contains", edgeType)
+	require.Equal(t, "host:a", from)
+	require.Equal(t, "host:b", to)
+
+	// to_subject may include a local_id with slashes.
+	edgeType, from, to, err = parseEdgeSubject("runs-on|cluster:cl1|host:cl1/vm1")
+	require.NoError(t, err)
+	require.Equal(t, "runs-on", edgeType)
+	require.Equal(t, "cluster:cl1", from)
+	require.Equal(t, "host:cl1/vm1", to)
+
+	_, _, _, err = parseEdgeSubject("bad")
+	require.Error(t, err, "missing components must error")
+
+	_, _, _, err = parseEdgeSubject("two|parts")
+	require.Error(t, err)
+}
+
+func TestResolveWatchCursor_InvalidCursor(t *testing.T) {
+	// A non-numeric cursor is rejected before any DB access, so a nil *sql.DB is
+	// safe here and keeps the test a pure error-path check.
+	for _, bad := range []string{"abc", "12x", "3.14", "-", "0x10", " 5"} {
+		_, err := resolveWatchCursor(context.Background(), nil, bad)
+		require.Error(t, err, "cursor %q must be rejected", bad)
+		require.Contains(t, err.Error(), "must be a decimal integer")
+	}
+}
+
+func TestResolveWatchCursor_ValidDecimal(t *testing.T) {
+	// A valid decimal cursor is parsed without touching the DB (nil is safe).
+	seq, err := resolveWatchCursor(context.Background(), nil, "42")
+	require.NoError(t, err)
+	require.Equal(t, int64(42), seq)
+}
+
+func TestBuildWatchEvent_OKFalseBranches(t *testing.T) {
+	// Edge subject whose pipe-delimited form does not split into exactly three
+	// parts: parseEdgeSubject fails (watch.go line ~160).
+	_, ok := buildWatchEvent("two|parts", "observation", "", 1)
+	require.False(t, ok, "malformed edge subject (wrong part count) must not yield an event")
+
+	// Well-formed edge subject but the from-EID is not a parseable EID
+	// (watch.go line ~164) — a stored edge row with a corrupt from-subject.
+	_, ok = buildWatchEvent("contains|nocolon|host:b", "observation", "", 2)
+	require.False(t, ok, "edge with non-parseable from-EID must not yield an event")
+
+	// Non-edge subject that is not a parseable EID (watch.go line ~171).
+	_, ok = buildWatchEvent("nocolon-subject", "observation", "", 3)
+	require.False(t, ok, "non-edge subject that is not a valid EID must not yield an event")
+}
+
+func TestBuildWatchEvent_OKTrue(t *testing.T) {
+	ev, ok := buildWatchEvent("host:abc", string(types.ObservationKindDriftDiff), "", 7)
+	require.True(t, ok)
+	require.Equal(t, "drift-updated", ev.EventKind)
+	require.Equal(t, int64(7), ev.Version)
+
+	ev, ok = buildWatchEvent("contains|host:a|host:b", "observation", "", 8)
+	require.True(t, ok)
+	require.Equal(t, "edge-updated", ev.EventKind)
+	require.Equal(t, "host:a", ev.Subject.String())
+}
+
+func TestSourceClassPrecedence(t *testing.T) {
+	require.Equal(t, types.SourceClassEnforcingModule, resolveSourceClass("enforcing-module:hyperv"))
+	require.Equal(t, types.SourceClassObserver, resolveSourceClass("mystery:thing"))
+	require.Less(t, sourceClassRank(types.SourceClassEnforcingModule), sourceClassRank(types.SourceClassObserver))
+}
+
+func TestProviderSatisfiesInterface(t *testing.T) {
+	var _ interfaces.EntityGraphProvider = (*SQLiteEntityGraphProvider)(nil)
+	require.NotEqual(t, "", (&SQLiteEntityGraphProvider{}).Name())
+}
+
+func TestDedupErrorPathIsClean(t *testing.T) {
+	// Guard: an empty batch is a no-op, not an error.
+	p := newTestProvider(t)
+	require.NoError(t, p.ReportObservations(context.Background(), interfaces.ObservationBatch{}))
+	// ErrNotFound is a valid non-nil sentinel; confirm it is not accidentally nil.
+	require.NotNil(t, ErrNotFound, "ErrNotFound must be a non-nil sentinel error")
+}
+
+func TestEscapeLIKE(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"host:abc", "host:abc"},
+		{"host:server%01", `host:server\%01`},
+		{"host:server_01", `host:server\_01`},
+		{`host:back\slash`, `host:back\\slash`},
+		{`100%_done`, `100\%\_done`},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, escapeLIKE(tc.in), "input: %q", tc.in)
+	}
+}
+
+// TestLIKEWildcardInEID_CollapseAsOf verifies that an EID containing SQL LIKE
+// metacharacters (%, _) does not produce spurious group members during temporal BFS.
+// Without LIKE escaping, pattern 'same-as|host:server%01|%' (where % is a wildcard)
+// would match 'same-as|host:server01|host:wildcard-peer', wrongly including those
+// entities in the group for host:server%01.
+func TestLIKEWildcardInEID_CollapseAsOf(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// decoy: host:server01 — an EID that an unescaped LIKE pattern for host:server%01
+	// would spuriously match (% wildcard matches empty string, so server%01 matches server01).
+	decoy := "host:server01"
+	peer := "host:wildcard-peer"
+	subject := "host:server%01"
+
+	for _, e := range []string{decoy, peer, subject} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root",
+				}),
+			},
+		}))
+	}
+
+	// Create a same-as edge between decoy and peer — NOT involving the test subject.
+	edgeSubject := "same-as|" + decoy + "|" + peer
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "operator:test",
+		Observations: []types.Observation{
+			obs(edgeSubject, "operator:test", types.ObservationKindState, now, map[string]interface{}{}),
+		},
+	}))
+
+	testEID := mustEID(t, subject)
+	members, err := p.resolveGroupMembersAsOf(ctx, testEID, now.Add(time.Second))
+	require.NoError(t, err)
+	// The subject has no same-as edges; only itself should be returned.
+	require.Len(t, members, 1, "subject with %% in EID must not match decoy's edges via unescaped LIKE")
+	require.Equal(t, subject, members[0].String())
+}
+
+// TestLIKEWildcardInEID_Timeline verifies that GetTimeline does not include
+// same-as-change events from edges unrelated to the queried subject when the
+// subject EID contains SQL LIKE metacharacters.
+func TestLIKEWildcardInEID_Timeline(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	decoy := "host:server01"
+	peer := "host:wildcard-peer2"
+	subject := "host:server%01"
+
+	for _, e := range []string{decoy, peer, subject} {
+		require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+			Source: "observer:scan",
+			Observations: []types.Observation{
+				obs(e, "observer:scan", types.ObservationKindState, now, map[string]interface{}{
+					"entity_kind": "host", "owning_tenant": "root",
+				}),
+			},
+		}))
+	}
+
+	// Same-as edge between decoy and peer — not involving subject.
+	edgeSubject := "same-as|" + decoy + "|" + peer
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "operator:test",
+		Observations: []types.Observation{
+			obs(edgeSubject, "operator:test", types.ObservationKindState, now, map[string]interface{}{}),
+		},
+	}))
+
+	testEID := mustEID(t, subject)
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{testEID}, interfaces.TimeRange{
+		From: now.Add(-time.Second),
+		To:   now.Add(time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Only state-change events for subject itself should be present — no spurious
+	// same-as-change events from the decoy's edge.
+	for _, ev := range events {
+		require.NotEqual(t, "same-as-change", ev.Kind,
+			"no same-as-change events expected for a subject with no same-as edges")
+	}
+}
+
+// TestGetTimeline_ApplyOutcomeKind verifies that GetTimeline surfaces apply-outcome
+// observations as "apply-outcome" timeline events (Issue #3375, ADR-022 §6).
+// This exercises the provider-side event-kind branch added alongside the existing
+// state/absence handling.
+func TestGetTimeline_ApplyOutcomeKind(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	eid := mustEID(t, "host:peer1/vm:myvm")
+
+	// Write a state observation and an apply-outcome observation for the same subject.
+	require.NoError(t, p.ReportObservations(ctx, interfaces.ObservationBatch{
+		Source: "peer1",
+		Observations: []types.Observation{
+			obs(eid.String(), "peer1", types.ObservationKindState, now.Add(-time.Second), map[string]interface{}{
+				"entity_kind": "vm", "owning_tenant": "root",
+			}),
+			obs(eid.String(), "peer1", types.ObservationKindApplyOutcome, now, map[string]interface{}{
+				"status":         "applied",
+				"module_name":    "hyperv",
+				"config_version": "v1",
+			}),
+		},
+	}))
+
+	events, err := p.GetTimeline(ctx, []interfaces.EIDRef{eid}, interfaces.TimeRange{
+		From: now.Add(-time.Minute),
+		To:   now.Add(time.Minute),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	kinds := make(map[string]int)
+	for _, ev := range events {
+		kinds[ev.Kind]++
+	}
+	assert.Greater(t, kinds["state-change"], 0,
+		"state-change events must still be present")
+	assert.Greater(t, kinds["apply-outcome"], 0,
+		"apply-outcome events must be surfaced by GetTimeline")
+
+	// The apply-outcome event must carry the payload.
+	for _, ev := range events {
+		if ev.Kind != "apply-outcome" {
+			continue
+		}
+		payload, _ := ev.Detail["payload"].(map[string]interface{})
+		require.NotNil(t, payload, "apply-outcome event must carry a payload in Detail")
+		assert.Equal(t, "applied", payload["status"])
+		assert.Equal(t, "hyperv", payload["module_name"])
+	}
+}

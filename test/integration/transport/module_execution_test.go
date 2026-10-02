@@ -82,8 +82,9 @@ func (s *ModuleExecutionTestSuite) SetupSuite() {
 	s.testHelper = NewTestHelper(GetTestHTTPAddr("https://localhost:8080"))
 
 	// Register a steward to get credentials
-	token := s.testHelper.CreateToken(s.T(), "default", "integration-test")
-	regResp := s.testHelper.RegisterSteward(s.T(), token)
+	token := s.testHelper.CreateToken("default", "integration-test")
+	regResp, err := s.testHelper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 	s.stewardID = regResp.StewardID
 
 	s.helper = NewModuleTestHelper(GetTestHTTPAddr("https://localhost:8080"), []byte(regResp.CACert))

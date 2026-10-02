@@ -20,6 +20,22 @@ GITEA_SECRET_KEY=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 GITEA_INTERNAL_TOKEN=$(openssl rand -base64 48 | tr -d "=+/\n" | cut -c1-32)
 REDIS_PASSWORD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
 
+# Ephemeral external secrets key. The controller refuses to start without one —
+# plaintext secret storage is prohibited — and docker-compose.test.yml mounts this
+# path into the fleet controller. Compose interpolates the whole file even when
+# only a subset of services is started, so this must exist for every target that
+# brings up any test service, not just the fleet stack.
+# A real file on the host, 0600, regenerated per session, never committed.
+SECRETS_KEY_FILE="$(pwd)/.cfgms-test-secrets.key"
+umask 077
+openssl rand 32 > "$SECRETS_KEY_FILE"
+chmod 600 "$SECRETS_KEY_FILE"
+
+# Session HMAC key for the HA cluster's shared database session store.
+# pkg/storage/providers/database/session_store.go fails closed without it, which
+# aborts every cluster-mode controller during storage initialisation.
+HA_SESSION_HMAC_KEY=$(openssl rand -base64 48 | tr -d "=+/" | cut -c1-44)
+
 # Generate API keys for HA controller nodes
 API_KEY_EAST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 API_KEY_CENTRAL=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
@@ -30,9 +46,15 @@ API_KEY_WEST=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-32)
 # The controller pre-creates these tokens on startup for Docker testing
 REG_TOKEN_STANDALONE="dockertest_standalone"
 # Other tokens use base32 format matching production GenerateToken() output (26 chars, a-z2-7)
-REG_TOKEN_EAST="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
-REG_TOKEN_CENTRAL="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
-REG_TOKEN_WEST="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
+# The HA stewards register against controllers that only accept tokens seeded at
+# startup under CFGMS_SEED_TEST_TOKENS=1 (features/controller/server/server.go).
+# These were random per-session values that matched no seeded token, so all
+# three stewards were rejected with "401 Invalid or expired registration token"
+# and never joined the cluster. "integration_reusable" is the seeded token with
+# no expiry, so all three can use it.
+REG_TOKEN_EAST="integration_reusable"
+REG_TOKEN_CENTRAL="integration_reusable"
+REG_TOKEN_WEST="integration_reusable"
 REG_TOKEN_TENANT1="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
 REG_TOKEN_TENANT2="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
 REG_TOKEN_TENANT3="$(openssl rand 16 | basenc --base32 | tr 'A-Z' 'a-z' | tr -d '=' | cut -c1-26)"
@@ -65,6 +87,12 @@ GITEA_INTERNAL_TOKEN=$GITEA_INTERNAL_TOKEN
 
 # Redis credentials
 REDIS_PASSWORD=$REDIS_PASSWORD
+
+# External secrets key (mounted into the fleet controller by docker-compose.test.yml)
+CFGMS_SECRETS_KEY_FILE=$SECRETS_KEY_FILE
+
+# Shared session HMAC key for the HA cluster's database session store
+HA_SESSION_HMAC_KEY=$HA_SESSION_HMAC_KEY
 
 # API keys for HA controller nodes
 API_KEY_EAST=$API_KEY_EAST
@@ -125,10 +153,12 @@ EOF
 if [ -f .gitignore ]; then
     grep -q "^\.env\.test$" .gitignore || echo ".env.test" >> .gitignore
     grep -q "^docker-compose\.test\.override\.yml$" .gitignore || echo "docker-compose.test.override.yml" >> .gitignore
+    grep -q "^\.cfgms-test-secrets\.key$" .gitignore || echo ".cfgms-test-secrets.key" >> .gitignore
 else
     cat > .gitignore <<EOF
 .env.test
 docker-compose.test.override.yml
+.cfgms-test-secrets.key
 EOF
 fi
 

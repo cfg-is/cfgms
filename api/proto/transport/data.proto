@@ -97,9 +97,94 @@ message LogEntry {
   string message = 3;
   google.protobuf.Timestamp timestamp = 4;
   map<string, string> fields = 5;
+  string correlation_id = 6;   // detection↔outcome correlation (ADR-012 §1)
 }
 
 message LogStreamResponse {
   int64 entries_received = 1;
   bool acknowledged = 2;
+}
+
+// === Telemetry Stream ===
+
+// TelemetryRequest is sent by the controller (server) to the steward (client) to
+// control live telemetry sampling. subscribe=true starts sampling at interval_ms;
+// subscribe=false stops sampling.
+message TelemetryRequest {
+  string steward_id = 1;
+  bool subscribe = 2;
+  // interval_ms is the requested snapshot interval in milliseconds.
+  // The steward clamps values below 1000 ms to 1000 ms (defense in depth).
+  int32 interval_ms = 3;
+}
+
+// ProcessSnapshot is a point-in-time view of one running process,
+// mirroring features/steward/telemetry.ProcessSnapshot.
+message ProcessSnapshot {
+  string fragment_id = 1;   // ADR-017 typed entity id: "process:<name>"
+  int32 pid = 2;
+  string name = 3;
+  double cpu_percent = 4;
+  uint64 memory_bytes = 5;
+  uint64 disk_read_bytes = 6;
+  uint64 disk_write_bytes = 7;
+  uint64 net_rx_bytes = 8;  // reserved; always 0 (usermode-only collector)
+  uint64 net_tx_bytes = 9;  // reserved; always 0 (usermode-only collector)
+}
+
+// ServiceSnapshot is a point-in-time view of one installed service / systemd unit,
+// mirroring features/steward/telemetry.ServiceSnapshot.
+message ServiceSnapshot {
+  string fragment_id = 1;   // ADR-017 typed entity id: "service:<name>"
+  string name = 2;
+  string state = 3;
+}
+
+// TelemetrySnapshot is sent by the steward (client) to the controller (server).
+// It carries one point-in-time view of all running processes and services on the
+// steward host. Produced only while a subscribe=true TelemetryRequest is active.
+message TelemetrySnapshot {
+  string steward_id = 1;
+  repeated ProcessSnapshot processes = 2;
+  repeated ServiceSnapshot services = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+// === Osquery Ad-hoc Query (Issue #3566, Epic #2855) ===
+
+// OsqueryQueryRequest is sent by the controller (server) to the steward (client)
+// to request execution of a catalog query. The catalog_id must map to an entry in
+// the bundle-embedded catalog registry shipped with the signed osquery module;
+// params must satisfy the declared type/bound schema for that catalog entry.
+// Raw SQL is never accepted on the wire — the steward resolves SQL from the
+// catalog ID after front-door admission validation.
+message OsqueryQueryRequest {
+  string steward_id = 1;
+  // catalog_id references a named entry in the osquery module's bundle-embedded
+  // catalog (features/modules/extended/osquery/catalog.go). Unrecognised IDs
+  // are rejected before any query text is constructed or runQuery is called.
+  string catalog_id = 2;
+  // params supplies typed values for template substitution. Each key must match
+  // a parameter name declared in the catalog entry's parameter schema, and each
+  // value must satisfy that parameter's declared type and bounds. Values
+  // containing SQL metacharacters (', --, ;, UNION) are rejected at admission
+  // if the declared parameter type does not explicitly allow them.
+  map<string, string> params = 3;
+}
+
+// OsqueryQueryResponse is sent by the steward (client) to the controller (server)
+// after executing a catalog query via runQuery. Each row is a flat string map
+// matching osquery's JSON-array output format.
+message OsqueryQueryResponse {
+  string steward_id = 1;
+  string catalog_id = 2;
+  // rows contains the query result rows. Each row is a flat map of column name
+  // to string value, matching osquery's --json output format.
+  repeated OsqueryRow rows = 3;
+}
+
+// OsqueryRow is one result row from an osquery catalog query.
+// Column names and values are strings, matching osquery's JSON-array output.
+message OsqueryRow {
+  map<string, string> columns = 1;
 }

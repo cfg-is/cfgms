@@ -621,7 +621,18 @@ func (s *FlatFileConfigStore) GetConfigStats(ctx context.Context) (*cfgconfig.Co
 	var oldest, newest *time.Time
 
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
-		if ferr != nil || d.IsDir() {
+		if ferr != nil {
+			// An error reading the root itself (permission denied, unmounted
+			// volume, etc.) means the store cannot be enumerated at all — that
+			// is a genuine health-check failure, not a skippable per-file
+			// hiccup. Errors on descendants stay non-fatal: one unreadable or
+			// corrupt config entry should not fail stats for the whole store.
+			if path == s.root {
+				return ferr
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		ext := filepath.Ext(path)

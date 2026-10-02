@@ -21,13 +21,25 @@ import (
 
 // StewardStatus represents the current status of a steward.
 type StewardStatus struct {
-	StewardID      string
+	StewardID string
+	// LastHeartbeat is the steward-supplied send time (steward clock) from the
+	// most recent heartbeat. It is reported for observability ONLY and must NOT
+	// be used for staleness detection — see receivedAt. Trusting a steward-
+	// asserted timestamp for the controller's own liveness accounting is unsound
+	// under clock skew, delivery latency, or a compromised steward.
 	LastHeartbeat  time.Time
 	Status         string
 	Healthy        bool
 	Metrics        map[string]string
 	MissedBeats    int
 	ConnectedSince time.Time
+
+	// receivedAt is the controller's wall-clock time when the most recent
+	// heartbeat was received. Staleness is measured against this (not the
+	// steward-supplied LastHeartbeat) so offline detection is purely controller-
+	// local and immune to clock skew and steward-supplied-time manipulation
+	// (Issue #2037).
+	receivedAt time.Time
 
 	// DNAHash is the most-recently reported DNA hash from the steward heartbeat.
 	// Empty when the steward has not yet sent a DNA hash (older steward versions).
@@ -61,6 +73,17 @@ type DNAHashMismatchCallback func(stewardID string)
 // can use the heartbeat as a trigger to drain pending work.
 type HeartbeatReceivedCallback func(stewardID string)
 
+// FragmentRootCallback is called whenever a heartbeat carries a non-empty
+// DNAAggregateRoot. The receiver should compare the claimed root to its own
+// stored root and request a fragment delta via SYNC_DNA if they differ
+// (ADR-017 §7). Optional — nil disables partial-sync detection.
+//
+// The heartbeat's claimed tenant is deliberately not passed. Heartbeat fields are
+// steward-supplied, so a compromised steward can claim any tenant path; a receiver
+// that needs a tenant must resolve it from controller-side state keyed by the
+// mTLS-verified steward identity, never take it from the heartbeat.
+type FragmentRootCallback func(ctx context.Context, stewardID, claimedRoot string)
+
 // TrustEvaluator receives liveness signals from the heartbeat service and
 // decides whether an IP should be promoted to trusted status (Issue #1694).
 // The implementation (e.g. IPTrustEvaluator via the server.go adapter) is
@@ -91,6 +114,7 @@ type Service struct {
 	onStatusChange      StatusChangeCallback
 	onDNAHashMismatch   DNAHashMismatchCallback
 	onHeartbeatReceived HeartbeatReceivedCallback
+	onFragmentRoot      FragmentRootCallback
 
 	// Trust evaluator for IP-trust establishment (Issue #1694). Optional — nil disables.
 	trustEvaluator TrustEvaluator
@@ -138,6 +162,11 @@ type Config struct {
 	// even when the steward remains healthy. Optional — nil disables.
 	OnHeartbeatReceived HeartbeatReceivedCallback
 
+	// OnFragmentRoot is called whenever a heartbeat carries a non-empty
+	// DNAAggregateRoot. The receiver compares the claimed root to its stored
+	// root and requests a fragment delta on mismatch (ADR-017 §7). Optional.
+	OnFragmentRoot FragmentRootCallback
+
 	// TrustEvaluator receives healthy/unhealthy liveness signals so the
 	// IP-trust establishment gate (Issue #1694) can promote IPs to trusted
 	// status after sustained liveness. Optional — nil disables.
@@ -179,6 +208,7 @@ func New(cfg *Config) (*Service, error) {
 		onStatusChange:        cfg.OnStatusChange,
 		onDNAHashMismatch:     cfg.OnDNAHashMismatch,
 		onHeartbeatReceived:   cfg.OnHeartbeatReceived,
+		onFragmentRoot:        cfg.OnFragmentRoot,
 		trustEvaluator:        cfg.TrustEvaluator,
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -238,8 +268,11 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 
 	previouslyHealthy := status.Healthy
 
-	// Update status
+	// Update status. LastHeartbeat records the steward-supplied send time for
+	// observability; receivedAt records the controller receipt time and is the
+	// authoritative basis for staleness detection (Issue #2037).
 	status.LastHeartbeat = hb.Timestamp
+	status.receivedAt = time.Now()
 	status.Status = string(hb.Status)
 
 	// Convert metrics from map[string]interface{} to map[string]string
@@ -292,6 +325,11 @@ func (s *Service) handleHeartbeatFromProvider(ctx context.Context, hb *controlpl
 		s.onHeartbeatReceived(hb.StewardID)
 	}
 
+	// Fire fragment-root callback for partial-sync detection (ADR-017 §7).
+	if hb.DNAAggregateRoot != "" && s.onFragmentRoot != nil {
+		s.onFragmentRoot(ctx, hb.StewardID, hb.DNAAggregateRoot)
+	}
+
 	// Notify the trust evaluator of a healthy liveness event (Issue #1694).
 	if s.trustEvaluator != nil {
 		if err := s.trustEvaluator.RecordLiveness(ctx, hb.StewardID, true); err != nil {
@@ -326,7 +364,9 @@ func (s *Service) checkStaleHeartbeats() {
 	now := time.Now()
 	for stewardID, status := range s.stewards {
 		if status.Healthy {
-			timeSinceLastBeat := now.Sub(status.LastHeartbeat)
+			// Measure staleness against the controller receipt time (Issue #2037),
+			// never the steward-supplied LastHeartbeat, which may be skewed.
+			timeSinceLastBeat := now.Sub(status.receivedAt)
 			if timeSinceLastBeat > s.stewardOfflineTimeout {
 				// Mark as unhealthy
 				status.Healthy = false
@@ -335,7 +375,8 @@ func (s *Service) checkStaleHeartbeats() {
 
 				s.logger.Warn("Steward heartbeat timeout",
 					"steward_id", stewardID,
-					"last_heartbeat", status.LastHeartbeat,
+					"last_received", status.receivedAt,
+					"last_heartbeat_reported", status.LastHeartbeat,
 					"timeout", timeSinceLastBeat)
 
 				if s.onStatusChange != nil {
@@ -428,4 +469,25 @@ func (s *Service) GetUnhealthyStewards() []string {
 	}
 
 	return unhealthy
+}
+
+// SetOnDNAHashMismatch registers the callback that fires when a heartbeat carries
+// a DNA hash that differs from the expected hash.  This setter allows late-wiring
+// after construction — the same pattern used by signingRotationSvc.SetPublisher
+// in server.go — so commandPublisher can be registered once available, breaking
+// the init cycle between heartbeat.Service and commands.Publisher.
+func (s *Service) SetOnDNAHashMismatch(cb DNAHashMismatchCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onDNAHashMismatch = cb
+}
+
+// SetOnFragmentRoot registers the callback that fires when a heartbeat carries
+// a non-empty DNAAggregateRoot. The callback should compare the claimed root to
+// its stored root and request a fragment delta on mismatch (ADR-017 §7).
+// This setter follows the same late-wiring pattern as SetOnDNAHashMismatch.
+func (s *Service) SetOnFragmentRoot(cb FragmentRootCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onFragmentRoot = cb
 }

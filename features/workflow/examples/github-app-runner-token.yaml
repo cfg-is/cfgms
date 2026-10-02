@@ -1,0 +1,29 @@
+name: "provision-github-actions-runner"
+description: >
+  Mint a short-lived GitHub Actions runner registration token using a GitHub App.
+  The token is returned in the step variable mint_runner_token_api_response["token"]
+  and can be passed to the runner agent install step.
+  App credentials (app_id, installation_id, private_key_pem) are loaded automatically
+  from the secrets provider — they must never appear in this file.
+  See docs/development/ci-runner-github-app-setup.md for the operator setup runbook.
+version: "1.0"
+
+variables:
+  github_owner: "your-org"
+  github_repo: "your-repo"
+
+steps:
+  - name: "mint-runner-token"
+    type: "api"
+    api:
+      provider: "github"
+      service: "runners"
+      operation: "registration-token"
+      parameters:
+        owner: "{{ .github_owner }}"
+        repo: "{{ .github_repo }}"
+      timeout: 30s
+      retry:
+        max_attempts: 2
+        initial_delay: 2s
+        backoff_multiplier: 2.0

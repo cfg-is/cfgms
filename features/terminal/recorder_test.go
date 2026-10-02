@@ -5,6 +5,8 @@ package terminal
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 func TestSessionRecorderCreation(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
+	tmpDir := t.TempDir()
 
 	tests := []struct {
 		name    string
@@ -26,7 +29,7 @@ func TestSessionRecorderCreation(t *testing.T) {
 		{
 			name: "valid config",
 			config: &RecorderConfig{
-				StoragePath:    "/tmp/cfgms-recordings",
+				StoragePath:    tmpDir,
 				MaxRecordingMB: 100,
 				Compression:    true,
 			},
@@ -65,7 +68,7 @@ func TestSessionRecorderCreation(t *testing.T) {
 func TestDataRecording(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -112,10 +115,31 @@ func TestDataRecording(t *testing.T) {
 	assert.True(t, len(recording.Events) > 0)
 }
 
+func TestSessionRecorderRejectsPathLikeSessionIDs(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	storagePath := t.TempDir()
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    storagePath,
+		MaxRecordingMB: 1,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	for _, sessionID := range []string{"", "../escape", `..\\escape`, "nested/session", ".hidden"} {
+		t.Run(sessionID, func(t *testing.T) {
+			err := recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID})
+			require.ErrorContains(t, err, "invalid recording session ID")
+		})
+	}
+
+	_, err = os.Stat(filepath.Join(filepath.Dir(storagePath), "escape.rec"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestRecordingMetadata(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -184,7 +208,7 @@ func TestRecordingCompression(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config := &RecorderConfig{
-				StoragePath:    "/tmp/cfgms-recordings",
+				StoragePath:    t.TempDir(),
 				MaxRecordingMB: 100,
 				Compression:    tt.compression,
 			}
@@ -235,7 +259,7 @@ func TestRecordingCompression(t *testing.T) {
 func TestRecordingSizeLimit(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 1, // Very small limit for testing
 		Compression:    false,
 	}
@@ -273,7 +297,7 @@ func TestRecordingSizeLimit(t *testing.T) {
 func TestConcurrentRecording(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -328,7 +352,7 @@ func TestConcurrentRecording(t *testing.T) {
 func TestRecordingPersistence(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -365,7 +389,7 @@ func TestRecordingPersistence(t *testing.T) {
 func TestRecordingCleanup(t *testing.T) {
 	logger := testutil.NewMockLogger(true)
 	config := &RecorderConfig{
-		StoragePath:    "/tmp/cfgms-recordings",
+		StoragePath:    t.TempDir(),
 		MaxRecordingMB: 100,
 		Compression:    true,
 	}
@@ -539,4 +563,236 @@ func TestGetRecordingNewFormat(t *testing.T) {
 			assert.Equal(t, 3, len(recording.Events), "event count must match")
 		})
 	}
+}
+
+// TestRecordingArtifactsAreOwnerOnly asserts that the storage directory and both
+// recording artifacts (.rec and .rec.meta) are owner-only. Recordings contain raw
+// keystrokes and shell output of privileged sessions — passwords, tokens and key
+// material — so world- or group-readable modes are a cleartext-secret disclosure.
+func TestRecordingArtifactsAreOwnerOnly(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	storageDir := filepath.Join(t.TempDir(), "recordings")
+	config := &RecorderConfig{
+		StoragePath:    storageDir,
+		MaxRecordingMB: 100,
+	}
+
+	recorder, err := NewSessionRecorder(config, logger)
+	require.NoError(t, err)
+
+	sessionID := "perm-check-session"
+	require.NoError(t, recorder.RecordData(sessionID, []byte("secret-password\n"), DataDirectionInput))
+	require.NoError(t, recorder.EndRecording(sessionID))
+	require.NoError(t, recorder.Close())
+
+	recPath := filepath.Join(storageDir, sessionID+".rec")
+
+	// Windows permission bits are synthetic, so the mode assertions only apply
+	// to POSIX platforms; existence is still verified everywhere.
+	for _, path := range []string{recPath, recPath + ".meta"} {
+		info, statErr := os.Stat(path)
+		require.NoError(t, statErr, "artifact must exist: %s", path)
+		if runtime.GOOS != "windows" {
+			assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+				"recording artifact must be owner read/write only: %s", path)
+		}
+	}
+
+	dirInfo, err := os.Stat(storageDir)
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm(),
+			"recording storage directory must be owner-only")
+	}
+}
+
+// TestRecorderTightensPreExistingPermissiveDir covers the case where a local user
+// pre-creates the storage directory world-readable/writable: os.MkdirAll returns nil
+// for an existing path without re-applying the mode, so the recorder must re-assert
+// owner-only permissions itself.
+func TestRecorderTightensPreExistingPermissiveDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Permission bits are synthetic on Windows; the POSIX assertion below
+		// does not apply there. Nothing to verify, so return without failing.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	storageDir := filepath.Join(t.TempDir(), "preexisting")
+	require.NoError(t, os.MkdirAll(storageDir, 0o777))
+	require.NoError(t, os.Chmod(storageDir, 0o777))
+
+	_, err := NewSessionRecorder(&RecorderConfig{StoragePath: storageDir, MaxRecordingMB: 100}, logger)
+	require.NoError(t, err)
+
+	info, err := os.Stat(storageDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"pre-existing permissive storage directory must be tightened to owner-only")
+}
+
+// TestRecorderRejectsSymlinkStorageDir covers the symlink-hijack vector: a local
+// user pre-creates the (predictable) storage path as a symlink into a directory it
+// controls. MkdirAll follows the link and succeeds, so the recorder must reject it.
+func TestRecorderRejectsSymlinkStorageDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Symlink creation on Windows requires elevated privileges.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	base := t.TempDir()
+	attackerDir := filepath.Join(base, "attacker")
+	require.NoError(t, os.MkdirAll(attackerDir, 0o700))
+	linkPath := filepath.Join(base, "recordings")
+	require.NoError(t, os.Symlink(attackerDir, linkPath))
+
+	recorder, err := NewSessionRecorder(&RecorderConfig{StoragePath: linkPath, MaxRecordingMB: 100}, logger)
+	require.Error(t, err)
+	assert.Nil(t, recorder)
+	assert.Contains(t, err.Error(), "symlink")
+}
+
+// TestStartRecordingRefusesExistingPath asserts recording files are created with
+// O_EXCL. Without it, os.Create follows a symlink planted at <session>.rec and
+// truncates the target, giving a local user arbitrary file truncation as the
+// controller process; it would also silently overwrite an existing recording.
+func TestStartRecordingRefusesExistingPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Symlink creation on Windows requires elevated privileges.
+		return
+	}
+
+	logger := testutil.NewMockLogger(true)
+	base := t.TempDir()
+	storageDir := filepath.Join(base, "recordings")
+
+	recorder, err := NewSessionRecorder(&RecorderConfig{StoragePath: storageDir, MaxRecordingMB: 100}, logger)
+	require.NoError(t, err)
+	defer func() { _ = recorder.Close() }()
+
+	victimPath := filepath.Join(base, "victim.txt")
+	victimContent := []byte("must not be truncated")
+	require.NoError(t, os.WriteFile(victimPath, victimContent, 0o600))
+
+	sessionID := "symlink-target-session"
+	require.NoError(t, os.Symlink(victimPath, filepath.Join(storageDir, sessionID+".rec")))
+
+	err = recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID})
+	require.Error(t, err, "StartRecording must refuse a pre-existing recording path")
+
+	got, err := os.ReadFile(victimPath)
+	require.NoError(t, err)
+	assert.Equal(t, victimContent, got, "symlink target must not be truncated")
+}
+
+// TestDefaultRecorderConfigHasNoImplicitStoragePath locks in the absence of a
+// built-in storage path. A shared default (previously /tmp/cfgms-recordings) puts
+// cleartext session recordings in a predictable, world-writable directory.
+func TestDefaultRecorderConfigHasNoImplicitStoragePath(t *testing.T) {
+	cfg := DefaultRecorderConfig()
+	require.NotNil(t, cfg)
+	assert.Empty(t, cfg.StoragePath,
+		"recorder must have no implicit storage path; callers supply a deployment-owned directory")
+}
+
+// TestGetRecordingOnActiveSessionReturnsRecordedData covers reading a recording
+// that has not been finalized — the live-session view an operator gets while the
+// terminal is still open. Frames are persisted by a background pump goroutine, so
+// GetRecording must drain it rather than sample whatever happens to be on disk;
+// without that synchronisation this returns an empty (or short-read) recording
+// depending on scheduling.
+func TestGetRecordingOnActiveSessionReturnsRecordedData(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 100,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	const sessionID = "active-read-session"
+	require.NoError(t, recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID}))
+	require.NoError(t, recorder.RecordData(sessionID, []byte("$ echo hello\r\n"), DataDirectionInput))
+	require.NoError(t, recorder.RecordData(sessionID, []byte("hello\r\n"), DataDirectionOutput))
+
+	recording, err := recorder.GetRecording(sessionID)
+	require.NoError(t, err, "an in-progress recording must be readable")
+	require.NotNil(t, recording)
+	assert.Equal(t, "$ echo hello\r\nhello\r\n", string(recording.Data),
+		"every frame recorded before the call must be present")
+	assert.Len(t, recording.Events, 2)
+}
+
+// TestGetRecordingConcurrentWithActiveWrites reads a recording repeatedly while
+// its writer is appending. A frame reaches disk as three separate writes
+// ([length][content][HMAC]), so an unsynchronised reader observes a length prefix
+// whose content has not landed yet and fails with "failed to read event content:
+// EOF". The reader must instead stop at the last complete frame: an append in
+// flight can only truncate the tail, never invalidate the frames before it.
+func TestGetRecordingConcurrentWithActiveWrites(t *testing.T) {
+	logger := testutil.NewMockLogger(true)
+	recorder, err := NewSessionRecorder(&RecorderConfig{
+		StoragePath:    t.TempDir(),
+		MaxRecordingMB: 100,
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	const (
+		sessionID = "concurrent-read-session"
+		frames    = 500
+	)
+	require.NoError(t, recorder.StartRecording(sessionID, &SessionMetadata{SessionID: sessionID}))
+
+	var (
+		wg        sync.WaitGroup
+		writeDone = make(chan struct{})
+		writeErr  = make(chan error, 1)
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(writeDone)
+		for i := 0; i < frames; i++ {
+			if err := recorder.RecordData(sessionID, []byte("output frame\r\n"), DataDirectionOutput); err != nil {
+				writeErr <- err
+				return
+			}
+		}
+	}()
+
+	// Read continuously for the whole lifetime of the writer.
+	var previousLen int
+	for reading := true; reading; {
+		select {
+		case <-writeDone:
+			reading = false
+		default:
+		}
+
+		recording, readErr := recorder.GetRecording(sessionID)
+		require.NoError(t, readErr, "reading an actively written recording must not fail")
+		require.NotNil(t, recording)
+		require.GreaterOrEqual(t, len(recording.Data), previousLen,
+			"a recording snapshot must never shrink")
+		previousLen = len(recording.Data)
+	}
+
+	wg.Wait()
+	select {
+	case err := <-writeErr:
+		require.NoError(t, err)
+	default:
+	}
+
+	require.NoError(t, recorder.EndRecording(sessionID))
+
+	final, err := recorder.GetRecording(sessionID)
+	require.NoError(t, err)
+	assert.Len(t, final.Events, frames, "no frame may be lost by a concurrent reader")
+
+	valid, err := recorder.VerifyRecording(sessionID)
+	require.NoError(t, err)
+	assert.True(t, valid, "HMAC chain must remain intact across concurrent reads")
 }

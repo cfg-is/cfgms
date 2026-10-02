@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
@@ -14,6 +15,19 @@ import (
 
 // ModuleLogger provides a specialized logger interface for CFGMS modules
 // It automatically adds module-specific context and integrates with the global provider system
+//
+// A ModuleLogger is immutable once returned by a constructor or a With* method, which
+// is what makes it safe to share one instance across goroutines. defaultFields is
+// never written after the logger is published: every With* method derives a new
+// ModuleLogger over a copied map (see derive). Before that, WithTenant/WithField wrote
+// straight into the receiver's map, so a component that held one logger and called
+// `sp.logger.WithTenant(id)` from two goroutines — the shape of every Start method that
+// spawns workers, e.g. SIEMProcessor.Start and CronScheduler.Start — performed
+// concurrent map writes against it, while logWithProvider ranged over the same map from
+// a third. That was latent only because the tenant ID was always empty (Issue #4326) and
+// the `tenantID != ""` guard skipped the write; returning a real tenant made it fire
+// under -race. Mutating the shared receiver also leaked tenancy: a tenant_id written by
+// one request stayed on the shared logger and tagged the next tenant's log lines.
 type ModuleLogger struct {
 	moduleName     string
 	component      string
@@ -27,52 +41,84 @@ func NewModuleLogger(moduleName, component string) *ModuleLogger {
 	// Get global manager if available
 	manager := GetGlobalLoggingManager()
 
-	// Create fallback logger for compatibility
-	fallback := NewLoggerWithConfig(DefaultConfig("cfgms", component))
+	// Create fallback logger for compatibility. Same level sourcing as
+	// LoggerFactory.CreateLogger: a hardcoded InfoLevel here silently discarded
+	// Debug records whenever the provider path was unavailable.
+	fallback := NewLoggerWithConfig(configuredLoggerConfig("cfgms", component))
 
-	logger := &ModuleLogger{
-		moduleName:     moduleName,
-		component:      component,
-		defaultFields:  make(map[string]interface{}),
+	return &ModuleLogger{
+		moduleName: moduleName,
+		component:  component,
+		defaultFields: map[string]interface{}{
+			"module":    moduleName,
+			"component": component,
+		},
 		manager:        manager,
 		fallbackLogger: fallback,
 	}
-
-	// Set default fields for the module
-	logger.defaultFields["module"] = moduleName
-	logger.defaultFields["component"] = component
-
-	return logger
 }
 
-// WithField adds a default field that will be included in all log entries from this module
+// derive returns a copy of ml carrying an independent defaultFields map, so that the
+// caller can add fields to the copy without writing to a map the receiver — which may
+// be shared with other goroutines — is still reading from.
+func (ml *ModuleLogger) derive() *ModuleLogger {
+	fields := make(map[string]interface{}, len(ml.defaultFields))
+	for key, value := range ml.defaultFields {
+		fields[key] = value
+	}
+
+	return &ModuleLogger{
+		moduleName:     ml.moduleName,
+		component:      ml.component,
+		defaultFields:  fields,
+		manager:        ml.manager,
+		fallbackLogger: ml.fallbackLogger,
+	}
+}
+
+// WithField returns a derived logger that includes the field in all of its log entries.
+// The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithField(key string, value interface{}) *ModuleLogger {
-	ml.defaultFields[key] = value
-	return ml
+	derived := ml.derive()
+	derived.defaultFields[key] = value
+	return derived
 }
 
-// WithFields adds multiple default fields that will be included in all log entries from this module
+// WithFields returns a derived logger that includes the fields in all of its log
+// entries. The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithFields(fields map[string]interface{}) *ModuleLogger {
+	derived := ml.derive()
 	for key, value := range fields {
-		ml.defaultFields[key] = value
+		derived.defaultFields[key] = value
 	}
-	return ml
+	return derived
 }
 
-// WithTenant adds tenant context to all log entries from this module (for multi-tenant logging)
+// WithTenant returns a derived logger that tags all of its log entries with the tenant
+// (for multi-tenant logging). The receiver is left unchanged; use the returned logger.
+// An empty tenant ID adds no tenancy and returns the receiver, which callers that cannot
+// resolve a tenant rely on — it is not an authorization decision either way, see
+// ExtractTenantFromContext.
 func (ml *ModuleLogger) WithTenant(tenantID string) *ModuleLogger {
-	if tenantID != "" {
-		ml.defaultFields["tenant_id"] = tenantID
+	if tenantID == "" {
+		return ml
 	}
-	return ml
+
+	derived := ml.derive()
+	derived.defaultFields["tenant_id"] = tenantID
+	return derived
 }
 
-// WithSession adds session context to all log entries from this module
+// WithSession returns a derived logger that tags all of its log entries with the
+// session. The receiver is left unchanged; use the returned logger.
 func (ml *ModuleLogger) WithSession(sessionID string) *ModuleLogger {
-	if sessionID != "" {
-		ml.defaultFields["session_id"] = sessionID
+	if sessionID == "" {
+		return ml
 	}
-	return ml
+
+	derived := ml.derive()
+	derived.defaultFields["session_id"] = sessionID
+	return derived
 }
 
 // logWithProvider logs using the global provider system with module context
@@ -247,21 +293,70 @@ func (lf *LoggerFactory) CreateComponentLogger(componentName string) *ModuleLogg
 	return NewModuleLogger(componentName, componentName)
 }
 
-// CreateLogger creates a legacy Logger interface for backward compatibility
+// CreateLogger creates a legacy Logger interface for backward compatibility.
+//
+// The level comes from the initialised global logging manager when there is
+// one. DefaultConfig hardcodes InfoLevel, and DefaultLogger.logEntry drops
+// anything below its own level before the entry ever reaches the manager — so
+// every logger built from this factory discarded Debug records no matter what
+// the operator configured. The controller passes exactly such a logger into its
+// server and HA subsystem, which is why an HA cluster configured with
+// `logging.level: DEBUG` still emitted nothing below INFO.
 func (lf *LoggerFactory) CreateLogger() Logger {
-	return NewLoggerWithConfig(DefaultConfig(lf.defaultServiceName, lf.defaultComponent))
+	return NewLoggerWithConfig(configuredLoggerConfig(lf.defaultServiceName, lf.defaultComponent))
 }
 
-// Global factory instance for convenience
-var globalLoggerFactory *LoggerFactory
+// configuredLoggerConfig returns a logger Config seeded from the global logging
+// manager's configured level, falling back to DefaultConfig when no manager has
+// been initialised yet.
+func configuredLoggerConfig(serviceName, component string) *Config {
+	cfg := DefaultConfig(serviceName, component)
+	if manager := GetGlobalLoggingManager(); manager != nil {
+		if managerCfg := manager.GetConfig(); managerCfg != nil && managerCfg.Level != "" {
+			cfg.Level = parseLevel(managerCfg.Level)
+		}
+	}
+	return cfg
+}
+
+// Global factory instance for convenience.
+//
+// factoryMutex guards it. Every exported convenience function in this file
+// (ForModule, ForComponent, GetLogger) funnels through GetGlobalLoggerFactory, which
+// lazily initialises the global on first use — so two goroutines constructing loggers
+// concurrently raced on the nil check and the assignment. This is the same guard
+// GetGlobalLoggingManager already applies to globalManager (manager.go:122); the
+// factory was the one global here left unprotected.
+var (
+	factoryMutex        sync.RWMutex
+	globalLoggerFactory *LoggerFactory
+)
 
 // InitializeGlobalLoggerFactory initializes the global logger factory
 func InitializeGlobalLoggerFactory(serviceName, component string) {
-	globalLoggerFactory = NewLoggerFactory(serviceName, component)
+	// Construct outside the lock: NewLoggerFactory reads configuration and must not
+	// run while writers are blocked behind it.
+	factory := NewLoggerFactory(serviceName, component)
+
+	factoryMutex.Lock()
+	defer factoryMutex.Unlock()
+	globalLoggerFactory = factory
 }
 
-// GetGlobalLoggerFactory returns the global logger factory
+// GetGlobalLoggerFactory returns the global logger factory, creating a default one on
+// first use. Safe for concurrent use.
 func GetGlobalLoggerFactory() *LoggerFactory {
+	factoryMutex.RLock()
+	factory := globalLoggerFactory
+	factoryMutex.RUnlock()
+	if factory != nil {
+		return factory
+	}
+
+	factoryMutex.Lock()
+	defer factoryMutex.Unlock()
+	// Re-check: another goroutine may have initialised it between the read unlock and
+	// the write lock.
 	if globalLoggerFactory == nil {
 		// Create default factory if none exists
 		globalLoggerFactory = NewLoggerFactory("cfgms", "unknown")
@@ -288,14 +383,23 @@ func GetLogger() Logger {
 
 // Context utility functions for structured logging
 
-// ExtractTenantFromContext extracts tenant ID from context for external use
+// ExtractTenantFromContext reads the tenant ID from ctxkeys.TenantID for tagging
+// log lines. It is a logging convenience only — never use its return value for an
+// authorization decision (Issue #4326). A caller making an authorization decision
+// must read ctxkeys.TenantID directly and fail closed when it is absent;
+// make check-architecture's TestNoLoggingTenantForAuthorization fails the build if
+// this accessor's result feeds a tenant-equality check anywhere outside pkg/logging.
 func ExtractTenantFromContext(ctx context.Context) string {
 	return extractTenantID(ctx)
 }
 
-// WithTenant adds tenant ID to context for downstream logging
+// WithTenant adds the tenant ID to context under ctxkeys.TenantID for downstream
+// logging, mirroring WithCorrelation's use of ctxkeys.CorrelationIDKey below — both
+// store under the single canonical key their respective packages share, rather than
+// a package-local key that authentication middleware and consumers could never agree
+// on (Issue #4326).
 func WithTenant(ctx context.Context, tenantID string) context.Context {
-	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+	return context.WithValue(ctx, ctxkeys.TenantID, tenantID)
 }
 
 // WithSession adds session ID to context for downstream logging

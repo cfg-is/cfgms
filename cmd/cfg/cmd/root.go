@@ -20,8 +20,9 @@ var (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "cfg",
-	Short: "CFGMS Configuration Management CLI",
+	Use:     "cfg",
+	Version: version.Info(),
+	Short:   "CFGMS Configuration Management CLI",
 	Long: `cfg is the command-line interface for CFGMS (Config Management System).
 It provides tools for comparing, validating, and managing configuration files
 across different environments and versions.`,
@@ -42,7 +43,7 @@ func init() {
 
 	// Admin bundle flags for mTLS authentication
 	rootCmd.PersistentFlags().StringVar(&bundlePath, "bundle", "", "Path to admin bundle file for mTLS auth (env: CFGMS_ADMIN_BUNDLE)")
-	rootCmd.PersistentFlags().BoolVar(&noBundle, "no-bundle", false, "Skip admin bundle auto-discovery and use API key auth")
+	rootCmd.PersistentFlags().BoolVar(&noBundle, "no-bundle", false, "Skip admin bundle auto-discovery and the active session (most commands will then fail — no fallback credential exists)")
 
 	// Add subcommands
 	rootCmd.AddCommand(diffCmd)
@@ -59,6 +60,13 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(installerCmd)
 	rootCmd.AddCommand(moduleCmd)
+	rootCmd.AddCommand(connectionsCmd)
+	rootCmd.AddCommand(connectCmd)
+	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(jobCmd)
+	rootCmd.AddCommand(webAuthnCmd)
+	rootCmd.AddCommand(accountCmd)
+	rootCmd.AddCommand(loginCmd)
 }
 
 // versionCmd represents the version command

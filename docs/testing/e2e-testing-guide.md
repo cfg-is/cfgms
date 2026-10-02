@@ -434,6 +434,14 @@ E2E tests run in GitHub Actions via the Build Gate workflow:
 - CI: 15–20 minutes (due to Docker overhead)
 
 **Required Checks** (branch protection):
+Ten contexts gate `develop`; the three that carry E2E coverage are called out here.
+Read the full set from the ruleset:
+
+```bash
+gh api repos/cfg-is/cfgms/rulesets/11647684 \
+  --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+```
+
 - `unit-tests`: Fast validation
 - `Build Gate`: Includes transport E2E tests
 - `security-deployment-gate`: Security validation

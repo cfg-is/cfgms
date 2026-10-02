@@ -50,11 +50,9 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 	// Test configuration
 	testConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 		Resources: []stewardconfig.ResourceConfig{
@@ -81,7 +79,6 @@ func TestEpic6ComplianceConfigurationStorage(t *testing.T) {
 
 		// Verify configuration matches
 		assert.Equal(t, testConfig.Steward.ID, retrievedConfig.Steward.ID)
-		assert.Equal(t, testConfig.Steward.Mode, retrievedConfig.Steward.Mode)
 		assert.Len(t, retrievedConfig.Resources, 1)
 		assert.Equal(t, "test-resource", retrievedConfig.Resources[0].Name)
 	})
@@ -201,11 +198,9 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 	// Valid configuration for testing — all required fields populated to pass validation
 	validConfig := &stewardconfig.StewardConfig{
 		Steward: stewardconfig.StewardSettings{
-			ID:   "test-steward",
-			Mode: stewardconfig.ModeStandalone,
+			ID: "test-steward",
 			Logging: stewardconfig.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 		},
 	}
@@ -219,8 +214,7 @@ func TestEpic6ComplianceValidation(t *testing.T) {
 		// Invalid configuration should fail
 		invalidConfig := &stewardconfig.StewardConfig{
 			Steward: stewardconfig.StewardSettings{
-				ID:   "",             // Invalid: empty ID after defaults applied
-				Mode: "invalid-mode", // Invalid mode
+				ID: "", // Invalid: empty ID after defaults applied
 			},
 		}
 

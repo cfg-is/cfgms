@@ -37,9 +37,9 @@ func TestLeaderElection(t *testing.T) {
 	require.NoError(t, helper.WaitForServices(ctx, 3*time.Minute, services...))
 
 	controllers := []string{
-		"https://localhost:9080",
-		"https://localhost:9081",
-		"https://localhost:9082",
+		controllerEastURL,
+		controllerCentralURL,
+		controllerWestURL,
 	}
 
 	// Wait for initial cluster formation and leader election
@@ -187,8 +187,8 @@ func TestLeaderElectionTiming(t *testing.T) {
 	require.NoError(t, helper.RestartService(ctx, "controller-west"))
 
 	controllers := []string{
-		"https://localhost:9080", // controller-east
-		"https://localhost:9081", // controller-central
+		controllerEastURL,    // controller-east
+		controllerCentralURL, // controller-central
 	}
 
 	// Wait for quorum-based leader election

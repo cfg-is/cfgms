@@ -1,0 +1,4 @@
+file: asset-live-activity.html
+order: 7
+status: **Reference**
+what: The asset live-activity tab — real-time process table and service list driven by the telemetry WebSocket; includes the `.rowkebab` per-row action menu pattern (applied to fleet rows in Story #2938). Both themes.

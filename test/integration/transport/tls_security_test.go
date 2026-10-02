@@ -154,18 +154,27 @@ func (s *TLSSecurityTestSuite) TestTLSConfigFromRegistration() {
 }
 
 // TestRegistrationReturnsCertificates verifies that all required certificate fields
-// are present in the registration response for mTLS connectivity.
+// are present in the registration response for mTLS connectivity, and that the wire
+// response never carries a client_key field: the steward generates its own keypair
+// locally and submits a CSR, so the controller never generates or sees a private key
+// for this credential (Issue #3780).
 func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 	s.T().Log("Testing certificate distribution via registration API")
 
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	resp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	require.NotEmpty(s.T(), resp.StewardID, "Registration should return steward ID")
 	require.NotEmpty(s.T(), resp.ClientCert, "Registration should return client certificate")
-	require.NotEmpty(s.T(), resp.ClientKey, "Registration should return client key")
+	require.NotEmpty(s.T(), resp.ClientKey, "the steward's locally generated key must be available for mTLS")
 	require.NotEmpty(s.T(), resp.CACert, "Registration should return CA certificate")
 	require.NotEmpty(s.T(), resp.TransportAddress, "Registration should return transport address")
+
+	rawBody, err := s.helper.RegisterStewardRawBody(token)
+	require.NoError(s.T(), err, "raw registration for wire-contract check should succeed")
+	require.NotContains(s.T(), string(rawBody), "client_key",
+		"no client_key field may ever appear on the wire response")
 
 	s.T().Logf("Certificate distribution validated for steward: %s", resp.StewardID)
 }
@@ -173,15 +182,16 @@ func (s *TLSSecurityTestSuite) TestRegistrationReturnsCertificates() {
 // TestClientCertificateFromRegistration verifies that the client certificate returned
 // during registration is valid and can be loaded for mTLS connections.
 func (s *TLSSecurityTestSuite) TestClientCertificateFromRegistration() {
-	token := s.helper.CreateToken(s.T(), "default", "integration-test")
-	resp := s.helper.RegisterSteward(s.T(), token)
+	token := s.helper.CreateToken("default", "integration-test")
+	resp, err := s.helper.RegisterSteward(token)
+	s.Require().NoError(err, "Steward registration should succeed")
 
 	certDir := s.T().TempDir()
 	clientCertPath := filepath.Join(certDir, "client.crt")
 	clientKeyPath := filepath.Join(certDir, "client.key")
 	caCertPath := filepath.Join(certDir, "ca.crt")
 
-	err := os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600)
+	err = os.WriteFile(clientCertPath, []byte(resp.ClientCert), 0600)
 	require.NoError(s.T(), err)
 	err = os.WriteFile(clientKeyPath, []byte(resp.ClientKey), 0600)
 	require.NoError(s.T(), err)

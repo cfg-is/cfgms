@@ -1,0 +1,5 @@
+# Build artifacts — regenerate with `cargo build --release` + the staging step in
+# consume_rust_link_windows.go. Never committed (multi-MB, toolchain-specific).
+/target/
+/link/
+/Cargo.lock

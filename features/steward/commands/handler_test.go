@@ -10,9 +10,13 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -25,10 +29,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	"github.com/cfgis/cfgms/pkg/cert"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
@@ -75,6 +82,9 @@ func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *business.C
 	if cp.IssuedAt.IsZero() {
 		cp.IssuedAt = time.Now()
 	}
+	if cp.DeliveryStatus == "" {
+		cp.DeliveryStatus = business.DeliveryStatusPending
+	}
 	m.records[rec.ID] = &cp
 	m.transitions[rec.ID] = append(m.transitions[rec.ID], &business.CommandTransition{
 		CommandID: rec.ID,
@@ -82,6 +92,89 @@ func (m *memCommandStore) CreateCommandRecord(_ context.Context, rec *business.C
 		Timestamp: cp.IssuedAt,
 	})
 	return nil
+}
+
+func (m *memCommandStore) CreateCommandRecords(ctx context.Context, records []*business.CommandRecord) error {
+	// Real (non-mocked) atomic-batch semantics: validate every record before
+	// writing any of them, so a mid-batch failure leaves nothing committed —
+	// matching the SQL providers' single-transaction behavior.
+	m.mu.Lock()
+	for _, rec := range records {
+		if rec == nil {
+			m.mu.Unlock()
+			return fmt.Errorf("record is nil")
+		}
+		if rec.ID == "" {
+			m.mu.Unlock()
+			return business.ErrCommandIDRequired
+		}
+		if rec.StewardID == "" {
+			m.mu.Unlock()
+			return business.ErrCommandStewardIDRequired
+		}
+		if _, exists := m.records[rec.ID]; exists {
+			m.mu.Unlock()
+			return fmt.Errorf("duplicate command ID: %s", rec.ID)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, rec := range records {
+		if err := m.CreateCommandRecord(ctx, rec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CreatePushAndCommandRecords ignores push — this test double backs the
+// steward-side command handler tests, which never read PushRecord state — and
+// otherwise delegates to CreateCommandRecords for identical atomic-batch
+// semantics.
+func (m *memCommandStore) CreatePushAndCommandRecords(ctx context.Context, _ *business.PushRecord, records []*business.CommandRecord) error {
+	return m.CreateCommandRecords(ctx, records)
+}
+
+func (m *memCommandStore) UpdateDeliveryStatus(_ context.Context, id string, status business.DeliveryStatus, detail string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.records[id]
+	if !ok {
+		return business.ErrCommandNotFound
+	}
+	rec.DeliveryStatus = status
+	rec.DeliveryDetail = detail
+	return nil
+}
+
+// ListPendingDeliveries mirrors the contract's tenant scoping: results are
+// limited to records stamped with stewardTenant or one of its ancestors, so a
+// record left behind by a previous tenant binding is not returned.
+func (m *memCommandStore) ListPendingDeliveries(_ context.Context, stewardID, stewardTenant string) ([]*business.CommandRecord, error) {
+	if stewardID == "" {
+		return nil, business.ErrCommandStewardIDRequired
+	}
+	if stewardTenant == "" {
+		return nil, business.ErrCommandTenantIDRequired
+	}
+	allowed := make(map[string]struct{})
+	for _, tenant := range business.TenantPathChain(stewardTenant) {
+		allowed[tenant] = struct{}{}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []*business.CommandRecord
+	for _, rec := range m.records {
+		if _, ok := allowed[rec.TenantID]; !ok {
+			continue
+		}
+		if rec.StewardID == stewardID && rec.DeliveryStatus == business.DeliveryStatusPending {
+			cp := *rec
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
 }
 
 func (m *memCommandStore) UpdateCommandStatus(_ context.Context, id string, status business.CommandStatus, result map[string]interface{}, errMsg string) error {
@@ -325,12 +418,16 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 	require.NoError(t, store.UpdateCommandStatus(ctx, "stale-cmd",
 		business.CommandStatusExecuting, nil, ""))
 
-	// Creating the handler should trigger the startup sweep.
+	// Creating the handler should trigger the startup sweep. A negative timeout
+	// guarantees the record (StartedAt = "now", set by UpdateCommandStatus above)
+	// is immediately treated as past the in-flight boundary, regardless of clock
+	// resolution — proving the sweep still fires for genuinely stale records.
 	_, err := New(&Config{
-		StewardID: "steward-test",
-		OnStatus:  noopStatus,
-		Logger:    newTestLogger(t),
-		Store:     store,
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: -1 * time.Second,
 	})
 	require.NoError(t, err)
 
@@ -338,6 +435,71 @@ func TestNew_SweepsStaleExecutingCommands(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, business.CommandStatusFailed, got.Status)
 	assert.Equal(t, "controller_restart", got.ErrorMessage)
+}
+
+// TestNew_SweepLeavesRecentExecutingCommandAlone proves the timeout boundary:
+// an executing record that started well within ExecutingRestartTimeout is left
+// executing by the startup sweep rather than immediately failed, because a
+// process restart that fast may not have genuinely interrupted it (Issue #3757).
+func TestNew_SweepLeavesRecentExecutingCommandAlone(t *testing.T) {
+	store := newMemCommandStore()
+	ctx := context.Background()
+
+	rec := &business.CommandRecord{
+		ID:        "recent-executing",
+		Type:      "sync_config",
+		StewardID: "steward-test",
+	}
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+	require.NoError(t, store.UpdateCommandStatus(ctx, "recent-executing",
+		business.CommandStatusExecuting, nil, ""))
+
+	_, err := New(&Config{
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: time.Hour,
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetCommandRecord(ctx, "recent-executing")
+	require.NoError(t, err)
+	assert.Equal(t, business.CommandStatusExecuting, got.Status,
+		"a record started well within the timeout must not be failed by the sweep")
+}
+
+// TestNew_SweepNeverTouchesPendingCommands proves a pending delivery/command
+// record survives the startup sweep untouched (Issue #3757 required test:
+// restart-survival). Pending means no attempt was ever made, so a restart
+// cannot have interrupted anything for the sweep to fail.
+func TestNew_SweepNeverTouchesPendingCommands(t *testing.T) {
+	store := newMemCommandStore()
+	ctx := context.Background()
+
+	rec := &business.CommandRecord{
+		ID:        "pending-cmd",
+		Type:      "sync_config",
+		StewardID: "steward-test",
+	}
+	require.NoError(t, store.CreateCommandRecord(ctx, rec))
+
+	// Even a zero/negative timeout must not touch a pending record — the sweep
+	// only ever lists CommandStatusExecuting.
+	_, err := New(&Config{
+		StewardID:               "steward-test",
+		OnStatus:                noopStatus,
+		Logger:                  newTestLogger(t),
+		Store:                   store,
+		ExecutingRestartTimeout: -1 * time.Second,
+	})
+	require.NoError(t, err)
+
+	got, err := store.GetCommandRecord(ctx, "pending-cmd")
+	require.NoError(t, err)
+	assert.Equal(t, business.CommandStatusPending, got.Status,
+		"a pending command must survive the startup sweep unmodified")
+	assert.Empty(t, got.ErrorMessage)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +797,59 @@ func TestHandleCommand_NilStore_StillWorks(t *testing.T) {
 	h.Wait()
 }
 
+// TestUpdateVerifier_AcceptsCommandSignedWithNewCert verifies that UpdateVerifier
+// allows the handler to accept commands signed with a cert that was not known at
+// construction time. This is the push_signing_cert correctness path (Issue #1844):
+// after the steward receives a new signing cert the command handler verifier must
+// be refreshed so that subsequent controller commands (signed with the new cert via
+// the DynamicSigner) are accepted without requiring a full reconnect.
+func TestUpdateVerifier_AcceptsCommandSignedWithNewCert(t *testing.T) {
+	_, oldVerifier := newTestSignerVerifier(t)
+	newSigner, newVerifier := newTestSignerVerifier(t)
+
+	// Handler starts with old-cert-only verifier.
+	h := newTestHandlerWithVerifier(t, nil, oldVerifier)
+
+	dispatched := make(chan struct{}, 1)
+	h.RegisterHandler(cpTypes.CommandSyncConfig, func(_ context.Context, _ *cpTypes.Command) error {
+		dispatched <- struct{}{}
+		return nil
+	})
+
+	ctx := context.Background()
+
+	// Command signed with the new cert must be rejected before the verifier update.
+	cmd := &cpTypes.Command{
+		ID:        "new-cert-before-update",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc := signTestCommand(t, newSigner, cmd)
+	err := h.HandleCommand(ctx, sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "command signed with unknown cert must be rejected before UpdateVerifier")
+
+	// Replace the verifier to include the new cert.
+	h.UpdateVerifier(newVerifier)
+
+	// Same new-cert signer, fresh command ID (replay cache would reject the same ID).
+	cmd2 := &cpTypes.Command{
+		ID:        "new-cert-after-update",
+		Type:      cpTypes.CommandSyncConfig,
+		StewardID: "steward-test",
+		Timestamp: time.Now(),
+	}
+	sc2 := signTestCommand(t, newSigner, cmd2)
+	require.NoError(t, h.HandleCommand(ctx, sc2), "command signed with new cert must be accepted after UpdateVerifier")
+	h.Wait()
+
+	select {
+	case <-dispatched:
+	case <-time.After(time.Second):
+		t.Fatal("handler was not dispatched after UpdateVerifier accepted the new-cert command")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // capturingLogger — real Logger implementation that records every log call.
 // Used by execute_script security tests to assert on handler log output.
@@ -780,12 +995,9 @@ func TestExecuteScriptHandler_Success(t *testing.T) {
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
 
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(echoScriptBody("hello")))
-	sc := testSignedCommandWithParams("es-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "exec-001",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(echoScriptBody("hello")), platformShell(), "steward-test")
+	params["execution_id"] = "exec-001"
+	sc := testSignedCommandWithParams("es-001", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
@@ -817,12 +1029,9 @@ func TestExecuteScriptHandler_NonZeroExitCode(t *testing.T) {
 	h.RegisterExecuteScriptHandler()
 
 	// Script exits with code 42.
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(exitScriptBody(42)))
-	sc := testSignedCommandWithParams("es-002", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "exec-002",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(exitScriptBody(42)), platformShell(), "steward-test")
+	params["execution_id"] = "exec-002"
+	sc := testSignedCommandWithParams("es-002", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
@@ -855,12 +1064,9 @@ func TestExecuteScriptHandler_StdoutTruncated(t *testing.T) {
 
 	// Generate >4096 bytes of output (500 iterations × 10 bytes = 5000 bytes).
 	scriptBody := fixedSizeStdoutScriptBody(5000)
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
-	sc := testSignedCommandWithParams("es-003", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "exec-003",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(scriptBody), platformShell(), "steward-test")
+	params["execution_id"] = "exec-003"
+	sc := testSignedCommandWithParams("es-003", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
@@ -900,13 +1106,10 @@ func TestExecuteScriptHandler_NoContentLogged(t *testing.T) {
 	// Use a recognizable marker that would be visible in logs if content were leaked.
 	secretMarker := "CFGMS_SECRET_MARKER_XYZ_12345"
 	scriptBody := echoScriptBody(secretMarker)
-	scriptContent := base64.StdEncoding.EncodeToString([]byte(scriptBody))
 
-	sc := testSignedCommandWithParams("es-004", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content": scriptContent,
-		"shell":          platformShell(),
-		"execution_id":   "exec-004",
-	})
+	params := signedInlineEnvelopeParams(t, []byte(scriptBody), platformShell(), "steward-test")
+	params["execution_id"] = "exec-004"
+	sc := testSignedCommandWithParams("es-004", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
@@ -965,6 +1168,83 @@ func sigTestSignRSASHA256(t *testing.T, key *rsa.PrivateKey, content []byte) str
 	return base64.StdEncoding.EncodeToString(sig)
 }
 
+// sigTestNonce returns a fresh crypto/rand-generated, hex-encoded 16-byte nonce for
+// operator envelope test fixtures (Issue #3694).
+func sigTestNonce(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	return hex.EncodeToString(b)
+}
+
+// signedInlineEnvelopeParams returns the cmd.Params entries preflightScriptSignature
+// requires for an inline (ad-hoc) command as of Issue #3694: script_content, shell,
+// plus a valid operator envelope — targeted at stewardID, a fresh nonce, and a
+// 5-minute expiry — signed with a freshly generated (untrusted-CA) RSA key. It exists
+// for execution-behavior tests that don't care about signing specifics but must
+// supply a valid envelope now that inline verification is mandatory; tests that
+// actually exercise signature/cert/target/expiry/nonce rejection build their params
+// by hand instead.
+func signedInlineEnvelopeParams(t *testing.T, content []byte, shell, stewardID string) map[string]interface{} {
+	t.Helper()
+	return signedInlineEnvelopeParamsWithKey(t, sigTestRSAKey(t), content, shell, stewardID)
+}
+
+// signedInlineEnvelopeParamsWithKey is signedInlineEnvelopeParams for a caller-supplied
+// RSA key, so a test can sign an envelope built from one content value and later swap
+// in different delivered params (e.g. tampered content) while keeping the same key.
+func signedInlineEnvelopeParamsWithKey(t *testing.T, key *rsa.PrivateKey, content []byte, shell, stewardID string) map[string]interface{} {
+	t.Helper()
+	return signedInlineEnvelopeParamsFull(t, key, content, shell,
+		[]string{stewardID}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+}
+
+// signedInlineEnvelopeParamsFull is the fully-parameterized envelope builder every
+// other signedInlineEnvelopeParams* helper delegates to. It exists directly for tests
+// that must control targets, nonce, or expiry precisely — target mismatch, expiry,
+// and nonce-replay coverage (Issue #3694).
+func signedInlineEnvelopeParamsFull(t *testing.T, key *rsa.PrivateKey, content []byte, shell string, targets []string, nonce string, expiresAt time.Time) map[string]interface{} {
+	t.Helper()
+	env := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: expiresAt,
+	}
+	canonical, err := operatorpayload.CanonicalBytes(env)
+	require.NoError(t, err)
+	sigValue := sigTestSignRSASHA256(t, key, canonical)
+	return map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                shell,
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": sigTestPubKeyPEM(key),
+		"targets":              env.Targets,
+		"nonce":                env.Nonce,
+		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// testSignedCommandForSteward is testSignedCommandWithParams for an outer
+// SignedCommand.StewardID other than the fixed "steward-test" default — needed for
+// target-mismatch coverage where the OUTER command legitimately routes to a
+// specific steward while the INNER, operator-signed envelope names a different
+// target list (Issue #3694).
+func testSignedCommandForSteward(id, stewardID string, cmdType cpTypes.CommandType, params map[string]interface{}) *cpTypes.SignedCommand {
+	return &cpTypes.SignedCommand{
+		Command: cpTypes.Command{
+			ID:        id,
+			Type:      cmdType,
+			StewardID: stewardID,
+			Timestamp: time.Now(),
+			Params:    params,
+		},
+	}
+}
+
 // sigTestCA creates a test CA and returns (CA, *x509.CertPool of CA cert).
 func sigTestCA(t *testing.T) (*cert.CA, *x509.CertPool) {
 	t.Helper()
@@ -996,6 +1276,146 @@ func sigTestOperatorCert(t *testing.T, ca *cert.CA, modifier func(*x509.Certific
 	})
 	require.NoError(t, err)
 	return c
+}
+
+// sigTestManifestSigningCert issues a real CodeSigning certificate from ca,
+// mirroring the controller's own PurposeSigning certificate
+// (features/controller/api/handlers_revocation_manifest.go's signRevocationManifest).
+func sigTestManifestSigningCert(t *testing.T, ca *cert.CA) *cert.Certificate {
+	t.Helper()
+	c, err := ca.GenerateSigningCertificate(&cert.SigningCertConfig{
+		CommonName:   "test-config-signer",
+		Organization: "Test CFGMS",
+		ValidityDays: 365,
+		KeySize:      2048,
+	})
+	require.NoError(t, err)
+	return c
+}
+
+// revocationManifestForTest and signedRevocationManifestForTest mirror
+// RevocationManifest/SignedRevocationManifest field-for-field (this package cannot
+// import features/controller/api), matching operatorroster's own local duplicate and
+// webauthn_credential_verifier.go's revocationManifestPayload.
+//
+// All six fields are declared, including the two WebAuthn roster fields this test never
+// populates. A verifier re-marshals the payload it unmarshalled to recompute the signed
+// bytes, so a mirror missing a field the controller signs makes that round trip lossy —
+// and a test fixture that omits the same field as the code under test hides the defect
+// instead of catching it.
+type revocationManifestForTest struct {
+	Kind                          string                                `json:"kind"`
+	Version                       int64                                 `json:"version"`
+	IssuedAt                      time.Time                             `json:"issued_at"`
+	RevokedSerials                []string                              `json:"revoked_serials"`
+	AuthorizedWebAuthnCredentials []authorizedWebAuthnCredentialForTest `json:"authorized_webauthn_credentials,omitempty"`
+	WebAuthnRelyingParty          *webauthnRelyingPartyForTest          `json:"webauthn_relying_party,omitempty"`
+}
+
+// authorizedWebAuthnCredentialForTest mirrors
+// features/controller/api.AuthorizedWebAuthnCredential.
+type authorizedWebAuthnCredentialForTest struct {
+	Kind         string   `json:"kind"`
+	CredentialID []byte   `json:"credential_id"`
+	PublicKey    []byte   `json:"public_key"`
+	TenantID     string   `json:"tenant_id"`
+	RootScope    bool     `json:"root_scope"`
+	Grants       []string `json:"grants"`
+}
+
+// webauthnRelyingPartyForTest mirrors features/controller/api.WebAuthnRelyingParty.
+type webauthnRelyingPartyForTest struct {
+	ID      string   `json:"id"`
+	Origins []string `json:"origins"`
+}
+
+type signedRevocationManifestForTest struct {
+	Manifest             revocationManifestForTest  `json:"manifest"`
+	Signature            *signature.ConfigSignature `json:"signature"`
+	SignerCertificatePEM string                     `json:"signer_certificate_pem"`
+}
+
+// sigTestSignRevocationManifest signs a revocation manifest with signingCert and
+// returns the JSON bytes exactly as the controller's
+// GET /api/v1/certificates/revocation-manifest serves them.
+//
+// The WebAuthn roster fields are populated deliberately: handleGetRevocationManifest sets
+// AuthorizedWebAuthnCredentials and WebAuthnRelyingParty on the same manifest object
+// before signing it whenever the controller has WebAuthn configured (Issue #3697), so
+// this is the shape a real controller serves. A fixture that left them unset would only
+// exercise the subset of the payload the consumer happens to read, and would pass against
+// a consumer whose local mirror silently drops the rest.
+func sigTestSignRevocationManifest(t *testing.T, signingCert *cert.Certificate, version int64, revokedSerials []string) []byte {
+	t.Helper()
+	if revokedSerials == nil {
+		// buildRevocationManifest always emits a non-nil slice.
+		revokedSerials = []string{}
+	}
+	manifest := revocationManifestForTest{
+		Kind:           "operator-cert-revocation",
+		Version:        version,
+		IssuedAt:       time.Now().UTC().Truncate(time.Second),
+		RevokedSerials: revokedSerials,
+		AuthorizedWebAuthnCredentials: []authorizedWebAuthnCredentialForTest{{
+			Kind:         "webauthn-credential",
+			CredentialID: []byte{0x01, 0x02, 0x03},
+			PublicKey:    []byte{0x0a, 0x0b, 0x0c},
+			TenantID:     "root/msp-a",
+			Grants:       []string{"operator-payload:sign"},
+		}},
+		WebAuthnRelyingParty: &webauthnRelyingPartyForTest{
+			ID:      "controller.example.com",
+			Origins: []string{"https://controller.example.com"},
+		},
+	}
+	data, err := json.Marshal(manifest)
+	require.NoError(t, err)
+
+	signer, err := signature.NewSigner(&signature.SignerConfig{
+		CertificatePEM: signingCert.CertificatePEM,
+		PrivateKeyPEM:  signingCert.PrivateKeyPEM,
+	})
+	require.NoError(t, err)
+	sig, err := signer.Sign(data)
+	require.NoError(t, err)
+
+	out, err := json.Marshal(signedRevocationManifestForTest{
+		Manifest:             manifest,
+		Signature:            sig,
+		SignerCertificatePEM: string(signingCert.CertificatePEM),
+	})
+	require.NoError(t, err)
+	return out
+}
+
+// sigTestOperatorEnvelopeParams builds a valid operatorpayload.Envelope over content
+// (targets=[stewardID], a fresh nonce, a 5-minute expiry), signs its canonical bytes
+// with the RSA private key in keyPEM, and returns the full cmd.Params map
+// preflightScriptSignature expects for an inline command, including the given
+// signature_public_key (so callers can pass a cert whose PEM differs from a bare
+// key, or intentionally mismatched material for negative tests).
+func sigTestOperatorEnvelopeParams(t *testing.T, keyPEM []byte, publicKeyPEM string, content []byte, shell, stewardID string) map[string]interface{} {
+	t.Helper()
+	env := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   []string{stewardID},
+		Nonce:     sigTestNonce(t),
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	canonical, err := operatorpayload.CanonicalBytes(env)
+	require.NoError(t, err)
+	sigValue := sigTestSignWithCert(t, keyPEM, canonical)
+	return map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                shell,
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      sigValue,
+		"signature_public_key": publicKeyPEM,
+		"targets":              env.Targets,
+		"nonce":                env.Nonce,
+		"expires_at":           env.ExpiresAt.UTC().Format(time.RFC3339),
+	}
 }
 
 // sigTestSignWithCert signs content using the RSA private key in certPEM and keyPEM.
@@ -1066,15 +1486,19 @@ func TestExecuteScriptHandler_RequireSignedAdhoc_Unsigned_Rejected(t *testing.T)
 	assert.True(t, os.IsNotExist(statErr), "executor must not have run: marker file exists at %s", markerPath)
 }
 
-// TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_Accepted verifies
-// that unsigned inline commands are accepted when require_signed_adhoc is false.
-func TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_Accepted(t *testing.T) {
+// TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_StillRejected verifies
+// Issue #3694's AC that operator-signature verification for inline commands is now
+// mandatory and unconditional: an unsigned inline command is rejected even when
+// require_signed_adhoc is explicitly false. Before #3694, require_signed_adhoc=false
+// skipped inline verification entirely (see git history for the prior
+// "...Accepted" test this replaces); that skip is gone.
+func TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_StillRejected(t *testing.T) {
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
 		StewardID:          "steward-test",
 		OnStatus:           cb,
 		Logger:             newTestLogger(t),
-		RequireSignedAdhoc: false, // signing not required
+		RequireSignedAdhoc: false,
 	})
 	require.NoError(t, err)
 	h.RegisterExecuteScriptHandler()
@@ -1086,11 +1510,12 @@ func TestExecuteScriptHandler_RequireSignedAdhoc_False_Unsigned_Accepted(t *test
 		"execution_id":   "sig-notsigned-001",
 	})
 
-	require.NoError(t, h.HandleCommand(context.Background(), sc))
-	h.Wait()
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"inline verification must be mandatory regardless of require_signed_adhoc")
 
 	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
-	require.NotNil(t, evt, "expected EventScriptCompleted for unsigned command when require_signed_adhoc=false")
+	require.Nil(t, evt, "unsigned inline command must not execute even when require_signed_adhoc=false")
 }
 
 // TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected verifies AC3:
@@ -1126,32 +1551,27 @@ func TestExecuteScriptHandler_LibraryScript_UntrustedKey_Rejected(t *testing.T) 
 }
 
 // TestExecuteScriptHandler_TamperedContent_Rejected verifies AC4:
-// a signature_value that is valid base64 but is a signature over DIFFERENT content
-// is rejected with ErrUnauthenticatedCommand; executor not invoked.
+// a signature_value that is valid base64 but is a signature over an envelope built
+// from DIFFERENT content is rejected with ErrUnauthenticatedCommand; executor not
+// invoked. The signature covers operatorpayload.CanonicalBytes (Issue #3694), so
+// tampering with the delivered script_content changes the reconstructed envelope's
+// canonical bytes and the signature no longer verifies.
 func TestExecuteScriptHandler_TamperedContent_Rejected(t *testing.T) {
 	key := sigTestRSAKey(t)
-	thumbprint := "corp-thumb"
-	trustedEntry := script.TrustedKeyEntry{Name: "corp-cert", Thumbprint: thumbprint}
-	h := newHandlerWithSigning(t, []script.TrustedKeyEntry{trustedEntry}, true, nil)
+	h := newHandlerWithSigning(t, nil, true, nil)
 
-	// Sign original content, but send tampered content in the command.
+	// Sign an envelope built from the original content, but deliver tampered content.
 	original := []byte("#!/bin/bash\necho hello")
 	tampered := []byte("#!/bin/bash\nrm -rf /")
-	sigValue := sigTestSignRSASHA256(t, key, original) // signed original
+	params := signedInlineEnvelopeParamsWithKey(t, key, original, platformShell(), "steward-test")
+	params["script_content"] = base64.StdEncoding.EncodeToString(tampered) // different content than what was signed
+	params["execution_id"] = "sig-tamper-001"
 
-	sc := testSignedCommandWithParams("sig-tamper-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content":       base64.StdEncoding.EncodeToString(tampered), // different content
-		"shell":                platformShell(),
-		"execution_id":         "sig-tamper-001",
-		"signature_algorithm":  "rsa-sha256",
-		"signature_value":      sigValue,
-		"signature_public_key": sigTestPubKeyPEM(key),
-		"signature_thumbprint": thumbprint,
-	})
+	sc := testSignedCommandWithParams("sig-tamper-001", cpTypes.CommandExecuteScript, params)
 
 	err := h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
-		"signature over different content must be rejected")
+		"signature over an envelope built from different content must be rejected")
 }
 
 // TestExecuteScriptHandler_InlineScript_CertNotChainedToCA_Rejected verifies AC5 (part 1):
@@ -1165,18 +1585,11 @@ func TestExecuteScriptHandler_InlineScript_CertNotChainedToCA_Rejected(t *testin
 	operatorCert := sigTestOperatorCert(t, differentCA, nil)
 
 	content := []byte(echoScriptBody("hello"))
-	sigValue := sigTestSignWithCert(t, operatorCert.PrivateKeyPEM, content)
-
 	h := newHandlerWithSigning(t, nil, true, caPool) // caPool is the controller CA
 
-	sc := testSignedCommandWithParams("sig-wrongca-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content":       base64.StdEncoding.EncodeToString(content),
-		"shell":                platformShell(),
-		"execution_id":         "sig-wrongca-001",
-		"signature_algorithm":  "rsa-sha256",
-		"signature_value":      sigValue,
-		"signature_public_key": string(operatorCert.CertificatePEM), // cert from different CA
-	})
+	params := sigTestOperatorEnvelopeParams(t, operatorCert.PrivateKeyPEM, string(operatorCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-wrongca-001"
+	sc := testSignedCommandWithParams("sig-wrongca-001", cpTypes.CommandExecuteScript, params)
 
 	err := h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
@@ -1195,18 +1608,11 @@ func TestExecuteScriptHandler_InlineScript_ExpiredCert_Rejected(t *testing.T) {
 	})
 
 	content := []byte(echoScriptBody("hello"))
-	sigValue := sigTestSignWithCert(t, expiredCert.PrivateKeyPEM, content)
-
 	h := newHandlerWithSigning(t, nil, true, caPool)
 
-	sc := testSignedCommandWithParams("sig-expired-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content":       base64.StdEncoding.EncodeToString(content),
-		"shell":                platformShell(),
-		"execution_id":         "sig-expired-001",
-		"signature_algorithm":  "rsa-sha256",
-		"signature_value":      sigValue,
-		"signature_public_key": string(expiredCert.CertificatePEM),
-	})
+	params := sigTestOperatorEnvelopeParams(t, expiredCert.PrivateKeyPEM, string(expiredCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-expired-001"
+	sc := testSignedCommandWithParams("sig-expired-001", cpTypes.CommandExecuteScript, params)
 
 	err := h.HandleCommand(context.Background(), sc)
 	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
@@ -1260,10 +1666,17 @@ func TestExecuteScriptHandler_LibraryScript_ValidTrustedKey_Accepted(t *testing.
 }
 
 // TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted verifies AC6 (inline):
-// an inline command signed by a cert chaining to the controller CA is accepted.
+// an inline command signed by a cert chaining to the controller CA, with the admin
+// marker (Issue #3689), is accepted.
 func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing.T) {
 	ca, caPool := sigTestCA(t)
-	operatorCert := sigTestOperatorCert(t, ca, nil) // valid, chained, not expired
+	// Payload-signing marker required (Issue #3696, superseding Issue #3689's
+	// admin-marker check): verifyOperatorCert now rejects any cert lacking
+	// cert.HasPayloadSigningMarker, matching the controller-issued CSR credential
+	// (cfg credential request-signing-cert) rather than the admin bundle. Test files
+	// are exempt from SetPayloadSigningMarker's restricted-caller allow-list
+	// (TestSetPayloadSigningMarker_Architecture).
+	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker) // valid, chained, not expired, payload-signing-marked
 
 	cb, getEvents := collectEvents()
 	h, err := New(&Config{
@@ -1277,20 +1690,235 @@ func TestExecuteScriptHandler_InlineScript_ValidOperatorCert_Accepted(t *testing
 	h.RegisterExecuteScriptHandler()
 
 	content := []byte(echoScriptBody("operator-hello"))
-	sigValue := sigTestSignWithCert(t, operatorCert.PrivateKeyPEM, content)
-
-	sc := testSignedCommandWithParams("sig-op-valid-001", cpTypes.CommandExecuteScript, map[string]interface{}{
-		"script_content":       base64.StdEncoding.EncodeToString(content),
-		"shell":                platformShell(),
-		"execution_id":         "sig-op-valid-001",
-		"signature_algorithm":  "rsa-sha256",
-		"signature_value":      sigValue,
-		"signature_public_key": string(operatorCert.CertificatePEM),
-	})
+	params := sigTestOperatorEnvelopeParams(t, operatorCert.PrivateKeyPEM, string(operatorCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-op-valid-001"
+	sc := testSignedCommandWithParams("sig-op-valid-001", cpTypes.CommandExecuteScript, params)
 
 	require.NoError(t, h.HandleCommand(context.Background(), sc))
 	h.Wait()
 
 	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
 	require.NotNil(t, evt, "inline command signed by valid controller-CA-chained cert must be accepted")
+}
+
+// TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected verifies Issue #3689's
+// acceptance criteria: a certificate chaining to controllerCARoots with valid
+// ExtKeyUsageClientAuth but WITHOUT the admin marker is rejected by
+// preflightScriptSignature when RequireSignedAdhoc is true. Before this fix,
+// verifyOperatorCert checked only chain + EKU, so any client-auth cert issued by the
+// controller CA — including a non-admin steward's own mTLS client cert — passed
+// steward-side verification; the controller-side equivalent
+// (validatePublicBetaCommandSignature) already enforced cert.HasAdminMarker.
+func TestExecuteScriptHandler_InlineScript_NonAdminCert_Rejected(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	// No TemplateModifier: a validly chained, unexpired, client-auth cert with no
+	// admin marker — e.g. an ordinary steward's own mTLS client certificate.
+	nonAdminCert := sigTestOperatorCert(t, ca, nil)
+
+	h := newHandlerWithSigning(t, nil, true, caPool)
+
+	content := []byte(echoScriptBody("hello"))
+	params := sigTestOperatorEnvelopeParams(t, nonAdminCert.PrivateKeyPEM, string(nonAdminCert.CertificatePEM), content, platformShell(), "steward-test")
+	params["execution_id"] = "sig-nonadmin-001"
+	sc := testSignedCommandWithParams("sig-nonadmin-001", cpTypes.CommandExecuteScript, params)
+
+	err := h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a chained, unexpired, client-auth cert WITHOUT the admin marker must be rejected")
+}
+
+// TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch is the
+// [REQUIRED TEST] for Issue #3699: revoking a certificate (simulated here as the
+// controller's certificate:revoke flow would produce — the certificate's serial
+// added to RevokedSerials in a newly-signed, higher-version manifest), re-fetching
+// the manifest via a real HTTP round trip against an httptest server standing in
+// for GET /api/v1/certificates/revocation-manifest, and then attempting to use
+// that certificate to sign an ad-hoc command is rejected end-to-end.
+//
+// This proves resistance to a leaked/stolen-credential attacker who still holds a
+// since-revoked private key; per the story's Acceptance Criteria it does not prove
+// resistance to an attacker with RCE on the controller host — both revocation-list
+// and a full authorized-key roster fail identically against that threat class.
+func TestExecuteScriptHandler_RevokedOperatorCert_RejectedAfterRefetch(t *testing.T) {
+	ca, caPool := sigTestCA(t)
+	operatorCert := sigTestOperatorCert(t, ca, cert.SetPayloadSigningMarker)
+	signingCert := sigTestManifestSigningCert(t, ca)
+
+	// First fetch: the certificate is not yet revoked.
+	var currentManifest []byte
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 1, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(currentManifest)
+	}))
+	defer srv.Close()
+
+	revocationVerifier := operatorroster.NewRevocationVerifier(caPool)
+	require.NoError(t, revocationVerifier.FetchAndVerify(context.Background(), srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict))
+
+	h, err := New(&Config{
+		StewardID:          "steward-test",
+		OnStatus:           noopStatus,
+		Logger:             newTestLogger(t),
+		RequireSignedAdhoc: true,
+		ControllerCARoots:  caPool,
+		RevocationVerifier: revocationVerifier,
+	})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	dispatch := func(execID string) error {
+		content := []byte(echoScriptBody("operator-hello"))
+		params := sigTestOperatorEnvelopeParams(t, operatorCert.PrivateKeyPEM, string(operatorCert.CertificatePEM), content, platformShell(), "steward-test")
+		params["execution_id"] = execID
+		sc := testSignedCommandWithParams(execID, cpTypes.CommandExecuteScript, params)
+		return h.HandleCommand(context.Background(), sc)
+	}
+
+	require.NoError(t, dispatch("sig-revoke-before-001"), "before revocation, a valid payload-signing cert must be accepted")
+	h.Wait()
+
+	// Simulate the controller's certificate:revoke flow having run: the next
+	// manifest served now lists the certificate's real serial, at a higher version.
+	currentManifest = sigTestSignRevocationManifest(t, signingCert, 2, []string{operatorCert.SerialNumber})
+	require.NoError(t, revocationVerifier.FetchAndVerify(context.Background(), srv.Client(), srv.URL, stewardtypes.ModuleTrustModeStrict))
+
+	err = dispatch("sig-revoke-after-001")
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a certificate present in the last-verified revocation manifest must be rejected, even though its chain/EKU/marker checks still pass")
+	assert.Contains(t, err.Error(), "revoked")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3694 — target binding, expiry, nonce replay, migration completeness.
+// ---------------------------------------------------------------------------
+
+// TestExecuteScriptHandler_TargetMismatch_Rejected is a required test (Issue #3694
+// AC): an envelope signed for target list ["host-A"], delivered to a steward whose
+// own ID is "host-B", is rejected even though the outer SignedCommand legitimately
+// routes to "host-B" (StewardID match passes) and the signature itself is
+// cryptographically valid.
+func TestExecuteScriptHandler_TargetMismatch_Rejected(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "host-B", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	key := sigTestRSAKey(t)
+	content := []byte(echoScriptBody("hello"))
+	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+		[]string{"host-A"}, sigTestNonce(t), time.Now().Add(5*time.Minute))
+	params["execution_id"] = "sig-targetmismatch-001"
+
+	sc := testSignedCommandForSteward("sig-targetmismatch-001", "host-B", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a steward not named in the signed target list must reject the command")
+
+	evt := firstEventOfType(getEvents(), cpTypes.EventScriptCompleted)
+	require.Nil(t, evt, "executor must not run when the steward is not an authorized target")
+}
+
+// TestExecuteScriptHandler_ExpiredEnvelope_Rejected is a required test (Issue #3694
+// AC): an envelope whose ExpiresAt is in the past is rejected even though the
+// signature is cryptographically valid and the steward is a correct target.
+func TestExecuteScriptHandler_ExpiredEnvelope_Rejected(t *testing.T) {
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	key := sigTestRSAKey(t)
+	content := []byte(echoScriptBody("hello"))
+	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+		[]string{"steward-test"}, sigTestNonce(t), time.Now().Add(-1*time.Minute))
+	params["execution_id"] = "sig-expiredenv-001"
+
+	sc := testSignedCommandWithParams("sig-expiredenv-001", cpTypes.CommandExecuteScript, params)
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand, "an expired envelope must be rejected")
+}
+
+// TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterReplayCache
+// is a required test (Issue #3694 AC): the identical valid envelope, delivered twice,
+// is accepted the first time and rejected the second time via the nonce cache — and
+// this holds even when the second delivery arrives wrapped in a FRESH outer
+// SignedCommand (a different command ID and timestamp), which the outer replay
+// cache (handler.go's replayCache, keyed by cmd.ID) would accept as new. This is the
+// scenario a compromised controller or a captured-and-replayed operator payload
+// produces: the outer envelope is fresh, but the inner operator-signed nonce is not.
+func TestExecuteScriptHandler_EnvelopeNonceReplay_RejectedIndependentlyOfOuterReplayCache(t *testing.T) {
+	cb, getEvents := collectEvents()
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: cb, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	key := sigTestRSAKey(t)
+	content := []byte(echoScriptBody("hello"))
+	nonce := sigTestNonce(t)
+	expiresAt := time.Now().Add(5 * time.Minute)
+	params := signedInlineEnvelopeParamsFull(t, key, content, platformShell(),
+		[]string{"steward-test"}, nonce, expiresAt)
+
+	// First delivery: distinct outer command ID/timestamp, succeeds.
+	first := map[string]interface{}{}
+	for k, v := range params {
+		first[k] = v
+	}
+	first["execution_id"] = "sig-noncereplay-001"
+	sc1 := testSignedCommandWithParams("sig-noncereplay-001", cpTypes.CommandExecuteScript, first)
+	require.NoError(t, h.HandleCommand(context.Background(), sc1))
+	h.Wait()
+	require.NotNil(t, firstEventOfType(getEvents(), cpTypes.EventScriptCompleted),
+		"first delivery of a fresh envelope must execute")
+
+	// Second delivery: a genuinely DIFFERENT outer command ID (so the outer
+	// replayCache does NOT catch it) carrying the SAME inner envelope (same
+	// content/targets/nonce/expiry/signature) — simulating a captured operator
+	// payload rewrapped by a compromised controller or a stale relay.
+	second := map[string]interface{}{}
+	for k, v := range params {
+		second[k] = v
+	}
+	second["execution_id"] = "sig-noncereplay-002"
+	sc2 := testSignedCommandWithParams("sig-noncereplay-002-different-outer-id", cpTypes.CommandExecuteScript, second)
+
+	err = h.HandleCommand(context.Background(), sc2)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a reused envelope nonce must be rejected even under a fresh outer command ID")
+}
+
+// TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected is a required test
+// (Issue #3694 AC — migration completeness): a signature computed over content alone
+// (the pre-#3694 wire format) — rather than over operatorpayload.CanonicalBytes of
+// the full envelope — is rejected, even when targets/nonce/expires_at are otherwise
+// present and well-formed. This confirms no remaining code path in
+// preflightScriptSignature accepts a content-only digest.
+func TestExecuteScriptHandler_LegacyContentOnlySignature_Rejected(t *testing.T) {
+	h, err := New(&Config{StewardID: "steward-test", OnStatus: noopStatus, Logger: newTestLogger(t)})
+	require.NoError(t, err)
+	h.RegisterExecuteScriptHandler()
+
+	key := sigTestRSAKey(t)
+	content := []byte(echoScriptBody("hello"))
+
+	// Pre-#3694 format: sign content directly, not CanonicalBytes(envelope).
+	legacySigValue := sigTestSignRSASHA256(t, key, content)
+
+	sc := testSignedCommandWithParams("sig-legacyformat-001", cpTypes.CommandExecuteScript, map[string]interface{}{
+		"script_content":       base64.StdEncoding.EncodeToString(content),
+		"shell":                platformShell(),
+		"execution_id":         "sig-legacyformat-001",
+		"signature_algorithm":  "rsa-sha256",
+		"signature_value":      legacySigValue,
+		"signature_public_key": sigTestPubKeyPEM(key),
+		"targets":              []string{"steward-test"},
+		"nonce":                sigTestNonce(t),
+		"expires_at":           time.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339),
+	})
+
+	err = h.HandleCommand(context.Background(), sc)
+	require.ErrorIs(t, err, ErrUnauthenticatedCommand,
+		"a signature computed over content alone (pre-#3694 format) must be rejected")
 }

@@ -12,12 +12,28 @@ This replaced the `strict_required_status_checks_policy` (strict mode, Story #79
 
 1. A PR is marked for merge (`gh pr merge --squash` or the GitHub UI)
 2. GitHub creates a temporary branch: `develop` tip + the PR's changes
-3. All 5 required checks run against that combined state:
+3. All 10 required checks run against that combined state:
    - `unit-tests`
    - `integration-tests`
    - `Build Gate`
-   - `security-deployment-gate`
    - `Controller Integration Tests (Linux)`
+   - `security-deployment-gate`
+   - `trivy-scan`
+   - `CodeQL`
+   - `zizmor`
+   - `frontend-checks`
+   - `CLA signature check`
+
+   Read the set from the ruleset rather than trusting this list:
+
+   ```bash
+   gh api repos/cfg-is/cfgms/rulesets/11647684 \
+     --jq '.rules[]|select(.type=="required_status_checks").parameters.required_status_checks[].context'
+   ```
+
+   Several of these run for real on only one side of the PR / merge-queue split and
+   post a stub context on the other — see `CLAUDE.md` → Required CI Checks for which
+   side each one really runs on.
 4. If all checks pass → PR is squash-merged into develop
 5. If any check fails → PR is ejected from the queue; author/agent is notified
 

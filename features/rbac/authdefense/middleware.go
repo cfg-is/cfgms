@@ -3,6 +3,9 @@
 package authdefense
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,12 +16,58 @@ import (
 // statusCapture wraps http.ResponseWriter to capture the response status code
 type statusCapture struct {
 	http.ResponseWriter
-	code int
+	code        int
+	wroteHeader bool
 }
 
 func (sc *statusCapture) WriteHeader(code int) {
+	if sc.wroteHeader {
+		return
+	}
+	sc.wroteHeader = true
 	sc.code = code
 	sc.ResponseWriter.WriteHeader(code)
+}
+
+// Write is deliberately NOT overridden. This middleware wraps every route, so a
+// pass-through Write would funnel every handler's response body through one
+// method — losing, for static analysis, the Content-Type each handler set on
+// the writer it was given, and reporting each body as a possible XSS sink. It
+// is also unnecessary: a handler that never calls WriteHeader has returned 200
+// by definition, which is the code this wrapper starts with. The embedded
+// ResponseWriter's Write is promoted unchanged.
+//
+// ReadFrom is omitted for the same reason; without a Write override, io.Copy
+// reaches the underlying writer's own optimized path.
+
+// Unwrap allows net/http.ResponseController to discover optional interfaces on
+// the underlying writer.
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
+}
+
+// Hijack preserves WebSocket and other HTTP upgrade support.
+func (sc *statusCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := sc.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+// Flush preserves streaming response support.
+func (sc *statusCapture) Flush() {
+	if flusher, ok := sc.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// Push preserves HTTP/2 server push support where the underlying writer has it.
+func (sc *statusCapture) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := sc.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
 }
 
 // Middleware returns an HTTP middleware that enforces the three-tier defense.

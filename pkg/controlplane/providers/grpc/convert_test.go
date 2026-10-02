@@ -88,20 +88,28 @@ func TestCommandNil(t *testing.T) {
 	assert.Nil(t, commandFromProto(nil))
 }
 
+// allCommandTypes enumerates every types.Command* constant that must survive
+// the proto round-trip. Add new constants here as they are defined in
+// pkg/controlplane/types/messages.go. The guard test below asserts this list
+// stays in sync with commandTypeToProto (Issue #1994).
+var allCommandTypes = []types.CommandType{
+	types.CommandSyncConfig,
+	types.CommandSyncDNA,
+	types.CommandReconnect,
+	types.CommandExecuteScript,
+	types.CommandRelayResponse,
+	types.CommandPushSigningCert,
+	types.CommandPushStewardBinary,
+	types.CommandOpenTerminal,   // Issue #2760
+	types.CommandObserveModules, // Issue #3104
+}
+
 func TestCommandTypeRoundTrip(t *testing.T) {
 	// Every command type the controller can dispatch must survive the
 	// semantic→proto→semantic round-trip. A type missing from either map
 	// serialises to the zero enum value, which mutates the signed Type field
 	// and makes steward-side signature verification fail (Issue #1943/#1948).
-	allTypes := []types.CommandType{
-		types.CommandSyncConfig,
-		types.CommandSyncDNA,
-		types.CommandReconnect,
-		types.CommandExecuteScript,
-		types.CommandPushSigningCert,
-		types.CommandPushStewardBinary,
-	}
-	for _, ct := range allTypes {
+	for _, ct := range allCommandTypes {
 		t.Run(string(ct), func(t *testing.T) {
 			pb, ok := commandTypeToProto[ct]
 			require.True(t, ok, "command type %q missing from commandTypeToProto", ct)
@@ -110,6 +118,26 @@ func TestCommandTypeRoundTrip(t *testing.T) {
 			result := protoToCommandType[pb]
 			assert.Equal(t, ct, result)
 		})
+	}
+}
+
+// TestCommandTypeConvertMapsComplete guards against the class of omission from
+// Issue #1992 and #1994: a Command* constant is added to messages.go but never
+// added to the convert maps, causing silent Type-collapse to UNSPECIFIED on the
+// wire. The slice length pin fails the test at compile-time if allCommandTypes
+// and commandTypeToProto diverge.
+func TestCommandTypeConvertMapsComplete(t *testing.T) {
+	require.Len(t, allCommandTypes, len(commandTypeToProto),
+		"allCommandTypes is out of sync with commandTypeToProto — "+
+			"add the new Command* constant to both the slice and the convert maps")
+
+	for _, ct := range allCommandTypes {
+		_, inToProto := commandTypeToProto[ct]
+		assert.True(t, inToProto, "command type %q missing from commandTypeToProto", ct)
+
+		pbVal := commandTypeToProto[ct]
+		_, inFromProto := protoToCommandType[pbVal]
+		assert.True(t, inFromProto, "proto value for command type %q missing from protoToCommandType", ct)
 	}
 }
 
@@ -125,6 +153,8 @@ func TestCommandTypeProtoDescriptorComplete(t *testing.T) {
 		transportpb.CommandType_COMMAND_TYPE_EXECUTE_SCRIPT:      "COMMAND_TYPE_EXECUTE_SCRIPT",
 		transportpb.CommandType_COMMAND_TYPE_PUSH_SIGNING_CERT:   "COMMAND_TYPE_PUSH_SIGNING_CERT",
 		transportpb.CommandType_COMMAND_TYPE_PUSH_STEWARD_BINARY: "COMMAND_TYPE_PUSH_STEWARD_BINARY",
+		transportpb.CommandType_COMMAND_TYPE_RELAY_RESPONSE:      "COMMAND_TYPE_RELAY_RESPONSE",
+		transportpb.CommandType_COMMAND_TYPE_OPEN_TERMINAL:       "COMMAND_TYPE_OPEN_TERMINAL", // Issue #2760
 	}
 	for ct, name := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -328,6 +358,7 @@ var wireCrossingEventTypes = []types.EventType{
 	types.EventStewardUpgradeSwapped,
 	types.EventStewardUpgradeCommitted,
 	types.EventStewardUpgradeRolledBack,
+	types.EventObserveSweepRequest, // Issue #3104
 }
 
 func TestEventTypeRoundTrip(t *testing.T) {
@@ -490,6 +521,89 @@ func TestHeartbeatRoundTrip(t *testing.T) {
 func TestHeartbeatNil(t *testing.T) {
 	assert.Nil(t, heartbeatToProto(nil))
 	assert.Nil(t, heartbeatFromProto(nil))
+}
+
+// TestHeartbeatDNAAggregateRootRoundTrip verifies that DNAAggregateRoot survives
+// the heartbeatToProto → heartbeatFromProto round-trip via the Metrics side-channel
+// (ADR-017 §7 / Issue #2906). The test also checks that:
+//   - Pre-existing Metrics keys survive alongside the aggregate root.
+//   - The dna_aggregate_root key is NOT visible in the returned Metrics map
+//     (it is stripped during decode and surfaced in the dedicated field only).
+func TestHeartbeatDNAAggregateRootRoundTrip(t *testing.T) {
+	now := time.Now().Truncate(time.Microsecond)
+
+	t.Run("aggregate root only", func(t *testing.T) {
+		hb := &types.Heartbeat{
+			StewardID:        "steward-root",
+			TenantID:         "tenant-root",
+			Status:           types.StatusHealthy,
+			Timestamp:        now,
+			DNAAggregateRoot: "sha256:abc123",
+		}
+
+		pb := heartbeatToProto(hb)
+		require.NotNil(t, pb)
+		// The root must be encoded in the proto Metrics map.
+		require.NotNil(t, pb.GetMetrics(), "proto Metrics must be non-nil when DNAAggregateRoot is set")
+		assert.Equal(t, "sha256:abc123", pb.GetMetrics()["dna_aggregate_root"])
+
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Equal(t, "sha256:abc123", result.DNAAggregateRoot,
+			"DNAAggregateRoot must survive the proto round-trip")
+		assert.Nil(t, result.Metrics,
+			"dna_aggregate_root side-channel key must be stripped from Metrics after decode")
+	})
+
+	t.Run("aggregate root alongside existing metrics", func(t *testing.T) {
+		// Use non-numeric string values; stringMapToInterfaceMap JSON-parses values
+		// so numeric strings become float64 after the round-trip.
+		hb := &types.Heartbeat{
+			StewardID: "steward-mixed",
+			Status:    types.StatusHealthy,
+			Timestamp: now,
+			Metrics: map[string]interface{}{
+				"region": "us-east",
+				"tier":   "standard",
+			},
+			DNAAggregateRoot: "sha256:def456",
+		}
+
+		pb := heartbeatToProto(hb)
+		require.NotNil(t, pb)
+		pbMetrics := pb.GetMetrics()
+		require.NotNil(t, pbMetrics)
+		assert.Equal(t, "sha256:def456", pbMetrics["dna_aggregate_root"])
+		assert.Equal(t, "us-east", pbMetrics["region"])
+		assert.Equal(t, "standard", pbMetrics["tier"])
+
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Equal(t, "sha256:def456", result.DNAAggregateRoot)
+		require.NotNil(t, result.Metrics, "user Metrics must survive alongside aggregate root")
+		assert.Equal(t, "us-east", result.Metrics["region"])
+		assert.Equal(t, "standard", result.Metrics["tier"])
+		_, hasKey := result.Metrics["dna_aggregate_root"]
+		assert.False(t, hasKey, "dna_aggregate_root must not appear in decoded Metrics")
+	})
+
+	t.Run("no aggregate root leaves metrics unaffected", func(t *testing.T) {
+		hb := &types.Heartbeat{
+			StewardID: "steward-noop",
+			Status:    types.StatusHealthy,
+			Timestamp: now,
+			Metrics: map[string]interface{}{
+				"env": "production",
+			},
+		}
+
+		pb := heartbeatToProto(hb)
+		result := heartbeatFromProto(pb)
+		require.NotNil(t, result)
+		assert.Empty(t, result.DNAAggregateRoot, "DNAAggregateRoot must be empty when not set")
+		require.NotNil(t, result.Metrics)
+		assert.Equal(t, "production", result.Metrics["env"])
+	})
 }
 
 func TestHeartbeatStatusRoundTrip(t *testing.T) {

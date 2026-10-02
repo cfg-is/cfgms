@@ -22,9 +22,9 @@ var (
 
 	// API connection flags
 	tokenAPIURL      string
-	tokenAPIKey      string
 	tokenTLSCACert   string
 	tokenTLSInsecure bool
+	tokenServerName  string
 )
 
 // tokenCmd represents the token command
@@ -40,10 +40,11 @@ registrations), time-limited (optional), and revocable.
 Use 'cfg token rotate' to atomically replace the active token for a
 tenant/group with a fresh one, invalidating the old one immediately.
 
-This command communicates with the controller's REST API to manage tokens.
-The controller URL and API key can be provided via flags or environment variables:
+This command communicates with the controller's REST API to manage tokens and
+requires an admin mTLS bundle or an active session (cfg connect). The controller
+URL can be provided via flags or environment variables:
   - CFGMS_API_URL: Controller REST API URL (default: http://localhost:9080)
-  - CFGMS_API_KEY: API key for authentication
+  - CFGMS_ADMIN_BUNDLE: Path to the admin mTLS bundle
   - CFGMS_TLS_CA_CERT: Path to CA certificate for TLS verification
   - CFGMS_TLS_INSECURE: Skip TLS verification (development only)
 
@@ -167,9 +168,9 @@ Examples:
 func init() {
 	// Global token command flags (for API connection)
 	tokenCmd.PersistentFlags().StringVar(&tokenAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	tokenCmd.PersistentFlags().StringVar(&tokenAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	tokenCmd.PersistentFlags().StringVar(&tokenTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	tokenCmd.PersistentFlags().BoolVar(&tokenTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	tokenCmd.PersistentFlags().StringVar(&tokenServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// Create command flags
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
@@ -203,8 +204,7 @@ func init() {
 	tokenCmd.AddCommand(tokenGetCmd)
 }
 
-// getAPIClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getAPIClient creates an API client using an active session or an admin mTLS bundle.
 func getAPIClient() (*APIClient, error) {
 	// Resolve API URL (without default — bundle ControllerURL fills the gap)
 	apiURL := tokenAPIURL
@@ -212,36 +212,13 @@ func getAPIClient() (*APIClient, error) {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	// Fallback: API key path (unchanged from pre-bundle behavior)
-	if apiURL == "" {
-		apiURL = "http://localhost:9080"
-	}
-
-	apiKey := tokenAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := tokenTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := tokenServerName
 
-	tlsCACertPath := tokenTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {

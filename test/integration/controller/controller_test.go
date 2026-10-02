@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -105,15 +106,16 @@ func (s *ControllerTestSuite) TestStewardContainer() {
 	assert.True(s.T(), s.docker.IsContainerRunning("steward-standalone"),
 		"Steward container should be running")
 
-	// Steward should have produced log output (proves it started)
-	logs, err := s.docker.GetStewardLogs(ctx)
-	require.NoError(s.T(), err, "Should be able to retrieve steward logs")
+	// The steward must have completed its connect sequence against the
+	// controller. This replaces a poll for provider-registration chatter, which
+	// pkg/logging routes to a no-op sink by default and which proved nothing
+	// about the steward's actual state even when it did exist. Registration is
+	// the real evidence of initialization: it requires a device identity, a
+	// trusted CA, an accepted token and a live gRPC transport.
+	logs, err := s.docker.WaitForLogContent(ctx, "steward-standalone",
+		"Steward registered and connected successfully")
+	require.NoError(s.T(), err, "Steward should register and connect to the controller")
 	assert.NotEmpty(s.T(), logs, "Steward should have produced log output")
-
-	// Steward should have registered storage/logging providers (proves initialization)
-	assert.True(s.T(),
-		strings.Contains(logs, "Registered") || strings.Contains(logs, "provider"),
-		"Steward logs should show provider registration (proves initialization)")
 
 	s.T().Log("Steward container validated")
 }
@@ -131,12 +133,36 @@ func (s *ControllerTestSuite) TestStorageInitialization() {
 	require.NoError(s.T(), err, "Health endpoint should be reachable")
 	assert.NotEmpty(s.T(), output, "Health endpoint should return status")
 
-	// Check controller logs for storage initialization evidence
-	logs, logErr := s.docker.GetControllerLogs(ctx)
-	require.NoError(s.T(), logErr)
-	assert.True(s.T(),
-		strings.Contains(logs, "storage") || strings.Contains(logs, "Registered storage provider"),
-		"Controller logs should show storage initialization")
+	// The health endpoint is the assertion. A controller cannot bind its public
+	// API before storage initialisation completes, so a response here is proof.
+	//
+	// There is deliberately no log-based check: the controller emits no records
+	// to CFGMS_LOG_DIR, so the previous poll for "Registered storage provider"
+	// could only ever spend its 30s budget and fail — one of the two subtests
+	// that kept this suite red.
+	//
+	// The payload is decoded rather than substring-matched. Asserting that the
+	// body contains "status" passes on any JSON carrying that key anywhere, and
+	// Server.writeResponse wraps every payload in an APIResponse envelope, so
+	// the old check could not distinguish a healthy controller from a degraded
+	// one — or from an error response.
+	var body struct {
+		Data struct {
+			Status   string            `json:"status"`
+			Services map[string]string `json:"services"`
+		} `json:"data"`
+	}
+	require.NoError(s.T(), json.Unmarshal([]byte(output), &body),
+		"Health endpoint should return a JSON APIResponse envelope, got: %s", output)
+	assert.Equal(s.T(), "healthy", body.Data.Status,
+		"Controller should report healthy once storage is initialised, got: %s", output)
+
+	// These two services are constructed from the storage manager, so their
+	// state is the closest the health payload comes to reporting on storage.
+	assert.Equal(s.T(), "healthy", body.Data.Services["controller"],
+		"Controller service should be healthy")
+	assert.Equal(s.T(), "healthy", body.Data.Services["configuration"],
+		"Configuration service should be healthy")
 
 	s.T().Log("Controller storage initialized (controller is serving requests)")
 }
@@ -182,6 +208,28 @@ func (s *ControllerTestSuite) TestCertificateManagement() {
 		"Controller should have generated certificate files in /app/certs")
 
 	s.T().Log("Certificate management validated")
+}
+
+// TestWaitForLogContentRejectsUnknownContainer validates that WaitForLogContent
+// refuses container names outside the harness-owned set before any docker
+// process is launched. Runs without Docker infrastructure.
+func TestWaitForLogContentRejectsUnknownContainer(t *testing.T) {
+	h := NewDockerComposeHelper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, name := range []string{"", "unknown-container", "steward-standalone; rm -rf /"} {
+		logs, err := h.WaitForLogContent(ctx, name, "anything")
+		require.Error(t, err, "container name %q should be rejected", name)
+		assert.Contains(t, err.Error(), "only harness-managed containers")
+		assert.Empty(t, logs, "no logs should be returned for a rejected container name")
+	}
+
+	// Harness-owned names pass validation.
+	for _, name := range []string{"controller-standalone", "steward-standalone", "cfgms-timescaledb-test"} {
+		require.NoError(t, validateContainerName(name), "harness container %q should be accepted", name)
+	}
 }
 
 func TestController(t *testing.T) {

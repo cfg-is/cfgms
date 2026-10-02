@@ -8,12 +8,20 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ## Getting Help & Community Resources
 
-- **Report Bugs**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues)
-- **Request Features**: [GitHub Issues](https://github.com/cfg-is/cfgms/issues/new)
+- **Report Bugs / Request Features**: [open a GitHub Issue](https://github.com/cfg-is/cfgms/issues/new) — these are **community issues** (public, open for comment) and are exactly what we want from you.
 - **View Pull Requests**: [GitHub Pull Requests](https://github.com/cfg-is/cfgms/pulls)
 - **Security Reports**: [security@cfg.is](mailto:security@cfg.is) (see [SECURITY.md](SECURITY.md))
 - **Project Roadmap**: [GitHub Project Board](https://github.com/orgs/cfg-is/projects/1)
 - **General Questions**: licensing@cfg.is
+
+### Issue classes — why some issues are locked
+
+You'll see two kinds of issue on this repo:
+
+- **`community`** — public and **open for comment**. Bug reports and feature requests from anyone. **This is how you engage** — file freely.
+- **`internal`** — **locked** to external comment. These are automated work-items from our private development pipeline. CFGMS plans and refines work on a **private project board** (to keep implementation detail and machine-readable instructions off the public tracker); a work-item only becomes a GitHub issue when it is actively being built, and it is created locked. A locked `internal` issue is **not** a sign the project is closed to contribution — it just isn't the place to comment. Open a `community` issue instead and we'll pick it up.
+
+Epics (`epic` + `internal`) are locked planning anchors. Pull requests are public — that's where code review happens in the open.
 
 ## Git Workflow: GitFlow
 

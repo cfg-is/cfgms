@@ -639,7 +639,7 @@ func (mlm *ModuleLifecycleManager) publishEvent(event LifecycleEvent) {
 			defer func() {
 				if r := recover(); r != nil {
 					// Log panic but don't crash the system
-					mlm.logger.Error("panic in lifecycle event listener", "recover", fmt.Sprintf("%v", r))
+					mlm.logger.Error("panic in lifecycle event listener", "recover", logging.SanitizeLogValue(fmt.Sprintf("%v", r)))
 				}
 			}()
 			l.OnLifecycleEvent(e)

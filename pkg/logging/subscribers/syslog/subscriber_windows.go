@@ -13,7 +13,6 @@ import (
 	"errors"
 	"os"
 	"strconv"
-	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging/interfaces"
 )
@@ -24,8 +23,6 @@ var ErrNotSupported = errors.New("syslog is not supported on Windows; use Window
 // SyslogSubscriber stub for Windows - syslog is not natively supported
 type SyslogSubscriber struct {
 	config        *SyslogConfig
-	initialized   bool
-	mutex         sync.RWMutex
 	enabledLevels map[string]bool
 	hostname      string
 	procID        string

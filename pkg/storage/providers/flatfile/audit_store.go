@@ -30,6 +30,25 @@ type FlatFileAuditStore struct {
 	root             string
 	maxRetentionDays int
 	mutex            sync.Mutex // serialises appends across goroutines
+
+	// chainHeads caches the last chained entry this store appended per tenant,
+	// guarded by mutex. Without it AppendChainedEntry re-reads and JSON-decodes
+	// every entry in the tenant's audit files on every single append, making a
+	// run of N appends O(N^2) decodes — 1100 entries cost ~600k decodes, enough
+	// to stall the audit drain goroutine past a 60s Flush deadline under
+	// parallel test load (Issue #3797). The type is a single-process,
+	// single-writer store (see the doc comment above), so the head this process
+	// last wrote is authoritative; any path that writes or removes entries
+	// outside AppendChainedEntry invalidates the affected cache entries so the
+	// next append re-reads from disk.
+	chainHeads map[string]chainHead
+}
+
+// chainHead is the cached tail of one tenant's audit chain: the sequence number
+// and checksum the next appended entry must link to.
+type chainHead struct {
+	sequenceNumber uint64
+	checksum       string
 }
 
 // NewFlatFileAuditStore creates a new FlatFileAuditStore rooted at root.
@@ -44,6 +63,7 @@ func NewFlatFileAuditStore(root string, maxRetentionDays int) (*FlatFileAuditSto
 	return &FlatFileAuditStore{
 		root:             root,
 		maxRetentionDays: maxRetentionDays,
+		chainHeads:       make(map[string]chainHead),
 	}, nil
 }
 
@@ -67,9 +87,9 @@ func (s *FlatFileAuditStore) dailyFilePath(tenantID string, t time.Time) (string
 	return filepath.Join(dir, filename), nil
 }
 
-// StoreAuditEntry appends an immutable audit entry to the daily JSONL file.
-// Returns ErrImmutable if the entry's timestamp predates the retention period.
-func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+// validateFlatFileAuditEntry checks the required fields shared by every write path
+// (StoreAuditEntry, AppendChainedEntry).
+func validateFlatFileAuditEntry(entry *business.AuditEntry) error {
 	if entry.TenantID == "" {
 		return business.ErrTenantIDRequired
 	}
@@ -84,6 +104,15 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	}
 	if entry.ResourceID == "" {
 		return business.ErrResourceIDRequired
+	}
+	return nil
+}
+
+// StoreAuditEntry appends an immutable audit entry to the daily JSONL file.
+// Returns ErrImmutable if the entry's timestamp predates the retention period.
+func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *business.AuditEntry) error {
+	if err := validateFlatFileAuditEntry(entry); err != nil {
+		return err
 	}
 
 	if entry.Timestamp.IsZero() {
@@ -109,12 +138,17 @@ func (s *FlatFileAuditStore) StoreAuditEntry(ctx context.Context, entry *busines
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
+	// This path writes a caller-supplied SequenceNumber straight to disk, so the
+	// tenant's durable chain head may move without AppendChainedEntry seeing it.
+	// Drop the cached head; the next chained append re-reads it from disk.
+	s.forgetChainHead(entry.TenantID)
+
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return fmt.Errorf("failed to create audit dir: %w", err)
 	}
 
 	// #nosec G304 — path validated by safeJoin inside dailyFilePath
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open audit file: %w", err)
 	}
@@ -136,25 +170,131 @@ func (s *FlatFileAuditStore) StoreAuditBatch(ctx context.Context, entries []*bus
 	return nil
 }
 
-// GetAuditEntry retrieves an audit entry by ID, scanning daily JSONL files newest-first.
-func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
-	tenantDirs, err := os.ReadDir(s.root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, business.ErrAuditNotFound
-		}
-		return nil, fmt.Errorf("failed to read audit root: %w", err)
+// AppendChainedEntry implements business.AuditStore.AppendChainedEntry. It holds
+// s.mutex for the read-then-append critical section — the same mutex StoreAuditEntry
+// uses to serialize appends — so the chain-head read and the write land atomically
+// with respect to every other writer in this process. FlatFileAuditStore is a
+// single-process, single-writer store (documented on the type); there is no
+// cross-process deployment of the flatfile provider to defend against
+// (ADR-004 amendment, ADR-031 Decision 1, Issue #3754).
+//
+// The chain head comes from s.chainHeads when this store has already appended
+// for the tenant, and is read from disk once otherwise, so an append costs one
+// file write rather than a full re-scan of the tenant's audit files (Issue
+// #3797). Writes that bypass this method (StoreAuditEntry) and file removals
+// (ArchiveAuditEntries, PurgeAuditEntries) invalidate the cache.
+func (s *FlatFileAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if computeChecksum == nil {
+		return fmt.Errorf("computeChecksum function is required")
+	}
+	entry.TenantID = tenantID
+	if err := validateFlatFileAuditEntry(entry); err != nil {
+		return err
 	}
 
-	for _, tenantDir := range tenantDirs {
-		if !tenantDir.IsDir() {
-			continue
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now().UTC()
+	}
+	if entry.Timestamp.Before(s.retentionCutoff()) {
+		return ErrImmutable
+	}
+
+	path, err := s.dailyFilePath(entry.TenantID, entry.Timestamp)
+	if err != nil {
+		return fmt.Errorf("invalid tenant ID: %w", err)
+	}
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	head, cached := s.chainHeads[tenantID]
+	if !cached {
+		last, err := s.GetLastAuditEntry(ctx, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to read chain head: %w", err)
 		}
-		auditDir := filepath.Join(s.root, tenantDir.Name(), "audit")
-		entry, err := s.scanDirForID(auditDir, id)
-		if err == nil {
-			return entry, nil
+		if last != nil {
+			head = chainHead{sequenceNumber: last.SequenceNumber, checksum: last.Checksum}
 		}
+	}
+	entry.SequenceNumber = head.sequenceNumber + 1
+	entry.PreviousChecksum = head.checksum
+	entry.Checksum = computeChecksum(entry)
+
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		s.forgetChainHead(tenantID)
+		return fmt.Errorf("failed to marshal audit entry: %w", err)
+	}
+	raw = append(raw, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+		s.forgetChainHead(tenantID)
+		return fmt.Errorf("failed to create audit dir: %w", err)
+	}
+
+	// #nosec G304 -- path validated by safeJoin inside dailyFilePath
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		s.forgetChainHead(tenantID)
+		return fmt.Errorf("failed to open audit file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if _, err := f.Write(raw); err != nil {
+		// The write may have landed partially, so the durable head is unknown:
+		// drop the cached head and let the next append re-read it from disk.
+		s.forgetChainHead(tenantID)
+		return fmt.Errorf("failed to append audit entry: %w", err)
+	}
+
+	s.rememberChainHead(tenantID, entry.SequenceNumber, entry.Checksum)
+	return nil
+}
+
+// rememberChainHead records the entry this store just appended as tenantID's
+// chain head. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) rememberChainHead(tenantID string, sequenceNumber uint64, checksum string) {
+	if s.chainHeads == nil {
+		s.chainHeads = make(map[string]chainHead)
+	}
+	s.chainHeads[tenantID] = chainHead{sequenceNumber: sequenceNumber, checksum: checksum}
+}
+
+// forgetChainHead drops tenantID's cached chain head so the next
+// AppendChainedEntry re-reads it from disk. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) forgetChainHead(tenantID string) {
+	delete(s.chainHeads, tenantID)
+}
+
+// forgetAllChainHeads drops every cached chain head. Callers must hold s.mutex.
+func (s *FlatFileAuditStore) forgetAllChainHeads() {
+	clear(s.chainHeads)
+}
+
+// GetAuditEntry retrieves an audit entry by ID, walking the full directory tree.
+// Hierarchical tenant IDs (e.g. "fleet-root/fleet-child-a") store their audit files
+// under nested subdirectories, so a single-level ReadDir(root) would miss them.
+func (s *FlatFileAuditStore) GetAuditEntry(ctx context.Context, id string) (*business.AuditEntry, error) {
+	var found *business.AuditEntry
+	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || d.Name() != "audit" {
+			return nil
+		}
+		entry, scanErr := s.scanDirForID(path, id)
+		if scanErr == nil {
+			found = entry
+		}
+		return nil
+	})
+	if found != nil {
+		return found, nil
+	}
+	if walkErr != nil && !os.IsNotExist(walkErr) {
+		return nil, fmt.Errorf("failed to read audit root: %w", walkErr)
 	}
 	return nil, business.ErrAuditNotFound
 }
@@ -246,22 +386,41 @@ func (s *FlatFileAuditStore) ListAuditEntries(ctx context.Context, filter *busin
 }
 
 // tenantIDsForFilter returns the list of tenant IDs to scan, based on the filter.
+// When no specific tenant is requested, it walks the root directory tree to find
+// every directory that contains an "audit" subdirectory. This supports hierarchical
+// tenant IDs (e.g. "fleet-root/fleet-child-a") whose audit files are stored under
+// nested subdirectories rather than directly under root.
 func (s *FlatFileAuditStore) tenantIDsForFilter(filter *business.AuditFilter) ([]string, error) {
 	if filter != nil && filter.TenantID != "" {
 		return []string{filter.TenantID}, nil
 	}
-	dirs, err := os.ReadDir(s.root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to list tenants: %w", err)
-	}
 	var ids []string
-	for _, d := range dirs {
-		if d.IsDir() {
-			ids = append(ids, d.Name())
+	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil
 		}
+		// Check if this directory has an "audit" subdirectory with JSONL files.
+		auditSub := filepath.Join(path, "audit")
+		entries, readErr := os.ReadDir(auditSub)
+		if readErr != nil {
+			return nil // no audit subdir — keep walking
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
+				// This directory is a tenant leaf: compute its ID relative to root.
+				rel, relErr := filepath.Rel(s.root, path)
+				if relErr != nil {
+					return nil
+				}
+				// Convert OS path separator to '/' for tenant ID consistency.
+				ids = append(ids, filepath.ToSlash(rel))
+				return nil
+			}
+		}
+		return nil
+	})
+	if walkErr != nil && !os.IsNotExist(walkErr) {
+		return nil, fmt.Errorf("failed to walk tenant dirs: %w", walkErr)
 	}
 	return ids, nil
 }
@@ -513,6 +672,12 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 
 	var oldest, newest *time.Time
 
+	auditRoot, err := os.OpenRoot(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("open audit root: %w", err)
+	}
+	defer func() { _ = auditRoot.Close() }()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -521,8 +686,11 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 			return nil
 		}
 
-		// #nosec G304 — path from WalkDir rooted at s.root
-		f, err := os.Open(path)
+		relativePath, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		f, err := auditRoot.Open(relativePath)
 		if err != nil {
 			return nil
 		}
@@ -601,6 +769,16 @@ func (s *FlatFileAuditStore) GetAuditStats(ctx context.Context) (*business.Audit
 func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	var count int64
 
+	// Archiving moves daily files out of the tenants' audit directories, which
+	// changes what GetLastAuditEntry reports. Drop every cached chain head once
+	// the walk has settled so the next append re-derives it from what remains
+	// on disk.
+	defer func() {
+		s.mutex.Lock()
+		s.forgetAllChainHeads()
+		s.mutex.Unlock()
+	}()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -647,6 +825,21 @@ func (s *FlatFileAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate
 func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	var count int64
 
+	auditRoot, err := os.OpenRoot(s.root)
+	if err != nil {
+		return 0, fmt.Errorf("open audit root: %w", err)
+	}
+	defer func() { _ = auditRoot.Close() }()
+
+	// Purging deletes daily files, which changes what GetLastAuditEntry reports.
+	// Drop every cached chain head once the walk has settled so the next append
+	// re-derives it from what remains on disk.
+	defer func() {
+		s.mutex.Lock()
+		s.forgetAllChainHeads()
+		s.mutex.Unlock()
+	}()
+
 	walkErr := filepath.WalkDir(s.root, func(path string, d os.DirEntry, ferr error) error {
 		if ferr != nil || d.IsDir() {
 			return nil
@@ -660,9 +853,13 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 			return nil
 		}
 
-		// Count entries before deleting. readFile retries Windows
-		// sharing violations from concurrent writers (Issue #1919).
-		raw, err := readFile(path)
+		relativePath, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		// Files selected for purge predate the current audit file, so no writer
+		// should hold them; Root keeps both the count and removal beneath s.root.
+		raw, err := auditRoot.ReadFile(relativePath)
 		if err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
 				if strings.TrimSpace(line) != "" {
@@ -670,7 +867,7 @@ func (s *FlatFileAuditStore) PurgeAuditEntries(ctx context.Context, beforeDate t
 				}
 			}
 		}
-		_ = os.Remove(path)
+		_ = auditRoot.Remove(relativePath)
 		return nil
 	})
 	if walkErr != nil {

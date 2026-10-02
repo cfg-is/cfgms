@@ -59,7 +59,7 @@ func SetupTestEnvironment(t *testing.T, config *StewardTestConfig) (certDir stri
 	} else {
 		dataDir = config.DataDir
 		if dataDir != "" {
-			err := os.MkdirAll(dataDir, 0755)
+			err := os.MkdirAll(dataDir, 0700)
 			require.NoError(t, err)
 		}
 		dataDirCleanup = func() {}

@@ -5,24 +5,34 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/registration"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/testutil"
 )
 
 // testIPTrustStore is a minimal in-memory IPTrustStore for hook unit tests.
@@ -92,7 +102,7 @@ func newTestApprovalHook(t *testing.T) (*WorkflowApprovalHook, cfgconfig.ConfigS
 	configStore := storageManager.GetConfigStore()
 
 	logger := logging.NewNoopLogger()
-	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil), logger, nil)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logger, nil, nil, nil, nil, nil)
 
 	hook := NewWorkflowApprovalHook(engine, configStore, logger)
 	return hook, configStore
@@ -476,7 +486,12 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)
 
-	body, _ := json.Marshal(RegistrationRequest{Token: token.Token})
+	body, _ := json.Marshal(RegistrationRequest{
+		Token:          token.Token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -497,12 +512,13 @@ func TestHandleRegister_HookRejects_Returns403(t *testing.T) {
 	assert.Equal(t, string(business.AuditEventSecurityEvent), string(entries[0].EventType))
 }
 
-// TestHandleRegister_HookError_FailsOpen verifies that when the approval hook returns an
-// error, handleRegister falls back to approve (fail-open) and continues with normal
-// registration processing (not 403 Forbidden).
-func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
+// TestHandleRegister_HookError_Quarantines verifies that admission-service
+// failures cannot grant a certificate or unrestricted fleet access.
+func TestHandleRegister_HookError_Quarantines(t *testing.T) {
 	server, tokenStore := setupTestServerWithTokenStore(t)
 	server.SetApprovalHook(&errorHook{})
+	server.SetPendingStore(pkgtesting.SetupTestStorage(t).GetPendingRegistrationStore())
+	server.cfg.Transport.ExternalAddress = "controller.example.com"
 
 	// Create a valid token in the store.
 	token := &registration.Token{
@@ -514,19 +530,24 @@ func TestHandleRegister_HookError_FailsOpen(t *testing.T) {
 	err := tokenStore.SaveToken(context.Background(), token)
 	require.NoError(t, err)
 
-	body, _ := json.Marshal(RegistrationRequest{Token: token.Token})
+	body, _ := json.Marshal(RegistrationRequest{
+		Token:          token.Token,
+		DeviceID:       testValidDeviceID,
+		IdentityKeyPub: testValidIdentityKeyPub,
+		CSRPEM:         testValidCSRPEM,
+	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
 
-	// The hook error causes fail-open: the request should not be rejected (403).
-	// Without a cert manager, the handler returns 500 at certificate generation.
-	// Either way it must NOT be 403 Forbidden (which would mean the hook error was
-	// incorrectly treated as a rejection).
-	assert.NotEqual(t, http.StatusForbidden, rec.Code,
-		"hook error must fail open — not treated as a rejection")
+	assert.Equal(t, http.StatusAccepted, rec.Code,
+		"hook error must quarantine without issuing a certificate")
+	var response RegistrationPendingResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	assert.Equal(t, business.PendingRegistrationStatusPending, response.Status)
+	assert.NotEmpty(t, response.PendingID)
 }
 
 // --- ManualReviewApprovalHook ---
@@ -537,7 +558,7 @@ func newTestManualReviewHook(t *testing.T) (*ManualReviewApprovalHook, business.
 	sm := pkgtesting.SetupTestStorage(t)
 	pendingStore := sm.GetPendingRegistrationStore()
 	require.NotNil(t, pendingStore, "OSS storage manager must provide a PendingRegistrationStore")
-	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger(), lease.SingletonJob{})
 	t.Cleanup(func() { hook.Stop() })
 	return hook, pendingStore
 }
@@ -611,7 +632,7 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	require.NoError(t, pendingStore.AddPending(ctx, entry))
 
 	// Use a fresh hook so the background goroutine is fresh.
-	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger())
+	hook := NewManualReviewApprovalHook(pendingStore, 24*time.Hour, logging.NewNoopLogger(), lease.SingletonJob{})
 	defer hook.Stop()
 
 	// Manually invoke the expiry sweep.
@@ -621,4 +642,151 @@ func TestManualReviewApprovalHook_ExpireTimedOut(t *testing.T) {
 	got, err := pendingStore.GetPendingByID(ctx, "pending-expired-test")
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRegistrationStatusExpired, got.Status)
+}
+
+func TestBoundRejectionReason(t *testing.T) {
+	t.Run("passes a normal operator-readable reason through", func(t *testing.T) {
+		assert.Equal(t, "device not on the trusted subnet",
+			boundRejectionReason("device not on the trusted subnet"))
+	})
+
+	t.Run("strips control characters that would forge log or record structure", func(t *testing.T) {
+		got := boundRejectionReason("denied\n2026-01-01 ERROR forged entry\x00")
+		assert.Equal(t, "denied2026-01-01 ERROR forged entry", got)
+		assert.NotContains(t, got, "\n")
+		assert.NotContains(t, got, "\x00")
+	})
+
+	t.Run("folds tabs to spaces and trims surrounding whitespace", func(t *testing.T) {
+		assert.Equal(t, "denied by policy", boundRejectionReason("  denied\tby policy  "))
+	})
+
+	t.Run("caps an unbounded reason", func(t *testing.T) {
+		got := boundRejectionReason(strings.Repeat("A", 5000))
+		assert.LessOrEqual(t, len(got), maxRejectionReasonLength+len("…"))
+		assert.True(t, strings.HasSuffix(got, "…"), "truncation must be visible: %q", got)
+	})
+
+	t.Run("truncates on a rune boundary", func(t *testing.T) {
+		// Multi-byte runes straddling the cut must not leave invalid UTF-8.
+		got := boundRejectionReason(strings.Repeat("é", 5000))
+		assert.True(t, utf8.ValidString(got), "truncated reason must remain valid UTF-8")
+		assert.True(t, strings.HasSuffix(got, "…"))
+	})
+
+	t.Run("empty stays empty", func(t *testing.T) {
+		assert.Equal(t, "", boundRejectionReason(""))
+	})
+}
+
+// --- ManualReviewApprovalHook: store requirements (#3491) ---
+
+// buildRegistrationHookPostgresDSN constructs a Postgres DSN from the same env
+// vars used by the cluster storage tests.
+func buildRegistrationHookPostgresDSN() string {
+	pw := testutil.GetTestDBPassword()
+	port := 5432
+	if p := os.Getenv("CFGMS_TEST_DB_PORT"); p != "" {
+		if pi, err := strconv.Atoi(p); err == nil {
+			port = pi
+		}
+	}
+	dbName := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_NAME"); v != "" {
+		dbName = v
+	}
+	dbUser := "cfgms_test"
+	if v := os.Getenv("CFGMS_TEST_DB_USER"); v != "" {
+		dbUser = v
+	}
+	return fmt.Sprintf("host=localhost port=%d dbname=%s user=%s password=%s sslmode=disable",
+		port, dbName, dbUser, pw)
+}
+
+// skipRegistrationHookTestIfNoPostgres skips the test when Postgres is unreachable.
+func skipRegistrationHookTestIfNoPostgres(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping Postgres test in short mode")
+	}
+	dsn := buildRegistrationHookPostgresDSN()
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Skip("Postgres not available:", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Ping(); err != nil {
+		t.Skip("Postgres not reachable:", err)
+	}
+	return dsn
+}
+
+// TestManualReviewApprovalHookStoreRequirements_DeclarationShape verifies that
+// ManualReviewApprovalHookStoreRequirements declares exactly one requirement:
+// PendingRegistrationStore as required for the "registration" subsystem.
+func TestManualReviewApprovalHookStoreRequirements_DeclarationShape(t *testing.T) {
+	reqs := ManualReviewApprovalHookStoreRequirements
+	require.Len(t, reqs, 1, "ManualReviewApprovalHook must declare exactly one required store")
+	assert.Equal(t, "registration", reqs[0].Subsystem,
+		"subsystem must be named 'registration' so startup errors are operator-readable")
+	assert.Equal(t, interfaces.StoreNamePendingRegistration, reqs[0].Store,
+		"declaration must reference PendingRegistrationStore")
+	assert.Equal(t, interfaces.RequirementRequired, reqs[0].Severity,
+		"registration admission cannot function without this store: severity must be Required")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_OSSCompositionPassesValidation verifies
+// that a controller composed with the OSS (flatfile+SQLite) storage manager satisfies
+// ManualReviewApprovalHookStoreRequirements — the OSS clean-start acceptance criterion.
+func TestManualReviewApprovalHookStoreRequirements_OSSCompositionPassesValidation(t *testing.T) {
+	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "test.db"))
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.NoError(t, err,
+		"OSS composite storage manager must satisfy ManualReviewApprovalHook store requirements")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_ClusterCompositionPassesValidation verifies
+// that a controller composed with the database-provider storage manager satisfies
+// ManualReviewApprovalHookStoreRequirements — the cluster clean-start acceptance criterion.
+// Skipped when Postgres is unreachable.
+func TestManualReviewApprovalHookStoreRequirements_ClusterCompositionPassesValidation(t *testing.T) {
+	pgDSN := skipRegistrationHookTestIfNoPostgres(t)
+
+	sm, err := interfaces.CreateClusterStorageManager(pgDSN, "test-hmac-key-32-bytes-padding--", nil)
+	require.NoError(t, err)
+	defer func() { _ = sm.Close() }()
+
+	err = interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.NoError(t, err,
+		"cluster storage manager must satisfy ManualReviewApprovalHook store requirements")
+}
+
+// TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup verifies
+// that when the backing provider declines PendingRegistrationStore, ValidateStorageRequirements
+// returns an error that names the "registration" subsystem. This guards against the #3400
+// condition — a provider gap that previously surfaced as a 503 at request time rather than
+// a startup failure.
+//
+// The test reproduces the condition against a real database provider implementation
+// that overrides only CreatePendingRegistrationStore (via
+// pkgtesting.SetupDecliningPendingRegistrationClusterStorage), composed through the
+// real CreateClusterStorageManager path — not a hand-built store-less StorageManager.
+// Skipped when Postgres is unreachable.
+func TestManualReviewApprovalHookStoreRequirements_DecliningProviderFailsStartup(t *testing.T) {
+	pgDSN := skipRegistrationHookTestIfNoPostgres(t)
+
+	sm := pkgtesting.SetupDecliningPendingRegistrationClusterStorage(t, pgDSN)
+	require.False(t, sm.HasStore(interfaces.StoreNamePendingRegistration),
+		"a declining provider must leave PendingRegistrationStore absent from the composed manager")
+
+	err := interfaces.ValidateStorageRequirements(sm, ManualReviewApprovalHookStoreRequirements)
+	require.Error(t, err,
+		"a real provider declining PendingRegistrationStore must block startup via ValidateStorageRequirements")
+	assert.Contains(t, err.Error(), "registration",
+		"startup error must name the registration subsystem so operators can diagnose the gap")
+	assert.Contains(t, err.Error(), string(interfaces.StoreNamePendingRegistration),
+		"startup error must name the missing store")
 }

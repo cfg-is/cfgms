@@ -30,6 +30,7 @@ import (
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	cpgrpc "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
+	cpmemory "github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	cptypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
@@ -750,11 +751,63 @@ func grpcCPFactory(t *testing.T) (cpinterfaces.ControlPlaneProvider, map[string]
 }
 
 // =============================================================================
-// Top-level test: run full suite against gRPC provider
+// In-Process Memory Factory
+// =============================================================================
+
+// memoryCPFactory is a CPProviderFactory for the in-process memory provider.
+// It creates a server provider and one client per steward ID in
+// cpContractStewardIDs, all attached to a single shared bus.
+func memoryCPFactory(t *testing.T) (cpinterfaces.ControlPlaneProvider, map[string]cpinterfaces.ControlPlaneProvider, func()) {
+	t.Helper()
+
+	ctx := context.Background()
+	bus := cpmemory.NewBus()
+
+	server := cpmemory.New(cpmemory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+
+	clients := make(map[string]cpinterfaces.ControlPlaneProvider, len(cpContractStewardIDs))
+	concreteClients := make([]*cpmemory.Provider, 0, len(cpContractStewardIDs))
+
+	for _, id := range cpContractStewardIDs {
+		client := cpmemory.New(cpmemory.ModeClient)
+		require.NoError(t, client.Initialize(ctx, map[string]interface{}{
+			"bus":        bus,
+			"steward_id": id,
+		}))
+		require.NoError(t, client.Start(ctx))
+		clients[id] = client
+		concreteClients = append(concreteClients, client)
+	}
+
+	require.Equal(t, len(cpContractStewardIDs), bus.ClientCount(), "all stewards should be attached")
+
+	cleanup := func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, c := range concreteClients {
+			require.NoError(t, c.Stop(stopCtx))
+		}
+		require.NoError(t, server.Stop(stopCtx))
+	}
+
+	return server, clients, cleanup
+}
+
+// =============================================================================
+// Top-level tests: run full suite against each provider
 // =============================================================================
 
 // TestCP_GRPCContractSuite runs all ControlPlaneProvider contract tests against
 // the gRPC-over-QUIC provider implementation.
 func TestCP_GRPCContractSuite(t *testing.T) {
 	RunCPContractTests(t, grpcCPFactory)
+}
+
+// TestCP_MemoryContractSuite runs all ControlPlaneProvider contract tests against
+// the in-process memory provider, so consumers that wire it into tests get the
+// same behavioural guarantees the gRPC provider offers.
+func TestCP_MemoryContractSuite(t *testing.T) {
+	RunCPContractTests(t, memoryCPFactory)
 }

@@ -27,29 +27,9 @@ type DatabaseAuditStore struct {
 	schemas DatabaseSchemas
 }
 
-// NewDatabaseAuditStore creates a new PostgreSQL-based audit store
-func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*DatabaseAuditStore, error) {
-	// Open database connection with connection pooling
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open database connection: %w", err)
-	}
-
-	// Configure connection pool for audit workload
-	maxOpenConns := getIntFromConfig(config, "max_open_connections", 50) // Higher for audit writes
-	maxIdleConns := getIntFromConfig(config, "max_idle_connections", 10)
-	connMaxLifetime := time.Duration(getIntFromConfig(config, "connection_max_lifetime_minutes", 30)) * time.Minute
-
-	db.SetMaxOpenConns(maxOpenConns)
-	db.SetMaxIdleConns(maxIdleConns)
-	db.SetConnMaxLifetime(connMaxLifetime)
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
-	}
-
+// NewDatabaseAuditStore creates a new PostgreSQL-based audit store backed by
+// the shared connection pool db (owned by DatabaseProvider).
+func NewDatabaseAuditStore(db *sql.DB, config map[string]interface{}) (*DatabaseAuditStore, error) {
 	store := &DatabaseAuditStore{
 		db:      db,
 		config:  config,
@@ -58,7 +38,6 @@ func NewDatabaseAuditStore(dsn string, config map[string]interface{}) (*Database
 
 	// Initialize database schema
 	if err := store.initializeSchema(); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 	}
 
@@ -90,6 +69,11 @@ func (s *DatabaseAuditStore) initializeSchema() error {
 	// Create audit entries table
 	if err := s.schemas.CreateAuditEntriesTable(ctx, s.db); err != nil {
 		return fmt.Errorf("failed to create audit_entries table: %w", err)
+	}
+
+	// Create the chain-head lock table AppendChainedEntry serializes on.
+	if err := s.schemas.CreateAuditChainHeadsTable(ctx, s.db); err != nil {
+		return fmt.Errorf("failed to create audit_chain_heads table: %w", err)
 	}
 
 	// Create audit statistics materialized view
@@ -266,6 +250,8 @@ func (s *DatabaseAuditStore) ListAuditEntries(ctx context.Context, filter *busin
 	orderClause := buildOrderByClause(filter)
 	limitClause := buildLimitOffsetClause(filter)
 
+	// #nosec G202 -- all three helpers return allowlisted SQL fragments and
+	// place every caller-controlled filter value in the args slice.
 	query := baseQuery + " " + whereClause + " " + orderClause + limitClause
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -588,6 +574,167 @@ func (s *DatabaseAuditStore) GetLastAuditEntry(ctx context.Context, tenantID str
 	return entry, nil
 }
 
+// AppendChainedEntry implements business.AuditStore.AppendChainedEntry. It takes a
+// row-level lock (SELECT ... FOR UPDATE) on the tenant's row in audit_chain_heads
+// before reading the current sequence/checksum, so the head-read, the sequence
+// assignment, and the entry INSERT all happen inside one transaction. A second
+// caller — including one running in a different controller process against this
+// same database — blocks on that lock until the first commits or rolls back, so
+// two concurrent appends for the same tenant can never be assigned the same
+// SequenceNumber (ADR-004 amendment, ADR-031 Decision 1, Issue #3754).
+//
+// Deliberately does not take s.mutex: that mutex only serializes callers within
+// this single process, which would mask a broken FOR UPDATE and give a false
+// sense of cross-node safety. The Postgres row lock is the only serialization
+// mechanism here, matching what actually happens when two controller nodes call
+// this method concurrently.
+func (s *DatabaseAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if entry == nil {
+		return fmt.Errorf("audit entry cannot be nil")
+	}
+	if computeChecksum == nil {
+		return fmt.Errorf("computeChecksum function is required")
+	}
+
+	entry.TenantID = tenantID
+	if err := s.validateAuditEntry(entry); err != nil {
+		return err
+	}
+
+	// Metadata defaults do not depend on the assigned sequence, so set them
+	// before opening the transaction to keep the locked section short.
+	if entry.ID == "" {
+		entry.ID = s.generateAuditID(entry)
+	}
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+	if entry.Severity == "" {
+		entry.Severity = business.AuditSeverityLow
+	}
+	if entry.UserType == "" {
+		entry.UserType = business.AuditUserTypeHuman
+	}
+	if entry.Version == "" {
+		entry.Version = "1.0"
+	}
+
+	detailsJSON, err := serializeMetadata(entry.Details)
+	if err != nil {
+		return fmt.Errorf("failed to serialize details: %w", err)
+	}
+	changesJSON, err := serializeAuditChanges(entry.Changes)
+	if err != nil {
+		return fmt.Errorf("failed to serialize changes: %w", err)
+	}
+	var ipAddr net.IP
+	if entry.IPAddress != "" {
+		ipAddr = net.ParseIP(entry.IPAddress)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Seed the chain-head row from any pre-existing audit_entries rows the first
+	// time a tenant is appended under this mechanism, so a tenant that wrote
+	// entries before audit_chain_heads existed keeps its sequence continuity.
+	//
+	// $1 appears three times below in two different type-inference contexts:
+	// once in the INSERT target list (assignment context, resolved against the
+	// tenant_id column) and twice inside WHERE tenant_id = $1 (operator context,
+	// resolved via equality-operator lookup). Postgres deduces a type for each
+	// occurrence independently and then requires them to agree; assignment
+	// context and operator context can deduce different types for the same
+	// unadorned placeholder, which Postgres rejects at parse time as SQLSTATE
+	// 42P08 "inconsistent types deduced for parameter $1" — this is not a race,
+	// it fails on every call. The explicit ::text cast pins all three
+	// occurrences to one identical type up front, so there is nothing left to
+	// deduce differently; text is implicitly assignable to the varchar(255)
+	// tenant_id column and implicitly comparable to it, so this changes no
+	// runtime semantics (Issue #3863).
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_chain_heads (tenant_id, sequence_number, checksum)
+		VALUES ($1::text,
+			COALESCE((SELECT MAX(sequence_number) FROM audit_entries WHERE tenant_id = $1::text), 0),
+			COALESCE((SELECT checksum FROM audit_entries WHERE tenant_id = $1::text ORDER BY sequence_number DESC LIMIT 1), '')
+		)
+		ON CONFLICT (tenant_id) DO NOTHING
+	`, tenantID); err != nil {
+		return fmt.Errorf("failed to seed audit chain head: %w", err)
+	}
+
+	var headSeq uint64
+	var headChecksum string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT sequence_number, checksum FROM audit_chain_heads WHERE tenant_id = $1 FOR UPDATE`,
+		tenantID,
+	).Scan(&headSeq, &headChecksum); err != nil {
+		return fmt.Errorf("failed to lock audit chain head: %w", err)
+	}
+
+	entry.SequenceNumber = headSeq + 1
+	entry.PreviousChecksum = headChecksum
+	entry.Checksum = computeChecksum(entry)
+
+	insertQuery := `
+		INSERT INTO audit_entries (
+			id, tenant_id, timestamp, event_type, action, user_id, user_type, session_id,
+			resource_type, resource_id, resource_name, result, error_code, error_message,
+			request_id, ip_address, user_agent, method, path, details, changes, tags,
+			severity, source, version, checksum, sequence_number, previous_checksum
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
+		)
+	`
+	if _, err := tx.ExecContext(ctx, insertQuery,
+		entry.ID,
+		entry.TenantID,
+		entry.Timestamp,
+		string(entry.EventType),
+		entry.Action,
+		entry.UserID,
+		string(entry.UserType),
+		convertNullString(entry.SessionID),
+		entry.ResourceType,
+		entry.ResourceID,
+		convertNullString(entry.ResourceName),
+		string(entry.Result),
+		convertNullString(entry.ErrorCode),
+		convertNullString(entry.ErrorMessage),
+		convertNullString(entry.RequestID),
+		ipAddr,
+		convertNullString(entry.UserAgent),
+		convertNullString(entry.Method),
+		convertNullString(entry.Path),
+		detailsJSON,
+		changesJSON,
+		pq.Array(entry.Tags),
+		string(entry.Severity),
+		entry.Source,
+		entry.Version,
+		entry.Checksum,
+		entry.SequenceNumber,
+		entry.PreviousChecksum,
+	); err != nil {
+		return fmt.Errorf("failed to store chained audit entry: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE audit_chain_heads SET sequence_number = $2, checksum = $3 WHERE tenant_id = $1`,
+		tenantID, entry.SequenceNumber, entry.Checksum,
+	); err != nil {
+		return fmt.Errorf("failed to advance audit chain head: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit chained audit entry: %w", err)
+	}
+	return nil
+}
+
 // ArchiveAuditEntries archives old audit entries (for compliance, implement as needed)
 func (s *DatabaseAuditStore) ArchiveAuditEntries(ctx context.Context, beforeDate time.Time) (int64, error) {
 	// Physical archival to a partition or archive table is deferred; returns zero rows.
@@ -666,7 +813,10 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	var eventTypeStr, userTypeStr, resultStr, severityStr string
 	var detailsJSON, changesJSON []byte
 	var tags pq.StringArray
-	var ipAddr net.IP
+	// ip_address is a nullable inet column; net.IP has no sql.Scanner, so a NULL
+	// value fails the whole Scan() call (database/sql's built-in NULL handling
+	// does not cover net.IP). Scan into sql.NullString instead.
+	var ipAddr sql.NullString
 	var sessionID, resourceName, errorCode, errorMessage, requestID, userAgent, method, path sql.NullString
 
 	err := scanner.Scan(
@@ -738,8 +888,8 @@ func (s *DatabaseAuditStore) scanAuditEntry(scanner interface {
 	}
 
 	// Convert IP address
-	if ipAddr != nil {
-		entry.IPAddress = ipAddr.String()
+	if ipAddr.Valid {
+		entry.IPAddress = ipAddr.String
 	}
 
 	// Deserialize JSON fields
@@ -788,9 +938,8 @@ func (s *DatabaseAuditStore) RefreshStatsView(ctx context.Context) error {
 }
 
 // Close closes the database connection
+// Close is a no-op: the underlying connection pool is owned and closed by
+// DatabaseProvider, not by individual stores (ADR-031 Decision 6).
 func (s *DatabaseAuditStore) Close() error {
-	if s.db != nil {
-		return s.db.Close()
-	}
 	return nil
 }

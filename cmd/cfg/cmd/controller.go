@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,10 +21,10 @@ import (
 var (
 	// Controller command flags
 	healthURL             string
-	healthAPIKey          string
 	healthFormat          string
 	controllerTLSCACert   string
 	controllerTLSInsecure bool
+	controllerServerName  string
 
 	// signing-cert rotate flags
 	signingCertOverlapDays int
@@ -66,8 +67,8 @@ Examples:
   # Check controller status
   cfg controller status --url=https://controller.example.com
 
-  # With API key authentication
-  cfg controller status --url=https://controller.example.com --api-key=your-key`,
+  # With an admin mTLS bundle
+  cfg controller status --url=https://controller.example.com --bundle=/path/to/admin.bundle.yaml`,
 	RunE: runControllerStatus,
 }
 
@@ -81,14 +82,19 @@ var controllerMetricsCmd = &cobra.Command{
 - Application: workflow/script queue depths, active executions
 - System: CPU, memory, goroutines
 
+Metrics are served only on the controller's private metrics listener
+(metrics_listen_addr in the controller config), never on the public API
+listener. Point --url, or CFGMS_METRICS_URL, at that listener's address. It
+is reachable only from the controller host or its private network.
+
 Output formats: text (default), json
 
 Examples:
-  # View metrics in human-readable format
-  cfg controller metrics --url=https://controller.example.com
+  # View metrics in human-readable format (run where the private listener is reachable)
+  cfg controller metrics --url=https://10.0.0.5:9443
 
   # Export metrics as JSON
-  cfg controller metrics --url=https://controller.example.com --format=json`,
+  CFGMS_METRICS_URL=https://10.0.0.5:9443 cfg controller metrics --format=json`,
 	RunE: runControllerMetrics,
 }
 
@@ -133,13 +139,55 @@ Examples:
 	RunE: runSigningCertRotate,
 }
 
+// clusterCmd groups cluster node management operations.
+var clusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Cluster node management",
+	Long: `Manage controller cluster nodes.
+
+Subcommands:
+  drain         Drain a cluster node, preventing it from accepting new work
+  decommission  Decommission a drained cluster node, removing it from the cluster`,
+}
+
+// clusterDrainCmd drains a cluster node.
+var clusterDrainCmd = &cobra.Command{
+	Use:   "drain <node-id>",
+	Short: "Drain a cluster node",
+	Long: `Drain a cluster node, preventing it from accepting new work.
+
+The node continues running until all in-flight requests complete,
+then transitions to the 'draining' state. Run decommission after
+drain completes to remove the node from the cluster.
+
+Examples:
+  cfg controller cluster drain node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDrain,
+}
+
+// clusterDecommissionCmd decommissions a drained cluster node.
+var clusterDecommissionCmd = &cobra.Command{
+	Use:   "decommission <node-id>",
+	Short: "Decommission a cluster node",
+	Long: `Decommission a drained cluster node, removing it from the cluster.
+
+The node must be in 'draining' state before it can be decommissioned.
+Returns an error (HTTP 409) if the node is not in 'draining' state.
+
+Examples:
+  cfg controller cluster decommission node-1 --url=https://controller.example.com`,
+	Args: cobra.ExactArgs(1),
+	RunE: runClusterDecommission,
+}
+
 func init() {
 	// Controller command flags
 	controllerCmd.PersistentFlags().StringVar(&healthURL, "url", "", "Controller API URL (required)")
-	controllerCmd.PersistentFlags().StringVar(&healthAPIKey, "api-key", "", "API key for authentication")
 	controllerCmd.PersistentFlags().StringVar(&healthFormat, "format", "text", "Output format (text, json)")
 	controllerCmd.PersistentFlags().StringVar(&controllerTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	controllerCmd.PersistentFlags().BoolVar(&controllerTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	controllerCmd.PersistentFlags().StringVar(&controllerServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	_ = controllerCmd.MarkPersistentFlagRequired("url")
 
@@ -150,46 +198,30 @@ func init() {
 	// signing-cert subcommand tree
 	signingCertCmd.AddCommand(signingCertRotateCmd)
 
+	// cluster subcommand tree
+	clusterCmd.AddCommand(clusterDrainCmd, clusterDecommissionCmd)
+
 	// Add subcommands
 	controllerCmd.AddCommand(controllerStatusCmd)
 	controllerCmd.AddCommand(controllerMetricsCmd)
 	controllerCmd.AddCommand(signingCertCmd)
+	controllerCmd.AddCommand(clusterCmd)
 }
 
-// getControllerClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getControllerClient creates an API client using an active session or an admin mTLS bundle.
 func getControllerClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(healthURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	// Try admin bundle first (mTLS auto-discovery)
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	// Fallback: API key path
-	apiKey := healthAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := controllerTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := controllerServerName
 
-	tlsCACertPath := controllerTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 func runControllerStatus(cmd *cobra.Command, args []string) error {
@@ -289,6 +321,14 @@ func runControllerStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runControllerMetrics(cmd *cobra.Command, args []string) error {
+	// Metrics live on the private metrics listener, not the public API
+	// listener, so CFGMS_METRICS_URL takes precedence over CFGMS_API_URL here;
+	// an explicit --url still wins over both.
+	if strings.TrimSpace(healthURL) == "" {
+		if metricsURL := os.Getenv("CFGMS_METRICS_URL"); metricsURL != "" {
+			healthURL = metricsURL
+		}
+	}
 	client, err := getControllerClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
@@ -304,6 +344,9 @@ func runControllerMetrics(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("metrics are not served at this address (404): point --url or CFGMS_METRICS_URL at the controller's private metrics listener (metrics_listen_addr), not the public API")
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
@@ -479,6 +522,84 @@ func runSigningCertRotate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Overlap days:      %d\n", result.OverlapDays)
 	fmt.Printf("Stewards notified: %d\n", result.StewardsNotified)
 	return nil
+}
+
+func runClusterDrain(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/drain"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to drain node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "draining"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+}
+
+func runClusterDecommission(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	client, err := getControllerClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	path := "/api/v1/cluster/nodes/" + url.PathEscape(nodeID) + "/decommission"
+	resp, err := client.doRequest(context.Background(), "POST", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to decommission node: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to close response body: %v\n", closeErr)
+		}
+	}()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("admin mTLS certificate required")
+	case http.StatusConflict:
+		return fmt.Errorf("%s", strings.TrimSpace(string(body)))
+	case http.StatusOK:
+		var result struct {
+			State string `json:"state"`
+		}
+		state := "decommissioned"
+		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.State != "" {
+			state = result.State
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Node %s is now %s.\n", nodeID, state)
+		return nil
+	default:
+		return fmt.Errorf("%s - %s", resp.Status, strings.TrimSpace(string(body)))
+	}
 }
 
 func getStatusIcon(status string) string {

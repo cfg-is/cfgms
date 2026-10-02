@@ -17,6 +17,7 @@ import (
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
@@ -30,11 +31,9 @@ var configSvcTestSeq int64
 func createTestStewardConfig(stewardID string) *stewardtypes.StewardConfig {
 	return &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: stewardID,
 			Logging: stewardtypes.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 			ErrorHandling: stewardtypes.ErrorHandlingConfig{
 				ModuleLoadFailure:  stewardtypes.ActionContinue,
@@ -282,7 +281,6 @@ func TestValidateConfig(t *testing.T) {
 		invalidConfig := &stewardtypes.StewardConfig{
 			Steward: stewardtypes.StewardSettings{
 				// Missing ID field
-				Mode: stewardtypes.ModeController,
 			},
 			Resources: []stewardtypes.ResourceConfig{
 				{
@@ -658,5 +656,106 @@ func TestGetConfiguration_TenantIsolation(t *testing.T) {
 	for _, r := range retrieved.Resources {
 		assert.NotEqual(t, "msp-a-policy", r.Name,
 			"steward-b must not receive resources from msp-a's ancestor chain (tenant isolation violated)")
+	}
+}
+
+// createTestServiceV2WithControllerSvc creates a ConfigurationServiceV2 backed by real
+// storage and a ControllerService, for integration tests that need both services.
+func createTestServiceV2WithControllerSvc(t *testing.T) (*ConfigurationServiceV2, *ControllerService) {
+	t.Helper()
+	logger := logging.NewNoopLogger()
+	storageManager := pkgtesting.SetupTestStorage(t)
+	controllerSvc := NewControllerService(logger)
+	svc := NewConfigurationServiceV2(logger, storageManager, controllerSvc)
+	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
+		context.Background(),
+		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
+	))
+	return svc, controllerSvc
+}
+
+// --- Cluster cascade wiring tests (Issue #2425) ---
+
+// TestNewConfigurationServiceV2_WiresClusterRegistry verifies that when NewConfigurationServiceV2
+// is constructed with a non-nil ControllerService, the cluster-policies cascade is active:
+// a steward with cluster membership DNA attributes receives resources from the matching
+// cluster-policies config document in its effective configuration.
+func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
+	ctx := context.Background()
+	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
+
+	stewardID := "cluster-member-1"
+
+	// Register the steward in the ControllerService with a cluster:cfg-lab ADR-017
+	// fragment — the shape BuildRegistry parses to record stewardID as a member of
+	// "cfg-lab" (Issue #2908). Built via sdna.NewFragment so the canonical bytes come
+	// from the same production encoder the steward uses.
+	clusterFrag, err := sdna.NewFragment("cluster:cfg-lab", "hyperv", sdna.MapState{"name": "cfg-lab"})
+	require.NoError(t, err)
+	dna := makeTestDNA(stewardID, nil)
+	dna.Fragments = []*common.Fragment{clusterFrag}
+	controllerSvc.mu.Lock()
+	controllerSvc.stewards[stewardID] = &StewardInfo{
+		ID:       stewardID,
+		TenantID: "default",
+		DNA:      dna,
+		Status:   "active",
+		Metrics:  make(map[string]string),
+	}
+	controllerSvc.mu.Unlock()
+
+	// Store a cluster-policies/cfg-lab config document.
+	cs := svc.storageManager.GetConfigStore()
+	clusterResource := stewardtypes.ResourceConfig{Name: "cfg-lab-vm", Module: "hyperv.vm"}
+	clusterCfg := stewardtypes.StewardConfig{
+		Resources: []stewardtypes.ResourceConfig{clusterResource},
+	}
+	clusterCfgYAML, err := yaml.Marshal(clusterCfg)
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreConfig(ctx, &cfgconfig.ConfigEntry{
+		Key:  &cfgconfig.ConfigKey{TenantID: "default", Namespace: "cluster-policies", Name: "cfg-lab"},
+		Data: clusterCfgYAML,
+	}))
+
+	// Also store a device-level config so Sources is non-empty (GetEffectiveConfiguration
+	// returns the raw resolver result without the Sources>0 gate).
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+
+	resourcesByName := make(map[string]stewardtypes.ResourceConfig)
+	for _, r := range effective.Config.Resources {
+		resourcesByName[r.Name] = r
+	}
+
+	_, hasCfgLabVM := resourcesByName["cfg-lab-vm"]
+	assert.True(t, hasCfgLabVM,
+		"steward with a cluster:cfg-lab DNA fragment must receive cfg-lab-vm from cluster-policies/cfg-lab")
+
+	src, hasSrc := effective.Sources["resource.cfg-lab-vm"]
+	require.True(t, hasSrc, "cluster resource source must be tracked in effective config")
+	assert.Contains(t, src.Source, "cluster-policies",
+		"source description must identify the cluster-policies namespace")
+}
+
+// TestNewConfigurationServiceV2_NoControllerSvc_NoCascade verifies that when
+// NewConfigurationServiceV2 is constructed with a nil ControllerService (test/standalone mode),
+// no cluster cascade occurs and ResolveConfiguration behaves identically to before this story.
+func TestNewConfigurationServiceV2_NoControllerSvc_NoCascade(t *testing.T) {
+	ctx := context.Background()
+	svc := createTestServiceV2(t) // nil controllerSvc
+
+	stewardID := "no-cluster-steward"
+	require.NoError(t, svc.SetConfiguration(ctx, "default", stewardID, createTestStewardConfig(stewardID)))
+
+	effective, err := svc.GetEffectiveConfiguration(ctx, "default", stewardID)
+	require.NoError(t, err)
+	require.NotNil(t, effective, "effective config must be returned even without a cluster registry")
+
+	// No cluster-policies resources should appear (there's no registry to look up membership).
+	for _, r := range effective.Config.Resources {
+		assert.NotContains(t, r.Name, "cluster",
+			"no cluster resources expected when ControllerService is nil")
 	}
 }

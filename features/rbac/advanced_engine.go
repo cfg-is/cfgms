@@ -12,14 +12,13 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// AdvancedAuthEngine provides enhanced authorization with conditional permissions,
-// delegation, and comprehensive audit logging.
+// AdvancedAuthEngine provides enhanced authorization with conditional permissions
+// and comprehensive audit logging.
 type AdvancedAuthEngine struct {
-	baseEngine        *AuthEngine
-	conditionEngine   *ConditionEngine
-	scopeEngine       *ScopeEngine
-	delegationManager *DelegationManager
-	auditManager      *audit.Manager
+	baseEngine      *AuthEngine
+	conditionEngine *ConditionEngine
+	scopeEngine     *ScopeEngine
+	auditManager    *audit.Manager
 }
 
 // NewAdvancedAuthEngine creates a new advanced authorization engine
@@ -32,22 +31,11 @@ func NewAdvancedAuthEngine(
 	baseEngine := NewAuthEngine(permStore, roleStore, subjectStore, assignmentStore)
 
 	return &AdvancedAuthEngine{
-		baseEngine:        baseEngine,
-		conditionEngine:   NewConditionEngine(),
-		scopeEngine:       NewScopeEngine(),
-		delegationManager: NewDelegationManager(nil), // Will be set via SetRBACManager
-		auditManager:      nil,                       // Set via SetAuditManager from parent Manager
+		baseEngine:      baseEngine,
+		conditionEngine: NewConditionEngine(),
+		scopeEngine:     NewScopeEngine(),
+		auditManager:    nil, // Set via SetAuditManager from parent Manager
 	}
-}
-
-// SetRBACManager sets the RBAC manager reference for delegation operations
-func (a *AdvancedAuthEngine) SetRBACManager(rbacManager RBACManager) {
-	a.delegationManager = NewDelegationManager(rbacManager)
-}
-
-// SetDelegationManager sets a specific delegation manager instance
-func (a *AdvancedAuthEngine) SetDelegationManager(delegationManager *DelegationManager) {
-	a.delegationManager = delegationManager
 }
 
 // SetAuditManager sets the audit manager for recording permission events to durable storage.
@@ -62,7 +50,7 @@ func (a *AdvancedAuthEngine) SetHierarchyEngine(he *HierarchyEngine) {
 	a.baseEngine.SetHierarchyEngine(he)
 }
 
-// CheckPermission performs comprehensive permission checking with RBAC and delegation.
+// CheckPermission performs comprehensive permission checking with RBAC and audit logging.
 func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *common.AccessRequest) (*common.AccessResponse, error) {
 	// Extract context information for audit logging
 	sourceIP := ""
@@ -72,7 +60,6 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 		userAgent = request.Context["user_agent"]
 	}
 
-	// Step 1: Check base RBAC permissions
 	baseResponse, err := a.baseEngine.CheckPermission(ctx, request)
 	if err != nil {
 		errorResponse := &common.AccessResponse{
@@ -83,50 +70,13 @@ func (a *AdvancedAuthEngine) CheckPermission(ctx context.Context, request *commo
 		return errorResponse, err
 	}
 
-	// Step 2: Check for delegated permissions if base RBAC failed
-	var delegatedGranted bool
-	var delegatedReason string
-	if !baseResponse.Granted {
-		delegatedGranted, delegatedReason, err = a.delegationManager.CheckDelegatedPermission(
-			ctx, request.SubjectId, request.PermissionId, request.ResourceId, request.TenantId, nil)
-		if err != nil {
-			errorResponse := &common.AccessResponse{
-				Granted: false,
-				Reason:  fmt.Sprintf("Error checking delegated permissions: %v", err),
-			}
-			a.recordPermissionCheck(ctx, request, business.AuditResultError, errorResponse.Reason, sourceIP, userAgent)
-			return errorResponse, err
-		}
-	}
-
-	// Determine if RBAC (base + delegation) grants access
-	rbacGranted := baseResponse.Granted || delegatedGranted
-	var rbacReason string
-	if baseResponse.Granted {
-		rbacReason = baseResponse.Reason
-	} else if delegatedGranted {
-		rbacReason = delegatedReason
-	} else {
-		rbacReason = fmt.Sprintf("Base: %s. Delegation: %s", baseResponse.Reason, delegatedReason)
-	}
-
-	finalResponse := &common.AccessResponse{
-		Granted:            rbacGranted,
-		Reason:             rbacReason,
-		AppliedRoles:       baseResponse.AppliedRoles,
-		AppliedPermissions: baseResponse.AppliedPermissions,
-	}
-	if delegatedGranted && !baseResponse.Granted {
-		finalResponse.AppliedPermissions = []string{request.PermissionId}
-	}
-
-	// Step 3: Log the final decision to durable audit store
+	// Log the decision to durable audit store
 	result := business.AuditResultDenied
-	if finalResponse.Granted {
+	if baseResponse.Granted {
 		result = business.AuditResultSuccess
 	}
-	a.recordPermissionCheck(ctx, request, result, finalResponse.Reason, sourceIP, userAgent)
-	return finalResponse, nil
+	a.recordPermissionCheck(ctx, request, result, baseResponse.Reason, sourceIP, userAgent)
+	return baseResponse, nil
 }
 
 // recordPermissionCheck emits a check_permission audit event to the durable store.
@@ -143,62 +93,6 @@ func (a *AdvancedAuthEngine) recordPermissionCheck(ctx context.Context, request 
 	}
 }
 
-// CheckConditionalPermission checks a conditional permission with context evaluation
-func (a *AdvancedAuthEngine) CheckConditionalPermission(ctx context.Context, request *common.AccessRequest, conditionalPerm *common.ConditionalPermission, authContext *common.AuthorizationContext) (*common.AccessResponse, error) {
-	// First check if user has the base permission
-	baseRequest := &common.AccessRequest{
-		SubjectId:    request.SubjectId,
-		PermissionId: conditionalPerm.PermissionId,
-		TenantId:     request.TenantId,
-		Context:      request.Context,
-	}
-
-	baseResponse, err := a.baseEngine.CheckPermission(ctx, baseRequest)
-	if err != nil {
-		return nil, err
-	}
-
-	if !baseResponse.Granted {
-		return &common.AccessResponse{
-			Granted: false,
-			Reason:  fmt.Sprintf("Base permission not granted: %s", baseResponse.Reason),
-		}, nil
-	}
-
-	// Check conditions
-	evaluationContext := a.conditionEngine.BuildEvaluationContext(authContext)
-	conditionsPass, conditionReason := a.conditionEngine.EvaluateConditions(ctx, conditionalPerm.Conditions, evaluationContext)
-	if !conditionsPass {
-		return &common.AccessResponse{
-			Granted: false,
-			Reason:  fmt.Sprintf("Conditional permission conditions not met: %s", conditionReason),
-		}, nil
-	}
-
-	// Check scope if specified
-	if conditionalPerm.Scope != nil && request.ResourceId != "" {
-		resourceAttributes := make(map[string]string)
-		if authContext.ResourceAttributes != nil {
-			resourceAttributes = authContext.ResourceAttributes
-		}
-
-		scopeAllowed, scopeReason := a.scopeEngine.EvaluateScope(ctx, conditionalPerm.Scope, request.ResourceId, resourceAttributes)
-		if !scopeAllowed {
-			return &common.AccessResponse{
-				Granted: false,
-				Reason:  fmt.Sprintf("Resource not in permitted scope: %s", scopeReason),
-			}, nil
-		}
-	}
-
-	// All checks passed
-	return &common.AccessResponse{
-		Granted:            true,
-		Reason:             fmt.Sprintf("Conditional permission granted. Conditions: %s", conditionReason),
-		AppliedPermissions: []string{conditionalPerm.PermissionId},
-	}, nil
-}
-
 // ValidateAccess performs comprehensive access validation with full context
 func (a *AdvancedAuthEngine) ValidateAccess(ctx context.Context, authContext *common.AuthorizationContext, requiredPermission string) (*common.AccessResponse, error) {
 	request := &common.AccessRequest{
@@ -211,59 +105,17 @@ func (a *AdvancedAuthEngine) ValidateAccess(ctx context.Context, authContext *co
 	return a.CheckPermission(ctx, request)
 }
 
-// GetSubjectPermissions retrieves all effective permissions for a subject including delegated permissions
+// GetSubjectPermissions retrieves all effective permissions for a subject
 func (a *AdvancedAuthEngine) GetSubjectPermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
-	// Get base permissions
-	basePermissions, err := a.baseEngine.GetSubjectPermissions(ctx, subjectID, tenantID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get delegated permissions
-	delegations, err := a.delegationManager.GetActiveDelegations(ctx, subjectID, tenantID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create a map to avoid duplicates
-	permissionMap := make(map[string]*common.Permission)
-
-	// Add base permissions
-	for _, perm := range basePermissions {
-		permissionMap[perm.Id] = perm
-	}
-
-	// Add delegated permissions
-	for _, delegation := range delegations {
-		for _, permID := range delegation.PermissionIds {
-			if _, exists := permissionMap[permID]; !exists {
-				// Look up permission from store; fall back to constructed permission if not found or on error.
-				permissionMap[permID] = a.getPermissionByID(ctx, permID, delegation.DelegatorId)
-			}
-		}
-	}
-
-	// Convert map back to slice
-	var result []*common.Permission
-	for _, perm := range permissionMap {
-		result = append(result, perm)
-	}
-
-	return result, nil
+	return a.baseEngine.GetSubjectPermissions(ctx, subjectID, tenantID)
 }
 
 // GetEffectivePermissions returns all effective permissions considering role hierarchy.
 // Delegates to baseEngine.GetEffectivePermissions so the hierarchy traversal wired via
 // SetHierarchyEngine is exercised through the production call path
 // (Manager.GetEffectivePermissions → advancedEngine → baseEngine with hierarchy).
-// Conditional and delegated permissions are available via GetSubjectPermissions.
 func (a *AdvancedAuthEngine) GetEffectivePermissions(ctx context.Context, subjectID, tenantID string) ([]*common.Permission, error) {
 	return a.baseEngine.GetEffectivePermissions(ctx, subjectID, tenantID)
-}
-
-// GetDelegationManager returns the delegation manager for external access
-func (a *AdvancedAuthEngine) GetDelegationManager() *DelegationManager {
-	return a.delegationManager
 }
 
 // GetConditionEngine returns the condition engine for external access
@@ -298,7 +150,10 @@ func (a *AdvancedAuthEngine) CreateTemporaryPermission(ctx context.Context, req 
 		if err := a.auditManager.RecordEvent(ctx, audit.AuthorizationEvent(
 			req.TenantID, req.SubjectID, "permission", req.PermissionID,
 			"grant_permission", business.AuditResultSuccess,
-		).Detail("granted_by", req.GrantedBy).
+		).
+			// permission grant is a sensitive admin action
+			Severity(business.AuditSeverityHigh).
+			Detail("granted_by", req.GrantedBy).
 			Detail("type", "temporary").
 			Detail("expires_at", fmt.Sprintf("%d", req.ExpiresAt))); err != nil {
 			slog.Warn("failed to record permission grant audit event", "error", err)
@@ -346,25 +201,6 @@ func (a *AdvancedAuthEngine) validateTemporaryPermissionRequest(ctx context.Cont
 	}
 
 	return nil
-}
-
-// getPermissionByID looks up a permission from the store with fallback for delegated (potentially synthetic) permissions.
-// Not-found errors are silenced; other errors are logged and the constructed fallback is returned.
-func (a *AdvancedAuthEngine) getPermissionByID(ctx context.Context, permID string, delegatorID string) *common.Permission {
-	perm, err := a.baseEngine.permissionStore.GetPermission(ctx, permID)
-	if err == nil {
-		return perm
-	}
-	if !isNotFoundError(err) {
-		slog.Warn("permission store lookup failed for delegated permission, using synthetic fallback",
-			"permission_id", permID,
-			"error", err)
-	}
-	return &common.Permission{
-		Id:          permID,
-		Name:        fmt.Sprintf("Delegated: %s", permID),
-		Description: fmt.Sprintf("Permission delegated by %s", delegatorID),
-	}
 }
 
 // TemporaryPermissionRequest represents a request for temporary permission

@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+
+/*
+ * App root: router + auth provider + route guard around the authenticated
+ * app shell (Story #2496).
+ *
+ * Route table (Story #2723, #2727, #2730, #2731, Issue #2732, #2733, #2941, #2968, #2992, #2937, #3608, #3614, #3722):
+ *   /enroll/:token   → Enroll (unauthenticated — magic-link redemption)
+ *   /login/confirm   → CliLogin (unauthenticated top-level route — the passkey
+ *                      ceremony renders inline for a session-less visitor; Issue #3722)
+ *   /cli/presence    → CliPresence (unauthenticated top-level route — the CLI
+ *                      presence relay confirmation screen; Issue #4287)
+ *   /                → AppShell layout → FleetOverview
+ *   /stewards/:id    → AppShell layout → StewardAssetPage
+ *   /audit           → AppShell layout → AuditView
+ *   /config          → AppShell layout → ConfigListView
+ *   /modules         → AppShell layout → ModuleReviewQueue
+ *   /workflows       → AppShell layout → WorkflowListView
+ *   /accounts        → AppShell layout → AccountsView
+ *   /certificates    → AppShell layout → CertificatesView
+ *   /registration    → AppShell layout → RegistrationConsolePage
+ *   /refresh         → AppShell layout → RefreshQueuePage
+ *   /passkeys        → AppShell layout → PasskeysView (self-service passkey management)
+ *   /reports         → AppShell layout → ReportsDashboardView
+ *   /compliance      → AppShell layout → ComplianceSummaryView
+ *   /monitoring      → AppShell layout → MonitoringView
+ *   /tenants         → AppShell layout → TenantAdminView
+ *   /installer       → AppShell layout → InstallerPage
+ *   /cases           → AppShell layout → CaseListView (Story #3614)
+ *   /cases/:id       → AppShell layout → CockpitView (Story #3608)
+ *
+ * Session presence is inferred from API responses, never from reading
+ * cookies (#2495). The fleet view's own data call (GET /api/v1/stewards,
+ * #2497) doubles as the authenticated probe — a 401 on it is handled
+ * centrally and drops the app to the login screen ("session expired"), so
+ * the shell no longer fires a separate probe request.
+ *
+ * The /enroll/:token route is a top-level sibling of the RequireAuth-gated
+ * subtree (Story #2968). It is genuinely unauthenticated — no session is
+ * required before enrollment, and RequireAuth is not in its render path.
+ * After a successful enrollment, apiFetch fires onSessionConfirmed and the
+ * navigate('/') call transitions into the authenticated shell.
+ *
+ * /login/confirm is likewise a top-level sibling outside RequireAuth (Issue
+ * #3722): the CLI login confirmation screen requires a passkey login before it
+ * will display or approve anything, but it enforces that itself (mirroring
+ * RequireAuth's own guard condition) rather than being wrapped by the shared
+ * guard, since the guard's fallback is the plain login screen with no
+ * confirmation-specific content either side of it.
+ *
+ * /cli/presence is the same shape again (Issue #4287): the CLI presence-relay
+ * confirmation screen re-derives RequireAuth's own guard condition locally rather
+ * than being wrapped by it, for the identical reason /login/confirm does.
+ */
+import { Routes, Route } from 'react-router'
+import { AuthProvider, RequireAuth } from './auth/AuthContext.tsx'
+import AppShell from './shell/AppShell.tsx'
+import FleetOverview from './fleet/FleetOverview.tsx'
+import StewardAssetPage from './fleet/StewardAssetPage.tsx'
+import AuditView from './audit/AuditView.tsx'
+import ConfigListView from './config/ConfigListView.tsx'
+import WorkflowListView from './workflow/WorkflowListView.tsx'
+import AccountsView from './accounts/AccountsView.tsx'
+import CertificatesView from './certificates/CertificatesView.tsx'
+import ModuleReviewQueue from './modules/ModuleReviewQueue.tsx'
+import ScriptsView from './scripts/ScriptsView.tsx'
+import RegistrationConsolePage from './registration/RegistrationConsolePage.tsx'
+import RefreshQueuePage from './refresh/RefreshQueuePage.tsx'
+import PasskeysView from './passkeys/PasskeysView.tsx'
+import Enroll from './pages/Enroll.tsx'
+import CliLogin from './pages/CliLogin.tsx'
+import CliPresence from './pages/CliPresence.tsx'
+import ReportsDashboardView from './reports/ReportsDashboardView.tsx'
+import ComplianceSummaryView from './compliance/ComplianceSummaryView.tsx'
+import MonitoringView from './monitoring/MonitoringView.tsx'
+import TenantAdminView from './tenants/TenantAdminView.tsx'
+import InstallerPage from './installer/InstallerPage.tsx'
+import CockpitView from './cockpit/CockpitView.tsx'
+import CaseListView from './cockpit/CaseListView.tsx'
+
+function App() {
+  return (
+    <AuthProvider>
+      <Routes>
+        {/* Unauthenticated: magic-link first-passkey enrollment (Story #2968) */}
+        <Route path="/enroll/:token" element={<Enroll />} />
+
+        {/* Unauthenticated top-level route: CLI login confirmation (Issue #3722) */}
+        <Route path="/login/confirm" element={<CliLogin />} />
+
+        {/* Unauthenticated top-level route: CLI presence relay (Issue #4287) */}
+        <Route path="/cli/presence" element={<CliPresence />} />
+
+        {/* All other routes require an authenticated session */}
+        <Route
+          path="*"
+          element={
+            <RequireAuth>
+              <Routes>
+                <Route path="/" element={<AppShell />}>
+                  <Route index element={<FleetOverview />} />
+                  <Route path="stewards/:id" element={<StewardAssetPage />} />
+                  <Route path="audit" element={<AuditView />} />
+                  <Route path="config" element={<ConfigListView />} />
+                  <Route path="modules" element={<ModuleReviewQueue />} />
+                  <Route path="workflows" element={<WorkflowListView />} />
+                  <Route path="accounts" element={<AccountsView />} />
+                  <Route path="certificates" element={<CertificatesView />} />
+                  <Route path="scripts" element={<ScriptsView />} />
+                  <Route path="registration" element={<RegistrationConsolePage />} />
+                  <Route path="refresh" element={<RefreshQueuePage />} />
+                  <Route path="passkeys" element={<PasskeysView />} />
+                  <Route path="reports" element={<ReportsDashboardView />} />
+                  <Route path="compliance" element={<ComplianceSummaryView />} />
+                  <Route path="monitoring" element={<MonitoringView />} />
+                  <Route path="tenants" element={<TenantAdminView />} />
+                  <Route path="installer" element={<InstallerPage />} />
+                  <Route path="cases" element={<CaseListView />} />
+                  <Route path="cases/:id" element={<CockpitView />} />
+                </Route>
+              </Routes>
+            </RequireAuth>
+          }
+        />
+      </Routes>
+    </AuthProvider>
+  )
+}
+
+export default App

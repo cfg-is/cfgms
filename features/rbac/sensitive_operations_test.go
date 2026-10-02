@@ -173,6 +173,56 @@ func TestAuditSensitiveOperation(t *testing.T) {
 	})
 }
 
+// TestAuditSensitiveOperationValidationErrorSeverity verifies that validation
+// errors (missing/short/long justification) for sensitive operations emit High
+// severity, not Critical. Validation failures are admin API bad-request errors,
+// not compromise indicators (Issue #2964, AC 4).
+func TestAuditSensitiveOperationValidationErrorSeverity(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	manager := NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	ctx := context.Background()
+	require.NoError(t, manager.Initialize(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = manager.Close(stopCtx)
+	})
+
+	opCtx := &SensitiveOperationContext{
+		OperationType: SensitiveOpDeleteRole,
+		SubjectID:     "user-severity-test",
+		TenantID:      "severity-test-tenant",
+		ResourceID:    "role-severity-test",
+		Justification: "", // empty → validation error path
+	}
+	validationErr := ErrJustificationRequired
+
+	manager.AuditSensitiveOperation(ctx, opCtx, business.AuditResultError, validationErr)
+
+	flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	require.NoError(t, manager.auditManager.Flush(flushCtx))
+
+	entries, err := manager.auditManager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "severity-test-tenant",
+		Limit:    10,
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "expected exactly one audit entry for the validation error")
+
+	assert.Equal(t, business.AuditSeverityHigh, entries[0].Severity,
+		"RBAC validation errors are admin API bad-request failures, not compromise indicators — must be High, not Critical (Issue #2964)")
+	assert.Equal(t, business.AuditResultError, entries[0].Result)
+}
+
 // TestManagerSensitiveGates verifies that each newly-gated Manager operation returns
 // ErrJustificationRequired when called without a justification in context and succeeds
 // when WithSensitiveOperationJustification is used.

@@ -1,0 +1,43 @@
+name: package
+description: Manages system packages across different package managers (apt, yum, brew, etc.)
+version: 0.1.0
+
+publisher: cfgms
+
+# Supported execution environments
+executors:
+  - steward  # Local package management on steward systems
+
+author: CFGMS Team
+license: MIT
+platforms:
+  - linux
+  - darwin
+  - windows
+schema: schema.yaml
+interfaces:
+  - Get
+  - Set
+  - Test
+
+owns:
+  - kind: package  # authority over package:* objects this module manages
+    required_fields:
+      - hostname  # device identity — required in every full-os-device DNA snapshot
+      - os        # device identity — required in every full-os-device DNA snapshot
+
+# Bounded, inventory-worthy domain (installed-package inventory). Universal —
+# every steward OS ships a package manager. OS predicates cover all three
+# platforms; no capability check needed since this domain is always present.
+observe_when:
+  - fact: os
+    equals: windows
+  - fact: os
+    equals: linux
+  - fact: os
+    equals: darwin
+
+security:
+  requires_root: true
+  capabilities: []
+  ports: []

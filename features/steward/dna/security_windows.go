@@ -94,7 +94,7 @@ func (w *WindowsSecurityCollector) collectDomainMembership(attributes map[string
 		attributes["domain_joined"] = "false"
 		return
 	}
-	defer key.Close()
+	defer func() { _ = key.Close() }()
 
 	domain, _, err := key.GetStringValue("Domain")
 	if err != nil || strings.TrimSpace(domain) == "" {
@@ -158,16 +158,16 @@ func (w *WindowsSecurityCollector) collectAVProducts(ctx context.Context, attrib
 		return
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	// Static script — no user input, no runtime code composition
 	const script = `(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Select-Object -ExpandProperty displayName) -join ','`
 	if _, err := tmpFile.WriteString(script); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		attributes["av_products_detected"] = "none"
 		return
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	output, err := runCommand(ctx, "powershell.exe",
 		"-NoProfile", "-NonInteractive", "-File", tmpPath,
@@ -243,12 +243,12 @@ func winPowerShellCount(ctx context.Context, tmpPattern, script string) int {
 		return 0
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if _, err := tmpFile.WriteString(script); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return 0
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 	psOut, err := runCommand(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-File", tmpPath)
 	if err != nil {
 		return 0

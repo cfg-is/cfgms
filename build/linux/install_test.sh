@@ -38,7 +38,7 @@ CORRECT_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$CERT_DIR/ca.crt" 2>
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 # make_install_dir populates a temp directory with install.sh and a mock
-# cfgms-steward binary. The mock writes the --ca-cert file to the expected
+# cfgms-steward binary. The mock writes the --controller-ca file to the expected
 # location under CFGMS_INSTALL_PREFIX so tests can verify cert placement.
 make_install_dir() {
     local dir="$1"
@@ -52,7 +52,7 @@ CA_CERT_SRC=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         install)   shift ;;
-        --ca-cert) CA_CERT_SRC="$2"; shift 2 ;;
+        --controller-ca) CA_CERT_SRC="$2"; shift 2 ;;
         *)         shift ;;
     esac
 done
@@ -184,25 +184,73 @@ else
 fi
 rm -rf "$T6" "$T6_PREFIX"
 
-# ── Test 7: --ca-cert explicit path is used instead of ./ca.crt default ──────
+# ── Test 7: --controller-ca explicit path overrides ./ca.crt default ─────────
 
 T7="$(mktemp -d)"
 T7_PREFIX="$(mktemp -d)"
 make_install_dir "$T7"
-# No ca.crt in $T7 — pass --ca-cert explicitly.
+# No ca.crt in $T7 — pass --controller-ca explicitly.
 
 run_install "$T7" "$T7_PREFIX" \
     --regtoken "tok-test" \
     --fingerprint "$CORRECT_FP" \
-    --ca-cert "$CERT_DIR/ca.crt"
+    --controller-ca "$CERT_DIR/ca.crt"
 
 T7_CERT="$T7_PREFIX/etc/cfgms/controller-ca.crt"
 if [[ $LAST_EXIT -eq 0 ]] && [[ -f "$T7_CERT" ]]; then
-    pass "test7: explicit --ca-cert path works and writes cert to prefixed path"
+    pass "test7: explicit --controller-ca path works and writes cert to prefixed path"
 else
     fail "test7: expected exit 0 and cert at $T7_CERT (exit=$LAST_EXIT cert_exists=$([ -f "$T7_CERT" ] && echo yes || echo no))"
 fi
 rm -rf "$T7" "$T7_PREFIX"
+
+# ── Test 8 & 9: Version-stamping ldflags round-trip ──────────────────────────
+#
+# Builds cfgms-steward twice using the same ldflags pattern as STEWARD_BUILD_FLAGS:
+# once with VERSION injected, once with the pre-story default (0.5.0-dev).
+# Requires: go toolchain available on PATH.
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+VERSION_BIN_DIR="$(mktemp -d)"
+
+TEST_VERSION="v1.9.9-test-stamp"
+PLACEHOLDER_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+# Test 8: build with injected VERSION and assert --version reports it.
+STAMPED_LDFLAGS="-s -w -X main.ControllerURL=https://localhost:9080 -X main.SecurityProfile=public-beta -X github.com/cfgis/cfgms/pkg/version.Version=${TEST_VERSION} -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=${PLACEHOLDER_KEY}"
+if go build \
+    -trimpath \
+    -ldflags "$STAMPED_LDFLAGS" \
+    -o "$VERSION_BIN_DIR/cfgms-steward-stamped" \
+    "$REPO_ROOT/cmd/steward" 2>/dev/null; then
+    VERSION_OUT="$("$VERSION_BIN_DIR/cfgms-steward-stamped" --version 2>/dev/null || true)"
+    if echo "$VERSION_OUT" | grep -q "$TEST_VERSION"; then
+        pass "test8: injected VERSION stamps into --version output"
+    else
+        fail "test8: --version should contain '$TEST_VERSION' (got: '$VERSION_OUT')"
+    fi
+else
+    fail "test8: go build failed for stamped binary"
+fi
+
+# Test 9: build with default VERSION (0.5.0-dev) and assert --version is unchanged.
+DEFAULT_LDFLAGS="-s -w -X main.ControllerURL=https://localhost:9080 -X main.SecurityProfile=public-beta -X github.com/cfgis/cfgms/pkg/version.Version=0.5.0-dev -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=${PLACEHOLDER_KEY}"
+if go build \
+    -trimpath \
+    -ldflags "$DEFAULT_LDFLAGS" \
+    -o "$VERSION_BIN_DIR/cfgms-steward-default" \
+    "$REPO_ROOT/cmd/steward" 2>/dev/null; then
+    DEFAULT_OUT="$("$VERSION_BIN_DIR/cfgms-steward-default" --version 2>/dev/null || true)"
+    if echo "$DEFAULT_OUT" | grep -q "0.5.0-dev"; then
+        pass "test9: default build version matches pre-story baseline (0.5.0-dev)"
+    else
+        fail "test9: --version should contain '0.5.0-dev' for default build (got: '$DEFAULT_OUT')"
+    fi
+else
+    fail "test9: go build failed for default binary"
+fi
+
+rm -rf "$VERSION_BIN_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

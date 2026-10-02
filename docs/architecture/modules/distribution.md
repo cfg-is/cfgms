@@ -132,10 +132,9 @@ pre-seeded at startup from:
 
 1. `CFGMSPublisherIdentity()` — the baked-in CFGMS publisher.
 2. Additional publishers declared in `steward.cfg` (steward) or controller tenant
-   configuration (controller). Persistence is a S5 (controller) and S7 (steward) concern.
+   configuration (controller).
 
-The trust store is rebuilt at each startup. There is no durable persistence of trust
-store state in this story — that is deferred to S5 and S7.
+The trust store is rebuilt at each startup.
 
 ---
 
@@ -179,6 +178,113 @@ directory without overwriting the old one.
 
 ---
 
+## Installed Bundle Layout (Steward, Issue #4425)
+
+The controller cache layout above is not the shape a bundle takes once installed on a
+steward. An installation root is a plain directory — its location on disk is chosen by
+whatever staged it there, not by content address — containing exactly:
+
+```
+<installation root>/
+    module.yaml     # the publisher's manifest — ModuleMetadata, byte-for-byte
+    bundle.yaml      # sidecar: binaries map, signatures, content hash
+    <binaries, at the paths bundle.yaml's binaries map records>
+```
+
+`module.yaml` (`pkg/modules/bundle.ManifestFileName`) holds only the manifest
+(`ModuleMetadata`) — the same bytes `ComputeInstalledContentHash` hashes when
+re-verifying the bundle. The rest of `Bundle` — `Binaries`, `Signatures` and
+`ContentHash` — has no home in `ModuleMetadata`, so it lives in a second file,
+`bundle.yaml` (`pkg/modules/bundle.BundleSidecarFileName`):
+
+```go
+// on-disk shape of bundle.yaml
+type installedSidecar struct {
+    Binaries    map[string]string `yaml:"binaries"`   // os-arch → file path, relative to root
+    Signatures  []BundleSignature `yaml:"signatures,omitempty"`
+    ContentHash string            `yaml:"content_hash"`
+}
+```
+
+The sidecar is a separate file rather than extra keys appended to `module.yaml`
+because `module.yaml` is the publisher's own manifest and is covered by the
+publisher's signature: `ComputeInstalledContentHash` hashes the manifest bytes
+directly, so rewriting `module.yaml` at install time to append these fields would
+change those bytes and invalidate every signature over the bundle. `bundle.yaml` is
+steward-authored install metadata, never signed itself, and installing a bundle never
+touches the publisher's signed manifest.
+
+**Binaries stay root-relative on read.** `Bundle.Binaries` values are relative-path
+strings by contract (see `Bundle` above); `pkg/modules/bundle.ReadInstalled(root)`
+returns them exactly as recorded in the sidecar, not resolved into absolute paths. A
+caller that needs to execute a binary resolves it itself via
+`InstalledBinaryPath(root, ...)` — the same confinement check
+`ComputeInstalledContentHash` already applies to every binary and to `module.yaml`
+itself, so a `bundle.yaml` binaries entry that escapes root (e.g. `../../etc/shadow`)
+is refused with `ErrBinaryPathEscapesRoot` on read exactly as it would be on write.
+
+**Reading validates the manifest.** `ReadInstalled` parses `module.yaml` with
+`features/modules.ParseModuleMetadata`, the canonical validating parser, not a bare
+`yaml.Unmarshal`. The manifest is publisher-supplied untrusted input, and the parser is
+what enforces the module contract on it — non-empty name, semver version, non-empty
+publisher, exactly one valid `executors` value, well-formed dependency constraints and
+`observe_when` predicates. It is also the only thing that populates
+`ModuleMetadata.Kind`, which is `yaml:"-"` and is derived from `executors` rather than
+read from YAML; since `Kind` is the ADR-006 module-kind confinement boundary (steward
+vs outpost vs workflow), a bare unmarshal here would hand every consumer a bundle with
+an empty `Kind`. A manifest that fails validation is refused with `ErrManifestInvalid`.
+A missing `bundle.yaml`, a `bundle.yaml` that fails to parse, and a missing
+`module.yaml` each fail with their own named error (`ErrSidecarMissing`,
+`ErrSidecarMalformed`, `ErrManifestMissing`) rather than a partially populated Bundle.
+
+**`ReadInstalled` is not a trust boundary.** It does call `VerifyInstalledContent`
+before returning, so a bundle whose files changed independently of its sidecar is
+refused with `ErrContentHashMismatch`. But the expected hash it compares against is
+read from `bundle.yaml`, which is steward-authored install metadata and is **never
+signed**. That makes the check a self-consistency check against an *unsigned local
+anchor*: it catches a partial write or a binary replaced on its own, and it does **not**
+survive an attacker with write access to the installation root, who rewrites the binary
+and the sidecar's `content_hash` together. CFGMS's threat model puts that attacker in
+scope — stewards run on hosts that may be compromised.
+
+Trusting a `ReadInstalled` result therefore requires the step `ReadInstalled` cannot
+perform, in this order:
+
+1. **Publisher-signature verification** —
+   `features/steward/modules/trust.StewardTrustEnforcer.VerifyForLoad`, which honours
+   `steward.cfg` `module_trust.mode` and checks `Bundle.Signatures` against the trust
+   store via `pkg/modules/trust.VerifyBundleSignature`. This makes the expected
+   `ContentHash` a *signed* value instead of an unsigned local anchor.
+2. **On-disk content re-check** — `VerifyInstalledContent`, binding the bytes currently
+   on disk to that signed hash.
+
+This is the same step-1/step-2 framing documented on
+`features/modules/extended/osquery.PreExecVerifier`, which is the worked example of the
+two in the correct order. `ReadInstalled` performs step 2 only; a caller that wires
+installed bundles into execution owns step 1. `DiscoverInstalled` inherits the same
+limit for every bundle in the map it returns.
+
+**Discovery.** `pkg/modules/bundle.DiscoverInstalled(dir)` enumerates the immediate
+subdirectories of `dir`, reads each as an installation root, and returns a
+`map[string]*InstalledBundle` keyed by `Bundle.Manifest.Name` — `InstalledBundle` pairs
+the reconstructed `Bundle` with the root it came from, since `Binaries` stays
+root-relative. A subdirectory that fails to read is skipped, with its error collected
+and returned (joined) rather than dropped, so one bad bundle does not prevent the rest
+from being discovered. Two installation roots declaring the same module name are a
+hard error naming both roots; the second root's bundle does not overwrite the first in
+the returned map.
+
+**Nothing produces this layout on a real steward yet.** The current Windows and macOS
+installers place module binaries flat and bare into a shared `modules/` directory, with
+no `module.yaml`, no `bundle.yaml`, and no per-module installation root — see the
+installer gap note on Issue #4425. This section defines and implements the format that
+a future installer change and a future steward-wiring story (the remainder of Issue
+#4410's split) will produce and consume; this story's own writer
+(`WriteInstalledSidecar`) is currently the only producer of a `bundle.yaml` that
+matches it.
+
+---
+
 ## Controller Approval Workflow (S5)
 
 After a bundle is fetched from a git source and placed in the cache, the controller runs it through an approval workflow before making it available for steward delivery.
@@ -210,16 +316,78 @@ Operators can promote a queued bundle to approved:
 
 ```
 cfg module approve cfgms/hyperv@0.2.1
+cfg module approve cfgms/hyperv@0.2.1 --content-hash 9f2c4a1b
 ```
 
-This calls `ApprovalWorkflow.Approve(addr)`, which transitions the cache entry from `pending` to `approved`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error.
+The CLI resolves the ref against `GET /api/v1/modules/approvals` (the pending review queue) to find the matching entry's address, then calls `POST /api/v1/modules/approvals/{address}/approve`, which transitions the cache entry from `pending` to `approved` via `ApprovalWorkflow.Approve(addr)`. Only `pending` entries can be approved; `approved` and `rejected` entries return an error, as does a ref with no matching pending entry.
 
-To inspect pending bundles:
+`module:approve` carries `RequireUserPresence: true` (ADR-021 Decision 4): approval authorizes a signed binary to execute on every targeted endpoint, so the POST above needs a fresh `X-Presence-Token` — a proof the admin actually touched their security key for this specific approval, not just an already-authenticated session. `cfg module approve` obtains one automatically via the CLI presence relay (Issue #4287, ADR-021 Amendment 7):
+
+1. The controller answers the first `POST .../approve` attempt with `401` and `WWW-Authenticate: CFGMS-StepUp ..., presence="required", permission="module:approve"`.
+2. `cfg` lodges a presence request (`POST /api/v1/cli-presence/lodge`) bound to that exact method, path, request-body hash and permission, and prints a short confirmation code and a URL at the controller's own web UI origin (`https://<controller>/cli/presence?request_id=<id>`) — never a CLI-local address.
+3. The admin opens that URL, confirms the code and the displayed action match the terminal, and completes the WebAuthn presence ceremony there. The page displays the bound permission, method, path and request-body digest — the relay accepts no caller-supplied description, so the approval shown is the approval being authorized. The controller mints the presence token bound to the same method/path/body-hash/permission the CLI lodged, and hands it to the durable request record.
+4. `cfg` polls `POST /api/v1/cli-presence/{id}/collect` for the token, then retries the original `POST .../approve` with `X-Presence-Token` attached. The approval now succeeds.
+
+Automation (API-key/`AssuranceMachine` principals) cannot lodge a presence request at all (ADR-021 Amendment 7 Decision 2) — `module:approve` stays an admin-only, presence-proven action.
+
+Because the cache key includes the content hash, `publisher/name@version` can match several pending bundles — and since `QueueForReview` is reached before signature verification, a bundle's claimed publisher is unverified at that point. A ref matching more than one pending entry is refused with an error listing each candidate content hash; pass `--content-hash` (full value or an unambiguous prefix) to name the bundle that was reviewed. The approved content hash is echoed on success.
+
+To inspect all cached modules (`cfg module list` calls `GET /api/v1/modules`):
 
 ```
+cfg module list
 cfg module list --status pending
-cfg module list --tenant root/msp-a --status pending
 ```
+
+### Git Source Resolver (live, Issue #4409)
+
+`GitSourceResolver` (`features/controller/modules/sources/git`) resolves a
+`publisher/name@version` reference to a `Bundle` by cloning the publisher's
+configured git repository and reading `module.yaml`, `binaries/` and
+`signatures/` out of the checkout. It is wired into the running controller as
+the `resolver` argument of `Server.SetModuleResolution` at startup
+(`features/controller/server/server.go`), constructed from controller
+configuration rather than from a hard-coded source list or path.
+
+**Configuration.** Controller config carries a `module_sources` map from
+publisher name to source repository namespace:
+
+```yaml
+module_sources:
+  cfgms:
+    type: git
+    base: https://git.example.com/cfgms
+```
+
+The clone URL for a given module is `<base>/<name>` (e.g. `.../cfgms/firewall`
+for `cfgms/firewall@1.0.0`). The resolver's clone cache lives under
+`<controller data root>/module-sources`, alongside the other module-subsystem
+directories under the same root. When `module_sources` is empty or absent, or
+when the clone root cannot be created, startup logs a warning and continues
+with a nil resolver — the same nil-tolerant pattern already used for the
+module cache above, never a crash.
+
+**Version pinning.** `version` is resolved to an exact commit — via `git
+ls-remote` for a tag or branch name, or via a full fetch-and-checkout for a
+raw commit SHA — and that exact commit is checked out before `module.yaml` and
+the binaries are read. The local clone cache directory is keyed by the
+resolved commit, not only by the requested version string, so a first
+resolution that happened to land on the wrong commit can never poison a later
+lookup for the same version: a different resolved commit is always a different
+cache entry. Resolving `pub/name@v1.0.0` and `pub/name@v2.0.0` against a
+repository where those tags point at different commits fetches and returns
+their respective content, not whichever commit the repository's default
+branch currently happens to be on. An unresolvable ref fails the request with
+an error naming the ref — there is no fallback to the default branch.
+
+**What this does not do.** Supplying the resolver makes it reachable for the
+module cache's read/approve/reject REST surface and for
+`handleUpdateStewardConfig`'s required_modules resolution path, but
+`ResolveCfgRequiredModules` only runs when the cache lister, resolver,
+approver *and* trust store are all non-nil. The approver and trust store are
+not wired at startup, so a `cfg push` declaring `required_modules:` is still
+never blocked on cache/approval state — that enforcement remains a distinct,
+not-yet-scheduled change.
 
 ### Implementation Reference
 

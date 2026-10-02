@@ -4,7 +4,7 @@
 # versions per the GHSA-69fq-xp46-6x23 advisory (CVE-2026-33634).
 #
 # Usage: install-trivy.sh <version> <sha256> [dest_dir]
-#   version    Trivy version tag (e.g. "v0.71.0")
+#   version    Trivy version tag (e.g. "v0.74.0")
 #   sha256     Expected SHA-256 of trivy_<v>_Linux-64bit.tar.gz from the
 #              upstream release's checksums.txt — pinned in caller's env.
 #   dest_dir   Install directory (default: /usr/local/bin)
@@ -48,7 +48,15 @@ ARCHIVE="trivy_${VERSION#v}_Linux-64bit.tar.gz"
 URL="https://github.com/aquasecurity/trivy/releases/download/${VERSION}/${ARCHIVE}"
 
 echo "Downloading $URL"
-curl -sSfL -o "$WORK/$ARCHIVE" "$URL"
+# --retry-all-errors covers the transient failure that evicted PR #4205
+# (connection reset mid-transfer, curl exit 35) — curl's default --retry only
+# retries a narrow set of timeout/5xx cases, not a reset. --retry-connrefused
+# additionally retries a refused connection instead of failing immediately.
+# No --retry-delay: curl's default exponential backoff applies. This only
+# governs the download itself — the SHA-256 check below always runs exactly
+# once against whatever curl ultimately wrote, and a mismatch is never
+# retried as if it were a network error.
+curl -sSfL --retry 5 --retry-all-errors --retry-connrefused -o "$WORK/$ARCHIVE" "$URL"
 
 echo "Verifying SHA-256 against pinned value"
 printf '%s  %s\n' "$SHA256" "$WORK/$ARCHIVE" | sha256sum -c -

@@ -40,6 +40,7 @@ What becomes easier or harder by making this decision?
 - **Accepted**: Approved and being/has been implemented
 - **Deprecated**: No longer relevant but kept for historical context
 - **Superseded**: Replaced by another ADR (link to replacement)
+- **Amended by ADR-NNN**: Still active; a later ADR changes part of it (state the amendment inline)
 
 ## Index of ADRs
 
@@ -48,15 +49,45 @@ What becomes easier or harder by making this decision?
 | ADR | Title | Date | Status |
 |-----|-------|------|--------|
 | [001](001-central-provider-compliance-enforcement.md) | Central Provider Compliance Enforcement | 2025-10-20 | Accepted |
-| [003](003-storage-data-taxonomy.md) | Storage Data Taxonomy | 2026-04-13 | Proposed |
+| [002](002-steward-bootstrap-for-controllers.md) | Steward Bootstrap for Controller Nodes | 2026-03-30 | Accepted |
+| [003](003-storage-data-taxonomy.md) | Storage Data Taxonomy | 2026-04-13 | Accepted |
+| [004](004-audit-chain-integrity.md) | Audit Chain Integrity via HMAC-Keyed Hash Chain | 2026-04-21 | Accepted |
 | [005](005-logging-interface-for-transport-providers.md) | Logging Interface for Transport Providers | 2026-05-04 | Accepted |
 | [006](006-module-packaging-and-distribution.md) | Module Packaging and Distribution | 2026-06-05 | Accepted |
 | [007](007-controller-upgrade-and-state-externalization.md) | Controller Upgrade and State Externalization Strategy | 2026-06-15 | Accepted |
 | [008](008-durable-execution-substrate.md) | Durable Execution Substrate for the Workflow Engine | 2026-06-15 | Accepted |
+| [009](009-hyperv-vm-provisioning-from-install-media.md) | Hyper-V VM Provisioning from Install Media (ISO → Managed Endpoint) | 2026-06-18 | Accepted |
+| [010](010-steward-side-provisioning-enrollment.md) | Steward-Side Provisioning Enrollment — Controller-Supplied Join Token, IP-Trust Admission, Media Cleanup | 2026-06-19 | Accepted |
+| [011](011-registration-refresh.md) | Registration-Refresh for Stewards Offline Past mTLS Cert Expiry | 2026-06-20 | Accepted |
+| [012](012-steward-event-telemetry-stream.md) | Steward Event/Telemetry Stream to Controller | 2026-06-23 | Accepted |
+| [013](013-steward-controller-trust-and-distribution.md) | Steward Controller-Trust Anchoring and Binary Distribution | 2026-06-24 | Accepted |
+| [014](014-cfg-sessions-and-credential-unlock.md) | cfg Admin Sessions and Credential Storage (Zero Standing Privilege) | 2026-06-28 | Accepted |
+| [015](015-story-materialization-at-decomposition.md) | Story Materialization at Decomposition | 2026-07-03 | Accepted |
+| [016](016-steward-module-foundation.md) | Steward Module Foundation — stdlib set, repository layout, DNA-fragment contract | 2026-07-04 | Accepted (2026-07-08) |
+| [017](017-dna-composition-and-sync.md) | DNA Composition & Sync — fragment model, authority resolution, partial-sync validation (incl. Amendment 1: twin/DEX data-model commitments) | 2026-07-04 | Accepted (2026-07-08) |
+| [018](018-web-session-semantics.md) | Web-Session Semantics (Browser Credential Login) | 2026-07-04 | Accepted |
+| [019](019-third-party-module-inclusion-and-trust.md) | Third-Party Module Inclusion and Delegated Publisher Trust | 2026-07-04 | Proposed |
+| [020](020-dna-required-field-declaration.md) | DNA Required-Field Declaration — per-configuration-type contract, module-manifest sourced | 2026-07-13 | Accepted |
+| [021](021-identity-assurance-levels.md) | Identity Assurance Levels and Step-Up Authentication | 2026-07-16 | Accepted |
+| [022](022-entity-graph-model-and-access-contract.md) | Entity Graph — logical model and access contract | 2026-07-21 | Accepted |
+| [023](023-entity-graph-storage-shape.md) | Entity Graph storage shape — relational observation-log store | 2026-07-21 | Accepted |
+| [024](024-module-observation-vs-convergence.md) | Module Observation vs Convergence — the `observe_when` predicate and the controller-mediated observation loop | 2026-07-22 | Accepted |
+| [025](025-tenant-access-boundary.md) | SaaS-Operator ↔ MSP Tenant Access Boundary (incl. Amendment 1: ancestry-based boundary check, not path-prefix matching) | 2026-07-30 | Accepted |
+| [026](026-reboot-windows.md) | Reboot Windows — device-scoped reboot gating with tenant inheritance and structured schedules | 2026-07-22 | Accepted |
+| [027](027-tenant-suspension-archive-and-cascading-deletion.md) | Tenant Suspension, Archive, and Cascading Deletion Lifecycle | 2026-07-31 | Accepted |
+| [029](029-controller-leadership-authority.md) | Controller Leadership Authority — Lease-Backed Authority and Fenced Side Effects | 2026-08-18 | Amended by ADR-031 |
+| [030](030-controller-secret-material-at-rest.md) | Controller Secret Material at Rest — Root of Trust per Deployment Shape | 2026-08-20 | Accepted |
+| [031](031-controller-cluster-service-model.md) | Controller Cluster Service Model — Any-Node Service, Durable Delivery, Minimal Leadership | 2026-09-01 | Accepted |
+| [032](032-saas-deployment-topology-and-trust.md) | SaaS Deployment Topology and Trust Hierarchy — Cells, Shared Root, Steward-Held Keys | 2026-09-01 | Accepted |
+| [033](033-audit-sink-architecture-and-adversary-bound.md) | Audit Sink Architecture and Adversary Bound — Pluggable Sink, Local-Durable Default, WORM/Object-Lock Recommended Production Option | 2026-09-11 | Accepted |
 
 ### Superseded/Deprecated
 
-*None yet*
+| ADR | Title | Date | Status |
+|-----|-------|------|--------|
+| [028](028-raft-log-persistence.md) | Raft Log Persistence for Controller Cluster Restarts | 2026-08-13 | Superseded by ADR-031 |
+
+ADR-011 and ADR-029 remain active but are **amended** by ADR-031; see their status lines.
 
 ## Creating a New ADR
 

@@ -7,12 +7,16 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -22,14 +26,22 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/session"
+	storageinterfaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// setupCertTestServer creates a server wired with a real cert manager for certificate handler tests.
+// setupCertTestServer creates a server wired with a real cert manager and a real
+// steward store for certificate handler tests. The steward store mirrors the
+// production composition (server.go wires it whenever the storage provider
+// supplies one) and is required by the list endpoint for any tenant-scoped caller.
 func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -69,8 +81,11 @@ func setupCertTestServer(t *testing.T) (*Server, *cert.Manager) {
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
 		nil, // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
+	server.SetStewardStore(storageManager.GetStewardStore())
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -275,11 +290,589 @@ func TestHandleListCertificates_RequiresCorrectPermission(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
+// setupCertTestServerWithStewardStore creates a server wired with a real cert
+// manager AND a real steward store for tenant-scope filtering tests.
+func setupCertTestServerWithStewardStore(t *testing.T) (*Server, *cert.Manager, business.StewardStore) {
+	t.Helper()
+	server, certMgr, stewardStore, _ := setupCertTestServerWithStewardStoreRoot(t)
+	return server, certMgr, stewardStore
+}
+
+// setupCertTestServerWithStewardStoreRoot is setupCertTestServerWithStewardStore with
+// the flat-file storage root returned as well, so a test can inject a genuine durable-store
+// fault by corrupting an on-disk steward record instead of substituting a fake store.
+func setupCertTestServerWithStewardStoreRoot(t *testing.T) (*Server, *cert.Manager, business.StewardStore, string) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	logger := logging.NewNoopLogger()
+
+	// Real OSS composite storage (flatfile steward records + in-memory SQLite business
+	// data), created here rather than via pkgtesting.SetupTestStorage so the test owns
+	// the flat-file root path.
+	flatfileRoot := t.TempDir()
+	storageManager, err := storageinterfaces.CreateOSSStorageManager(
+		flatfileRoot,
+		"file:cfgms-certtest-"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory",
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if closeErr := storageManager.Close(); closeErr != nil {
+			t.Errorf("storageManager.Close: %v", closeErr)
+		}
+	})
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	certMgr := newTestCertManager(t)
+
+	server, err := New(
+		cfg, logger, controllerService, configService,
+		nil, rbacService, certMgr, tenantManager, rbacManager,
+		nil, nil, nil, "", nil, auditMgr,
+		nil, // No command publisher
+		nil, // No push store
+		nil, // No blob store
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
+	)
+	require.NoError(t, err)
+
+	stewardStore := storageManager.GetStewardStore()
+	server.SetStewardStore(stewardStore)
+
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
+
+	return server, certMgr, stewardStore, flatfileRoot
+}
+
+// TestHandleListCertificates_TenantScope_ExcludesSiblingTenant verifies that a
+// caller scoped to client-1 never sees a certificate belonging to a steward in
+// sibling tenant client-2.
+func TestHandleListCertificates_TenantScope_ExcludesSiblingTenant(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	// Register two stewards in sibling tenants.
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	// Issue mTLS client certs for both stewards.
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	_, err = certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Caller scoped to client-1.
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// client-1's cert must be present.
+	foundClient1 := false
+	for _, c := range resp.Data {
+		if c.StewardID == "steward-client1" {
+			foundClient1 = true
+		}
+		// client-2's cert must never appear.
+		assert.NotEqual(t, "steward-client2", c.StewardID,
+			"client-2 certificate must be excluded from client-1 caller's response")
+	}
+	assert.True(t, foundClient1, "client-1 certificate must be included in the response")
+}
+
+// TestHandleListCertificates_StewardFilter_TenantScope_ExcludesSiblingTenantByCommonName
+// covers the ?steward_id= branch under a tenant-scoped caller. The filter matches on
+// COMMON NAME, which is independent of the owning steward (provisioning accepts an
+// explicit common_name while ClientID stays the steward ID). A client-1 caller asking
+// for the sibling tenant's certificate by its common name must receive nothing: the
+// scope decision has to resolve the certificate's recorded owner, not the caller's
+// query param.
+func TestHandleListCertificates_StewardFilter_TenantScope_ExcludesSiblingTenantByCommonName(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	// Issued the way the provisioning service does it: common name diverges from
+	// the steward ID recorded as ClientID.
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-client2.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"a client-1 caller must not learn anything about client-2's certificate via its common name")
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&resp))
+	assert.Empty(t, resp.Data,
+		"sibling-tenant certificate must be filtered out of the steward_id-filtered response")
+}
+
+// TestHandleListCertificates_StewardFilter_TenantScope_IncludesOwnTenantByCommonName
+// is the positive counterpart: the ?steward_id= branch must still return the caller's
+// own certificate when the common name diverges from the owning steward ID, and must
+// label it with the authoritative owner (ClientID) rather than the query param.
+func TestHandleListCertificates_StewardFilter_TenantScope_IncludesOwnTenantByCommonName(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-client1.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "steward-client1.example.com", resp.Data[0].CommonName)
+	assert.Equal(t, "steward-client1", resp.Data[0].StewardID,
+		"the response must report the certificate's recorded owner, not the query param")
+}
+
+// TestHandleListCertificates_StewardFilter_TenantScope_DivergentCNNotOwnerLabelled
+// pins the labelling rule that the scope decision depends on: even for an unscoped
+// admin, a certificate returned by the common-name filter carries its recorded
+// ClientID as StewardID. Without this, filterCertsByTenantScope would evaluate a
+// caller-supplied string.
+func TestHandleListCertificates_StewardFilter_TenantScope_DivergentCNNotOwnerLabelled(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:list"})
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-gamma.example.com",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-gamma",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates?steward_id=steward-gamma.example.com", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Data, 1)
+	assert.Equal(t, "steward-gamma", resp.Data[0].StewardID)
+}
+
+// TestHandleListCertificates_TenantScope_InternalCertVisibleToAll verifies that a
+// controller-internal certificate with no ClientID still appears in every caller's
+// list regardless of tenant scope.
+func TestHandleListCertificates_TenantScope_InternalCertVisibleToAll(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	// Generate a signing cert (no ClientID — controller-internal).
+	ensureSharedSigningCertificate(t, certMgr)
+
+	// Register a steward in a different tenant and issue a cert for it.
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-other",
+		TenantID: "other-tenant",
+		Hostname: "other-host",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-other",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-other",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Caller scoped to client-1 (different from other-tenant).
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// The signing cert (no StewardID) must be present.
+	foundInternal := false
+	for _, c := range resp.Data {
+		if c.StewardID == "" {
+			foundInternal = true
+		}
+		// other-tenant cert must be absent.
+		assert.NotEqual(t, "steward-other", c.StewardID,
+			"other-tenant certificate must not appear in client-1 caller's response")
+	}
+	assert.True(t, foundInternal, "controller-internal cert (no ClientID) must appear regardless of tenant scope")
+}
+
+// TestHandleListCertificates_TenantScope_StewardNotInStore_CertKept verifies the
+// story AC for unattributable certificates: a cert whose ClientID has no steward
+// record in the durable store has no tenant owner to check against, so it remains
+// visible to a tenant-scoped caller (same as a controller-internal cert with no
+// ClientID at all).
+func TestHandleListCertificates_TenantScope_StewardNotInStore_CertKept(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	// Issue a cert for a steward that is NOT registered in the stewardStore.
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	found := false
+	for _, c := range resp.Data {
+		if c.StewardID == "unregistered-steward" {
+			found = true
+		}
+	}
+	assert.True(t, found, "cert whose owning steward has no durable record must remain visible to a tenant-scoped caller")
+}
+
+// TestHandleListCertificates_TenantScope_StewardNotInStore_VisibleToUnscopedAdmin
+// verifies that unattributable certs also remain visible to an unscoped admin
+// (mTLS admin cert → TenantID ""), which never filters at all.
+func TestHandleListCertificates_TenantScope_StewardNotInStore_VisibleToUnscopedAdmin(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	found := false
+	for _, c := range resp.Data {
+		if c.StewardID == "unregistered-steward" {
+			found = true
+		}
+	}
+	assert.True(t, found, "unscoped admin must still see certs with no durable steward record")
+}
+
+// TestHandleListCertificates_TenantScope_StoreFault_Returns500 verifies that a genuine
+// durable-store fault (a corrupted steward record, distinct from not-found) fails the
+// request instead of degrading to no filtering at all. During a store outage the
+// endpoint must never fall back to returning every tenant's certificates.
+func TestHandleListCertificates_TenantScope_StoreFault_Returns500(t *testing.T) {
+	server, certMgr, stewardStore, flatfileRoot := setupCertTestServerWithStewardStoreRoot(t)
+
+	// steward-client1 is in the caller's tenant; steward-client2 is in a sibling tenant.
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	for _, id := range []string{"steward-client1", "steward-client2"} {
+		_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   id,
+			Organization: "Test CFGMS",
+			ClientID:     id,
+			ValidityDays: 365,
+		})
+		require.NoError(t, err)
+	}
+
+	// Corrupt the durable record for steward-client2 so GetSteward returns an
+	// unmarshal error rather than business.ErrStewardNotFound.
+	recordPath := filepath.Join(flatfileRoot, "stewards", "steward-client2.json")
+	require.FileExists(t, recordPath)
+	require.NoError(t, os.WriteFile(recordPath, []byte("{ not json"), 0o600))
+	_, lookupErr := stewardStore.GetSteward(context.Background(), "steward-client2")
+	require.Error(t, lookupErr, "corrupted record must produce a store error")
+	require.NotErrorIs(t, lookupErr, business.ErrStewardNotFound,
+		"the injected fault must be a genuine store error, not not-found")
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"store fault during tenant-scope filtering must fail the request")
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"failed scope evaluation must not leak the other tenant's certificate")
+	assert.NotContains(t, body, "steward-client1",
+		"failed scope evaluation must not return partial certificate data")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// TestHandleListCertificates_TenantScope_NilStewardStore_Returns503 verifies the
+// endpoint fails CLOSED when the controller was composed without a steward store.
+// Without that store, subtree membership cannot be evaluated for a tenant-scoped
+// caller, so returning the list at all would disclose every tenant's serials,
+// common names and expiry dates. The composition is reachable: server.go wires the
+// store only when the storage provider supplies one, and a provider answering
+// CreateStewardStore with business.ErrNotSupported leaves it nil.
+func TestHandleListCertificates_TenantScope_NilStewardStore_Returns503(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	// Two stewards in sibling tenants, both with issued certs.
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+	for _, id := range []string{"steward-client1", "steward-client2"} {
+		_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   id,
+			Organization: "Test CFGMS",
+			ClientID:     id,
+			ValidityDays: 365,
+		})
+		require.NoError(t, err)
+	}
+
+	// Reproduce the unwired composition: no steward store on the server.
+	server.SetStewardStore(nil)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:list"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a tenant-scoped caller must never receive an unfiltered certificate list")
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"unevaluable scope must not leak the sibling tenant's certificate")
+	assert.NotContains(t, body, "steward-client1",
+		"unevaluable scope must not return partial certificate data")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillListed
+// verifies the fail-closed guard is scoped to tenant-scoped callers only: an
+// unscoped admin (mTLS admin cert → TenantID "") has no subtree to restrict to and
+// still receives the full list when no steward store is wired.
+func TestHandleListCertificates_TenantScope_NilStewardStore_UnscopedAdminStillListed(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	_, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	server.SetStewardStore(nil)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must not be blocked by the tenant-scope store requirement")
+
+	var resp struct {
+		Data []CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	found := false
+	for _, c := range resp.Data {
+		if c.StewardID == "steward-client1" {
+			found = true
+		}
+	}
+	assert.True(t, found, "unscoped admin must still receive the full certificate list")
+}
+
 // setupRotationTestServer creates a server wired with a real cert manager and
 // signing rotation service for rotate-endpoint tests.
 func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.SigningRotationService) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -310,7 +903,7 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
 	certMgr := newTestCertManager(t)
-	require.NoError(t, certMgr.EnsureSigningCertificate(nil))
+	ensureSharedSigningCertificate(t, certMgr)
 
 	rotationSvc := service.NewSigningRotationService(certMgr, logger)
 	rotationSvc.SetControllerService(controllerService)
@@ -319,24 +912,29 @@ func setupRotationTestServer(t *testing.T) (*Server, *cert.Manager, *service.Sig
 		cfg, logger, controllerService, configService,
 		nil, rbacService, certMgr, tenantManager, rbacManager,
 		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	server.SetSigningRotationService(rotationSvc)
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Close(closeCtx)
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
 	})
 
 	return server, certMgr, rotationSvc
 }
 
 // TestHandleRotateSigningCertRequiresAdminCert verifies that the rotate endpoint
-// returns 403 for any non-admin principal, even when rbacService is nil.
+// returns 403 for any sub-Strong-assurance principal, even when rbacService is nil.
 //
-// (a) API-key principal → 403 (issued by X-API-Key header, IsAdmin == false).
-// (b) rbacService == nil + non-admin cert (no admin marker) → 403.
-// The explicit IsAdmin guard must block both before any rotation logic runs.
+// (a) API-key principal → 403 (AssuranceMachine, does not meet AssuranceStrong bar).
+// (b) rbacService == nil + non-Strong-assurance cert → 503 (fail closed).
+// The defense-in-depth Assurance < AssuranceStrong guard must block both before any
+// rotation logic runs, mirroring the certificate:rotate permissionAssurance entry.
 func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 	server, _, _ := setupRotationTestServer(t)
 
@@ -349,14 +947,14 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		var errResp ErrorResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-		assert.Equal(t, "FORBIDDEN", errResp.Error.Code)
+		// Assurance gate (requirePermission) fires before the handler's own Assurance check:
+		// Machine-assurance API keys get INSUFFICIENT_PERMISSIONS, not MTLS_REQUIRED (Issue #2780).
+		assert.Equal(t, "INSUFFICIENT_PERMISSIONS", errResp.Error.Code)
 	})
 
 	t.Run("nil_rbac_non_admin_principal_rejected", func(t *testing.T) {
-		// Build a server with rbacService == nil to exercise the RBAC-nil bypass path.
-		// requirePermission skips the check when rbacService is nil; the explicit IsAdmin
-		// guard in the handler must catch non-admin principals before rotation is reached.
-		t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+		// Build a server with rbacService == nil to verify authorization fails closed.
+		setTestSecretsEnv(t)
 		cfg := config.DefaultConfig()
 		cfg.Certificate.EnableCertManagement = false
 		logger := logging.NewNoopLogger()
@@ -370,24 +968,26 @@ func TestHandleRotateSigningCertRequiresAdminCert(t *testing.T) {
 			cfg, logger, controllerService, configService,
 			nil, nil /* rbacService == nil */, nil, nil, nil,
 			nil, nil, nil, "", nil, auditMgr2, nil, nil, nil,
+			nil, // Issue #4208: health alert manager
+			nil, // Issue #4208: health trace manager
 		)
 		require.NoError(t, err)
 		nilRBACServer.SetSigningRotationService(service.NewSigningRotationService(nil, logger))
 		t.Cleanup(func() {
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = nilRBACServer.Close(closeCtx)
+			if closeErr := nilRBACServer.Close(closeCtx); closeErr != nil {
+				t.Errorf("nilRBACServer.Close: %v", closeErr)
+			}
 		})
 
-		// Use an API-key principal (IsAdmin == false). With rbacService == nil,
-		// requirePermission skips the RBAC check — the explicit IsAdmin guard in the
-		// handler must be the sole gate.
+		// A valid credential cannot compensate for a missing authorization service.
 		apiKey := NewTestKey(t, nilRBACServer, []string{"certificate:rotate"})
 		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
 		req.Header.Set("X-API-Key", apiKey)
 		rec := httptest.NewRecorder()
 		nilRBACServer.router.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	})
 }
 
@@ -536,4 +1136,1410 @@ func TestHandleRotateSigningCert_NegativeOverlapRejected(t *testing.T) {
 	server.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleRotateSigningCert_TenantScope_Returns403 is the [REQUIRED TEST] for Issue
+// #4334: the signing CA is a single fleet-wide resource, so a tenant-scoped caller
+// (even one meeting the AssuranceStrong bar) must be refused — only an unscoped
+// (root) caller may rotate it. This must succeed (rotate the CA) before the fix and
+// be refused after.
+func TestHandleRotateSigningCert_TenantScope_Returns403(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{
+		ID:         "scoped-admin",
+		Assurance:  session.AssuranceStrong,
+		TenantID:   "client-1",
+		CertSerial: "scoped-admin-serial",
+	})
+	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("client-1"))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleRotateSigningCert(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "the signing CA must not be rotated for a tenant-scoped caller")
+}
+
+// TestHandleRotateSigningCert_UnsetScope_Returns403 verifies the fail-closed contract
+// (Issue #4316): a request reaching the handler with no TenantScope ever established
+// is refused, never treated as unrestricted root access.
+func TestHandleRotateSigningCert_UnsetScope_Returns403(t *testing.T) {
+	server, _, _ := setupRotationTestServer(t)
+
+	ctx := context.WithValue(context.Background(), principalContextKey, &Principal{
+		ID:         "unset-scope-admin",
+		Assurance:  session.AssuranceStrong,
+		CertSerial: "unset-scope-admin-serial",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	server.handleRotateSigningCert(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// setupProvisionTestServer creates a server wired with a real cert manager and a real
+// certificate provisioning service. The cert manager's storage path is returned so a
+// test can inject a storage fault (the provisioning service writes every issued cert
+// through the cert store).
+func setupProvisionTestServer(t *testing.T) (*Server, *cert.Manager, string) {
+	t.Helper()
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+
+	logger := logging.NewNoopLogger()
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	require.NoError(t, rbacManager.Initialize(context.Background()))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	// Cert manager with a test-owned storage path (newTestCertManager hides its
+	// t.TempDir()), so the storage-fault test can make the cert store unwritable.
+	certStoragePath := filepath.Join(t.TempDir(), "certs")
+	certMgr := newSharedTestCertManagerAt(t, certStoragePath)
+
+	provisioningSvc := service.NewCertificateProvisioningService(certMgr, logger)
+
+	server, err := New(
+		cfg, logger, controllerService, configService,
+		provisioningSvc, rbacService, certMgr, tenantManager, rbacManager,
+		nil, nil, nil, "", nil, auditMgr, nil, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
+	)
+	require.NoError(t, err)
+	// Issue #4334: wire a real steward store so tenant-containment tests can resolve
+	// an existing steward's owning tenant. Every pre-existing caller of this helper
+	// authenticates via the unscoped bootstrap-fallback admin cert (newAdminPeerCert),
+	// so the handler's new tenant check short-circuits on IsRoot() and never touches
+	// this store — attaching it changes nothing for them.
+	server.SetStewardStore(storageManager.GetStewardStore())
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := server.Close(closeCtx); closeErr != nil {
+			t.Errorf("server.Close: %v", closeErr)
+		}
+	})
+
+	return server, certMgr, certStoragePath
+}
+
+// scopedProvisionContext builds a context carrying a tenant-scoped TenantScope for
+// tenantID, mirroring scopedRevokeContext for the provision handler (Issue #4334).
+// An empty tenantID models an unscoped (root) caller.
+func scopedProvisionContext(tenantID string) context.Context {
+	if tenantID == "" {
+		return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	}
+	return context.WithValue(context.Background(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
+}
+
+// newAdminPeerCert issues an mTLS admin certificate from certMgr and returns it parsed,
+// ready to attach to a request as a TLS peer certificate. certificate:provision requires
+// AssuranceStrong (assurance.go), so only an admin-marked client cert reaches the handler.
+func newAdminPeerCert(t *testing.T, certMgr *cert.Manager) *x509.Certificate {
+	t.Helper()
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	parsed, err := cert.ParseCertificateFromPEM(issued.CertificatePEM)
+	require.NoError(t, err)
+	return parsed
+}
+
+// postProvision sends POST /api/v1/certificates/provision authenticated with the given
+// admin peer certificate and returns the recorder.
+func postProvision(server *Server, peer *x509.Certificate, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision", strings.NewReader(body))
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{peer}}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestHandleProvisionCertificate_NilService_Returns503 verifies the handler reports the
+// provisioning service as unavailable rather than panicking when it is not wired.
+func TestHandleProvisionCertificate_NilService_Returns503(t *testing.T) {
+	server, certMgr := setupCertTestServer(t) // certProvisioningService == nil
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer, `{"steward_id":"steward-001"}`)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleProvisionCertificate_InvalidJSON_Returns400 verifies a malformed body is
+// rejected before any certificate is issued.
+func TestHandleProvisionCertificate_InvalidJSON_Returns400(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	rec := postProvision(server, peer, `{"steward_id":`)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "INVALID_JSON", errResp.Error.Code)
+
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "no certificate may be issued for a malformed request")
+}
+
+// TestHandleProvisionCertificate_MissingStewardID_Returns400 verifies the required-field
+// check: a syntactically valid body with no steward_id is rejected with MISSING_STEWARD_ID.
+func TestHandleProvisionCertificate_MissingStewardID_Returns400(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer, `{"common_name":"steward-001.example.com"}`)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "MISSING_STEWARD_ID", errResp.Error.Code)
+}
+
+// TestHandleProvisionCertificate_Success_Returns201 verifies the success path: 201 with a
+// usable certificate/key/CA triple, and the issued cert recorded in the cert manager.
+// common_name is omitted so the steward_id default is exercised.
+func TestHandleProvisionCertificate_Success_Returns201(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer, `{"steward_id":"steward-prov-01","validity_days":30}`)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data CertificateProvisionResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	result := resp.Data
+	assert.NotEmpty(t, result.SerialNumber)
+
+	issued, err := cert.ParseCertificateFromPEM([]byte(result.CertificatePEM))
+	require.NoError(t, err, "certificate_pem must be a parseable certificate")
+	assert.Equal(t, "steward-prov-01", issued.Subject.CommonName,
+		"common_name must default to steward_id when omitted")
+	assert.WithinDuration(t, time.Now().AddDate(0, 0, 30), issued.NotAfter, 24*time.Hour,
+		"validity_days from the request must be honoured")
+	assert.Equal(t, result.SerialNumber, issued.SerialNumber.String())
+	assert.False(t, result.ExpiresAt.IsZero(), "expires_at must be populated")
+
+	// The private key and CA cert must both be usable material, not placeholders.
+	keyPair, err := tls.X509KeyPair([]byte(result.CertificatePEM), []byte(result.PrivateKeyPEM))
+	require.NoError(t, err, "certificate_pem and private_key_pem must form a usable key pair")
+	assert.NotNil(t, keyPair.PrivateKey)
+	_, err = cert.ParseCertificateFromPEM([]byte(result.CACertificatePEM))
+	require.NoError(t, err, "ca_certificate_pem must be a parseable certificate")
+
+	// The issued cert must be recorded in the cert manager under the steward's ID.
+	stored, err := certMgr.GetCertificateByCommonName("steward-prov-01")
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.Equal(t, result.SerialNumber, stored[0].SerialNumber)
+	assert.Equal(t, "steward-prov-01", stored[0].ClientID)
+}
+
+// TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400 is the
+// required test for Issue #4346: a validity_days request above the ceiling is
+// refused with 400, not silently clamped down to the maximum.
+func TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer,
+		`{"steward_id":"steward-prov-ceiling","validity_days":826}`)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+
+	stored, err := certMgr.GetCertificateByCommonName("steward-prov-ceiling")
+	require.NoError(t, err)
+	assert.Empty(t, stored, "no certificate must be issued for a refused over-ceiling request")
+}
+
+// TestHandleProvisionCertificate_ExplicitCommonName_Returns201 verifies an explicit
+// common_name is used instead of the steward_id default.
+func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	rec := postProvision(server, peer,
+		`{"steward_id":"steward-prov-02","common_name":"steward-prov-02.example.com","organization":"Example Org"}`)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data CertificateProvisionResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	issued, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
+	require.NoError(t, err)
+	assert.Equal(t, "steward-prov-02.example.com", issued.Subject.CommonName)
+	assert.Contains(t, issued.Subject.Organization, "Example Org")
+}
+
+// TestHandleProvisionCertificate_ProvisioningFailure_Returns500 verifies that a real
+// failure inside the provisioning service surfaces as 500 with no internal detail in the
+// response body. The fault is injected by replacing the cert store's storage directory
+// with a regular file, so persisting the issued certificate fails (ENOTDIR) — the CA
+// itself is already loaded in memory and still signs successfully.
+func TestHandleProvisionCertificate_ProvisioningFailure_Returns500(t *testing.T) {
+	server, certMgr, certStoragePath := setupProvisionTestServer(t)
+	peer := newAdminPeerCert(t, certMgr)
+
+	require.NoError(t, os.RemoveAll(certStoragePath))
+	require.NoError(t, os.WriteFile(certStoragePath, []byte("not a directory"), 0o600))
+
+	rec := postProvision(server, peer, `{"steward_id":"steward-prov-03"}`)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+
+	body := rec.Body.String()
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	assert.Equal(t, "Failed to provision certificate", errResp.Error.Message)
+	assert.NotContains(t, body, certStoragePath,
+		"the error response must not disclose internal filesystem paths")
+	assert.NotContains(t, body, "BEGIN",
+		"no certificate material may be returned on the failure path")
+}
+
+// TestHandleProvisionCertificate_TenantScope_SiblingTenant_Returns403 is the
+// [REQUIRED TEST] for Issue #4334: a caller scoped to client-1 must be refused when
+// provisioning a certificate for a steward already registered under sibling tenant
+// client-2 — this must fail (issue a certificate) before the fix and be refused after.
+func TestHandleProvisionCertificate_TenantScope_SiblingTenant_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client2"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before), "no certificate may be issued for a cross-tenant provision")
+}
+
+// TestHandleProvisionCertificate_TenantScope_OwnTenant_Succeeds verifies a caller
+// scoped to client-1 CAN provision a certificate for a steward registered under its
+// own tenant.
+func TestHandleProvisionCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_UnknownSteward_Returns403 verifies the
+// containment check fails closed on an absent steward record, matching the revoke
+// path in the same file: without a durable record the steward_id cannot be attributed
+// to the caller's subtree, so an unused steward_id must not be a free pass through the
+// check for an endpoint that returns a certificate and its private key.
+func TestHandleProvisionCertificate_TenantScope_UnknownSteward_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"brand-new-steward"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before),
+		"no certificate may be issued for a steward with no durable record")
+}
+
+// TestHandleProvisionCertificate_TenantScope_RootOnboardsNewSteward_Succeeds verifies
+// that denying the unattributable case for tenant-scoped callers leaves new-device
+// onboarding available to a root/unscoped caller.
+func TestHandleProvisionCertificate_TenantScope_RootOnboardsNewSteward_Succeeds(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"brand-new-steward"}`))
+	req = req.WithContext(scopedProvisionContext("")) // root scope
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_SpoofedCommonName_Returns403 is the
+// certificate-identity half of Issue #4334: the containment check resolves steward_id,
+// but consumers authenticate on the Subject CommonName (PeerStewardID,
+// pkg/transport/quic/tls.go). A tenant-scoped caller passing containment with its own
+// steward must not be able to name a victim steward in common_name and receive a
+// CA-signed certificate (plus private key) that impersonates it.
+func TestHandleProvisionCertificate_TenantScope_SpoofedCommonName_Returns403(t *testing.T) {
+	server, certMgr, _ := setupProvisionTestServer(t)
+	ctx := context.Background()
+	require.NoError(t, server.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "steward-client1-cn", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+	require.NoError(t, server.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "steward-victim", TenantID: "client-2", Hostname: "h2", Platform: "linux", Arch: "amd64",
+	}))
+
+	before, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-cn","common_name":"steward-victim"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	after, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	assert.Len(t, after, len(before),
+		"no certificate may be issued with a Subject naming another steward")
+	assert.NotContains(t, rec.Body.String(), "BEGIN",
+		"no certificate material may be returned on the denial path")
+}
+
+// TestHandleProvisionCertificate_TenantScope_SpoofedOrganization_Returns403 covers the
+// second Subject field: the internal-delivery peer authorizer
+// (pkg/controlplane/internaldelivery/peer_auth.go) refuses steward leaves on the
+// Organization marker alone, so a caller-chosen non-steward Organization is a step
+// towards cluster-node authority and must be refused.
+func TestHandleProvisionCertificate_TenantScope_SpoofedOrganization_Returns403(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client1-org", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-org","organization":"CFGMS Controllers"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestHandleProvisionCertificate_TenantScope_SubjectComesFromRecord verifies the
+// positive side of the Subject rule: a tenant-scoped provision for an in-subtree
+// steward issues a certificate whose CommonName is the steward's own ID and whose
+// Organization is the steward marker the internal-delivery authorizer rejects.
+func TestHandleProvisionCertificate_TenantScope_SubjectComesFromRecord(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+	require.NoError(t, server.stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID: "steward-client1-subject", TenantID: "client-1", Hostname: "h1", Platform: "linux", Arch: "amd64",
+	}))
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-client1-subject","common_name":"steward-client1-subject"}`))
+	req = req.WithContext(scopedProvisionContext("client-1"))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Data CertificateProvisionResult `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	issued, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
+	require.NoError(t, err)
+	assert.Equal(t, "steward-client1-subject", issued.Subject.CommonName)
+	assert.Contains(t, issued.Subject.Organization, internaldelivery.StewardCertOrganization,
+		"a tenant-scoped provision must carry the steward organization marker")
+}
+
+// TestHandleProvisionCertificate_UnsetScope_Returns403 verifies the fail-closed
+// contract (Issue #4316): a request that reaches the handler with no TenantScope ever
+// established is refused, never treated as unrestricted root access.
+func TestHandleProvisionCertificate_UnsetScope_Returns403(t *testing.T) {
+	server, _, _ := setupProvisionTestServer(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/provision",
+		strings.NewReader(`{"steward_id":"steward-unset-scope"}`))
+	rec := httptest.NewRecorder()
+	server.handleProvisionCertificate(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestProvisionFailureDetail_CoversEveryFailureCondition exercises each condition
+// that sends handleProvisionCertificate down its failure branch. Two of them —
+// a nil response and an unsuccessful response — carry no error, and formatting
+// them previously dereferenced a nil error and crashed the server process. Every
+// case must produce a non-empty detail string and must not panic.
+func TestProvisionFailureDetail_CoversEveryFailureCondition(t *testing.T) {
+	tests := []struct {
+		name     string
+		resp     *service.CertificateProvisioningResponse
+		err      error
+		expected string
+	}{
+		{
+			name:     "service error is reported verbatim",
+			resp:     &service.CertificateProvisioningResponse{Success: false, Message: "CA unavailable"},
+			err:      errors.New("failed to generate certificate: no CA loaded"),
+			expected: "failed to generate certificate: no CA loaded",
+		},
+		{
+			name:     "error without a response still reports the error",
+			resp:     nil,
+			err:      errors.New("provision request is required"),
+			expected: "provision request is required",
+		},
+		{
+			name:     "nil response and nil error",
+			resp:     nil,
+			err:      nil,
+			expected: "provisioning service returned no response and no error",
+		},
+		{
+			name:     "unsuccessful response with a message and nil error",
+			resp:     &service.CertificateProvisioningResponse{Success: false, Message: "Steward ID is required"},
+			err:      nil,
+			expected: "provisioning service reported failure without an error: Steward ID is required",
+		},
+		{
+			name:     "unsuccessful response with no message and nil error",
+			resp:     &service.CertificateProvisioningResponse{Success: false},
+			err:      nil,
+			expected: "provisioning service reported failure without an error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var detail string
+			require.NotPanics(t, func() {
+				detail = provisionFailureDetail(tc.resp, tc.err)
+			}, "formatting a provisioning failure must never panic")
+			assert.Equal(t, tc.expected, detail)
+			assert.NotEmpty(t, detail, "every failure condition must yield a loggable detail")
+		})
+	}
+}
+
+// ---- GET /api/v1/certificates/{serial} ----
+
+// TestHandleGetCertificate_ReturnsRealData verifies the GET-one endpoint returns
+// CertificateInfo with the correct fields for a known serial number.
+func TestHandleGetCertificate_ReturnsRealData(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-getone",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-getone",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.Equal(t, "steward-getone", resp.Data.CommonName)
+	assert.Equal(t, "steward-getone", resp.Data.StewardID)
+	assert.True(t, resp.Data.IsValid)
+	assert.False(t, resp.Data.ExpiresAt.IsZero(), "expires_at must be populated")
+}
+
+// TestHandleGetCertificate_UnknownSerial_Returns404 verifies that requesting
+// a non-existent serial returns 404, not a 500 or silent success.
+// The serial uses only digits to pass the path-parameter charset validation
+// (validation_middleware.go: charset:alphanumeric).
+func TestHandleGetCertificate_UnknownSerial_Returns404(t *testing.T) {
+	server, _ := setupCertTestServer(t)
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/99999999999999999999", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_NilCertManager_Returns503 verifies 503 when no cert manager
+// is configured. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleGetCertificate_NilCertManager_Returns503(t *testing.T) {
+	server := setupTestServer(t) // no cert manager
+	apiKey := NewTestKey(t, server, []string{"certificate:get"})
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/12345678901234567890", nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_RequiresAuth verifies the endpoint rejects unauthenticated
+// requests. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleGetCertificate_RequiresAuth(t *testing.T) {
+	server, _ := setupCertTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/certificates/12345678901234567890", nil)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestHandleGetCertificate_TenantScope_OwnTenant_Visible verifies that a caller
+// scoped to client-1 can GET their own tenant's certificate.
+func TestHandleGetCertificate_TenantScope_OwnTenant_Visible(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "own-tenant cert must be visible")
+	var resp struct {
+		Data CertificateInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.Equal(t, "steward-client1", resp.Data.StewardID)
+}
+
+// TestHandleGetCertificate_TenantScope_SiblingTenant_Returns404 is a [REQUIRED TEST]:
+// a caller scoped to client-1 cannot GET a certificate whose owning steward belongs
+// to client-2 — the endpoint must return 404 (not 200 or 403) to avoid disclosing
+// cross-tenant certificate existence.
+func TestHandleGetCertificate_TenantScope_SiblingTenant_Returns404(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// certificate:get has no AssuranceStrong requirement — use an API key scoped to client-1.
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"sibling-tenant certificate must return 404 to avoid disclosing serial existence")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_TenantScope_NilStewardStore_Returns503 is the GET-one
+// counterpart of TestHandleListCertificates_TenantScope_NilStewardStore_Returns503:
+// when the controller was composed without a steward store, subtree membership
+// cannot be evaluated, so a tenant-scoped caller asking for a cert with a non-empty
+// ClientID must get 503 rather than the certificate. Returning it would disclose a
+// possibly cross-tenant serial, common name and expiry.
+func TestHandleGetCertificate_TenantScope_NilStewardStore_Returns503(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Reproduce the unwired composition: no steward store on the server.
+	server.SetStewardStore(nil)
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"a tenant-scoped caller must never receive a certificate whose scope cannot be evaluated")
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"unevaluable scope must not leak the certificate's owning steward")
+	assert.NotContains(t, body, issued.SerialNumber,
+		"unevaluable scope must not echo certificate data back to the caller")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleGetCertificate_TenantScope_StoreFault_Returns500 is the GET-one
+// counterpart of TestHandleListCertificates_TenantScope_StoreFault_Returns500: a
+// genuine durable-store fault (a corrupted record, distinct from not-found) during
+// scope evaluation must fail the request closed instead of falling through to
+// returning the certificate.
+func TestHandleGetCertificate_TenantScope_StoreFault_Returns500(t *testing.T) {
+	server, certMgr, stewardStore, flatfileRoot := setupCertTestServerWithStewardStoreRoot(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Corrupt the durable record so GetSteward returns an unmarshal error rather
+	// than business.ErrStewardNotFound.
+	recordPath := filepath.Join(flatfileRoot, "stewards", "steward-client2.json")
+	require.FileExists(t, recordPath)
+	require.NoError(t, os.WriteFile(recordPath, []byte("{ not json"), 0o600))
+	_, lookupErr := stewardStore.GetSteward(context.Background(), "steward-client2")
+	require.Error(t, lookupErr, "corrupted record must produce a store error")
+	require.NotErrorIs(t, lookupErr, business.ErrStewardNotFound,
+		"the injected fault must be a genuine store error, not not-found")
+
+	apiKey := NewEphemeralTestKey(t, server, []string{"certificate:get"}, "client-1", 5*time.Minute)
+	req := httptest.NewRequest("GET", "/api/v1/certificates/"+issued.SerialNumber, nil)
+	req.Header.Set("X-API-Key", apiKey)
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"store fault during tenant-scope evaluation must fail the request")
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "steward-client2",
+		"failed scope evaluation must not leak the certificate's owning steward")
+	assert.NotContains(t, body, issued.SerialNumber,
+		"failed scope evaluation must not return certificate data")
+	assert.NotContains(t, body, flatfileRoot,
+		"the error response must not disclose internal filesystem paths")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+}
+
+// ---- POST /api/v1/certificates/{serial}/revoke ----
+
+// TestHandleRevokeCertificate_Success verifies the success path for certificate
+// revocation: the response carries IsRevoked=true and the cert manager confirms
+// revocation via IsRevoked.
+func TestHandleRevokeCertificate_Success(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-revoke-ok",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-revoke-ok",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// certificate:revoke requires AssuranceStrong — use mTLS admin cert.
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp struct {
+		Data RevokeCertificateResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, issued.SerialNumber, resp.Data.SerialNumber)
+	assert.False(t, resp.Data.IsValid, "revoked cert must report IsValid: false")
+	assert.True(t, resp.Data.IsRevoked, "revoked cert must report IsRevoked: true")
+
+	// Verify actual revocation in the cert manager.
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
+		"cert must be on the revocation list after successful revoke")
+}
+
+// TestHandleRevokeCertificate_RevokedCertReportsCorrectly verifies that after
+// revocation the certificate still appears in ListCertificates and
+// GetCertificateByCommonName (revocation does not delete the cert), and IsRevoked
+// returns true (Issue #3129 AC: "appears correctly in ListCertificates/
+// GetCertificateByCommonName output").
+func TestHandleRevokeCertificate_RevokedCertReportsCorrectly(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-revoke-report",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-revoke-report",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "revoke must succeed: %s", rec.Body.String())
+
+	// IsRevoked must return true.
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
+		"IsRevoked must return true after revocation")
+
+	// ListCertificates must still include the cert (revocation doesn't delete it).
+	certInfos, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	found := false
+	for _, c := range certInfos {
+		if c.SerialNumber == issued.SerialNumber {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"revoked cert must still appear in ListCertificates (revocation is not deletion)")
+
+	// GetCertificateByCommonName must still return the cert.
+	byCN, err := certMgr.GetCertificateByCommonName("steward-revoke-report")
+	require.NoError(t, err)
+	found = false
+	for _, c := range byCN {
+		if c.SerialNumber == issued.SerialNumber {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"revoked cert must still appear in GetCertificateByCommonName output")
+}
+
+// TestHandleRevokeCertificate_UnknownSerial_Returns404 is a [REQUIRED TEST]:
+// revoking an unknown serial must return 404, not a 500 or silent success.
+// Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleRevokeCertificate_UnknownSerial_Returns404(t *testing.T) {
+	server, certMgr := setupCertTestServer(t)
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/99999999999999999999/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, "unknown serial must return 404, not 500 or 200")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleRevokeCertificate_NilCertManager_Returns503 verifies 503 when no cert
+// manager is configured. Uses a digit-only serial to pass path-parameter charset validation.
+func TestHandleRevokeCertificate_NilCertManager_Returns503(t *testing.T) {
+	server, certMgr := setupCertTestServer(t) // certMgr needed for admin cert only
+
+	// Replace server's cert manager with nil to trigger the guard.
+	server.certManager = nil
+
+	adminCert, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:       "operator-admin",
+		Organization:     "CFGMS",
+		ValidityDays:     1,
+		TemplateModifier: cert.SetAdminMarker,
+	})
+	require.NoError(t, err)
+	x509Cert, err := cert.ParseCertificateFromPEM(adminCert.CertificatePEM)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{x509Cert}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+}
+
+// TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNotRevoke
+// is a [REQUIRED TEST]: a caller scoped to client-1 cannot revoke a certificate
+// whose owning steward belongs to client-2. The endpoint must return 404 and the
+// certificate must remain un-revoked.
+//
+// certificate:revoke is AssuranceStrong — no API key can reach the endpoint via the
+// router. We call the handler directly, injecting a Strong-assurance principal
+// scoped to client-1, to test the handler's tenant gate independently.
+func TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client2",
+		TenantID: "client-2",
+		Hostname: "host2",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client2",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client2",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Inject a Strong-assurance principal scoped to client-1 directly into the
+	// context. We call the handler method directly (bypassing requirePermission)
+	// because certificate:revoke is AssuranceStrong and no API key can satisfy that.
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "scoped-admin",
+		Name:      "mtls-cert:scoped-admin",
+		Assurance: session.AssuranceStrong,
+		TenantID:  "client-1",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"cross-tenant revoke must return 404 to avoid disclosing cert existence across tenants")
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
+		"cross-tenant revoke must NOT revoke the certificate")
+}
+
+// TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds verifies that a
+// Strong-assurance principal scoped to client-1 CAN revoke a certificate belonging
+// to a steward in client-1. Calls the handler directly (same rationale as the
+// sibling-tenant test above).
+func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "scoped-admin",
+		Name:      "mtls-cert:scoped-admin",
+		Assurance: session.AssuranceStrong,
+		TenantID:  "client-1",
+	})
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(ctx)
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"own-tenant revoke must succeed: %s", rec.Body.String())
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
+		"cert must be revoked after successful own-tenant revoke")
+}
+
+// scopedRevokeContext builds a Strong-assurance principal context scoped to the
+// given tenant. An empty tenant models an unscoped mTLS admin.
+func scopedRevokeContext(tenantID string) context.Context {
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	return context.WithValue(ctx, principalContextKey, &Principal{
+		ID:        "revoke-caller",
+		Name:      "mtls-cert:revoke-caller",
+		Assurance: session.AssuranceStrong,
+		TenantID:  tenantID,
+	})
+}
+
+// internalCertSerial returns the serial of a certificate with no ClientID
+// (controller-internal: CA, signing or server cert).
+func internalCertSerial(t *testing.T, certMgr *cert.Manager) string {
+	t.Helper()
+	certs, err := certMgr.ListCertificates()
+	require.NoError(t, err)
+	for _, c := range certs {
+		if c.ClientID == "" {
+			return c.SerialNumber
+		}
+	}
+	t.Fatal("no controller-internal certificate (empty ClientID) found in store")
+	return ""
+}
+
+// TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotRevoke
+// verifies the fail-closed rule for the destructive path: a tenant-scoped caller
+// must NOT be able to revoke a controller-internal certificate (empty ClientID —
+// CA, signing or server cert). Revoking one severs mTLS for the entire fleet, so
+// unlike the read/list path it is denied with the same 404 used for out-of-scope
+// certificates.
+func TestHandleRevokeCertificate_TenantScope_InternalCert_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	ensureSharedSigningCertificate(t, certMgr)
+	serial := internalCertSerial(t, certMgr)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": serial})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"tenant-scoped caller must not revoke a controller-internal certificate")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+	revoked, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.False(t, revoked,
+		"controller-internal certificate must remain un-revoked after a tenant-scoped attempt")
+}
+
+// TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds verifies the
+// other half of the fail-closed rule: an unscoped admin (empty caller tenant)
+// retains the ability to revoke controller-internal certificates.
+func TestHandleRevokeCertificate_InternalCert_UnscopedAdminSucceeds(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	ensureSharedSigningCertificate(t, certMgr)
+	serial := internalCertSerial(t, certMgr)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+serial+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext(""))
+	req = mux.SetURLVars(req, map[string]string{"serial": serial})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must be able to revoke a controller-internal cert: %s", rec.Body.String())
+	revoked, err := certMgr.IsRevoked(serial)
+	require.NoError(t, err)
+	assert.True(t, revoked,
+		"cert must be revoked after unscoped-admin revoke")
+}
+
+// TestHandleRevokeCertificate_TenantScope_StewardNotInStore_Returns404_AndDoesNotRevoke
+// verifies that a certificate whose owning steward has no durable record is
+// unattributable and therefore NOT revocable by a tenant-scoped caller. It could
+// belong to any tenant; allowing it would let one tenant silently kill another
+// tenant's steward.
+func TestHandleRevokeCertificate_TenantScope_StewardNotInStore_Returns404_AndDoesNotRevoke(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	// Issue a cert for a steward that is NOT registered in the stewardStore.
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"unattributable certificate must not be revocable by a tenant-scoped caller")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "CERTIFICATE_NOT_FOUND", errResp.Error.Code)
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
+		"unattributable certificate must remain un-revoked after a tenant-scoped attempt")
+}
+
+// TestHandleRevokeCertificate_StewardNotInStore_UnscopedAdminSucceeds verifies an
+// unscoped admin can still revoke a certificate whose steward has no durable
+// record — orphaned certs remain administratively revocable.
+func TestHandleRevokeCertificate_StewardNotInStore_UnscopedAdminSucceeds(t *testing.T) {
+	server, certMgr, _ := setupCertTestServerWithStewardStore(t)
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "unregistered-steward",
+		Organization: "Test CFGMS",
+		ClientID:     "unregistered-steward",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext(""))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"unscoped admin must be able to revoke an unattributable cert: %s", rec.Body.String())
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.True(t, revoked,
+		"cert must be revoked after unscoped-admin revoke")
+}
+
+// TestHandleRevokeCertificate_TenantScope_NilStewardStore_Returns503 verifies the
+// revoke endpoint fails CLOSED when the controller was composed without a steward
+// store. Subtree membership cannot be evaluated, so a tenant-scoped caller must not
+// be allowed to sever another tenant's mTLS connectivity — 503, and the certificate
+// stays valid. The composition is reachable: server.go wires the store only when
+// the storage provider supplies one.
+func TestHandleRevokeCertificate_TenantScope_NilStewardStore_Returns503(t *testing.T) {
+	server, certMgr, stewardStore := setupCertTestServerWithStewardStore(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Reproduce the unwired composition: no steward store on the server.
+	server.SetStewardStore(nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"revoke must fail closed when tenant scope cannot be evaluated")
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, "SERVICE_UNAVAILABLE", errResp.Error.Code)
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
+		"certificate must remain un-revoked when scope evaluation is impossible")
+}
+
+// TestHandleRevokeCertificate_TenantScope_StoreFault_Returns500 verifies that a
+// genuine durable-store fault during revoke scope evaluation (a corrupted record,
+// distinct from business.ErrStewardNotFound) fails the request instead of falling
+// through to revocation. Revoking on an unverified scope would let one tenant kill
+// another tenant's steward whenever the store is degraded.
+func TestHandleRevokeCertificate_TenantScope_StoreFault_Returns500(t *testing.T) {
+	server, certMgr, stewardStore, flatfileRoot := setupCertTestServerWithStewardStoreRoot(t)
+
+	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
+		ID:       "steward-client1",
+		TenantID: "client-1",
+		Hostname: "host1",
+		Platform: "linux",
+		Arch:     "amd64",
+	}))
+
+	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-client1",
+		Organization: "Test CFGMS",
+		ClientID:     "steward-client1",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
+	// Corrupt the durable record so GetSteward returns an unmarshal error rather
+	// than business.ErrStewardNotFound.
+	recordPath := filepath.Join(flatfileRoot, "stewards", "steward-client1.json")
+	require.FileExists(t, recordPath)
+	require.NoError(t, os.WriteFile(recordPath, []byte("{ not json"), 0o600))
+	_, lookupErr := stewardStore.GetSteward(context.Background(), "steward-client1")
+	require.Error(t, lookupErr, "corrupted record must produce a store error")
+	require.NotErrorIs(t, lookupErr, business.ErrStewardNotFound,
+		"the injected fault must be a genuine store error, not not-found")
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+	req = req.WithContext(scopedRevokeContext("client-1"))
+	req = mux.SetURLVars(req, map[string]string{"serial": issued.SerialNumber})
+	rec := httptest.NewRecorder()
+	server.handleRevokeCertificate(rec, req)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"store fault during revoke scope evaluation must fail the request")
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, flatfileRoot,
+		"the error response must not disclose internal filesystem paths")
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(strings.NewReader(body)).Decode(&errResp))
+	assert.Equal(t, "INTERNAL_ERROR", errResp.Error.Code)
+	revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+	require.NoError(t, err)
+	assert.False(t, revoked,
+		"certificate must remain un-revoked when scope evaluation fails")
+}
+
+// TestCertificateHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for
+// this file (Issue #3761, ADR-031 Decision 1). handleProvisionCertificate,
+// handleRotateSigningCert and handleRevokeCertificate used to return 503 and
+// perform no certificate operation when the serving node held no lease-backed
+// leadership. Any-node service means every cluster node now serves these
+// certificate-lifecycle writes: driven against a real, deliberately
+// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired), each
+// handler must reach its normal success path and the certificate mutation must
+// actually land.
+func TestCertificateHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	t.Run("handleProvisionCertificate issues a certificate", func(t *testing.T) {
+		server, certMgr, _ := setupProvisionTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		before, err := certMgr.ListCertificates()
+		require.NoError(t, err)
+
+		peer := newAdminPeerCert(t, certMgr)
+		rec := postProvision(server, peer, `{"steward_id":"provisioned-from-non-authoritative"}`)
+
+		require.Equal(t, http.StatusCreated, rec.Code,
+			"provision must succeed regardless of leadership; body: %s", rec.Body.String())
+		after, err := certMgr.ListCertificates()
+		require.NoError(t, err)
+		assert.Greater(t, len(after), len(before),
+			"the certificate must actually be issued on a non-authoritative node")
+	})
+
+	t.Run("handleRotateSigningCert rotates the signing certificate", func(t *testing.T) {
+		server, certMgr, _ := setupRotationTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"signing rotation must succeed regardless of leadership; body: %s", rec.Body.String())
+	})
+
+	t.Run("handleRevokeCertificate revokes the certificate", func(t *testing.T) {
+		server, certMgr := setupCertTestServer(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+
+		issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
+			CommonName:   "revoked-from-non-authoritative",
+			Organization: "Test CFGMS",
+			ClientID:     "revoked-from-non-authoritative",
+			ValidityDays: 365,
+		})
+		require.NoError(t, err)
+
+		req := httptest.NewRequest("POST", "/api/v1/certificates/"+issued.SerialNumber+"/revoke", nil)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"revoke must succeed regardless of leadership; body: %s", rec.Body.String())
+		revoked, err := certMgr.IsRevoked(issued.SerialNumber)
+		require.NoError(t, err)
+		assert.True(t, revoked,
+			"the certificate must actually be revoked on a non-authoritative node")
+	})
+}
+
+// TestCertificateHandlers_SucceedOnAuthoritativeNode is the mirror case for
+// continuity: a real, deliberately authoritative *ha.Manager (SingleServerMode,
+// the shape every OSS single-controller install runs) must still reach the same
+// certificate-lifecycle logic. Removing the gate must not have broken the
+// authoritative path either.
+func TestCertificateHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, certMgr, _ := setupRotationTestServer(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/certificates/signing/rotate", nil)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{newAdminPeerCert(t, certMgr)}}
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"signing rotation must succeed on an authoritative node; body: %s", rec.Body.String())
 }

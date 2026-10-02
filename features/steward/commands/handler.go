@@ -23,7 +23,8 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/config/signature"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/steward/operatorroster"
 	scriptrelay "github.com/cfgis/cfgms/features/steward/script_relay"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -68,8 +69,24 @@ type Handler struct {
 	// rejected as a potential replay.
 	replayWindow time.Duration
 
+	// executingRestartTimeout bounds how long a command may sit in "executing"
+	// before a startup sweep treats it as abandoned (Issue #3757, ADR-031
+	// Decision 2). Only executing records started at least this long ago are
+	// failed with "controller_restart"; pending records are never touched by
+	// the sweep at all — they were never mid-attempt, so a restart cannot have
+	// interrupted anything for them to fail.
+	executingRestartTimeout time.Duration
+
 	// replayCache detects duplicate command IDs within the replay window.
 	replayCache *ttlReplayCache
+
+	// envelopeNonceCache detects a reused operator-payload envelope nonce
+	// (Issue #3694), independently of replayCache: replayCache dedups the outer
+	// SignedCommand.ID, which a compromised controller (or a stale relay) could
+	// rewrap with a fresh ID and timestamp around a captured, still-validly-signed
+	// inner envelope. envelopeNonceCache catches that case because it keys on the
+	// operator's own signed nonce, not on anything the outer command controls.
+	envelopeNonceCache *ttlReplayCache
 
 	// maxParamsBytes is the maximum allowed JSON-serialized size of Command.Params.
 	maxParamsBytes int
@@ -88,9 +105,31 @@ type Handler struct {
 	// command certificates. When nil, CA chain verification of operator certs is skipped.
 	controllerCARoots *x509.CertPool
 
+	// tenantID is this steward's own tenant path, used to confine an authorized
+	// WebAuthn credential to the tenant subtree it was registered in (Issue #3697).
+	tenantID string
+
+	// webauthnManifestFloor is the per-steward high-water mark of accepted
+	// authorized-credential-manifest issuance instants (Issue #3697). Shared across
+	// verifications so a captured older manifest — one still listing a since-removed
+	// credential — cannot be replayed after a newer one has been honoured.
+	webauthnManifestFloor *manifestFreshnessFloor
+
+	// revocationVerifier answers whether an operator certificate's serial has been
+	// revoked, from the last signed revocation manifest this steward independently
+	// verified for itself (Issue #3699). nil is treated as "no manifest verified
+	// yet" — the same graceful-degradation behavior as an unset revocationVerifier
+	// field, since operatorroster.RevocationVerifier.IsRevoked already answers
+	// false when it has never verified a manifest.
+	revocationVerifier *operatorroster.RevocationVerifier
+
 	// Issue #1675: per-execution relay registry.
 	// relays maps executionID → *scriptrelay.Relay for CommandRelayResponse dispatch.
 	relays sync.Map
+
+	// eventEmitter streams script output events to the controller via LogStream (Issue #2143).
+	// When nil, script output emission is skipped (e.g. tests without a live gRPC connection).
+	eventEmitter EventEmitter
 }
 
 // CommandFunc is a function that handles a specific command type.
@@ -128,6 +167,12 @@ type Config struct {
 	// Defaults to 5 minutes when zero.
 	ReplayWindow time.Duration
 
+	// ExecutingRestartTimeout bounds how long a command may sit in "executing"
+	// before the startup sweep treats it as abandoned and fails it with
+	// "controller_restart" (Issue #3757). Defaults to 5 minutes when zero.
+	// Pending records are never touched by the sweep regardless of this value.
+	ExecutingRestartTimeout time.Duration
+
 	// MaxParamsBytes is the maximum JSON-serialized size of Command.Params.
 	// Defaults to 65536 (64 KiB) when zero.
 	MaxParamsBytes int
@@ -146,16 +191,52 @@ type Config struct {
 	// ControllerCARoots is the certificate pool for verifying operator-signed inline
 	// command certs. When nil, CA chain verification of operator certs is skipped.
 	ControllerCARoots *x509.CertPool
+
+	// TenantID is this steward's own tenant path. It confines a fleet-wide
+	// authorized-WebAuthn-credential roster entry (Issue #3697) to the tenant subtree
+	// its owning account belongs to. Empty in standalone mode or before registration
+	// has assigned one, in which case only a root-scope entry authorizes execution.
+	TenantID string
+
+	// EventEmitter, when non-nil, receives script output LogEntry events after each
+	// CommandExecuteScript completes (Issue #2143). Enqueue must never block.
+	EventEmitter EventEmitter
+
+	// RevocationVerifier answers whether an operator certificate has been revoked,
+	// from the last signed revocation manifest independently verified against this
+	// steward's controller CA (Issue #3699). Nil disables the revocation check —
+	// the same degrade-safe default as an unconfigured controllerCARoots.
+	RevocationVerifier *operatorroster.RevocationVerifier
 }
 
 const (
 	defaultReplayWindow  = 5 * time.Minute
 	defaultMaxParamBytes = 64 * 1024
+
+	// defaultExecutingRestartTimeout bounds how long a command may sit in
+	// "executing" before the startup sweep treats it as abandoned (Issue #3757).
+	// 5 minutes covers the vast majority of steward command executions (see the
+	// 30s default per-command timeout in executeCommand) with headroom for
+	// slower ones; a still-executing record that young is more likely mid-attempt
+	// across a fast crash/restart than truly stuck, so the sweep leaves it alone
+	// and lets it either complete or reach its own execution timeout.
+	defaultExecutingRestartTimeout = 5 * time.Minute
+
+	// envelopeNonceCacheTTL bounds how long an operator-payload envelope nonce is
+	// remembered for replay detection (Issue #3694). It is independent of — and
+	// deliberately longer-lived than — replayWindow: an envelope's own ExpiresAt
+	// is the authorization bound, but a nonce must stay in the dedup cache at
+	// least that long to catch a replay near the end of a long-lived envelope's
+	// validity window.
+	envelopeNonceCacheTTL = 24 * time.Hour
 )
 
 // New creates a new command handler and, when a CommandStore is configured,
-// sweeps any commands left in "executing" state from a previous run and marks
-// them as failed with reason "controller_restart".
+// sweeps commands left in "executing" state from a previous run that have been
+// executing longer than ExecutingRestartTimeout, marking them as failed with
+// reason "controller_restart" (Issue #3757). Commands in "pending" state are
+// never touched by this sweep — a restart never fails a queued delivery
+// (ADR-031 Decision 2).
 func New(cfg *Config) (*Handler, error) {
 	if cfg.StewardID == "" {
 		return nil, fmt.Errorf("steward ID is required")
@@ -171,25 +252,35 @@ func New(cfg *Config) (*Handler, error) {
 	if replayWindow == 0 {
 		replayWindow = defaultReplayWindow
 	}
+	executingRestartTimeout := cfg.ExecutingRestartTimeout
+	if executingRestartTimeout == 0 {
+		executingRestartTimeout = defaultExecutingRestartTimeout
+	}
 	maxParamsBytes := cfg.MaxParamsBytes
 	if maxParamsBytes == 0 {
 		maxParamsBytes = defaultMaxParamBytes
 	}
 
 	h := &Handler{
-		stewardID:          cfg.StewardID,
-		handlers:           make(map[cpTypes.CommandType]CommandFunc),
-		onStatus:           cfg.OnStatus,
-		logger:             cfg.Logger,
-		store:              cfg.Store,
-		executing:          make(map[string]*executionContext),
-		verifier:           cfg.Verifier,
-		replayWindow:       replayWindow,
-		replayCache:        newReplayCache(replayWindow),
-		maxParamsBytes:     maxParamsBytes,
-		signingConfig:      cfg.SigningConfig,
-		requireSignedAdhoc: cfg.RequireSignedAdhoc,
-		controllerCARoots:  cfg.ControllerCARoots,
+		stewardID:               cfg.StewardID,
+		handlers:                make(map[cpTypes.CommandType]CommandFunc),
+		onStatus:                cfg.OnStatus,
+		logger:                  cfg.Logger,
+		store:                   cfg.Store,
+		executing:               make(map[string]*executionContext),
+		verifier:                cfg.Verifier,
+		replayWindow:            replayWindow,
+		executingRestartTimeout: executingRestartTimeout,
+		replayCache:             newReplayCache(replayWindow),
+		envelopeNonceCache:      newReplayCache(envelopeNonceCacheTTL),
+		maxParamsBytes:          maxParamsBytes,
+		signingConfig:           cfg.SigningConfig,
+		requireSignedAdhoc:      cfg.RequireSignedAdhoc,
+		controllerCARoots:       cfg.ControllerCARoots,
+		tenantID:                cfg.TenantID,
+		webauthnManifestFloor:   &manifestFreshnessFloor{},
+		revocationVerifier:      cfg.RevocationVerifier,
+		eventEmitter:            cfg.EventEmitter,
 	}
 
 	// Startup sweep: flip stale "executing" records from a previous run to "failed".
@@ -210,23 +301,57 @@ func (h *Handler) Wait() {
 	h.wg.Wait()
 }
 
-// sweepStaleExecutingCommands marks commands that were left in "executing" state
-// (from a crashed or restarted process) as "failed" with error "controller_restart".
+// UpdateVerifier replaces the handler's signature verifier. Called after a
+// push_signing_cert command updates the steward's trust set so that subsequent
+// commands signed with the newly trusted cert are accepted without reconnecting
+// (Issue #1844).
+func (h *Handler) UpdateVerifier(v signature.Verifier) {
+	h.mu.Lock()
+	h.verifier = v
+	h.mu.Unlock()
+}
+
+// RevocationVerifier returns the operator-certificate revocation verifier wired into
+// this handler (Issue #3699/#4400), so a caller can observe whether a manifest has
+// been verified without this package duplicating operatorroster's own storage. Used
+// by the steward's transport-layer manifest-fetch wiring (features/steward/client) and
+// by tests exercising that wiring end to end. May be nil if the handler was built
+// without one.
+func (h *Handler) RevocationVerifier() *operatorroster.RevocationVerifier {
+	return h.revocationVerifier
+}
+
+// sweepStaleExecutingCommands marks commands left in "executing" state (from a
+// crashed or restarted process) as "failed" with error "controller_restart" —
+// but only once they have been executing longer than executingRestartTimeout
+// (Issue #3757, ADR-031 Decision 2). "executing" implies a delivery attempt was
+// genuinely in flight when the process stopped; a record that started executing
+// more recently than the timeout may simply have survived a fast restart mid-step
+// and is left alone to either complete or age past the timeout on a later sweep.
+// "pending" records are never listed or touched here at all — pending means no
+// attempt was ever made, so a restart cannot have interrupted anything to fail;
+// they stay pending and are drained via ListPendingDeliveries.
 func (h *Handler) sweepStaleExecutingCommands(ctx context.Context) error {
-	stale, err := h.store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
+	executing, err := h.store.ListCommandsByStatus(ctx, business.CommandStatusExecuting)
 	if err != nil {
-		return fmt.Errorf("listing stale executing commands: %w", err)
+		return fmt.Errorf("listing executing commands: %w", err)
 	}
 
-	for _, cmd := range stale {
+	now := time.Now()
+	for _, cmd := range executing {
+		if cmd.StartedAt != nil && now.Sub(*cmd.StartedAt) < h.executingRestartTimeout {
+			// Started recently enough that this may be a fast restart mid-attempt
+			// rather than a genuinely abandoned command; a later sweep re-evaluates it.
+			continue
+		}
 		if err := h.store.UpdateCommandStatus(ctx, cmd.ID,
 			business.CommandStatusFailed, nil, "controller_restart"); err != nil {
 			h.logger.Error("Failed to mark stale command as failed",
-				"command_id", cmd.ID,
-				"error", err)
+				"command_id", logging.SanitizeLogValue(cmd.ID),
+				"error", logging.SanitizeLogValue(err.Error()))
 		} else {
 			h.logger.Info("Marked stale executing command as failed (controller_restart)",
-				"command_id", cmd.ID)
+				"command_id", logging.SanitizeLogValue(cmd.ID))
 		}
 	}
 	return nil
@@ -282,7 +407,12 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 	cmd := &signed.Command
 
 	// 1. Signature verification (only when a verifier is configured).
-	if h.verifier != nil {
+	// Read verifier under the lock because UpdateVerifier may replace it concurrently
+	// after a push_signing_cert delivery (Issue #1844).
+	h.mu.RLock()
+	verifier := h.verifier
+	h.mu.RUnlock()
+	if verifier != nil {
 		if signed.Signature == nil {
 			return ErrUnauthenticatedCommand
 		}
@@ -297,7 +427,7 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 		if err != nil {
 			return fmt.Errorf("marshal command for verification: %w", err)
 		}
-		if err := h.verifier.Verify(cmdBytes, signed.Signature); err != nil {
+		if err := verifier.Verify(cmdBytes, signed.Signature); err != nil {
 			return fmt.Errorf("%w: %v", ErrUnauthenticatedCommand, err)
 		}
 	}
@@ -369,6 +499,8 @@ func (h *Handler) HandleCommand(ctx context.Context, signed *cpTypes.SignedComma
 
 	// Execute command in background; wg.Done is called inside executeCommand.
 	h.wg.Add(1)
+	// #nosec G118 -- accepted commands intentionally outlive receipt handling;
+	// executeCommand applies a command timeout and Handler.Stop waits on h.wg.
 	go h.executeCommand(cmd)
 
 	return nil

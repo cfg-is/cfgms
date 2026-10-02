@@ -5,12 +5,13 @@ package run
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	scriptmodule "github.com/cfgis/cfgms/features/modules/script"
+	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
 )
 
 // staticFleetQuery is a real FleetQuery implementation that returns a fixed set
@@ -222,6 +223,8 @@ func TestSynthesizeCommandRun_TwoDevices_CreatesTwoJobs(t *testing.T) {
 		"#!/bin/bash\necho hello",
 		scriptmodule.ShellBash,
 		nil,
+		nil,
+		nil, "", time.Time{},
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, runID)
@@ -401,6 +404,8 @@ func TestSynthesizeCommandRun_QueuedExecutionIDs_MatchJobRecords(t *testing.T) {
 		"echo test",
 		scriptmodule.ShellBash,
 		nil,
+		nil,
+		nil, "", time.Time{},
 	)
 	require.NoError(t, err)
 

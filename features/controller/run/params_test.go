@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	script "github.com/cfgis/cfgms/features/modules/script"
+	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 

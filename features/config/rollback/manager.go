@@ -20,25 +20,43 @@ type DefaultRollbackManager struct {
 	validator  RollbackValidator
 	store      RollbackStore
 	notifier   RollbackNotifier
+	tenants    TargetTenantResolver
 }
 
-// NewRollbackManager creates a new rollback manager
+// NewRollbackManager creates a new rollback manager.
+//
+// tenants resolves the tenant that owns a rollback target and is the only input
+// to the tenant boundary enforced on every entry point (Issue #4340). It is a
+// required parameter rather than an optional setter so that each wiring point
+// has to name its ownership authority: passing nil leaves every non-root caller
+// refused with ErrRollbackTenantUnverifiable, never served unchecked.
 func NewRollbackManager(
 	gitManager git.GitManager,
 	validator RollbackValidator,
 	store RollbackStore,
 	notifier RollbackNotifier,
+	tenants TargetTenantResolver,
 ) RollbackManager {
 	return &DefaultRollbackManager{
 		gitManager: gitManager,
 		validator:  validator,
 		store:      store,
 		notifier:   notifier,
+		tenants:    tenants,
 	}
 }
 
 // ListRollbackPoints returns available rollback points for a target
 func (m *DefaultRollbackManager) ListRollbackPoints(ctx context.Context, targetType TargetType, targetID string, limit int) ([]RollbackPoint, error) {
+	// Bound the disclosure to the caller's tenant subtree before any history is
+	// read (Issue #4340). Each point built below carries the target's commit SHA,
+	// commit message, operator name and email, change ID and the configuration
+	// paths that commit touched, so the target's owning tenant has to contain the
+	// caller first.
+	if _, err := m.authorizeTarget(ctx, targetType, targetID); err != nil {
+		return nil, err
+	}
+
 	// Get the repository for this target
 	repoID, err := m.getRepositoryID(ctx, targetType, targetID)
 	if err != nil {
@@ -100,6 +118,15 @@ func (m *DefaultRollbackManager) PreviewRollback(ctx context.Context, request Ro
 		return nil, err
 	}
 
+	// Bound preview/execute to the requesting caller's tenant scope (Issue #4340):
+	// a caller cannot preview or apply a rollback for a target outside its subtree.
+	// The resolved tenant travels onto the preview and from there onto the
+	// operation ExecuteRollback records.
+	targetTenantID, err := m.authorizeTarget(ctx, request.TargetType, request.TargetID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get repository
 	repoID, err := m.getRepositoryID(ctx, request.TargetType, request.TargetID)
 	if err != nil {
@@ -150,6 +177,7 @@ func (m *DefaultRollbackManager) PreviewRollback(ctx context.Context, request Ro
 		EstimatedDuration: estimatedDuration,
 		RequiresApproval:  requiresApproval,
 		RiskAssessment:    *riskAssessment,
+		TargetTenantID:    targetTenantID,
 	}
 
 	return preview, nil
@@ -160,6 +188,15 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 	userID, err := m.getCurrentUser(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("cannot execute rollback: %w", err)
+	}
+
+	// Bound the request to the caller's tenant before anything about the target is
+	// disclosed (Issue #4340) — including whether a rollback is already running for
+	// it, which the concurrency check below would otherwise reveal. PreviewRollback
+	// repeats the check; running it here keeps the denial unwrapped so the API maps
+	// it to 403 rather than to the generic preview failure.
+	if _, err := m.authorizeTarget(ctx, request.TargetType, request.TargetID); err != nil {
+		return nil, err
 	}
 
 	// Check for existing rollback in progress
@@ -175,7 +212,7 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 
 	// Check validation results
 	if !preview.ValidationResults.Passed && !request.Options.Force {
-		return nil, ErrRollbackValidationFailed
+		return nil, validationFailure(&preview.ValidationResults)
 	}
 
 	// Check approval if required
@@ -203,7 +240,8 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 			Stage:      "initializing",
 			Percentage: 0,
 		},
-		AuditTrail: []AuditEntry{},
+		AuditTrail:     []AuditEntry{},
+		TargetTenantID: preview.TargetTenantID,
 	}
 
 	// Save operation
@@ -223,6 +261,8 @@ func (m *DefaultRollbackManager) ExecuteRollback(ctx context.Context, request Ro
 	}
 
 	// Execute rollback asynchronously
+	// #nosec G118 -- rollback is a persisted durable operation that must survive
+	// the initiating request; executeRollbackAsync enforces step timeouts/status.
 	go m.executeRollbackAsync(context.Background(), operation, preview)
 
 	return operation, nil
@@ -237,6 +277,14 @@ func (m *DefaultRollbackManager) GetRollbackStatus(ctx context.Context, rollback
 
 	if operation == nil {
 		return nil, ErrRollbackNotFound
+	}
+
+	// Bound status reads to the caller's tenant scope (Issue #4340): the operation
+	// discloses who initiated it, the original request and the complete audit trail,
+	// and the rollback ID is the only thing standing between a tenant-scoped caller
+	// and another tenant's copy of all three.
+	if err := m.authorizeOperation(ctx, operation); err != nil {
+		return nil, err
 	}
 
 	return operation, nil
@@ -256,6 +304,12 @@ func (m *DefaultRollbackManager) CancelRollback(ctx context.Context, rollbackID 
 
 	if operation == nil {
 		return ErrRollbackNotFound
+	}
+
+	// Bound cancellation to the requesting caller's tenant scope (Issue #4340):
+	// a caller cannot cancel a rollback for a target outside its subtree.
+	if err := m.authorizeOperation(ctx, operation); err != nil {
+		return err
 	}
 
 	// Check if rollback can be cancelled
@@ -294,10 +348,44 @@ func (m *DefaultRollbackManager) ListRollbackHistory(ctx context.Context, target
 		Limit:      limit,
 	}
 
-	return m.store.ListOperations(ctx, filters)
+	operations, err := m.store.ListOperations(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	// Bound enumeration to the caller's tenant subtree (Issue #4340). targetID is
+	// itself the enumeration key here — unlike GetRollbackStatus no rollback ID has
+	// to be guessed — so a caller supplying another tenant's steward or device ID
+	// would otherwise receive that tenant's operations with their full audit trails.
+	// Operations are filtered rather than the whole call rejected so that a target
+	// whose operations span tenants (a device reassigned between clients keeps its
+	// earlier operations) returns the caller's own history instead of an error.
+	visible := make([]RollbackOperation, 0, len(operations))
+	for i := range operations {
+		if err := m.authorizeOperation(ctx, &operations[i]); err != nil {
+			continue
+		}
+		visible = append(visible, operations[i])
+	}
+
+	return visible, nil
 }
 
 // Helper methods
+
+// validationFailure maps failed validation results onto the rollback error that describes
+// them. A caller the RBAC manager refused is denied, not malformed, so the refusal keeps
+// its own error code (surfaced by the API as 403) instead of collapsing into the generic
+// validation failure (422).
+func validationFailure(results *ValidationResults) *RollbackError {
+	for _, issue := range results.Errors {
+		if issue.Type == ValidationIssuePermission {
+			return ErrRollbackPermissionDenied
+		}
+	}
+
+	return ErrRollbackValidationFailed
+}
 
 func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, operation *RollbackOperation, preview *RollbackPreview) {
 	// Update status to validating
@@ -317,7 +405,7 @@ func (m *DefaultRollbackManager) executeRollbackAsync(ctx context.Context, opera
 	}
 
 	if !validationResults.Passed && !operation.Request.Options.Force {
-		m.failRollback(ctx, operation, ErrRollbackValidationFailed)
+		m.failRollback(ctx, operation, validationFailure(validationResults))
 		return
 	}
 
@@ -691,6 +779,100 @@ func (m *DefaultRollbackManager) verifyApproval(ctx context.Context, approvalID 
 	}
 
 	return nil
+}
+
+// authorizeTarget answers "may this caller act on (targetType, targetID)" and
+// returns the tenant that owns the target (Issue #4340).
+//
+// The owning tenant comes from the TargetTenantResolver — the controller's
+// steward registry — and never from data the caller supplied or from metadata on
+// the target's Git history: Git commits carry no tenant, so a check reading them
+// would allow every caller. Enforcement is fail-closed in all three directions:
+// a caller with no resolver wired is refused, a target the registry does not own
+// is refused, and a caller whose scope is unset (never established by the
+// authentication middleware) is refused. Root scope always allows and still
+// receives the resolved tenant so it is recorded on the operation.
+func (m *DefaultRollbackManager) authorizeTarget(ctx context.Context, targetType TargetType, targetID string) (string, error) {
+	tenantID, known := m.resolveTargetTenant(ctx, targetType, targetID)
+
+	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsRoot() {
+		return tenantID, nil
+	}
+	if m.tenants == nil {
+		return "", ErrRollbackTenantUnverifiable
+	}
+	if !known {
+		return "", ErrRollbackOutsideTenantScope
+	}
+	if err := authorizeTenant(scope, tenantID); err != nil {
+		return "", err
+	}
+
+	return tenantID, nil
+}
+
+// authorizeOperation bounds a recorded operation to the caller's tenant scope.
+//
+// The tenant recorded on the operation wins: an operation is a historical record
+// that belongs to the tenant which owned the target when it ran, so a device
+// reassigned between clients does not hand its previous owner's audit trail to
+// its new one. Operations written before the tenant was recorded carry an empty
+// value and fall back to resolving the target's owner live. With neither
+// available the operation stays invisible to every caller but root.
+func (m *DefaultRollbackManager) authorizeOperation(ctx context.Context, operation *RollbackOperation) error {
+	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsRoot() {
+		return nil
+	}
+	if m.tenants == nil {
+		return ErrRollbackTenantUnverifiable
+	}
+
+	tenantID := operation.TargetTenantID
+	if tenantID == "" {
+		tenantID, _ = m.resolveTargetTenant(ctx, operation.Request.TargetType, operation.Request.TargetID)
+	}
+
+	return authorizeTenant(scope, tenantID)
+}
+
+// resolveTargetTenant asks the wired resolver which tenant owns the target.
+// known is false when no resolver is wired, when the registry does not hold the
+// target, or when it holds the target with no tenant recorded — all three are
+// "ownership not established", which authorizeTarget and authorizeOperation
+// treat as outside every tenant.
+func (m *DefaultRollbackManager) resolveTargetTenant(ctx context.Context, targetType TargetType, targetID string) (string, bool) {
+	if m.tenants == nil {
+		return "", false
+	}
+
+	tenantID, known := m.tenants.TenantForTarget(ctx, targetType, targetID)
+	if !known || tenantID == "" {
+		return "", false
+	}
+
+	return tenantID, true
+}
+
+// authorizeTenant reports whether scope contains resourceTenant. An unset scope
+// is never treated as unrestricted (ctxkeys.TenantScope semantics, Issue #4316),
+// and an empty resourceTenant is never treated as "nothing to enforce": both are
+// denied, so a lost caller scope or an unresolved target closes the door instead
+// of opening it.
+func authorizeTenant(scope ctxkeys.TenantScope, resourceTenant string) error {
+	if resourceTenant == "" {
+		return ErrRollbackOutsideTenantScope
+	}
+	if scope.IsRoot() {
+		return nil
+	}
+	if scope.IsTenant() && scope.Path() != "" &&
+		(resourceTenant == scope.Path() || strings.HasPrefix(resourceTenant, scope.Path()+"/")) {
+		return nil
+	}
+
+	return ErrRollbackOutsideTenantScope
 }
 
 func (m *DefaultRollbackManager) getCurrentUser(ctx context.Context) (string, error) {

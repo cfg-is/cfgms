@@ -32,22 +32,6 @@ func (w *windowsHypervExecutor) RemoveVM(_ context.Context, _ string) error {
 	return modules.ErrUnsupportedPlatform
 }
 
-func (w *windowsHypervExecutor) CreateSnapshot(_ context.Context, _, _ string) error {
-	return modules.ErrUnsupportedPlatform
-}
-
-func (w *windowsHypervExecutor) GetSnapshot(_ context.Context, _, _ string) (*SnapshotConfig, error) {
-	return nil, modules.ErrUnsupportedPlatform
-}
-
-func (w *windowsHypervExecutor) RemoveSnapshot(_ context.Context, _, _ string) error {
-	return modules.ErrUnsupportedPlatform
-}
-
-func (w *windowsHypervExecutor) RestoreSnapshot(_ context.Context, _, _ string) error {
-	return modules.ErrUnsupportedPlatform
-}
-
 func (w *windowsHypervExecutor) CreateVSwitch(_ context.Context, _ VSwitchConfig) error {
 	return modules.ErrUnsupportedPlatform
 }

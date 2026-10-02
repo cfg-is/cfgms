@@ -257,7 +257,7 @@ func (w *WebhookNotifier) sendWebhook(ctx context.Context, payload interface{}) 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(1<<uint(attempt-1)) * w.retryBase
+			delay := time.Duration(1<<(attempt-1)) * w.retryBase
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

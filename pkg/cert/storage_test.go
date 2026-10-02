@@ -261,6 +261,108 @@ func TestGetCertificateByCommonName_EmptyCommonName(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// --- Path traversal / serial validation tests (Issue #4348) ---
+
+// TestGetCertificate_RejectsPathTraversalSerial verifies that GetCertificate
+// refuses a serial number containing path traversal sequences before it is
+// ever joined into a filesystem path, and does not read a file outside the
+// certificate store root.
+func TestGetCertificate_RejectsPathTraversalSerial(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+
+	// Plant a secret file outside the store root that a successful traversal
+	// would read.
+	outsideDir := t.TempDir()
+	secretPath := filepath.Join(outsideDir, "secret.pem")
+	require.NoError(t, os.WriteFile(secretPath, []byte("top-secret-key-material"), 0600))
+
+	for _, malicious := range []string{
+		"../" + filepath.Base(outsideDir) + "/secret",
+		"..%2f..%2fetc%2fpasswd",
+		"../../etc/passwd",
+		"foo/../../bar",
+		"a/b",
+	} {
+		_, err := store.GetCertificate(malicious)
+		assert.Error(t, err, "GetCertificate must reject traversal serial %q", malicious)
+	}
+}
+
+// TestDeleteCertificate_RejectsPathTraversalSerial verifies that
+// DeleteCertificate refuses a serial number containing path traversal
+// sequences, so it can never be used to remove a directory outside the
+// certificate store root.
+func TestDeleteCertificate_RejectsPathTraversalSerial(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+
+	// A directory outside the store root that a successful traversal delete
+	// would remove.
+	outsideDir := t.TempDir()
+	canary := filepath.Join(outsideDir, "canary.txt")
+	require.NoError(t, os.WriteFile(canary, []byte("must survive"), 0600))
+
+	for _, malicious := range []string{
+		"../" + filepath.Base(outsideDir),
+		"../../etc",
+		"foo/../../bar",
+	} {
+		err := store.DeleteCertificate(malicious)
+		assert.Error(t, err, "DeleteCertificate must reject traversal serial %q", malicious)
+	}
+
+	_, statErr := os.Stat(canary)
+	assert.NoError(t, statErr, "file outside the store root must survive a rejected DeleteCertificate")
+}
+
+// TestGetCertificate_RejectsSymlinkEscape verifies that GetCertificate
+// refuses to follow a symlink planted inside the store root that points
+// outside of it — filepath.Clean alone would not catch this, since the
+// symlink target is only known after resolving it on disk.
+func TestGetCertificate_RejectsSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "cert.pem"), []byte("outside-cert"), 0600))
+
+	// A serial number that passes format validation but resolves (via a
+	// symlink planted directly inside the store root) to a directory outside
+	// the store root.
+	linkName := "esc0001"
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(dir, linkName)))
+
+	_, err = store.GetCertificate(linkName)
+	assert.Error(t, err, "GetCertificate must reject a serial resolving via symlink outside the store root")
+}
+
+// TestStoreCertificate_RejectsInvalidSerial is a regression test
+// (security-review finding, Issue #4348): StoreCertificate must validate the
+// serial through the same resolveCertDir path as GetCertificate/
+// DeleteCertificate. Before this, a serial StoreCertificate accepted (e.g. a
+// leading '-', which (*x509.Certificate).SerialNumber.String() can produce
+// for a DER-encoded serial with its high bit set) could be written
+// successfully and then never be readable or deletable again, since
+// serialNumberPattern rejects a leading hyphen.
+func TestStoreCertificate_RejectsInvalidSerial(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFileStore(dir)
+	require.NoError(t, err)
+
+	cert := minimalCert("-123", CertificateTypePublicAPI, time.Now().Add(365*24*time.Hour))
+	err = store.StoreCertificate(cert)
+	assert.Error(t, err, "StoreCertificate must reject a serial number that GetCertificate/DeleteCertificate could never resolve")
+
+	// Nothing must have been written to disk.
+	entries, readErr := os.ReadDir(dir)
+	require.NoError(t, readErr)
+	assert.Empty(t, entries, "a rejected StoreCertificate must not leave a partial directory on disk")
+}
+
 // --- NewFileStore error path ---
 
 func TestNewFileStore_EmptyBasePath(t *testing.T) {

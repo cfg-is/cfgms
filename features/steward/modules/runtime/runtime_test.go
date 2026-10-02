@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 CFGMS Contributors
 
-//go:build !windows
-
 package runtime_test
 
 import (
@@ -14,8 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,12 +31,22 @@ import (
 // TestMain before any tests run.
 var echoModuleBin string
 
-// shortBaseDir creates a temp dir under /tmp with a predictably short path so
-// that socket paths constructed from it fit within the macOS sun_path limit
-// (103 bytes). t.TempDir() on macOS returns /var/folders/... paths that are
-// already 80+ bytes, causing makeSocketPath to error before any gRPC is tried.
+// exitModuleBin is the path to the compiled exit_module binary — a module that
+// exits immediately without listening. Set by TestMain before any tests run.
+var exitModuleBin string
+
+// shortBaseDir returns a runtimeDir for the module runtime. On Unix it is a
+// temp dir under /tmp with a predictably short path so socket paths
+// constructed from it fit within the macOS sun_path limit (103 bytes) —
+// t.TempDir() on macOS returns /var/folders/... paths that are already 80+
+// bytes, causing makeSocketPath to error before any gRPC is tried. On Windows
+// runtimeDir is unused by makeSocketPath (named pipes are identified by name,
+// not filesystem path — see socket_windows.go), so t.TempDir() is fine there.
 func shortBaseDir(t *testing.T) string {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return t.TempDir()
+	}
 	base, err := os.MkdirTemp("/tmp", "cfgms-rt-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(base) })
@@ -62,14 +70,31 @@ func run(m *testing.M) int {
 	}
 	defer func() { _ = os.RemoveAll(binaryDir) }()
 
-	echoModuleBin = filepath.Join(binaryDir, "echo_module")
+	echoModuleBin = filepath.Join(binaryDir, "echo_module"+exeSuffix())
 	cmd := exec.Command("go", "build", "-o", echoModuleBin, "./testdata/echo_module")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime_test: failed to build echo_module: %s: %v\n", out, err)
 		return 1
 	}
 
+	exitModuleBin = filepath.Join(binaryDir, "exit_module"+exeSuffix())
+	cmd = exec.Command("go", "build", "-o", exitModuleBin, "./testdata/exit_module")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime_test: failed to build exit_module: %s: %v\n", out, err)
+		return 1
+	}
+
 	return m.Run()
+}
+
+// exeSuffix returns the platform executable suffix (".exe" on Windows, empty
+// elsewhere) so exec.Command can resolve a binary built with "go build -o":
+// on Windows, exec.LookPath requires a PATHEXT-recognized extension.
+func exeSuffix() string {
+	if goruntime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // makeBypassBundle creates a minimal steward-kind bundle using the echo_module
@@ -112,43 +137,31 @@ func TestEchoModuleLifecycle(t *testing.T) {
 	assert.Equal(t, runtime.StateStopped, handle.GetState())
 }
 
-// TestEchoModuleLifecycleWithHashFallbackRuntimeDir is the regression test for
-// the macOS CI concern (PR #1897 review): on macOS, t.TempDir() returns paths
-// under /var/folders/... that, joined with the socket filename, exceed the
-// 104-byte sun_path limit. The runtime must hash the socket name into the
-// steward-private sockets directory (never /tmp) so net.Listen("unix", ...)
-// succeeds.
+// TestStartFailsFastWhenModuleExitsBeforeListening asserts Start reports a
+// module that died during startup — promptly, rather than waiting out the 30 s
+// listen deadline.
 //
-// A runtimeDir of exactly 71 chars is used: the minimum that triggers the hash
-// fallback (natural = 71+33 = 104 > 103) while the hash path still fits
-// within the private dir (hash = 71+32 = 103 ≤ 103). Uses /tmp directly for
-// a predictably short base (~28 chars) so no platform-conditional skip is needed.
-func TestEchoModuleLifecycleWithHashFallbackRuntimeDir(t *testing.T) {
-	// Use /tmp directly for a short, predictable base on all platforms.
-	const targetLen = 71
-	base, err := os.MkdirTemp("/tmp", "cfgms-rt-test-")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
-	if len(base) >= targetLen {
-		t.Fatalf("base dir %q (%d bytes) is already >= %d", base, len(base), targetLen)
-	}
-	paddingLen := targetLen - len(base) - 1
-	long := filepath.Join(base, strings.Repeat("d", paddingLen))
-	require.NoError(t, os.MkdirAll(long, 0o755))
+// The runtime reaps the child from the moment it is forked, so a module that
+// fails closed at startup is reported as an early exit. That case is not
+// hypothetical: contract.Listen fails closed when the address it was given is
+// already held by another local process (on Windows, a named pipe another user
+// created first). Before, cmd.Wait() was not consulted until after the
+// handshake, so the runtime kept polling the address and would have accepted,
+// handshaked with and trusted whatever other server answered there.
+func TestStartFailsFastWhenModuleExitsBeforeListening(t *testing.T) {
+	rt := runtime.NewModuleRuntime(shortBaseDir(t))
+	b := makeBypassBundle(exitModuleBin)
 
-	rt := runtime.NewModuleRuntime(long)
-	b := makeBypassBundle(echoModuleBin)
-
+	start := time.Now()
 	handle, err := rt.Start(b, stewardtypes.ModuleTrustModeBypass, nil)
-	require.NoError(t, err)
-	require.NotNil(t, handle)
+	elapsed := time.Since(start)
 
-	ctx := context.Background()
-	resp, err := handle.Client.Get(ctx, &proto.GetRequest{ResourceId: "long-path"})
-	require.NoError(t, err)
-	assert.Equal(t, "echo:long-path", resp.ConfigData)
-
-	require.NoError(t, rt.Stop(handle))
+	require.Error(t, err)
+	assert.Nil(t, handle)
+	assert.Contains(t, err.Error(), "exited before it was ready",
+		"error must identify the module's exit rather than a generic listen timeout; got %v", err)
+	assert.Less(t, elapsed, 10*time.Second,
+		"Start must report the dead child promptly, not wait out the 30 s listen deadline (took %s)", elapsed)
 }
 
 // TestStartReturnsErrWrongModuleKindForNonStewardBundle verifies that Start()

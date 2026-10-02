@@ -82,6 +82,15 @@ func (s *DatabaseRBACStore) GetSubject(ctx context.Context, id string) (*common.
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
+	return s.getSubjectLocked(ctx, id)
+}
+
+// getSubjectLocked performs the GetSubject query and tenant-access check
+// without acquiring s.mutex. Callers must already hold either the read or
+// write lock (Issue #4351: DeleteSubject holds the write lock and cannot call
+// the exported GetSubject, which re-acquires a read lock on the same
+// non-reentrant sync.RWMutex).
+func (s *DatabaseRBACStore) getSubjectLocked(ctx context.Context, id string) (*common.Subject, error) {
 	query := `
 		SELECT id, type, display_name, tenant_id, role_ids, is_active, attributes
 		FROM rbac_subjects
@@ -230,13 +239,16 @@ func (s *DatabaseRBACStore) DeleteSubject(ctx context.Context, id string) error 
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	// H-TENANT-1: Fetch subject first to validate tenant access (security audit finding)
-	_, err := s.GetSubject(ctx, id)
+	// H-TENANT-1: Fetch subject first to validate tenant access (security audit finding).
+	// Uses getSubjectLocked, not GetSubject: GetSubject takes a read lock, and this
+	// method already holds the write lock above — sync.RWMutex is not reentrant, so
+	// calling GetSubject here deadlocked every DeleteSubject call (Issue #4351).
+	_, err := s.getSubjectLocked(ctx, id)
 	if err != nil {
 		return err
 	}
 
-	// Tenant validation already performed in GetSubject
+	// Tenant validation already performed in getSubjectLocked
 	// Proceed with deletion
 
 	// Begin transaction

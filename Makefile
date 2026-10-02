@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-performance test-performance-baseline test-data-consistency test-docker test-cross-feature-integration test-failure-propagation proto proto-gen proto-gen-modules lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin test-install-sh
+.PHONY: build test test-framework-api-sharded test-go-group-controller-core test-go-group-heavy-providers test-go-group-rest test-go-group-windows-api test-go-group-windows-controller test-go-group-windows-steward test-go-group-windows-rest test-go-group-macos-api test-go-group-macos-providers test-go-group-macos-controller test-go-group-macos-steward test-go-group-macos-rest test-scripts test-unit test-integration-factory test-watch test-commit test-complete test-e2e-local test-e2e-parallel test-e2e-ci test-e2e-controller test-e2e-scenarios test-e2e-fleet test-ci test-integration test-security test-docker proto proto-gen proto-gen-modules proto-gen-clusterdelivery lint lint-log-injection clean security-trivy security-deps security-scan security-check security-precommit check-architecture check-license-headers generate-test-certificates build-msi-windows build-pkg-darwin release-artifacts test-release-artifacts test-install-sh install-cfg uninstall-cfg test-install-cfg test-frontend
 
 # Use bash for all recipe commands (required for credential loading scripts)
 SHELL := /bin/bash
@@ -19,10 +19,23 @@ fix-git-bare:
 # Build settings
 GO_BUILD_FLAGS=-trimpath -ldflags="-s -w"
 
-# Steward controller URL baked in at build time (security: no runtime override).
-# Override for MSP builds: make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com
+# Steward build flags: controller URL, version, and publisher-key baked in at build time
+# (security: no runtime override for controller URL or publisher key).
+#
+# Scope boundary: STEWARD_PUBLISHER_KEY wires the ldflags injection mechanism; a build
+# using the placeholder key (all-zero) cannot verify genuine signed upgrades. The all-zero
+# key is a small-order Ed25519 point, so ed25519.Verify does NOT fail against it (it accepts
+# attacker-forged signatures). Fail-closed behavior is enforced in code, not by the crypto:
+# pkg/modules/trust rejects the all-zero/small-order placeholder (ErrUntrustedPublisherKey),
+# so a placeholder-key build refuses ALL bundles. The real production key is deferred to the
+# code-signing pipeline (ADR-013 §5).
+#
+# Override for MSP builds:
+#   make build-steward STEWARD_CONTROLLER_URL=https://ctrl.mymsp.com VERSION=v1.0.0
+#   make build-steward STEWARD_PUBLISHER_KEY=<base64-ed25519-pub>
 STEWARD_CONTROLLER_URL ?= https://localhost:9080
-STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL)"
+STEWARD_SECURITY_PROFILE?=public-beta
+STEWARD_BUILD_FLAGS=-trimpath -ldflags="-s -w -X main.ControllerURL=$(STEWARD_CONTROLLER_URL) -X main.SecurityProfile=$(STEWARD_SECURITY_PROFILE) -X github.com/cfgis/cfgms/pkg/version.Version=$(or $(VERSION),0.5.0-dev) -X github.com/cfgis/cfgms/pkg/modules/trust.cfgmsPublisherPublicKey=$(or $(STEWARD_PUBLISHER_KEY),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=)"
 
 # Binary names
 STEWARD_BINARY=cfgms-steward
@@ -33,7 +46,7 @@ CERT_MANAGER_BINARY=cert-manager
 
 # Protocol buffer variables
 PROTO_DIR=api/proto
-PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*")
+PROTO_FILES=$(shell find $(PROTO_DIR) -name "*.proto" -not -path "*/transport/*" -not -path "*/clusterdelivery/*")
 PROTO_INCLUDES=-I$(PROTO_DIR)
 
 # Check for required tools
@@ -101,9 +114,25 @@ proto-gen-modules: check-proto-grpc-tools
 		$(MODULES_PROTO_FILES)
 	@echo "Done. Generated files in $(MODULES_PROTO_DIR)/"
 
+# Internal controller-to-controller delivery proto files requiring gRPC
+# service generation (ADR-031 Decision 3, Issue #3764)
+CLUSTERDELIVERY_PROTO_DIR=api/proto/clusterdelivery
+CLUSTERDELIVERY_PROTO_FILES=$(shell find $(CLUSTERDELIVERY_PROTO_DIR) -name "*.proto")
+
+# Generate Go code from the clusterdelivery proto file including gRPC service
+# stubs. IMPORTANT: This is the authoritative target for clusterdelivery protos.
+.PHONY: proto-gen-clusterdelivery
+proto-gen-clusterdelivery: check-proto-grpc-tools
+	@echo "Generating clusterdelivery proto files (messages + gRPC services)..."
+	@protoc $(PROTO_INCLUDES) \
+		--go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+		--go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+		$(CLUSTERDELIVERY_PROTO_FILES)
+	@echo "Done. Generated files in $(CLUSTERDELIVERY_PROTO_DIR)/"
+
 # Build all binaries
 .PHONY: build
-build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
+build: fix-git-bare build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules build-workflow-modules
 
 # Build individual binaries
 .PHONY: build-steward build-steward-launcher build-controller build-cli build-cert-manager build-stdlib-modules
@@ -123,19 +152,81 @@ build-cert-manager:
 	go build ${GO_BUILD_FLAGS} -o bin/${CERT_MANAGER_BINARY} ./cmd/cert-manager
 
 # Stdlib module binaries (out-of-process gRPC binaries bundled in the steward installer)
-STDLIB_MODULES := file service package script firewall patch
+STDLIB_MODULES := \
+	cert_trust \
+	file \
+	firewall \
+	hostname \
+	package \
+	patch \
+	script \
+	service \
+	time \
+	user
+
+# Stdlib payload boundary check: all five sources of stdlib module names must agree.
+# See scripts/check-stdlib-payload-boundary.sh and ADR-016 clause 3.
+.PHONY: check-stdlib-payload-boundary
+check-stdlib-payload-boundary:
+	@bash ./scripts/check-stdlib-payload-boundary.sh
+
+# Stdlib completeness gate: every STDLIB_MODULES entry must satisfy ADR-016 clause 6
+# (valid module.yaml, cmd/main.go, owns: declaration, no unresolved stubs).
+# Depends on check-stdlib-payload-boundary so clause 1 (directory ↔ manifest
+# agreement) is also enforced.
+# See scripts/check-stdlib-completeness.sh and ADR-016 clause 6.
+.PHONY: check-stdlib-completeness
+check-stdlib-completeness: check-stdlib-payload-boundary
+	@bash ./scripts/check-stdlib-completeness.sh
+
+# Verify docs/ contains no private-deployment identifiers.
+# See docs/development/documentation-boundaries.md.
+.PHONY: check-docs-boundary
+check-docs-boundary:
+	@bash ./scripts/check-docs-boundary.sh
 
 .PHONY: build-stdlib-modules
-build-stdlib-modules:
+build-stdlib-modules: check-stdlib-payload-boundary
 	@echo "Building stdlib module binaries..."
 	@for module in $(STDLIB_MODULES); do \
 		echo "  Building cfgms-module-$$module..."; \
-		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/$$module/cmd || exit 1; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$module ./features/modules/stdlib/$$module/cmd || exit 1; \
+	done
+
+# Workflow-kind module binaries (controller-executed, out-of-process gRPC
+# binaries published to the controller module cache — see ADR-006 and
+# features/workflow/module_loader.go). Deliberately separate from
+# STDLIB_MODULES: workflow modules are never part of the steward installer
+# payload, and STDLIB_MODULES membership is a closed set fixed by ADR-016
+# (Issue #4325). List entries are paths relative to
+# features/workflow/modules/, e.g. "m365/entra_user".
+WORKFLOW_MODULES := \
+	m365/entra_user \
+	m365/entra_group
+
+.PHONY: build-workflow-modules
+build-workflow-modules:
+	@echo "Building workflow module binaries..."
+	@for module in $(WORKFLOW_MODULES); do \
+		name=$$(echo $$module | tr '/_' '--'); \
+		echo "  Building cfgms-module-$$name..."; \
+		go build ${GO_BUILD_FLAGS} -o bin/cfgms-module-$$name ./features/workflow/modules/$$module/cmd || exit 1; \
 	done
 
 # Cross-platform build targets
 # Supported platforms: Linux, Windows, macOS (AMD64 and ARM64)
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
+# Targets build-cross-validate cross-compiles. linux/amd64 is left out: every
+# ubuntu-latest job builds it natively, and the queue's Native Build (Linux)
+# shard 1 runs `make build`. The other four are in. linux/arm64 and
+# darwin/amd64 have no native runner anywhere in CI. windows/amd64 and
+# darwin/arm64 have PR test legs that compile their packages with `go test`,
+# but nothing links the release binaries for them since #4220 removed the
+# queue's Windows and macOS `make build` jobs. Kept separate from PLATFORMS:
+# build-cross-platform is the release matrix and must still produce binaries
+# for all five.
+CROSS_VALIDATE_PLATFORMS := linux/arm64 darwin/amd64 windows/amd64 darwin/arm64
 
 # Build all binaries for all platforms (outputs to bin/platform/)
 .PHONY: build-cross-platform
@@ -166,7 +257,7 @@ build-cross-validate:
 	@echo "🔍 Validating Cross-Platform Compilation"
 	@echo "========================================"
 	@FAILED=0; \
-	for platform in $(PLATFORMS); do \
+	for platform in $(CROSS_VALIDATE_PLATFORMS); do \
 		export GOOS=$${platform%/*}; \
 		export GOARCH=$${platform#*/}; \
 		printf "  %-15s" "$$GOOS/$$GOARCH:"; \
@@ -216,7 +307,7 @@ build-steward-cross:
 # This target cross-compiles the binary and packages it into an MSI.
 # For production builds, provide a code-signing certificate:
 #   make build-msi-windows STEWARD_CONTROLLER_URL=https://ctrl.example.com \
-#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint>
+#        VERSION=v1.0.0 SIGNING_CERT_THUMBPRINT=<thumbprint> PUBLISHER_KEY=<base64-ed25519-pub>
 build-msi-windows:
 	@echo "🪟 Building Windows MSI installer"
 	@echo "==================================="
@@ -235,10 +326,15 @@ build-msi-windows:
 	if [ -n "$(SIGNING_CERT_THUMBPRINT)" ]; then \
 		SIGN_ARG="-SigningCertThumbprint '$(SIGNING_CERT_THUMBPRINT)'"; \
 	fi; \
+	KEY_ARG=""; \
+	if [ -n "$(PUBLISHER_KEY)" ]; then \
+		KEY_ARG="-PublisherKey '$(PUBLISHER_KEY)'"; \
+	fi; \
 	pwsh -NonInteractive -File build/windows/build-msi.ps1 \
 		$$URL_ARG \
 		-Version "$(or $(VERSION),0.0.0)" \
-		$$SIGN_ARG
+		$$SIGN_ARG \
+		$$KEY_ARG
 	@echo "✅ MSI built: bin/cfgms-steward-windows-amd64.msi"
 
 # Build macOS .pkg installer for cfgms-steward (amd64 and arm64).
@@ -252,7 +348,7 @@ build-msi-windows:
 # Examples:
 #   make build-pkg-darwin VERSION=v1.0.0
 #   APPLE_SIGNING_IDENTITY="Developer ID Installer: Acme (XXXXXXXXXX)" \
-#     make build-pkg-darwin VERSION=v1.0.0
+#     make build-pkg-darwin VERSION=v1.0.0 PUBLISHER_KEY=<base64-ed25519-pub>
 build-pkg-darwin:
 	@echo "🍎 Building macOS .pkg installer"
 	@echo "================================="
@@ -260,9 +356,32 @@ build-pkg-darwin:
 		echo "❌ build-pkg-darwin must be run on macOS (pkgbuild requires macOS)."; \
 		exit 1; \
 	fi
-	@bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)"
-	@bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)"
+	@KEY_ARG=""; \
+	if [ -n "$(PUBLISHER_KEY)" ]; then \
+		KEY_ARG="--publisher-key $(PUBLISHER_KEY)"; \
+	fi; \
+	bash build/darwin/build-pkg.sh --arch amd64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG; \
+	bash build/darwin/build-pkg.sh --arch arm64 --version "$(or $(VERSION),0.0.0)" $$KEY_ARG
 	@echo "✅ Packages built: bin/cfgms-steward-darwin-amd64.pkg  bin/cfgms-steward-darwin-arm64.pkg"
+
+# Build deterministic release archives. Official invocations must supply the
+# annotated-tag version, exact commit timestamp, and non-placeholder publisher
+# public key; the script independently rebuilds and compares every file.
+release-artifacts:
+	@if [ -z "$(VERSION)" ] || [ -z "$(COMMIT)" ] || [ -z "$(SOURCE_DATE_EPOCH)" ] || [ -z "$(PUBLISHER_KEY)" ]; then \
+		echo "Usage: make release-artifacts VERSION=vX.Y.Z COMMIT=<full-sha> SOURCE_DATE_EPOCH=<epoch> PUBLISHER_KEY=<base64-public-key> [OUTPUT_DIR=dist]"; \
+		exit 1; \
+	fi
+	@bash scripts/release/build-reproducible.sh \
+		--version "$(VERSION)" \
+		--commit "$(COMMIT)" \
+		--source-date-epoch "$(SOURCE_DATE_EPOCH)" \
+		--publisher-key "$(PUBLISHER_KEY)" \
+		--output "$(or $(OUTPUT_DIR),dist)"
+
+test-release-artifacts:
+	@bash scripts/release/build-reproducible_test.sh
+	@bash scripts/verify-release-artifact_test.sh
 
 # Run Linux install.sh tests (Story #1708)
 test-install-sh:
@@ -271,46 +390,639 @@ test-install-sh:
 	@bash build/linux/install_test.sh
 	@echo "✅ Linux install.sh tests passed"
 
-# Run Hyper-V host install script Pester tests (Story #1854).
-# Windows CI only — pwsh + Pester 5 required. NOT included in test-complete
-# (same precedent as test-install-sh). Run manually on Windows CI runner.
-test-install-hyperv-ps1:
-	@echo "🪟 Testing scripts/install-hyperv-host.ps1"
-	@echo "============================================"
-	@pwsh -NonInteractive -File scripts/install-hyperv-host_test.ps1
-	@echo "✅ Hyper-V install script tests passed"
+# Install cfg CLI binary onto PATH (Issue #2216)
+# Depends on build-cli so the installed binary is always current.
+# Linux/macOS: delegates to scripts/install-cfg.sh (root → /usr/local/bin, non-root → ~/.local/bin).
+# Windows: copies bin/cfg.exe to %GOPATH%/bin.
+install-cfg: build-cli
+	@DETECTED_OS="$$(go env GOOS)"; \
+	if [ "$$DETECTED_OS" = "windows" ]; then \
+		GOPATH_BIN="$$(go env GOPATH | tr '\\' '/')/bin"; \
+		mkdir -p "$$GOPATH_BIN"; \
+		cp bin/cfg.exe "$$GOPATH_BIN/cfg.exe"; \
+		echo "cfg installed to $$GOPATH_BIN/cfg.exe"; \
+		case ":$$PATH:" in \
+			*":$$GOPATH_BIN:"*) ;; \
+			*) \
+				echo ""; \
+				echo "Note: $$GOPATH_BIN is not on your PATH."; \
+				echo "To add it permanently, run in PowerShell:"; \
+				echo "  setx PATH \"%PATH%;$$GOPATH_BIN\""; \
+				;; \
+		esac; \
+	else \
+		bash scripts/install-cfg.sh; \
+	fi
+
+# Remove the cfg CLI binary installed by install-cfg (Issue #2216)
+# Accepts an optional PREFIX= override: make uninstall-cfg PREFIX=/opt/cfgms/bin
+# Without PREFIX, removes from /usr/local/bin and ~/.local/bin (the two defaults).
+uninstall-cfg:
+	@DETECTED_OS="$$(go env GOOS)"; \
+	if [ "$$DETECTED_OS" = "windows" ]; then \
+		GOPATH_BIN="$$(go env GOPATH | tr '\\' '/')/bin"; \
+		TARGET="$$GOPATH_BIN/cfg.exe"; \
+		rm -f "$$TARGET"; \
+		echo "cfg uninstalled from $$GOPATH_BIN"; \
+	elif [ -n "$(PREFIX)" ]; then \
+		TARGET="$(PREFIX)/cfg"; \
+		rm -f "$$TARGET"; \
+		echo "cfg uninstalled from $(PREFIX)"; \
+	else \
+		REMOVED=""; \
+		if [ -f "/usr/local/bin/cfg" ]; then \
+			rm -f /usr/local/bin/cfg; \
+			REMOVED="$${REMOVED:+$$REMOVED, }/usr/local/bin/cfg"; \
+		fi; \
+		if [ -f "$$HOME/.local/bin/cfg" ]; then \
+			rm -f "$$HOME/.local/bin/cfg"; \
+			REMOVED="$${REMOVED:+$$REMOVED, }$$HOME/.local/bin/cfg"; \
+		fi; \
+		if [ -n "$$REMOVED" ]; then \
+			echo "cfg uninstalled from: $$REMOVED"; \
+		else \
+			echo "cfg not found in /usr/local/bin or $$HOME/.local/bin (nothing removed)"; \
+		fi; \
+	fi
+
+# Run cfg install script integration tests (Issue #2216)
+test-install-cfg: build-cli
+	@echo "🧪 Testing scripts/install-cfg.sh"
+	@echo "=================================="
+	@bash scripts/install-cfg-test.sh
+	@echo "✅ cfg install tests passed"
 
 # Smart test - core modules + changed modules only
+#
+# The Go work below is split into named groups (test-go-group-*) rather than one
+# `go test ./...` invocation (Issue #4151). `make test` still runs every group
+# sequentially, matching this target's historical local behavior; the CI matrix
+# (.github/workflows/test-suite.yml) is what actually buys wall-clock time, by
+# running each group on its own runner instead of sharing one runner's CPUs.
+# Splitting shell-level jobs on a single runner (the first attempt, PR #4155)
+# measured no improvement: `go test ./...` already parallelizes across packages
+# up to GOMAXPROCS, so pulling one package out of that list and running it as a
+# second sequential step just reorders the same CPU-bound work rather than
+# reducing it. Separate runners are separate CPU pools, which is the only thing
+# that helps a CPU-bound `-race` suite on a 4-vCPU GitHub-hosted runner.
+#
+# The script suite is gated by what changed (Issue #4305): unless the caller has
+# already set CFGMS_TEST_SCRIPTS_GROUPS, `make test` asks
+# scripts/lib/detect-tooling-changed.sh which suite groups the diff against the
+# develop merge base touches, and runs only those. No resolvable merge base
+# (fresh clone, no origin/develop) fails closed to every group, as test-frontend
+# does. test-commit, test-complete-full and test-agent-complete pin every group
+# via a target-specific export, which this target inherits as a prerequisite, so
+# they run test-scripts exactly once, in full, whatever the diff.
+TEST_SCRIPTS_ALL_GROUPS := core,security-review,claude-tooling,devinfra
 test: fix-git-bare
 	@echo "🧪 Running Tests (Smart Mode)"
 	@echo "============================="
-	@go clean -testcache
+	@if [ "$$GITHUB_ACTIONS" != "true" ]; then go clean -testcache; fi
 	@echo "🧪 Testing OSS Build..."
-	@echo "  Testing framework (excluding modules and long-running tests)..."
-	@go test -race -short -timeout=5m $$(go list ./... | grep -v '/features/modules/' | grep -v '/test/integration' | grep -v '/test/e2e')
-	@echo "  Testing core modules (smoke test)..."
-	@for module in $(CORE_MODULES); do \
-		echo "  Testing $$module..."; \
-		go test -race -short -timeout=30s ./features/modules/$$module/...; \
-	done
-	@changed_modules="$(CHANGED_MODULES)"; \
-	if [ -n "$$changed_modules" ]; then \
-		echo "📝 Testing changed modules: $$changed_modules"; \
-		for module in $$changed_modules; do \
-			if ! echo "$(CORE_MODULES)" | grep -q "\\<$$module\\>"; then \
-				echo "  Testing changed module: $$module"; \
-				go test -race -short -timeout=2m ./features/modules/$$module/...; \
-			fi; \
-		done; \
-	else \
-		echo "📋 No module changes detected - skipping additional module tests"; \
-	fi
+	@$(MAKE) test-go-group-controller-core
+	@$(MAKE) test-go-group-heavy-providers
+	@$(MAKE) test-go-group-rest
+	@$(MAKE) test-framework-api-sharded
 	@echo "✅ OSS build tests complete"
 	@echo ""
-	@echo "🔧 Testing Shell Scripts..."
-	@./scripts/test-scripts.sh || { echo "❌ Script tests failed"; exit 1; }
+	@if [ -n "$(CFGMS_TEST_SCRIPTS_GROUPS)" ]; then \
+		echo "📋 test-scripts groups: $(CFGMS_TEST_SCRIPTS_GROUPS) (CFGMS_TEST_SCRIPTS_GROUPS set by the caller — auto-detection skipped)"; \
+		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$(CFGMS_TEST_SCRIPTS_GROUPS)"; \
+	else \
+		MERGE_BASE=$$(git merge-base HEAD origin/develop 2>/dev/null || true); \
+		if [ -z "$$MERGE_BASE" ]; then \
+			SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
+			REASON="no origin/develop merge base resolvable — fail closed to every group"; \
+		else \
+			DETECT_OUT=$$(./scripts/lib/detect-tooling-changed.sh "$$MERGE_BASE" 2>&1); \
+			SEL_GROUPS=$$(printf '%s\n' "$$DETECT_OUT" | sed -n 's/^groups=//p' | tail -n 1); \
+			REASON="vs develop merge base $$(printf '%.8s' "$$MERGE_BASE"): $$(printf '%s\n' "$$DETECT_OUT" | grep -v '^groups=' | tail -n 1)"; \
+			if [ -z "$$SEL_GROUPS" ]; then \
+				SEL_GROUPS="$(TEST_SCRIPTS_ALL_GROUPS)"; \
+				REASON="detect-tooling-changed.sh printed no groups= line — fail closed to every group"; \
+			fi; \
+		fi; \
+		echo "📋 test-scripts groups: $$SEL_GROUPS ($$REASON)"; \
+		$(MAKE) test-scripts CFGMS_TEST_SCRIPTS_GROUPS="$$SEL_GROUPS"; \
+	fi
 	@echo ""
 	@echo "✅ ALL VALIDATION COMPLETE (HA + Scripts)"
+
+#	-timeout is a HANG DETECTOR, not a performance budget (Issue #2887). It applies
+#	per test binary (per package), so it scales with package size, not test health:
+#	when it fires, Go panics and dumps every goroutine stack so a deadlocked test is
+#	diagnosable instead of hanging CI forever. 10m is Go's own default. The outer
+#	bound on a genuine hang is `timeout-minutes` on the unit-tests-* jobs in
+#	.github/workflows/test-suite.yml. Do not tighten this to track how long any one
+#	group currently takes — that turns a hang detector into a false ceiling that any
+#	growing package eventually crosses.
+#
+#	The three groups below are a manually balanced partition of the same package
+#	list the pre-#4151 single `go test ./...` call used (minus features/modules,
+#	test/integration, test/e2e, and features/controller/api, which has its own
+#	target below). Balanced against CI run 35391321900 (2026-09-18, PR #4155,
+#	4-vCPU ubuntu-latest, single-runner main pass ~600s):
+#	features/controller/server 111.5s, features/controller/initialization 92s,
+#	pkg/cert 81s, pkg/controlplane/providers/grpc 66s, features/steward/client
+#	63s, pkg/storage/providers/sqlite 51s — the six single-package costs that
+#	together made up most of that 600s, with the remaining ~195 packages summing
+#	to the rest. Splitting by package name (not test name, unlike
+#	test-framework-api-sharded) is enough here: none of these packages has
+#	features/controller/api's single-package test-count problem, and go test
+#	already runs multiple packages within one invocation concurrently up to
+#	GOMAXPROCS, so a group's wall time is close to its slowest single package,
+#	not the sum. If a future measurement shows a group's wall time has drifted
+#	far from the others, rebalance by moving a package, not by adding a fourth
+#	group — CI job count is a cost too (checkout + setup-go + cache-restore
+#	overhead per job, see CLAUDE.md "Required CI Checks" runs-on routing notes).
+GO_GROUP_CONTROLLER_CORE := ./features/controller/server/... ./features/controller/initialization/...
+GO_GROUP_HEAVY_PROVIDERS := ./pkg/cert/... ./pkg/controlplane/providers/grpc/... ./features/steward/client/... ./pkg/storage/providers/sqlite/...
+
+# CFGMS_TEST_GROUP_LIST_ONLY=1 prints the packages each group resolves to and
+# exits without running anything — mirrors CFGMS_API_TEST_SHARD_PLAN_ONLY
+# below. Single source of truth for scripts/test-scripts.sh's
+# test_go_group_split_partition_covers_all_packages, which asserts the three
+# groups partition the same package list the pre-#4151 single `go test ./...`
+# call used (no package dropped, none run by two groups).
+.PHONY: test-go-group-controller-core
+test-go-group-controller-core:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_CONTROLLER_CORE); \
+	else \
+		echo "  Testing controller-core group (features/controller/server, features/controller/initialization)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_CONTROLLER_CORE); \
+	fi
+
+.PHONY: test-go-group-heavy-providers
+test-go-group-heavy-providers:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_HEAVY_PROVIDERS); \
+	else \
+		echo "  Testing heavy-providers group (pkg/cert, controlplane/grpc, steward/client, storage/sqlite)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_HEAVY_PROVIDERS); \
+	fi
+
+# `set -e` is load-bearing (Issue #4420): this recipe runs four commands in one
+# shell — the framework package list, the per-module loop, and the final
+# adapter/conformance run — and a recipe's exit status is the status of its LAST
+# command only. Without it, a failing framework run followed by three passing
+# ones exited 0, so `make test` -> test-commit -> test-agent-complete reported
+# success over a real test failure. Do not remove it, and do not add a command
+# after the last one without keeping the chain fail-fast.
+# Guarded by scripts/test-scripts.sh's test_go_group_rest_propagates_early_failure.
+.PHONY: test-go-group-rest
+test-go-group-rest:
+	@set -e; \
+	pkgs=$$(go list ./... \
+		| grep -v '/features/modules/' \
+		| grep -v '/test/integration' \
+		| grep -v '/test/e2e' \
+		| grep -v '/features/controller/api$$' \
+		| grep -v '/features/controller/server$$' \
+		| grep -v '/features/controller/initialization$$' \
+		| grep -v '/pkg/cert$$' \
+		| grep -v '/pkg/cert/bundle$$' \
+		| grep -v '/pkg/cert/interfaces$$' \
+		| grep -v '/pkg/controlplane/providers/grpc$$' \
+		| grep -v '/features/steward/client$$' \
+		| grep -v '/pkg/storage/providers/sqlite$$'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+		exit 0; \
+	fi; \
+	echo "  Testing framework (remaining packages, including ./test/unit/... which"; \
+	echo "  go list ./... already covers - excludes only modules and long-running tests)..."; \
+	go test -race -short -timeout=10m $$pkgs; \
+	echo "  Testing all modules..."; \
+	for module in $(ALL_MODULES); do \
+		echo "  Testing $$module..."; \
+		go test -race -short -timeout=2m ./features/modules/$$module/...; \
+	done; \
+	echo "  Testing features/modules/adapter, features/modules/conformance..."; \
+	go test -race -short -timeout=2m ./features/modules/adapter/... ./features/modules/conformance/...
+
+# Windows/macOS PR-side native leg targets (Issue #4219).
+#
+# The queue's former Native Build (Windows) job (cross-platform-build.yml,
+# removed in #4220 once these legs existed) ran
+# `go test -short ./pkg/... ./features/...` plus a separate `-v ./cmd/...` on
+# one windows-latest runner, with NO -race (Windows -race is out of scope, and
+# unchanged by this story). Of the last 15 queue `Cross-Platform Build
+# Validation` failures (measured 2026-09-22), all 15 were Native Build
+# (Windows), spread across features/controller/api, pkg/storage/providers/sqlite,
+# cmd/cfgms-steward-launcher, pkg/ha, pkg/lease, features/controller/registration,
+# features/controller/fleet/storage and features/workflow/trigger — no small
+# subset would have caught them, so the PR side needs to run everything the
+# queue job runs, split across four legs to stay under a 7-minute-per-leg
+# budget. Measured serial per-package wall time on windows-latest (queue run
+# 35678629960, job 106590441360): features/... 1111s/109 pkgs (api alone 205s),
+# pkg/... 350s/80 pkgs, cmd/... 147s/6 pkgs.
+#
+# CFGMS_TEST_RACE=0 (consumed by test-framework-api-sharded and the race_flag
+# checks below) drops -race for these targets without duplicating the sharding
+# or package-list logic the Linux legs already use.
+GO_GROUP_WINDOWS_CONTROLLER_EXTRA := ./pkg/cert/... ./pkg/controlplane/... ./pkg/storage/providers/sqlite/...
+GO_GROUP_WINDOWS_STEWARD_CMD := ./features/steward/... ./cmd/...
+
+.PHONY: test-go-group-windows-api
+test-go-group-windows-api:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
+	else \
+		CFGMS_TEST_RACE=0 $(MAKE) test-framework-api-sharded; \
+	fi
+
+.PHONY: test-go-group-windows-controller
+test-go-group-windows-controller:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs="$$(go list ./features/controller/... | grep -v '/features/controller/api$$') $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA)"; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $$pkgs; \
+	else \
+		echo "  Testing windows-controller group (features/controller minus api, pkg/cert, pkg/controlplane, pkg/storage/sqlite)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+# -v is scoped to ./cmd/... only (matching cross-platform-build.yml's queue
+# job, Issue #3470): cmd/cfgms-steward-launcher's Windows-only SCM tests need
+# per-test output to tell a passing test from one that skipped for lack of
+# Administrator rights — a non-verbose run only prints one "ok <package>" line
+# per package with no per-test result. features/steward stays non-verbose to
+# keep the rest of the log readable.
+#
+# Both go test calls share one shell, so their exit statuses are latched into
+# $$status and re-raised at the end rather than left to the recipe's last
+# command. Without that, a features/steward failure was silently discarded
+# whenever ./cmd/... passed: run 36518171606 job 109245289531 printed
+# "FAIL github.com/cfgis/cfgms/features/steward/modules/runtime" and still
+# concluded success. Both package sets must keep running on every invocation, so
+# `&&` is the wrong fix — a failure in the first must not hide the second's results.
+.PHONY: test-go-group-windows-steward
+test-go-group-windows-steward:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	else \
+		status=0; \
+		echo "  Testing windows-steward group (features/steward)..."; \
+		go test $$race_flag -short -timeout=10m ./features/steward/... || status=1; \
+		echo "  Testing windows-steward group (cmd, verbose)..."; \
+		go test -v $$race_flag -short -timeout=10m ./cmd/... || status=1; \
+		exit $$status; \
+	fi
+
+# Everything the queue's former Native Build (Windows) job tested (./pkg/...
+# ./features/... ./cmd/...) that isn't already claimed by the api/controller/
+# steward legs above - includes the module packages, matching that job's
+# unfiltered ./features/....
+.PHONY: test-go-group-windows-rest
+test-go-group-windows-rest:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	pkgs=$$(go list ./pkg/... ./features/... ./cmd/... \
+		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/steward' \
+		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing windows-rest group (remaining pkg/features/cmd packages, including modules)..."; \
+		go test $$race_flag -short -timeout=10m $$pkgs; \
+	fi
+
+# The queue's former Native Build (macOS) job (removed in #4220) ran the same
+# package set as Linux WITH
+# -race (`go test -race -short ./pkg/... ./features/... ./cmd/...`). A first
+# attempt at 2 legs (api sharded internally 3-way, everything else in one
+# job) measured 10m25s and 11m44s on this story's own PR (#4225, run
+# 35811533253) — `macos-latest` hosted runners have only 3 vCPUs, so
+# test-framework-api-sharded's nproc-based internal sharding maxes out at 3
+# processes on the SAME 3 cores, and -race's overhead compounds it. Splitting
+# into more CI jobs (each its own dedicated 3-core runner) buys real
+# parallelism that internal sharding on one runner cannot; splitting the
+# *content* the way the Windows legs do (controller/steward pulled off the
+# "rest" pile) tackles the heaviest single packages (pkg/cert 74s,
+# pkg/controlplane/providers/grpc 67s, features/steward/client 65s,
+# features/controller/initialization 59s — all measured serial on that same
+# run's macos-rest job).
+#
+# CFGMS_MACOS_API_SHARD/CFGMS_MACOS_API_SHARDS split features/controller/api's
+# test list into CI-job-level groups (default 1 shard = no split), each
+# running go test's own internal parallelism rather than
+# test-framework-api-sharded's process-level sharding — an outer split across
+# separate runners each with a full 3-core budget, not an inner split
+# fighting over the same 3 cores.
+#
+# Both variables are validated as decimal integers, and both `awk -v`
+# assignments are quoted, before either reaches awk. This is the same invariant
+# test-framework-api-sharded documents for CFGMS_API_TEST_SHARDS, in the awk
+# dialect instead of the bash-arithmetic one: an unquoted `-v s=$shard` lets a
+# value containing whitespace word-split into a *replacement awk program*, and
+# awk's system() then executes arbitrary commands. It is also a fail-open —
+# awk on macOS (BWK awk, like gawk) is fatal on a zero or non-numeric modulus
+# while Linux mawk passes every line through, so an unvalidated count
+# misbehaves differently on the only platform that runs this target, and an
+# empty partition used to `exit 0` with zero tests run behind the required
+# Build Gate context. Index and count are both range-checked (0 <= shard <
+# shards) and an empty enumeration or an empty shard slice fails closed. See
+# test_api_shard_count_rejects_non_integer in scripts/test-scripts.sh for the
+# regression guard covering both variable pairs.
+.PHONY: test-go-group-macos-api
+test-go-group-macos-api:
+	@shard="$${CFGMS_MACOS_API_SHARD:-0}"; \
+	shards="$${CFGMS_MACOS_API_SHARDS:-1}"; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1;; \
+	esac; \
+	case "$$shard" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_API_SHARD must be a non-negative decimal integer, got '$$shard'"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	shard=$$((10#$$shard)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ CFGMS_MACOS_API_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1; \
+	fi; \
+	if [ "$$shard" -ge "$$shards" ]; then \
+		echo "❌ CFGMS_MACOS_API_SHARD must be less than CFGMS_MACOS_API_SHARDS ($$shards), got '$$shard'"; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list ./features/controller/api/...; \
+	else \
+		list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
+		list_rc=$$?; \
+		if [ $$list_rc -ne 0 ]; then \
+			echo "$$list_out"; \
+			echo "❌ failed to enumerate features/controller/api tests"; \
+			exit 1; \
+		fi; \
+		names=$$(echo "$$list_out" | grep -E '^Test'); \
+		total=$$(echo "$$names" | grep -c .); \
+		if [ "$$total" -eq 0 ]; then \
+			echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
+			exit 1; \
+		fi; \
+		pattern=$$(echo "$$names" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s' | paste -sd'|' -); \
+		if [ -z "$$pattern" ]; then \
+			echo "❌ macos-api shard $$shard/$$shards: no tests assigned out of $$total - the shard count exceeds the test count. Refusing to report a pass."; \
+			exit 1; \
+		fi; \
+		echo "  Testing features/controller/api shard $$shard/$$shards (-race)..."; \
+		go test -race -short -timeout=10m -run "^($$pattern)$$" ./features/controller/api/...; \
+	fi
+
+# pkg/cert, pkg/controlplane, pkg/storage/sqlite — the heaviest non-controller
+# packages measured above.
+.PHONY: test-go-group-macos-providers
+test-go-group-macos-providers:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
+	else \
+		echo "  Testing macos-providers group (pkg/cert, pkg/controlplane, pkg/storage/sqlite, -race)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_CONTROLLER_EXTRA); \
+	fi
+
+.PHONY: test-go-group-macos-controller
+test-go-group-macos-controller:
+	@pkgs=$$(go list ./features/controller/... | grep -v '/features/controller/api$$'); \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-controller group (features/controller minus api, -race)..."; \
+		go test -race -short -timeout=10m $$pkgs; \
+	fi
+
+.PHONY: test-go-group-macos-steward
+test-go-group-macos-steward:
+	@if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		go list $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	else \
+		echo "  Testing macos-steward group (features/steward, cmd, -race)..."; \
+		go test -race -short -timeout=10m $(GO_GROUP_WINDOWS_STEWARD_CMD); \
+	fi
+
+# Everything not claimed by the api/providers/controller/steward groups above,
+# split into CFGMS_MACOS_REST_SHARDS CI-job-level groups the same way the api
+# group is split (see above for why: more 3-core runners, not more processes
+# fighting over one runner's 3 cores), and validated the same way before either
+# value reaches awk (see test-go-group-macos-api for what an unvalidated,
+# unquoted `awk -v` assignment buys an attacker, and why an empty partition
+# must fail rather than exit 0).
+.PHONY: test-go-group-macos-rest
+test-go-group-macos-rest:
+	@shard="$${CFGMS_MACOS_REST_SHARD:-0}"; \
+	shards="$${CFGMS_MACOS_REST_SHARDS:-1}"; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_REST_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1;; \
+	esac; \
+	case "$$shard" in \
+	''|*[!0-9]*) \
+		echo "❌ CFGMS_MACOS_REST_SHARD must be a non-negative decimal integer, got '$$shard'"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	shard=$$((10#$$shard)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ CFGMS_MACOS_REST_SHARDS must be a positive decimal integer, got '$$shards'"; \
+		exit 1; \
+	fi; \
+	if [ "$$shard" -ge "$$shards" ]; then \
+		echo "❌ CFGMS_MACOS_REST_SHARD must be less than CFGMS_MACOS_REST_SHARDS ($$shards), got '$$shard'"; \
+		exit 1; \
+	fi; \
+	pkgs_all=$$(go list ./pkg/... ./features/... ./cmd/... \
+		| grep -v '^github.com/cfgis/cfgms/features/controller$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/controller/' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/cert' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/controlplane' \
+		| grep -v '^github.com/cfgis/cfgms/pkg/storage/providers/sqlite$$' \
+		| grep -v '^github.com/cfgis/cfgms/features/steward' \
+		| grep -v '^github.com/cfgis/cfgms/cmd/'); \
+	if [ -z "$$pkgs_all" ]; then \
+		echo "❌ macos-rest: package enumeration produced no packages - check go list output. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	pkgs=$$(echo "$$pkgs_all" | awk -v "s=$$shard" -v "n=$$shards" 'NR % n == s'); \
+	if [ -z "$$pkgs" ]; then \
+		echo "❌ macos-rest shard $$shard/$$shards: no packages assigned - the shard count exceeds the package count. Refusing to report a pass."; \
+		exit 1; \
+	fi; \
+	if [ -n "$${CFGMS_TEST_GROUP_LIST_ONLY:-}" ]; then \
+		echo "$$pkgs"; \
+	else \
+		echo "  Testing macos-rest shard $$shard/$$shards (remaining pkg/features/cmd packages, including modules, -race)..."; \
+		go test -race -short -timeout=10m $$pkgs; \
+	fi
+
+.PHONY: test-scripts
+# CFGMS_TEST_SCRIPTS_GROUPS narrows the run to one or more of test-scripts.sh's
+# named suite groups (core, security-review, claude-tooling, devinfra) — see
+# scripts/test-scripts.sh --group. Unset (the default) runs all four, unchanged
+# from before this variable existed.
+test-scripts:
+	@echo "🔧 Testing Shell Scripts..."
+	@./scripts/test-scripts.sh $(if $(CFGMS_TEST_SCRIPTS_GROUPS),--group $(CFGMS_TEST_SCRIPTS_GROUPS),) || { echo "❌ Script tests failed"; exit 1; }
+
+# Runs features/controller/api's tests as N parallel `go test` processes instead
+# of one (Issue #4151). The package is a single flat directory (2,006 top-level
+# tests as of 2026-09-18), so there is no sub-package boundary to matrix on and
+# no per-test hotspot to fix — Go only parallelizes within a package via
+# t.Parallel(), which this suite doesn't use. Splitting by test name into N
+# `-test.run` invocations of one prebuilt test binary and running them as
+# background shell jobs gets real OS-level parallelism across CPU cores
+# without touching test source.
+#
+# This target is invoked as its own CI matrix leg (unit-tests-api in
+# .github/workflows/test-suite.yml) so the N shards get a dedicated runner's
+# CPUs rather than sharing them with every other package — the first attempt
+# (PR #4155, single job) ran this target as a second sequential step on the
+# same runner and measured no wall-clock improvement, because `go test ./...`
+# was already CPU-bound at GOMAXPROCS with or without this package in its
+# argument list. The per-shard internal parallelism here still matters on a
+# dedicated runner: a single serial `go test` of this package is the ~322s
+# critical path described below; N shards on N cores brings that down to
+# roughly (single-package critical path) / N.
+#
+# CFGMS_API_TEST_SHARDS overrides the shard count (defaults to nproc, capped to
+# a sane range so a huge build host doesn't spawn dozens of `go test` binaries
+# for ~2,000 tests). CFGMS_API_TEST_SHARD_PLAN_ONLY=1 prints each shard's test
+# count and exits without running anything — used by
+# scripts/test-scripts.sh's test_api_shard_partition_covers_all_tests to verify
+# the partition is complete and even without paying for a full -race run.
+#
+# The shard count is validated as a decimal integer before it reaches any
+# arithmetic context. Bash evaluates the contents of a variable used inside
+# $(( )) as an arithmetic expression, so an unvalidated value is both command
+# execution (an array-subscript payload runs) and a fail-open: a non-numeric
+# value makes `seq 0 $((shards - 1))` emit nothing, so zero shards launch and
+# the target exits 0 with the whole suite silently unrun.
+#
+# The test binary is COMPILED ONCE, before the fan-out, and each shard execs
+# that binary (Issue #4239). Shards used to run `go test -run ...` directly,
+# which made every shard responsible for producing its own build: `go test
+# -list` populates the build cache only for the non-race configuration, so the
+# race-instrumented build of this package was cold when N shards started and
+# all N invoked the compiler on the same 115k-line package at the same moment.
+# One such build peaks around 1.5GB resident here, so eight concurrent ones
+# exhaust a 30GB host and the kernel kills `compile` mid-build - observed as
+# `compile: signal: killed` / `[build failed]` on 5 of 8 shards, while the
+# shards that happened to win the race passed in ~30s. Building once bounds
+# peak memory at one compiler regardless of the shard count, and the shards
+# then do test execution only.
+#
+# Aggregation fails closed: every shard that was launched must produce a
+# readable exit status, and at least one shard must have been launched. A
+# shard subshell killed before it records one (OOM kill under N concurrent
+# -race binaries, any signal, a full or unwritable temp dir) counts as a
+# failure, because a skipped shard is a whole slice of the suite that
+# silently never ran - see test_api_shard_aggregation_fails_closed and
+# test_api_shard_count_rejects_non_integer for the regression guards. The
+# build itself fails closed the same way: a build that reports success but
+# leaves no runnable binary stops the target instead of launching shards that
+# would each exit non-zero for an unrelated reason.
+.PHONY: test-framework-api-sharded
+test-framework-api-sharded:
+	@race_flag="-race"; \
+	if [ "$${CFGMS_TEST_RACE:-1}" = "0" ]; then race_flag=""; fi; \
+	shards="$${CFGMS_API_TEST_SHARDS:-}"; \
+	if [ -z "$$shards" ]; then shards=$$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4); fi; \
+	case "$$shards" in \
+	''|*[!0-9]*) \
+		echo "❌ shard count must be a positive integer, got '$$shards' (set CFGMS_API_TEST_SHARDS to a decimal number)"; \
+		exit 1;; \
+	esac; \
+	shards=$$((10#$$shards)); \
+	if [ "$$shards" -lt 1 ]; then \
+		echo "❌ shard count must be a positive integer, got '$$shards' (set CFGMS_API_TEST_SHARDS to a decimal number)"; \
+		exit 1; \
+	fi; \
+	if [ "$$shards" -gt 8 ]; then shards=8; fi; \
+	list_out=$$(go test -list '.*' ./features/controller/api/... 2>&1); \
+	list_rc=$$?; \
+	if [ $$list_rc -ne 0 ]; then \
+		echo "$$list_out"; \
+		echo "❌ failed to enumerate features/controller/api tests"; \
+		exit 1; \
+	fi; \
+	names=$$(echo "$$list_out" | grep -E '^Test'); \
+	total=$$(echo "$$names" | grep -c .); \
+	if [ "$$total" -eq 0 ]; then \
+		echo "❌ no tests found in features/controller/api - check package path or go test -list output"; \
+		exit 1; \
+	fi; \
+	echo "  Sharding $$total features/controller/api tests across $$shards parallel test processes..."; \
+	if [ -n "$${CFGMS_API_TEST_SHARD_PLAN_ONLY:-}" ]; then \
+		for i in $$(seq 0 $$((shards - 1))); do \
+			n=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | grep -c .); \
+			echo "shard $$i: $$n tests"; \
+		done; \
+		exit 0; \
+	fi; \
+	pkg_count=$$(go list ./features/controller/api/... 2>/dev/null | grep -c .); \
+	if [ "$$pkg_count" != "1" ]; then \
+		echo "❌ ./features/controller/api/... resolves to $$pkg_count packages, but this target compiles a single test binary. Build one binary per package before adding sub-packages - do not fall back to per-shard builds."; \
+		exit 1; \
+	fi; \
+	tmpdir=$$(mktemp -d); \
+	if [ -z "$$tmpdir" ] || [ ! -d "$$tmpdir" ]; then \
+		echo "❌ could not create a temp dir for shard output - refusing to report a pass"; \
+		exit 1; \
+	fi; \
+	case "$$tmpdir" in /*) ;; *) tmpdir="$$PWD/$$tmpdir";; esac; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	echo "  Compiling the features/controller/api test binary once (shards exec it; N concurrent compiles of this package exhaust memory)..."; \
+	if ! go test $$race_flag -c -o "$$tmpdir/api.test" ./features/controller/api; then \
+		echo "❌ failed to build the features/controller/api test binary - no shards were run"; \
+		exit 1; \
+	fi; \
+	if [ ! -x "$$tmpdir/api.test" ]; then \
+		echo "❌ the test build reported success but produced no runnable binary at $$tmpdir/api.test - refusing to report a pass"; \
+		exit 1; \
+	fi; \
+	pids=""; \
+	launched=""; \
+	for i in $$(seq 0 $$((shards - 1))); do \
+		pattern=$$(echo "$$names" | awk -v s=$$i -v n=$$shards 'NR % n == s' | paste -sd'|' -); \
+		if [ -n "$$pattern" ]; then \
+			( cd ./features/controller/api && "$$tmpdir/api.test" -test.short -test.timeout=10m -test.paniconexit0 -test.run "^($$pattern)$$" > "$$tmpdir/shard-$$i.log" 2>&1; \
+			  echo $$? > "$$tmpdir/shard-$$i.exit" ) & \
+			pids="$$pids $$!"; \
+			launched="$$launched $$i"; \
+		fi; \
+	done; \
+	wait $$pids; \
+	if [ -z "$$launched" ]; then \
+		echo "❌ no shards were launched for $$total features/controller/api tests - refusing to report a pass"; \
+		exit 1; \
+	fi; \
+	fail=0; \
+	for i in $$launched; do \
+		if [ -f "$$tmpdir/shard-$$i.log" ]; then cat "$$tmpdir/shard-$$i.log"; fi; \
+		if code=$$(cat "$$tmpdir/shard-$$i.exit" 2>/dev/null) && [ -n "$$code" ]; then \
+			if [ "$$code" != "0" ]; then \
+				echo "❌ shard $$i: the features/controller/api test binary exited $$code"; \
+				fail=1; \
+			fi; \
+		else \
+			echo "❌ shard $$i: no readable exit status - the shard was launched but never recorded a result (killed by the OOM killer or a signal, or its output could not be written). Failing closed."; \
+			fail=1; \
+		fi; \
+	done; \
+	exit $$fail
 
 # OPTIMIZED TEST TARGETS (Cache-Aware Strategy)
 
@@ -366,10 +1078,20 @@ test-watch:
 # SMART TESTING SYSTEM
 
 # Core modules for smoke testing (always tested)
-CORE_MODULES := file script
+CORE_MODULES := stdlib/file stdlib/script
 
-# All modules for change detection
-ALL_MODULES := file script firewall package patch m365 activedirectory network_activedirectory
+# All modules for change detection — derived from the tree so a new module
+# can never silently drop out of smart-mode selection (Issue #4164). Every
+# directory under features/modules/ containing a module.yaml is a module
+# (stdlib/<name>, extended/<name>, or a top-level module like hyperv);
+# adapter/ and conformance/ have no module.yaml and are excluded by this
+# criterion alone. features/workflow/modules/m365 is a separate subsystem
+# outside features/modules/ and is intentionally not picked up here. The
+# grep constrains discovered names to a safe charset before they are
+# expanded into shell recipes below (CHANGED_MODULES, test-module, the
+# smart-mode loops) — a directory name were it ever to contain shell
+# metacharacters would otherwise be interpolated unquoted.
+ALL_MODULES := $(shell find features/modules -mindepth 1 -name module.yaml -exec dirname {} \; | sed 's|^features/modules/||' | grep -E '^[A-Za-z0-9_/-]+$$' | sort -u)
 
 # Detect changed modules using git diff
 CHANGED_MODULES = $(shell \
@@ -465,6 +1187,16 @@ security-precommit:
 
 # Central Provider Architecture Compliance Check
 # Prevents duplicate implementations of cross-cutting concerns
+#
+# The custom-cache rule matches on declaration text, so it cannot distinguish a
+# duplicate of pkg/cache from a differently-shaped store whose name contains
+# "Cache". A declaration that is genuinely not a pkg/cache-style in-memory TTL
+# cache is exempted by annotating that line with a written reason:
+#
+#	//architecture:allow-custom-cache -- <reason>
+#
+# Same convention as //architecture:allow-raw-leader (pkg/ha/architecture_test.go).
+# Annotate the specific declaration; do not add path exclusions to this target.
 .PHONY: check-architecture
 check-architecture:
 	@echo "🏗️  Checking Central Provider Compliance..."
@@ -531,18 +1263,27 @@ check-architecture:
 	if [ -n "$$files" ]; then \
 		feature_files=$$(echo "$$files" | grep "^features/" || true); \
 		if [ -n "$$feature_files" ]; then \
-			if echo "$$feature_files" | xargs grep -l "type.*Cache.*struct" 2>/dev/null; then \
+			cache_types=$$(echo "$$feature_files" | xargs grep -n "type.*Cache.*struct" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$cache_types" ]; then \
 				echo "  ❌ Found custom Cache type in features/ - should use pkg/cache.Cache"; \
+				echo "$$cache_types" | sed 's/^/     /'; \
 				echo "     pkg/cache provides general-purpose caching with TTL and eviction"; \
+				echo "     If the type is genuinely not a pkg/cache-style in-memory TTL cache,"; \
+				echo "     annotate the declaration line with a written reason:"; \
+				echo "     //architecture:allow-custom-cache -- <reason>"; \
 				violations=$$((violations + 1)); \
 			fi; \
-			if echo "$$feature_files" | xargs grep -l "type.*L1.*struct\|type.*L2.*struct" 2>/dev/null; then \
+			tier_types=$$(echo "$$feature_files" | xargs grep -n "type.*L1.*struct\|type.*L2.*struct" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$tier_types" ]; then \
 				echo "  ❌ Found custom L1/L2 cache implementation - should use pkg/cache.Cache"; \
+				echo "$$tier_types" | sed 's/^/     /'; \
 				echo "     Multi-tier caching should be implemented in pkg/cache if needed"; \
 				violations=$$((violations + 1)); \
 			fi; \
-			if echo "$$feature_files" | xargs grep -l "func.*NewCache\|func.*NewL[12]Cache" 2>/dev/null; then \
+			cache_ctors=$$(echo "$$feature_files" | xargs grep -n "func.*NewCache\|func.*NewL[12]Cache" 2>/dev/null | grep -v "//architecture:allow-custom-cache" || true); \
+			if [ -n "$$cache_ctors" ]; then \
 				echo "  ❌ Found custom cache constructor - should use pkg/cache.NewCache()"; \
+				echo "$$cache_ctors" | sed 's/^/     /'; \
 				violations=$$((violations + 1)); \
 			fi; \
 		fi; \
@@ -587,6 +1328,27 @@ check-architecture:
 	@echo "📦 Checking storage provider import violations..."
 	@bash ./scripts/check-providers.sh
 	@echo "   Safe to commit - no secrets detected in staged files"
+	@echo ""
+	@echo "📦 Checking raw Raft leader primitive usage outside pkg/ha..."
+	@go test ./pkg/ha/... -run TestNoRawLeaderPrimitiveOutsidePkgHA -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking ctxkeys.NewRootScope has no unauthorized callers..."
+	@go test ./pkg/ctxkeys/... -run TestNewRootScope_RestrictedCaller -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking wrapper-registered handlers consume caller tenant scope..."
+	@go test ./features/controller/api/... -run TestHandlersConsumeCallerScope -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking authorization decisions do not read the tenant from logging.ExtractTenantFromContext..."
+	@go test ./pkg/logging/... -run TestNoLoggingTenantForAuthorization -count=1 -timeout 120s
+	@echo ""
+	@echo "📦 Checking for tracked .py files under core product paths..."
+	@bash ./scripts/check-no-python-in-core.sh
+	@echo ""
+	@echo "📦 Checking windows-setup.ps1 and script templates for banned execution patterns..."
+	@bash ./scripts/check-no-banned-exec-patterns.sh
+	@echo ""
+	@echo "📦 Checking every non-test package is reachable from a main package..."
+	@bash ./scripts/check-dead-packages.sh
 
 # License Header Verification
 # Ensures all source files have SPDX license headers
@@ -626,7 +1388,8 @@ validate-providers:
 	echo ""
 
 # Pre-commit validation (smart tests + quality gates + SECRET SCANNING + ARCHITECTURE + LICENSE)
-test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture security-scan
+test-commit: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
+test-commit: test lint lint-log-injection check-license-headers security-precommit check-architecture check-stdlib-completeness security-scan
 	@echo ""
 	@echo "✅ PRE-COMMIT VALIDATION FINISHED"
 	@echo "===================================="
@@ -635,6 +1398,8 @@ test-commit: test lint lint-log-injection check-license-headers security-precomm
 	@echo "- ✅ License headers validated"
 	@echo "- ✅ Secret scanning passed (no secrets in staged files)"
 	@echo "- ✅ Architecture compliance passed (no central provider violations)"
+	@echo "- ✅ Stdlib payload boundary validated (all five sources agree)"
+	@echo "- ✅ Stdlib completeness validated (ADR-016 clause 6)"
 	@echo "- ✅ Security scanning passed (vulnerabilities)"
 	@echo ""
 	@echo "🎯 Code is validated and ready for commit/PR"
@@ -732,18 +1497,20 @@ test-m365-integration:
 	@echo "⚡ This will FAIL if M365 credentials are not available"
 	@echo "📝 Add credentials to .env.local or set M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID"
 	@echo ""
-	go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
-	go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
+	go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
 
-# M365 integration tests - PERMISSIVE mode (skips without credentials) 
+# M365 integration tests - PERMISSIVE mode (skips without credentials)
 # Use this for development when you don't have M365 credentials
 test-m365-integration-dev:
 	@echo "🌐 Running M365 Integration Tests (DEV MODE)"
 	@echo "============================================"
 	@echo "⚡ This will SKIP if M365 credentials are not available"
 	@echo ""
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_application/... -run "Integration"
-	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_application/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_admin_unit/... -run "Integration"
+	ALLOW_SKIP_INTEGRATION=true go test -v -race -timeout=2m ./features/workflow/modules/m365/entra_group/... -run "Integration"
 
 # M365 unit tests (mocked dependencies, no credentials needed)
 test-m365-unit:
@@ -775,7 +1542,23 @@ test-fast:
 	@echo "💡 Optimized for CI/CD pipelines"
 	@echo ""
 	@echo "🧪 Running unit tests..."
-	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=5m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+#	-timeout is a HANG DETECTOR, not a performance budget — same rule as `make test`
+#	above (Issue #2887), and this target runs the same packages under -race, so it
+#	carries the same 10m value. At 5m this was a false ceiling: features/controller/api
+#	(926 tests) needs ~234s of real CPU under -race on its own, because every test
+#	builds a fresh SQLite business-store schema (79 DDL statements, ~7ms plain but
+#	~164ms under the race detector's ~22x amplification of modernc.org/sqlite). Add
+#	the 4-way package parallelism `go test` uses and that crosses 300s, whereupon Go
+#	dumps stacks mid-DDL — a runnable, never-scheduled goroutine, i.e. CPU starvation,
+#	not a deadlock. Do not tighten this to track how long the suite currently takes.
+	@CFGMS_TEST_SHORT=1 go test -short -race -timeout=10m ./pkg/... ./features/... ./api/... ./cmd/... || exit 1
+	@echo ""
+#	Build-tagged code is invisible to every target above, so nothing catches a
+#	break in it until an e2e image build fails hours later. The test-endpoint
+#	routes are only compiled by docker-compose.test.yml, which is exactly the
+#	configuration the integration and fleet suites depend on.
+	@echo "🏷️  Vetting build-tagged sources (cfgms_test_endpoints)..."
+	@go vet -tags cfgms_test_endpoints ./features/controller/api/... || exit 1
 	@echo ""
 	@echo "✅ Fast comprehensive tests complete"
 
@@ -786,7 +1569,13 @@ test-load-testing:
 	@echo "====================="
 	@echo "📊 Testing system under high concurrency"
 	@echo ""
-	@go test -race -timeout=30m -run "Load" ./test/e2e/... ./test/integration/transport/... ./test/performance/... || exit 1
+	@set -eu; \
+		load_key=$$(mktemp); \
+		trap 'rm -f "$$load_key"' EXIT; \
+		chmod 0600 "$$load_key"; \
+		head -c 32 /dev/urandom > "$$load_key"; \
+		CFGMS_SECRETS_KEY_FILE="$$load_key" go test -race -timeout=30m -run "Load" \
+			./features/controller/api ./test/e2e/... ./test/integration/transport/...
 	@echo ""
 	@echo "✅ Load testing complete"
 
@@ -803,24 +1592,6 @@ test-performance-benchmarks:
 
 
 
-# Performance baseline establishment (for new releases)
-# Performance regression tests removed — will be rebuilt with real profiling data
-# when the system has enough infrastructure to establish meaningful baselines
-test-performance-baseline:
-	@echo "📈 Performance Baselines"
-	@echo "========================"
-	@echo "ℹ️  Performance regression tests not yet implemented"
-	@echo "   Will be added when real profiling data establishes meaningful baselines"
-	@echo "   See: features/steward/performance/ for component-level performance tests"
-
-# Data consistency testing (Story #85)
-test-data-consistency:
-	@echo "📊 DATA CONSISTENCY VALIDATION"
-	@echo "==============================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestDataFlow" ./test/e2e/...
-	@echo "✅ Data consistency validation complete"
-
 # Production Risk Testing - Automated Gates
 .PHONY: test-production-critical
 
@@ -832,11 +1603,14 @@ test-data-consistency:
 
 
 # Security Scanning Tools (v0.3.1)
-.PHONY: security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy
+.PHONY: check-binary-artifacts security-trivy security-deps security-gosec security-staticcheck security-scan security-check security-scan-nonblocking security-remediation-report install-nancy
+
+check-binary-artifacts:
+	@bash scripts/check-binary-artifacts.sh
 
 # Automatic Nancy installation (cross-platform)
 install-nancy:
-	@echo "📦 Installing Nancy v2.0.0..."
+	@echo "📦 Installing Nancy v2.1.0..."
 	@echo "============================="
 	@if command -v nancy >/dev/null 2>&1; then \
 		echo "✅ Nancy is already installed: $$(nancy --version)"; \
@@ -854,16 +1628,16 @@ install-nancy:
 	case "$$os" in \
 		linux) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
 			fi ;; \
 		darwin) \
 			if [ "$$arch" = "x86_64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-amd64" -o "$$gopath/bin/nancy"; \
 			elif [ "$$arch" = "arm64" ]; then \
-				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
+				curl -L "https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-arm64" -o "$$gopath/bin/nancy"; \
 			else \
 				echo "❌ Unsupported architecture: $$arch"; \
 				exit 1; \
@@ -885,10 +1659,10 @@ security-trivy:
 	@if ! command -v trivy >/dev/null 2>&1; then \
 		echo "❌ Error: trivy is not installed"; \
 		echo ""; \
-		echo "Install trivy v0.71.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
+		echo "Install trivy v0.74.0 — NEVER use v0.69.4-v0.69.6 (CVE-2026-33634)"; \
 		echo "and NEVER use @latest:"; \
-		echo "  ./.github/scripts/install-trivy.sh v0.71.0 \\"; \
-		echo "    30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814"; \
+		echo "  ./.github/scripts/install-trivy.sh v0.74.0 \\"; \
+		echo "    2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"; \
 		echo ""; \
 		echo "Official documentation: https://aquasecurity.github.io/trivy/latest/getting-started/installation/"; \
 		echo "Rollback procedure: docs/runbooks/trivy-rollback.md"; \
@@ -899,11 +1673,10 @@ security-trivy:
 		rc=$$?; \
 		if [ $$rc -eq 2 ]; then \
 			echo ""; \
-			echo "⚠️  Trivy DB download failed — infrastructure issue, not a security finding."; \
-			echo "   Scan skipped; ensure mirror.gcr.io is in the DNS allowlist and re-run."; \
-		else \
-			exit $$rc; \
+			echo "❌ Trivy scan incomplete — database initialization failed."; \
+			echo "   This blocking target cannot pass until the scan completes cleanly."; \
 		fi; \
+		exit $$rc; \
 	}
 
 # Nancy Go dependency vulnerability scanning
@@ -913,25 +1686,25 @@ security-deps:
 	@if ! command -v nancy >/dev/null 2>&1; then \
 		echo "❌ Error: nancy is not installed"; \
 		echo ""; \
-		echo "Install nancy (v2.0.0) for your platform:"; \
+		echo "Install nancy (v2.1.0) for your platform:"; \
 		echo ""; \
 		echo "🚀 Quick Install (recommended):"; \
 		echo "  make install-nancy"; \
 		echo ""; \
 		echo "📥 Manual Install - Linux (amd64):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-linux-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-linux-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Intel):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-amd64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-amd64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🍎 Manual Install - macOS (Apple Silicon):"; \
-		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-darwin-arm64 -o ~/nancy"; \
+		echo "  curl -L https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-darwin-arm64 -o ~/nancy"; \
 		echo "  chmod +x ~/nancy && mv ~/nancy \$$(go env GOPATH)/bin/nancy"; \
 		echo ""; \
 		echo "🪟 Manual Install - Windows (PowerShell):"; \
-		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.0.0/nancy-v2.0.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
+		echo "  Invoke-WebRequest -Uri 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe' -OutFile 'nancy.exe'"; \
 		echo "  Move-Item nancy.exe \$$(go env GOPATH)\\bin\\nancy.exe"; \
 		echo ""; \
 		echo "📦 Package Managers:"; \
@@ -941,17 +1714,42 @@ security-deps:
 		echo "🔗 All releases: https://github.com/sonatype-nexus-community/nancy/releases"; \
 		exit 1; \
 	fi
-	@echo "Scanning Go dependencies for known vulnerabilities..."
-	@if go list -json -deps ./... | nancy sleuth --skip-update-check 2>/dev/null; then \
+	@# Nancy v2 cannot query Sonatype Guide anonymously — a missing token yields
+	@# 401 Unauthorized, not a clean scan. CI must fail closed on that; a developer
+	@# workstation without a token skips loudly rather than blocking local work.
+	@# Set CFGMS_REQUIRE_GUIDE_TOKEN=1 to force fail-closed outside CI.
+	@# One shell block: `exit 0` in a separate recipe line would end only that
+	@# line's shell and make would run the scan anyway.
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		if [ -n "$${CI:-}" ] || [ "$${CFGMS_REQUIRE_GUIDE_TOKEN:-}" = "1" ]; then \
+			echo "❌ Error: GUIDE_TOKEN is required by Nancy v2 for Sonatype Guide"; \
+			echo "   Obtain a token from https://guide.sonatype.com and export GUIDE_TOKEN."; \
+			exit 1; \
+		fi; \
+		echo "⏭️  SKIPPED: no GUIDE_TOKEN — dependency vulnerabilities were NOT checked"; \
+		echo "   Nancy v2 requires a Sonatype Guide bearer token; it cannot scan anonymously."; \
+		echo "   Get a free token at https://guide.sonatype.com, then: export GUIDE_TOKEN=<token>"; \
+		echo "   CI runs this scan with the repository GUIDE_TOKEN secret and fails closed."; \
+		exit 0; \
+	fi; \
+	if [ -f .nancy-ignore ]; then \
+		bash scripts/verify-nancy-ignore-scope.sh .nancy-ignore || exit 1; \
+		suppressed=$$(grep -v '^[[:space:]]*#' .nancy-ignore | grep -v '^[[:space:]]*$$' | wc -l | tr -d ' '); \
+		if [ "$${suppressed:-0}" -gt 0 ]; then \
+			echo ""; \
+			echo "ℹ️  Note: $${suppressed} CVE suppression(s) active — see .nancy-ignore for justification and expiry dates"; \
+		fi; \
+	fi; \
+	echo "Scanning Go dependencies for known vulnerabilities..."; \
+	if go list -json -deps ./... | nancy sleuth --skip-update-check; then \
 		echo "✅ Nancy dependency scan completed - no critical vulnerabilities found"; \
 	else \
 		echo ""; \
-		echo "⚠️  Nancy found vulnerable dependencies. Consider updating:"; \
+		echo "❌ Nancy dependency scan failed or found vulnerable dependencies:"; \
 		echo "   - Review the vulnerabilities listed above"; \
 		echo "   - Update dependencies with: go get -u <package>@<safe-version>"; \
 		echo "   - Re-run: make security-deps"; \
-		echo ""; \
-		echo "ℹ️  Non-blocking for development workflow - fix when convenient"; \
+		exit 1; \
 	fi
 
 # gosec Go security pattern analysis
@@ -962,42 +1760,16 @@ security-gosec:
 		echo "❌ Error: gosec is not installed"; \
 		echo ""; \
 		echo "Install gosec using Go:"; \
-		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1"; \
+		echo "  go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0"; \
 		echo ""; \
 		echo "For more info: https://github.com/securego/gosec"; \
 		exit 1; \
 	fi
 	@echo "Analyzing Go code for security patterns..."
 	@echo "Using .gosec.json configuration (single source of truth)..."
-	@echo "Running per-directory to avoid cross-package type resolution bottleneck..."
-	@rm -f /tmp/gosec-results-combined.json
-	@all_issues="[]"; \
-	for dir in pkg features cmd api test internal; do \
-		if [ -d "$$dir" ]; then \
-			gosec -conf .gosec.json -exclude=G103,G115,G404 -fmt json -quiet ./$$dir/... > /tmp/gosec-results-$$dir.json 2>/dev/null || true; \
-			if [ -s /tmp/gosec-results-$$dir.json ]; then \
-				dir_issues=$$(jq -r '.Issues // []' /tmp/gosec-results-$$dir.json 2>/dev/null); \
-				if [ "$$dir_issues" != "null" ] && [ "$$dir_issues" != "[]" ]; then \
-					all_issues=$$(echo "$$all_issues" "$$dir_issues" | jq -s '.[0] + .[1]'); \
-				fi; \
-			fi; \
-			rm -f /tmp/gosec-results-$$dir.json; \
-		fi; \
-	done; \
-	issues_count=$$(echo "$$all_issues" | jq 'length' 2>/dev/null || echo "0"); \
-	if [ "$$issues_count" -gt 0 ]; then \
-		echo "⚠️  gosec found $$issues_count security issues:"; \
-		echo ""; \
-		echo "$$all_issues" | jq -r '.[] | "  • \(.rule_id) (\(.severity)): \(.details) at \(.file):\(.line)"' 2>/dev/null || echo "  Issues found but could not parse details"; \
-		echo ""; \
-		echo "💡 Review and fix security patterns above"; \
-		echo "   Use #nosec comment to suppress false positives"; \
-		echo "   Configure .gosec.json to customize rules and exclusions"; \
-		echo ""; \
-		echo "ℹ️  Non-blocking for development workflow - fix when convenient"; \
-	else \
-		echo "✅ gosec analysis completed - no security patterns found"; \
-	fi
+	@echo "Public-beta policy: every medium-or-higher candidate is blocking."
+	@gosec -conf .gosec.json -severity medium -confidence medium ./...
+	@echo "✅ gosec analysis completed - no blocking security patterns found"
 
 # staticcheck advanced Go static analysis with curated rules and performance optimization
 security-staticcheck:
@@ -1007,7 +1779,7 @@ security-staticcheck:
 		echo "❌ Error: staticcheck is not installed"; \
 		echo ""; \
 		echo "Install staticcheck using Go:"; \
-		echo "  go install honnef.co/go/tools/cmd/staticcheck@2026.1"; \
+		echo "  GOTOOLCHAIN=\$$(go env GOVERSION) go install honnef.co/go/tools/cmd/staticcheck@2026.2.1"; \
 		echo ""; \
 		echo "For more info: https://staticcheck.io/"; \
 		exit 1; \
@@ -1020,47 +1792,10 @@ security-staticcheck:
 	fi
 	@echo "🚀 Performance: caching enabled, concurrent analysis, memory-optimized"
 	@echo "Analyzing Go code for critical static analysis issues..."
-	@# Use configuration file if available, with performance optimizations
-	@staticcheck_cmd="staticcheck -f json"; \
-	if [ -f staticcheck.conf ]; then \
-		staticcheck_cmd="$$staticcheck_cmd -config staticcheck.conf"; \
-	fi; \
-	if $$staticcheck_cmd ./... > /tmp/staticcheck-results.json 2>/dev/null; then \
-		echo "✅ staticcheck analysis completed - no issues found"; \
-	else \
-		issues_count=$$(wc -l < /tmp/staticcheck-results.json 2>/dev/null || echo "0"); \
-		if [ "$$issues_count" -gt 0 ]; then \
-			echo "⚠️  staticcheck found $$issues_count static analysis issues:"; \
-			echo ""; \
-			echo "📊 Issue Summary by Category:"; \
-			jq -r 'group_by(.code | split("")[0]) | .[] | "\(.length) issues: \(.[0].code | split("")[0]) (\(if .[0].code | startswith("SA") then "Static Analysis - HIGH" elif .[0].code | startswith("ST") then "Standard Library - MEDIUM" elif .[0].code | startswith("U") then "Unused Code - LOW" else "Other" end))"' /tmp/staticcheck-results.json 2>/dev/null || \
-			echo "  Could not categorize issues"; \
-			echo ""; \
-			echo "🔍 Top Issues (showing up to 15):"; \
-			head -15 /tmp/staticcheck-results.json | jq -r '. | "  • \(.code): \(.message) at \(.location.file):\(.location.line)"' 2>/dev/null || \
-			head -15 /tmp/staticcheck-results.json | sed 's/^/  • /' 2>/dev/null || \
-			echo "  Issues found but could not parse details"; \
-			if [ "$$issues_count" -gt 15 ]; then \
-				echo "  ... and $$((issues_count - 15)) more issues (see full results in JSON)"; \
-			fi; \
-			echo ""; \
-			echo "💡 Fix Priority Guide:"; \
-			echo "   • SA* (Static Analysis): HIGH - potential bugs and correctness issues"; \
-			echo "   • ST* (Standard Library): MEDIUM - API usage and best practices"; \
-			echo "   • U* (Unused Code): LOW - cleanup when convenient"; \
-			echo ""; \
-			echo "🔧 Configuration:"; \
-			echo "   • Customize rules in staticcheck.conf"; \
-			echo "   • Use //lint:ignore <rule> <reason> to suppress false positives"; \
-			echo "   • Focus on SA* issues first for maximum impact"; \
-			echo ""; \
-			echo "ℹ️  Non-blocking for development workflow - fix based on priority"; \
-		else \
-			echo "✅ staticcheck analysis completed - no issues found"; \
-		fi; \
-	fi
-	@echo "📁 Full results saved to: /tmp/staticcheck-results.json"
-	@echo "🎯 Focused on important issues - style warnings excluded for development velocity"
+	@# Staticcheck discovers staticcheck.conf by walking up from each package.
+	@# Current releases no longer accept the removed -config flag.
+	@staticcheck ./...
+	@echo "✅ staticcheck analysis completed - no issues found"
 
 # Security testing only
 test-security: security-scan
@@ -1070,31 +1805,6 @@ test-security: security-scan
 	@echo "- ✅ All security scans passed"
 	@echo ""
 	@echo "🔒 Security validation complete"
-
-# Performance and load testing
-test-performance: test-performance-baseline
-	@echo ""
-	@echo "✅ PERFORMANCE TESTING FINISHED"
-	@echo "=================================="
-	@echo "- ✅ Performance benchmarks completed"
-	@echo ""
-	@echo "📊 Performance validation complete"
-
-# Cross-feature integration testing (Story #85)
-test-cross-feature-integration:
-	@echo "🔗 CROSS-FEATURE INTEGRATION TESTING"
-	@echo "====================================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/(TestControllerStewardIntegration|TestRBACIntegration|TestWorkflowIntegration)" ./test/e2e/...
-	@echo "✅ Cross-feature integration testing complete"
-
-# Failure propagation testing (Story #85)
-test-failure-propagation:
-	@echo "🔄 FAILURE PROPAGATION TESTING"
-	@echo "==============================="
-	@if [ -f .env.test ]; then set -a && . ./.env.test && set +a; fi && \
-		go test -v -race -timeout=30m -run "TestE2EScenarios/TestFailurePropagation" ./test/e2e/...
-	@echo "✅ Failure propagation testing complete"
 
 # Docker environment management
 test-docker: test-integration-status
@@ -1106,18 +1816,25 @@ test-docker: test-integration-status
 	@echo "Use 'make test-with-real-storage' to run tests against Docker backends"
 
 # Unified security scanning (runs all security tools) - BLOCKING mode
-security-scan: security-trivy security-deps security-gosec security-staticcheck
+security-scan: check-binary-artifacts security-trivy security-deps security-gosec security-staticcheck
 	@echo ""
 	@echo "🛡️  SECURITY SCAN COMPLETE"
 	@echo "=========================="
 	@echo "📊 Security Scan Results:"
 	@echo "   • Trivy filesystem scan: ✅ PASSED"
-	@echo "   • Nancy dependency scan: ✅ PASSED"
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		echo "   • Nancy dependency scan: ⏭️  SKIPPED (no GUIDE_TOKEN)"; \
+	else \
+		echo "   • Nancy dependency scan: ✅ PASSED"; \
+	fi
 	@echo "   • gosec Go security analysis: ✅ PASSED"
 	@echo "   • staticcheck advanced analysis: ✅ PASSED"
 	@echo ""
-	@echo "🎯 ALL SECURITY TOOLS PASSED - DEPLOYMENT APPROVED"
-	@echo "   Mode: BLOCKING (critical issues block deployment)"
+	@echo "✅ ALL LOCAL SECURITY GATES PASSED"
+	@echo "   Mode: BLOCKING (findings and incomplete scans fail this target)"
+	@if [ -z "$${GUIDE_TOKEN:-}" ]; then \
+		echo "   ⚠️  Dependency scanning was skipped — this run is not complete evidence."; \
+	fi
 	@echo ""
 	@echo "📋 Claude Code Integration:"
 	@echo "   • All security scans passed - no automated remediation needed"
@@ -1290,8 +2007,66 @@ security-remediation-report:
 	fi; \
 	rm -f /tmp/trivy-remediation.json /tmp/nancy-remediation.json /tmp/gosec-remediation.json /tmp/staticcheck-remediation.json
 
+# golangci-lint resolution (Issue #3627).
+#
+# golangci-lint loads its config against the module's *targeted* Go version — the
+# `toolchain` directive in go.mod — and refuses to start when the Go it was itself
+# built with is older ("the Go language version (go1.26) used to build
+# golangci-lint is lower than the targeted Go version (1.27.0)", exit 3). So a
+# linter binary that merely happens to be on PATH silently rots the moment that
+# directive moves, which is what the 1.26.6 -> 1.27.0 bump did to every dev
+# container built before it.
+#
+# Resolve the binary rather than trusting PATH. `golangci-lint config path` is an
+# exact functional probe of the failure: it performs the same config load that
+# `run` does, so a PATH binary that passes it is genuinely usable and is reused
+# as-is (this is the CI case — golangci-lint.yml installs the pinned version the
+# same way). When it fails, build the pinned version with the pinned toolchain
+# into a user-writable cache, which is the identical `go install` path
+# .devcontainer/Dockerfile and .github/workflows/golangci-lint.yml use.
+#
+# That build needs a writable GOPATH even though GOMODCACHE is separate: switching
+# to a toolchain newer than the local `go` downloads golang.org/toolchain, and the
+# verified checksum-database tree head is written to $GOPATH/pkg/sumdb. The image
+# installs its Go tools as root into a root-owned GOPATH, so the probe below falls
+# back to the invoking user's own GOPATH rather than weakening sum verification.
+#
+# GOLANGCI_LINT_VERSION must match .github/workflows/dependency-pin-check.yml,
+# .github/workflows/golangci-lint.yml, .devcontainer/Dockerfile and
+# windows-setup.ps1.
+GOLANGCI_LINT_VERSION ?= v2.14.0
+GO_TOOLCHAIN_VERSION := $(shell awk '$$1 == "toolchain" { print $$2 }' go.mod)
+LINT_TOOLS_BIN := $(HOME)/.cache/cfgms/tools/bin
+
 lint:
-	golangci-lint run
+	@LINTER=""; \
+	for candidate in golangci-lint "$(LINT_TOOLS_BIN)/golangci-lint"; do \
+		command -v "$$candidate" >/dev/null 2>&1 || continue; \
+		"$$candidate" --version 2>/dev/null | grep -q "version $(GOLANGCI_LINT_VERSION:v%=%) " || continue; \
+		"$$candidate" config path >/dev/null 2>&1 || continue; \
+		LINTER="$$candidate"; break; \
+	done; \
+	if [ -z "$$LINTER" ]; then \
+		echo "🔧 No usable golangci-lint $(GOLANGCI_LINT_VERSION); building it with $(GO_TOOLCHAIN_VERSION) into $(LINT_TOOLS_BIN)"; \
+		mkdir -p "$(LINT_TOOLS_BIN)"; \
+		TOOL_GOPATH="$$(go env GOPATH)"; \
+		if ! ( mkdir -p "$$TOOL_GOPATH/pkg/sumdb" && touch "$$TOOL_GOPATH/pkg/sumdb/.cfgms-write-probe" ) 2>/dev/null; then \
+			echo "   ⚠️  GOPATH $$TOOL_GOPATH is not writable by $$(id -un); building under $(HOME)/go instead"; \
+			TOOL_GOPATH="$(HOME)/go"; \
+		else \
+			rm -f "$$TOOL_GOPATH/pkg/sumdb/.cfgms-write-probe"; \
+		fi; \
+		GOPATH="$$TOOL_GOPATH" GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN="$(LINT_TOOLS_BIN)" \
+			go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) || exit 1; \
+		LINTER="$(LINT_TOOLS_BIN)/golangci-lint"; \
+		if ! "$$LINTER" config path >/dev/null 2>&1; then \
+			echo "❌ Freshly built golangci-lint still cannot load .golangci.yml:"; \
+			"$$LINTER" config path 2>&1 | sed 's/^/    /'; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "🔍 $$("$$LINTER" --version)"; \
+	"$$LINTER" run
 
 # Log-injection linter — catches the recurring CodeQL "Log entries created from
 # user input" class at commit time. Walks features/**/api/ by default; pass file
@@ -1551,9 +2326,17 @@ test-integration-setup:
 	@echo ""
 
 # Clean up Docker test environment and generated credentials
+#
+# Compose interpolates the whole file even for `down`, and two services declare
+# ${CFGMS_SECRETS_KEY_FILE:?...}, so tearing down without that variable aborts
+# before removing anything. .env.test carries the ephemeral key when setup ran;
+# when it did not, any value satisfies interpolation because `down` mounts
+# nothing. The :? guard still fails closed on `up`, which is where it matters.
 test-integration-cleanup:
 	@echo "🧹 Cleaning up CFGMS Docker test environment..."
 	@echo "================================================"
+	@if [ -f .env.test ]; then set -a; . ./.env.test; set +a; fi; \
+	export CFGMS_SECRETS_KEY_FILE="$${CFGMS_SECRETS_KEY_FILE:-/dev/null}"; \
 	docker compose -f docker-compose.test.yml -f docker-compose.test.override.yml down -v --remove-orphans 2>/dev/null || \
 	docker compose -f docker-compose.test.yml down -v --remove-orphans
 	@echo "🔐 Removing generated credentials..."
@@ -1634,7 +2417,24 @@ test-integration-short:
 	@echo ""
 	@echo "✅ Short integration tests completed successfully!"
 
-# Test database provider specifically
+# Test database provider specifically, plus the packages whose tests exercise a
+# Postgres-backed store through it: the cluster storage manager
+# (pkg/storage/interfaces) and the controller registration handlers
+# (features/controller/api), which prove the cluster-mode 503->200 path (Issue #3401).
+# pkg/migrate/storage is included for the same reason: its //go:build integration
+# migrator tests need Postgres, were referenced by no Makefile target and no workflow,
+# and so had never run — which is how a skip list that hard-errors reached develop
+# unnoticed (Issue #3402).
+# pkg/cert (which covers pkg/cert/interfaces via ./...) is included for the same
+# reason again: the cluster-visible RevocationStore/SigningCursorStore tests
+# (Issue #3852 AC4-AC6, AC7 contract test) skip without CFGMS_TEST_DB_* reachable
+# and no other Makefile target or workflow points Postgres at them, so this is
+# their only run path too.
+# Those tests skip when Postgres is unreachable, so this target is their only run path.
+# -p 1 is required, not tidiness: these packages share one Postgres instance and the
+# database provider's setupTestDatabase (or, for pkg/cert, dropClusterTables) drops
+# every table, so running them concurrently lets one package truncate another's
+# fixtures mid-test.
 test-integration-db:
 	@echo "📊 Testing Database Storage Provider"
 	@echo "==================================="
@@ -1645,7 +2445,7 @@ test-integration-db:
 	@set -a && . ./.env.test && set +a && ./scripts/wait-for-services.sh && \
 	CFGMS_TEST_DB_HOST=localhost \
 	CFGMS_TEST_DB_PORT=5433 \
-	go test -v -tags=integration ./pkg/storage/providers/database/...
+	go test -v -p 1 -tags=integration ./pkg/storage/providers/database/... ./pkg/storage/interfaces/... ./features/controller/api/... ./pkg/migrate/storage/... ./pkg/cert/...
 
 # Test git provider specifically  
 test-integration-git:
@@ -1682,12 +2482,18 @@ test-integration-complete: test-integration-setup test-with-real-storage test-in
 test-integration-docker:
 	@echo "🐳 Running Docker Integration Tests"
 	@echo "===================================="
-	@if [ ! -f .env.test ]; then \
-		echo "❌ Docker test environment not set up"; \
-		echo "   Run: make test-integration-setup"; \
-		exit 1; \
-	fi
-	@set -a && source .env.test && set +a && \
+	@# The tests below are NOT built with -tags=integration, so the
+	@# Docker-dependent suites (//go:build integration) are excluded and these
+	@# packages run without live Docker services. .env.test is sourced only to
+	@# supply real backend credentials when the Docker environment IS up (e.g.
+	@# CI after `make test-integration-setup`); it is optional otherwise so this
+	@# gate can run in agent containers without a Docker daemon.
+	@if [ -f .env.test ]; then \
+		echo "   Sourcing .env.test (Docker environment detected)"; \
+		set -a && . ./.env.test && set +a; \
+	else \
+		echo "   .env.test not found — running with local/default config"; \
+	fi && \
 		go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
 	@echo "✅ Docker integration tests passed"
 
@@ -1825,19 +2631,39 @@ test-e2e-ci:
 	@$(MAKE) test-transport-setup
 	@echo ""
 	@echo "📋 Step 2/3: Running tests in container with container-to-container networking..."
+# `-e HOME=/tmp` below is load-bearing — do not remove it as redundant.
+# Dockerfile.test-runner creates exactly one passwd entry, uid 1001 (testuser). The
+# `--user $$(id -u):$$(id -g)` flag on the docker run passes the *invoking* uid, so any
+# developer whose uid is not 1001 runs with no passwd entry and HOME falls back to `/`,
+# which a non-root user cannot write. The docker CLI then dies initialising its config
+# directory (`ERROR: mkdir /.docker: permission denied`), killing every test that builds
+# an image. `/home/testuser` is not a substitute: it is owned by uid 1001. Dropping
+# `--user` is not a substitute either: the repository is a bind mount owned by the
+# invoker, and the container would write root-owned artifacts into the working tree.
+#
+# The repository is mounted at `$(PWD)` — its host path — rather than at a fixed
+# `/workspace`, and that is load-bearing too. The tests drive `docker compose` over the
+# mounted host socket, so bind-mount paths in `docker-compose.test.yml` are resolved by
+# the *host* daemon, not inside this container. Under a `/workspace` mount, compose sent
+# the daemon `/workspace/test/fixtures/ha/controller-ha.cfg`, which does not exist on the
+# host; the daemon then created it as an empty directory, and every HA test died on
+# `read /etc/cfgms/controller.cfg: is a directory` (16 tests in test/integration/ha) while
+# littering root-owned `/workspace/...` stubs on the host. Mounting at the identical
+# absolute path makes container-side and host-side paths agree.
 	@docker build -t cfgms-test-runner -f Dockerfile.test-runner . >/dev/null 2>&1 && \
-	DOCKER_GID=$$(stat -c '%g' /var/run/docker.sock) && \
+	DOCKER_GID=$$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock --entrypoint stat cfgms-test-runner -c '%g' /var/run/docker.sock) && \
 	docker run --rm \
 		--user $$(id -u):$$(id -g) \
 		--network cfgms-test \
 		--group-add $$DOCKER_GID \
-		-v "$(PWD):/workspace" \
+		-v "$(PWD):$(PWD)" \
 		-v /var/run/docker.sock:/var/run/docker.sock \
-		-w /workspace \
+		-w "$(PWD)" \
+		-e HOME=/tmp \
 		-e CFGMS_TEST_INTEGRATION=1 \
 		-e GITHUB_ACTIONS=true \
-		-e GOCACHE=/workspace/.cache/go-build \
-		-e GOMODCACHE=/workspace/.cache/go-mod \
+		-e GOCACHE=$(PWD)/.cache/go-build \
+		-e GOMODCACHE=$(PWD)/.cache/go-mod \
 		cfgms-test-runner \
 		sh -c ' \
 			echo "📦 Installing Go dependencies..." && \
@@ -1880,16 +2706,16 @@ test-e2e-fast:
 	@echo ""
 	@echo "⚡ FAST E2E VALIDATION"
 	@echo "======================"
-	@echo "Running 2 core test suites in parallel:"
+	@echo "Running 2 core test suites sequentially:"
 	@echo "  1️⃣  Transport integration tests"
 	@echo "  2️⃣  Controller E2E tests"
 	@echo ""
-	@echo "⏱️  Expected runtime: ~3-5 minutes"
+	@echo "⏱️  Expected runtime: ~5-8 minutes"
 	@echo "⚠️  Excludes long-running performance/scale tests (use test-e2e-parallel for full validation)"
 	@echo ""
 	@$(MAKE) test-transport-setup
 	@echo ""
-	@$(MAKE) -j2 test-e2e-transport test-e2e-controller || { \
+	@$(MAKE) test-e2e-transport test-e2e-controller || { \
 		echo ""; \
 		echo "❌ One or more E2E test suites failed"; \
 		$(MAKE) test-transport-cleanup; \
@@ -1980,11 +2806,15 @@ test-e2e-fleet: build-cli
 	@echo "Starting fleet docker-compose profile and running test/e2e/fleet/..."
 	@echo ""
 	@set -e; \
-	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v' EXIT; \
+	fleet_key=$$(mktemp); \
+	chmod 0600 "$$fleet_key"; \
+	head -c 32 /dev/urandom > "$$fleet_key"; \
+	export CFGMS_SECRETS_KEY_FILE="$$fleet_key"; \
+	trap 'rc=$$?; if [ $$rc -ne 0 ]; then echo ""; echo "❌ Fleet E2E failed (exit $$rc) — dumping container logs before teardown:"; docker compose --profile fleet -f docker-compose.test.yml logs --no-color --tail=200 || true; for c in fleet-controller fleet-steward-1 fleet-steward-2; do echo ""; echo "----- $$c : /tmp/cfgms file logs -----"; docker cp "$$c:/tmp/cfgms/." - 2>/dev/null | tar -xOf - 2>/dev/null || echo "(no file logs)"; done; fi; echo ""; echo "🧹 Tearing down fleet compose..."; docker compose --profile fleet -f docker-compose.test.yml down -v; rm -f "$$fleet_key"' EXIT; \
 	docker compose --profile fleet -f docker-compose.test.yml up -d --build --wait; \
 	echo ""; \
 	echo "Running fleet E2E tests..."; \
-	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 300s ./test/e2e/fleet/...
+	CFG_BINARY=$(CURDIR)/bin/cfg CFGMS_FLEET_TEST=1 go test -v -timeout 600s ./test/e2e/fleet/...
 	@echo ""
 	@echo "✅ FLEET E2E TESTS PASSED"
 
@@ -2009,7 +2839,28 @@ test-quality: test lint check-license-headers test-production-critical build-cro
 	@echo "ℹ️  Security scans run separately via security-engineer agent"
 	@echo "ℹ️  E2E tests available via make test-e2e-fast (for local CI debugging)"
 
-test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-integration-docker test-e2e-fast
+# Frontend validation — mirrors the CI `frontend-checks` job
+# (.github/workflows/frontend-ci.yml): lint, typecheck, unit tests, and a
+# production build over web/. Runs ONLY when web/ actually changed vs the
+# develop merge base (same detection CI uses), so Go-only work does not pay the
+# npm-install cost. Closes the gap where the agent gate had zero frontend
+# coverage, so a web story's lint/typecheck errors first surfaced as CI red
+# instead of being caught locally before the PR (observed on #2740, #2755, #2759).
+.PHONY: test-frontend
+test-frontend:
+	@MERGE_BASE=$$(git merge-base HEAD origin/develop 2>/dev/null || true); \
+	if [ -n "$$MERGE_BASE" ] && git diff --quiet "$$MERGE_BASE" HEAD -- web/ && git diff --quiet HEAD -- web/; then \
+		echo "⏩ test-frontend: no web/ changes vs develop — skipping (CI parity)"; \
+	else \
+		[ -z "$$MERGE_BASE" ] && echo "ℹ️  test-frontend: no develop merge base — running checks (safe fallback)" || true; \
+		echo "🧪 test-frontend: web/ changes detected — running frontend checks"; \
+		command -v npm >/dev/null 2>&1 || { echo "❌ test-frontend: npm not found but web/ changed. Install Node (see .devcontainer/Dockerfile)"; exit 1; }; \
+		( cd web && npm ci && npm run lint && npm run typecheck && npm run test && npm run build ); \
+		echo "✅ test-frontend: frontend checks passed"; \
+	fi
+
+test-complete-full: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
+test-complete-full: test-commit test-fast test-production-critical build-cross-validate test-frontend test-integration-docker test-e2e-fast
 	@echo ""
 	@echo "✅ COMPLETE STORY VALIDATION FINISHED"
 	@echo "========================================"
@@ -2037,7 +2888,8 @@ test-complete: test-complete-full
 # Used by headless agent containers that don't have access to Docker daemon
 # Story #435: Provides ~95% of validation coverage without Docker-in-Docker
 .PHONY: test-agent-complete
-test-agent-complete: test-commit test-fast test-production-critical build-cross-validate
+test-agent-complete: export CFGMS_TEST_SCRIPTS_GROUPS := $(TEST_SCRIPTS_ALL_GROUPS)
+test-agent-complete: test-commit test-fast test-production-critical build-cross-validate test-frontend
 	@echo ""
 	@echo "✅ AGENT CONTAINER VALIDATION FINISHED"
 	@echo "========================================"
@@ -2045,6 +2897,7 @@ test-agent-complete: test-commit test-fast test-production-critical build-cross-
 	@echo "- ✅ Fast comprehensive tests passed (test-fast)"
 	@echo "- ✅ Production critical tests passed (test-production-critical)"
 	@echo "- ✅ Cross-platform compilation validated (build-cross-validate)"
+	@echo "- ✅ Frontend checks passed or skipped (test-frontend; web/ only)"
 	@echo ""
 	@echo "⏩ Deferred to CI (requires Docker daemon):"
 	@echo "   - test-integration-docker (storage/controller Docker tests)"
@@ -2072,8 +2925,17 @@ generate-test-certificates: build-controller  ## Generate test certificates usin
 	@echo "✅ Configuration copied to controller.cfg"
 	@echo ""
 	@echo "Step 2: Initializing controller to generate CA and certificates..."
-	@./bin/controller --init > /tmp/controller-init.log 2>&1 || \
-		{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
+# The controller refuses to initialize its secret store without an external key —
+# plaintext secret storage is prohibited. This target only needs the CA and
+# certificates it writes, so give it an ephemeral key that lives for the length of
+# the init and is removed straight after.
+	@set -eu; \
+		init_key=$$(mktemp); \
+		trap 'rm -f "$$init_key"' EXIT; \
+		chmod 0600 "$$init_key"; \
+		head -c 32 /dev/urandom > "$$init_key"; \
+		CFGMS_SECRETS_KEY_FILE="$$init_key" ./bin/controller --init > /tmp/controller-init.log 2>&1 || \
+			{ echo "❌ Controller init failed:"; cat /tmp/controller-init.log; exit 1; }
 	@rm -f controller.cfg
 	@if [ ! -f "test/integration/transport/certs/ca/ca.crt" ]; then \
 		echo "❌ CA certificate not generated. Init log:"; \

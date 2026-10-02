@@ -36,7 +36,7 @@ The CFGMS Controller is designed for infrastructure deployment:
 - **Process Management**: Full Unix process control and monitoring
 - **File System**: POSIX-compliant file and directory management with ownership/permissions
 - **Network**: Native network interface and routing table access
-- **Security**: User/group management, SSH key handling, firewall configuration (iptables — Linux only; Windows/macOS not yet implemented)
+- **Security**: User/group management, SSH key handling, firewall configuration (iptables, Linux)
 
 #### Windows
 
@@ -121,7 +121,9 @@ The project includes automated builds and testing for all supported platforms:
 
 ### Building from Source
 
-CFGMS does not yet publish pre-built release binaries. Build from source:
+No pre-built artifact should be treated as available or trusted until the new
+protected signed-release workflow has completed successfully for a frozen tag.
+Until then, build from source:
 
 ```bash
 # Clone and build
@@ -130,6 +132,10 @@ cd cfgms
 make build
 # Creates: bin/controller, bin/cfgms-steward, bin/cfg
 ```
+
+For future tagged artifacts, follow
+[Release Artifact Verification](release-artifact-verification.md) before
+installation.
 
 ### Cross-Platform Steward Builds
 
@@ -257,14 +263,6 @@ Each platform logs to appropriate system locations:
 - **Windows**: Windows Event Log and `C:\ProgramData\CFGMS\logs\`
 - **macOS**: System log and `/usr/local/var/log/cfgms/`
 
-## Future Platform Support
-
-### Planned Additions
-
-- **Linux ARM32**: Raspberry Pi and embedded device support
-- **FreeBSD**: Advanced networking appliance support
-- **Container Platforms**: Native Kubernetes operator deployment
-
-### Community Contributions
+## Community Contributions
 
 Platform support contributions are welcome. Open a GitHub issue describing the target platform before starting work.

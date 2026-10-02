@@ -13,7 +13,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -82,6 +82,15 @@ func (s *Server) handleListScripts(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetScriptLibraryItem handles GET /api/v1/scripts/{id}.
+//
+// Script library items are shared, non-tenant-scoped reference data:
+// VersionedScript/ScriptMetadata carry no TenantID, there is no Create route
+// through this API (scripts are provisioned via the git-backed repository), and
+// handleListScripts (same file) already returns the full library to every
+// authenticated caller. There is no owning tenant to check the caller against —
+// same trust boundary as handleListScripts.
+//
+//architecture:allow-unscoped-tenant-read -- shared reference data, no owning tenant (Issue #4335)
 func (s *Server) handleGetScriptLibraryItem(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -177,7 +186,7 @@ func (s *Server) handlePutScriptPrivilege(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.storePrivilegeMetadata(r.Context(), tenantID, id, meta); err != nil {
-		s.logger.Error("Failed to store privilege metadata", "id", sanitizedID, "error", err)
+		s.logger.Error("Failed to store privilege metadata", "id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store privilege metadata", "INTERNAL_ERROR")
 		return
 	}
@@ -271,6 +280,10 @@ func (s *Server) handleGetScriptExecutions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/executions") {
+		return
+	}
+
 	sanitizedID := logging.SanitizeLogValue(stewardID)
 
 	// Parse query filters
@@ -318,7 +331,7 @@ func (s *Server) handleGetScriptExecutions(w http.ResponseWriter, r *http.Reques
 	fetchLimit := limit + offset
 	records, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, fetchLimit)
 	if err != nil {
-		s.logger.Error("Failed to query script executions", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to query script executions", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve executions", "INTERNAL_ERROR")
 		return
 	}
@@ -382,13 +395,17 @@ func (s *Server) handleGetScriptExecution(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/executions/{execution_id}") {
+		return
+	}
+
 	sanitizedStewardID := logging.SanitizeLogValue(stewardID)
 	sanitizedExecutionID := logging.SanitizeLogValue(executionID)
 
 	// 0 = no limit: scan all records for this device to locate the execution.
 	records, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, 0)
 	if err != nil {
-		s.logger.Error("Failed to query script executions", "steward_id", sanitizedStewardID, "error", err)
+		s.logger.Error("Failed to query script executions", "steward_id", sanitizedStewardID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve execution", "INTERNAL_ERROR")
 		return
 	}
@@ -419,6 +436,10 @@ func (s *Server) handleGetScriptMetrics(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/metrics") {
+		return
+	}
+
 	sanitizedID := logging.SanitizeLogValue(stewardID)
 
 	since := time.Now().Add(-24 * time.Hour) // default: last 24 hours
@@ -430,7 +451,7 @@ func (s *Server) handleGetScriptMetrics(w http.ResponseWriter, r *http.Request) 
 
 	aggregated, err := s.scriptAuditLogger.GetExecutionMetrics(stewardID, since)
 	if err != nil {
-		s.logger.Error("Failed to get script metrics", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to get script metrics", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve metrics", "INTERNAL_ERROR")
 		return
 	}
@@ -475,12 +496,16 @@ func (s *Server) handleGetScriptStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/scripts/status") {
+		return
+	}
+
 	sanitizedID := logging.SanitizeLogValue(stewardID)
 
 	// Most-recent completed execution provides the "last execution" summary.
 	recent, err := s.scriptTracker.QueryByDevice(r.Context(), stewardID, 1)
 	if err != nil {
-		s.logger.Error("Failed to get script status", "steward_id", sanitizedID, "error", err)
+		s.logger.Error("Failed to get script status", "steward_id", sanitizedID, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve script status", "INTERNAL_ERROR")
 		return
 	}
@@ -539,6 +564,10 @@ func (s *Server) handlePostScriptRetry(w http.ResponseWriter, r *http.Request) {
 	}
 	if executionID == "" {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Execution ID is required", "MISSING_EXECUTION_ID")
+		return
+	}
+
+	if !s.authorizeStewardScopeLenient(w, r, stewardID, "POST /api/v1/stewards/{id}/scripts/executions/{execution_id}/retry") {
 		return
 	}
 

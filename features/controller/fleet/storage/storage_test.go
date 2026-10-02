@@ -6,11 +6,14 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/pkg/logging"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -68,12 +71,310 @@ func TestStorageManager(t *testing.T) {
 	})
 }
 
+// validAggregateRoot returns a well-formed (64 lowercase hex) aggregate root
+// built from seed, so tests exercise the accepted shape rather than the
+// arbitrary strings a steward could also put in DNA.aggregate_root.
+func validAggregateRoot(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+// TestContentHash_PrefersAggregateRoot is the REQUIRED TEST for the #2906
+// aggregate-root-first branch of generateContentHash/ContentHash (Issue #3329):
+// when DNA.AggregateRoot is set to a well-formed digest, it must be returned
+// verbatim rather than falling back to the ID+ConfigHash+SyncFingerprint hash.
+// Before this test, every existing case in this file left AggregateRoot unset,
+// so only the fallback branch was ever exercised.
+func TestContentHash_PrefersAggregateRoot(t *testing.T) {
+	root := validAggregateRoot("aggregate-root-value")
+	dna := &commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+		AggregateRoot:   root,
+	}
+
+	hash, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash != root {
+		t.Errorf("ContentHash must return AggregateRoot verbatim when set, got %q", hash)
+	}
+
+	// Changing the fallback-only fields must not change the result while
+	// AggregateRoot is set — proving the branch takes priority, not just that
+	// it happens to agree with the fallback.
+	dna.ConfigHash = "different-cfg-hash"
+	dna.SyncFingerprint = "different-fp"
+	hash2, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash2 != root {
+		t.Errorf("ContentHash must ignore ConfigHash/SyncFingerprint once AggregateRoot is set, got %q", hash2)
+	}
+}
+
+// TestContentHash_RejectsMalformedAggregateRoot pins the boundary validation
+// added for the Story #396 finding: DNA.aggregate_root arrives from the steward
+// as an arbitrary string (common.proto field 10) and reaches ContentHash
+// unvalidated via RegisterSteward -> storeDNA -> Manager.Store. Anything that is
+// not the exact shape sdna.AggregateRoot produces must be discarded in favour of
+// the derived digest, because the return value becomes a log field, a database
+// key and a filesystem path component.
+func TestContentHash_RejectsMalformedAggregateRoot(t *testing.T) {
+	malformed := map[string]string{
+		"too short (panics the log slice)": "abc",
+		"path traversal":                   "../../../../etc/cron.d/x",
+		"uppercase hex":                    strings.ToUpper(validAggregateRoot("upper")),
+		"non-hex characters":               strings.Repeat("g", 64),
+		"one char short":                   validAggregateRoot("short")[:63],
+		"one char long":                    validAggregateRoot("long") + "a",
+		"log injection":                    strings.Repeat("a", 62) + "\r\n",
+		"nul byte":                         strings.Repeat("a", 63) + "\x00",
+	}
+
+	fallback, err := ContentHash(&commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+	})
+	if err != nil {
+		t.Fatalf("ContentHash returned error for fallback baseline: %v", err)
+	}
+
+	for name, root := range malformed {
+		t.Run(name, func(t *testing.T) {
+			hash, err := ContentHash(&commonpb.DNA{
+				Id:              "device-1",
+				ConfigHash:      "cfg-hash",
+				SyncFingerprint: "fp",
+				AggregateRoot:   root,
+			})
+			if err != nil {
+				t.Fatalf("ContentHash returned error: %v", err)
+			}
+			if hash == root {
+				t.Errorf("ContentHash returned malformed steward-supplied root %q verbatim", root)
+			}
+			if hash != fallback {
+				t.Errorf("ContentHash must fall back to the derived digest, got %q want %q", hash, fallback)
+			}
+			if len(hash) != 64 {
+				t.Errorf("ContentHash must always return a 64-character digest, got %d characters", len(hash))
+			}
+		})
+	}
+}
+
+// TestContentHash_RecomputesRootFromManifest proves the strongest branch: when
+// the DNA carries a manifest, the content address is derived server-side from
+// that manifest, so a steward claiming a different (but well-formed) root cannot
+// steer its record onto another steward's content address.
+func TestContentHash_RecomputesRootFromManifest(t *testing.T) {
+	manifest := []*commonpb.ManifestEntry{
+		{FragmentId: "service:sshd", FragmentHash: validAggregateRoot("sshd")},
+		{FragmentId: "host:cpu", FragmentHash: validAggregateRoot("cpu")},
+	}
+	computed, err := sdna.AggregateRoot(manifest)
+	if err != nil {
+		t.Fatalf("sdna.AggregateRoot returned error: %v", err)
+	}
+
+	lying := validAggregateRoot("someone-elses-content")
+	hash, err := ContentHash(&commonpb.DNA{
+		Id:            "device-1",
+		AggregateRoot: lying,
+		Manifest:      manifest,
+	})
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash == lying {
+		t.Error("ContentHash used the claimed aggregate root instead of recomputing from the manifest")
+	}
+	if hash != computed {
+		t.Errorf("ContentHash must recompute the root from the manifest, got %q want %q", hash, computed)
+	}
+}
+
+// TestStore_ShortAggregateRootDoesNotPanic reproduces the remote-DoS finding
+// against the real manager: before the fix, Store's eager "content_hash",
+// contentHash[:16] log argument was evaluated regardless of log level, so a
+// steward registering with a three-character aggregate_root crashed the
+// controller process (no gRPC panic-recovery interceptor exists on the control
+// plane).
+func TestStore_ShortAggregateRootDoesNotPanic(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create storage manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	for _, root := range []string{"abc", "", "..", strings.Repeat("a", 15)} {
+		dna := &commonpb.DNA{Id: "steward-1", AggregateRoot: root}
+		if err := manager.Store(context.Background(), "steward-1", dna, nil); err != nil {
+			t.Fatalf("Store failed for aggregate_root %q: %v", root, err)
+		}
+	}
+}
+
+// TestContentHash_FallsBackWithoutAggregateRoot verifies the deterministic
+// fallback path used for DNA that has not been migrated to the fragment model.
+func TestContentHash_FallsBackWithoutAggregateRoot(t *testing.T) {
+	dna := &commonpb.DNA{
+		Id:              "device-1",
+		ConfigHash:      "cfg-hash",
+		SyncFingerprint: "fp",
+	}
+
+	hash, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("ContentHash fallback must not return an empty string")
+	}
+
+	hash2, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash != hash2 {
+		t.Errorf("ContentHash fallback must be deterministic for identical input, got %q then %q", hash, hash2)
+	}
+
+	dna.ConfigHash = "different-cfg-hash"
+	hash3, err := ContentHash(dna)
+	if err != nil {
+		t.Fatalf("ContentHash returned error: %v", err)
+	}
+	if hash3 == hash {
+		t.Error("ContentHash fallback must change when ConfigHash changes")
+	}
+}
+
+// TestDeduplication_UsesAggregateRoot proves Store()'s deduplication keys off
+// AggregateRoot when present, not just the ID+ConfigHash+SyncFingerprint
+// fallback: two DNA records with the same AggregateRoot but otherwise
+// different identity fields must still dedup together.
+func TestDeduplication_UsesAggregateRoot(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.EnableDeduplication = true
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create dedup-enabled manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
+	device1ID := "aggroot-device-001"
+	device2ID := "aggroot-device-002"
+
+	sharedRoot := validAggregateRoot("shared-aggregate-root")
+	dna1 := &commonpb.DNA{
+		Id:              "system-a",
+		ConfigHash:      "config-hash-a",
+		SyncFingerprint: "sync-fingerprint-a",
+		AggregateRoot:   sharedRoot,
+	}
+	// Differs in every fallback-only field, but shares AggregateRoot.
+	dna2 := &commonpb.DNA{
+		Id:              "system-b",
+		ConfigHash:      "config-hash-b",
+		SyncFingerprint: "sync-fingerprint-b",
+		AggregateRoot:   sharedRoot,
+	}
+
+	if err := manager.Store(ctx, device1ID, dna1, nil); err != nil {
+		t.Fatalf("Failed to store DNA for device 1: %v", err)
+	}
+	if err := manager.Store(ctx, device2ID, dna2, nil); err != nil {
+		t.Fatalf("Failed to store DNA for device 2: %v", err)
+	}
+
+	sqlBackend := manager.storage.(*SQLiteBackend)
+	sqlBackend.mutex.RLock()
+	var refCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_references WHERE device_id = ?`, device2ID,
+	).Scan(&refCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_references for device2: %v", err)
+	}
+	sqlBackend.mutex.RUnlock()
+
+	if refCount != 1 {
+		t.Errorf("deduplication by AggregateRoot failed: expected device2 to have 1 row in "+
+			"dna_references (content hash keyed off shared AggregateRoot), got %d", refCount)
+	}
+}
+
+// TestStore_RetentionPolicyGoroutine verifies that Store's fire-and-forget
+// enforceRetentionPolicy goroutine (storage.go line ~301) actually prunes records.
+// The goroutine is called directly in this test to avoid timing races, which is safe
+// because enforceRetentionPolicy is an exported-to-package method and the production
+// go call remains unchanged.
+func TestStore_RetentionPolicyGoroutine(t *testing.T) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.MaxRecordsPerDevice = 2
+	config.EnableDeduplication = false
+
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
+	const deviceID = "goroutine-prune-device"
+
+	// Store 4 records — double the cap.
+	for i := 1; i <= 4; i++ {
+		dna := createTestDNA(t, deviceID, map[string]string{
+			"version": fmt.Sprintf("v%d", i),
+		})
+		if err := manager.Store(ctx, deviceID, dna, nil); err != nil {
+			t.Fatalf("Store v%d failed: %v", i, err)
+		}
+	}
+
+	// Invoke the same method Store dispatches as a goroutine, but synchronously so
+	// the test outcome is deterministic. This confirms the body does real pruning.
+	manager.enforceRetentionPolicy(deviceID)
+
+	history, err := manager.GetHistory(ctx, deviceID, &QueryOptions{IncludeData: true, Limit: 100})
+	if err != nil {
+		t.Fatalf("GetHistory after synchronous enforceRetentionPolicy failed: %v", err)
+	}
+	if len(history.Records) > config.MaxRecordsPerDevice {
+		t.Errorf("expected <= %d records after enforceRetentionPolicy, got %d",
+			config.MaxRecordsPerDevice, len(history.Records))
+	}
+
+	// Most recent record must survive.
+	current, err := manager.GetCurrent(ctx, deviceID)
+	if err != nil {
+		t.Fatalf("GetCurrent after enforceRetentionPolicy failed: %v", err)
+	}
+	if got := dnaAttrs(current.DNA)["version"]; got != "v4" {
+		t.Errorf("expected most recent version v4 to survive pruning, got %q", got)
+	}
+}
+
 func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	ctx := context.Background()
 	deviceID := "test-device-001"
 
 	// Create test DNA
-	dna := createTestDNA(deviceID, map[string]string{
+	dna := createTestDNA(t, deviceID, map[string]string{
 		"os":           "linux",
 		"arch":         "amd64",
 		"hostname":     "test-host",
@@ -102,13 +403,16 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 		t.Errorf("Expected DNA ID %s, got %s", dna.Id, current.DNA.Id)
 	}
 
-	if len(current.DNA.Attributes) != len(dna.Attributes) {
-		t.Errorf("Expected %d attributes, got %d", len(dna.Attributes), len(current.DNA.Attributes))
+	storedAttrs := dnaAttrs(dna)
+	currentAttrs := dnaAttrs(current.DNA)
+
+	if len(currentAttrs) != len(storedAttrs) {
+		t.Errorf("Expected %d attributes, got %d", len(storedAttrs), len(currentAttrs))
 	}
 
 	// Verify specific attributes
-	for key, expectedValue := range dna.Attributes {
-		if actualValue, exists := current.DNA.Attributes[key]; !exists {
+	for key, expectedValue := range storedAttrs {
+		if actualValue, exists := currentAttrs[key]; !exists {
 			t.Errorf("Missing attribute %s", key)
 		} else if actualValue != expectedValue {
 			t.Errorf("Expected attribute %s=%s, got %s", key, expectedValue, actualValue)
@@ -116,82 +420,96 @@ func testStoreAndRetrieve(t *testing.T, manager *Manager) {
 	}
 }
 
-func testDeduplication(t *testing.T, manager *Manager) {
-	ctx := context.Background()
+// testDeduplication creates its own manager with EnableDeduplication=true so that
+// deduplication behavior is actually exercised. The shared manager passed as a
+// parameter uses DefaultConfig (EnableDeduplication=false) and is intentionally
+// ignored here; a dedicated manager is required so assertions are meaningful.
+func testDeduplication(t *testing.T, _ *Manager) {
+	logger := logging.NewLogger("error")
+	config := createTestConfig(t, BackendSQLite)
+	config.EnableDeduplication = true
 
+	manager, err := NewManager(config, logger)
+	if err != nil {
+		t.Fatalf("failed to create dedup-enabled manager: %v", err)
+	}
+	defer func() { _ = manager.Close() }()
+
+	ctx := context.Background()
 	device1ID := "device-001"
 	device2ID := "device-002"
 
-	// For proper deduplication testing, create DNA with shared content but different device context
-	// Both DNA records have identical attributes but represent different devices with the same configuration
+	// Create identical DNA objects so both devices share the same content hash.
 	sharedDNAAttributes := map[string]string{
 		"os":        "windows",
 		"arch":      "amd64",
 		"hostname":  "shared-config",
 		"cpu_count": "8",
 	}
-
-	// Create identical DNA objects for deduplication (same content hash)
-	dna1 := &commonpb.DNA{
-		Id:              "shared-system-id", // Same system configuration
-		Attributes:      sharedDNAAttributes,
+	dna1 := attachTestFragment(t, &commonpb.DNA{
+		Id:              "shared-system-id",
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
-	}
-
-	dna2 := &commonpb.DNA{
-		Id:              "shared-system-id", // Same system configuration
-		Attributes:      sharedDNAAttributes,
+	}, sharedDNAAttributes)
+	dna2 := attachTestFragment(t, &commonpb.DNA{
+		Id:              "shared-system-id",
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "shared-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(sharedDNAAttributes)),
 		SyncFingerprint: "shared-sync-fingerprint",
-	}
+	}, sharedDNAAttributes)
 
-	// Store both DNA records
-	err := manager.Store(ctx, device1ID, dna1, nil)
-	if err != nil {
+	// Store device1 — full record lands in dna_history (no prior content exists).
+	if err := manager.Store(ctx, device1ID, dna1, nil); err != nil {
 		t.Fatalf("Failed to store DNA for device 1: %v", err)
 	}
 
-	err = manager.Store(ctx, device2ID, dna2, nil)
-	if err != nil {
+	// Store device2 with identical DNA — HasContent=true → storeReference path →
+	// only a dna_references row is written (no full copy stored).
+	if err := manager.Store(ctx, device2ID, dna2, nil); err != nil {
 		t.Fatalf("Failed to store DNA for device 2: %v", err)
 	}
 
-	// Get storage stats to verify deduplication
-	stats, err := manager.GetStorageStats(ctx)
-	if err != nil {
-		t.Fatalf("Failed to get storage stats: %v", err)
+	// Verify deduplication: device2 must have a row in dna_references (not dna_history).
+	// This is the core deduplication invariant: identical DNA content must not be stored
+	// as a second full copy.
+	sqlBackend := manager.storage.(*SQLiteBackend)
+	sqlBackend.mutex.RLock()
+	var histCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_history WHERE device_id = ?`, device2ID,
+	).Scan(&histCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_history for device2: %v", err)
+	}
+	var refCount int
+	if err := sqlBackend.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dna_references WHERE device_id = ?`, device2ID,
+	).Scan(&refCount); err != nil {
+		sqlBackend.mutex.RUnlock()
+		t.Fatalf("failed to count dna_references for device2: %v", err)
+	}
+	sqlBackend.mutex.RUnlock()
+
+	if histCount != 0 {
+		t.Errorf("deduplication failed: device2 has %d row(s) in dna_history — "+
+			"identical DNA content should be stored as a reference, not a full copy", histCount)
+	}
+	if refCount != 1 {
+		t.Errorf("deduplication failed: expected device2 to have 1 row in dna_references, got %d", refCount)
 	}
 
-	// With deduplication, we should have more total blocks than unique blocks
-	if stats.DeduplicationRatio <= 0 {
-		t.Logf("Deduplication ratio: %f (may be 0 for memory backend)", stats.DeduplicationRatio)
-	}
-
-	// Verify both devices can retrieve their data
+	// device1's record must remain accessible via GetCurrent (stored as full content in dna_history).
 	current1, err := manager.GetCurrent(ctx, device1ID)
 	if err != nil {
 		t.Fatalf("Failed to get current DNA for device 1: %v", err)
 	}
-
-	current2, err := manager.GetCurrent(ctx, device2ID)
-	if err != nil {
-		t.Fatalf("Failed to get current DNA for device 2: %v", err)
-	}
-
-	// Both should have the same content but different device IDs
-	if current1.DeviceID == current2.DeviceID {
-		t.Error("Device IDs should be different")
-	}
-
-	if current1.ContentHash != current2.ContentHash {
-		t.Error("Content hashes should be identical for deduplicated content")
+	if current1.DeviceID != device1ID {
+		t.Errorf("expected device ID %s, got %s", device1ID, current1.DeviceID)
 	}
 }
 
@@ -212,7 +530,7 @@ func testHistoricalQueries(t *testing.T, manager *Manager) {
 			"version":      fmt.Sprintf("v%d", i+1),
 		}
 
-		dna := createTestDNA(deviceID, attributes)
+		dna := createTestDNA(t, deviceID, attributes)
 		// Simulate time progression
 		dna.LastUpdated = timestamppb.New(baseTime.Add(time.Duration(i) * time.Hour))
 
@@ -290,7 +608,7 @@ func testCompression(t *testing.T, manager *Manager) {
 		largeAttributes[key] = value
 	}
 
-	dna := createTestDNA(deviceID, largeAttributes)
+	dna := createTestDNA(t, deviceID, largeAttributes)
 
 	// Store DNA
 	err := manager.Store(ctx, deviceID, dna, nil)
@@ -324,8 +642,9 @@ func testCompression(t *testing.T, manager *Manager) {
 	}
 
 	// Verify all large attributes are intact
+	currentAttrs := dnaAttrs(current.DNA)
 	for key, expectedValue := range largeAttributes {
-		if actualValue, exists := current.DNA.Attributes[key]; !exists {
+		if actualValue, exists := currentAttrs[key]; !exists {
 			t.Errorf("Missing large attribute %s after compression/decompression", key)
 		} else if actualValue != expectedValue {
 			t.Errorf("Large attribute %s corrupted during compression/decompression", key)
@@ -347,7 +666,7 @@ func testStorageStats(t *testing.T, manager *Manager) {
 			"device_id": deviceID,
 		}
 
-		dna := createTestDNA(deviceID, attributes)
+		dna := createTestDNA(t, deviceID, attributes)
 		err := manager.Store(ctx, deviceID, dna, nil)
 		if err != nil {
 			t.Fatalf("Failed to store DNA for device %s: %v", deviceID, err)
@@ -422,7 +741,7 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 		attributes[key] = value
 	}
 
-	dna := createTestDNA("test-device", attributes)
+	dna := createTestDNA(t, "test-device", attributes)
 
 	// Test compression
 	compressed, originalSize, err := compressor.Compress(dna)
@@ -452,13 +771,16 @@ func testCompressionAlgorithm(t *testing.T, algorithm string) {
 		t.Errorf("Decompressed DNA ID mismatch: expected %s, got %s", dna.Id, decompressed.Id)
 	}
 
-	if len(decompressed.Attributes) != len(dna.Attributes) {
+	originalAttrs := dnaAttrs(dna)
+	decompressedAttrs := dnaAttrs(decompressed)
+
+	if len(decompressedAttrs) != len(originalAttrs) {
 		t.Errorf("Decompressed attributes count mismatch: expected %d, got %d",
-			len(dna.Attributes), len(decompressed.Attributes))
+			len(originalAttrs), len(decompressedAttrs))
 	}
 
-	for key, expectedValue := range dna.Attributes {
-		if actualValue, exists := decompressed.Attributes[key]; !exists {
+	for key, expectedValue := range originalAttrs {
+		if actualValue, exists := decompressedAttrs[key]; !exists {
 			t.Errorf("Missing attribute %s after %s decompression", key, algorithm)
 		} else if actualValue != expectedValue {
 			t.Errorf("Attribute %s corrupted during %s compression/decompression", key, algorithm)
@@ -510,7 +832,7 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	ctx := context.Background()
 
 	// Create test record
-	dna := createTestDNA("backend-test-device", map[string]string{
+	dna := createTestDNA(t, "backend-test-device", map[string]string{
 		"os":   "linux",
 		"arch": "amd64",
 		"test": "backend_" + string(backendType),
@@ -523,10 +845,13 @@ func testStorageBackend(t *testing.T, backendType BackendType, config *Config, l
 	}
 
 	record := &DNARecord{
-		DeviceID:         "backend-test-device",
-		DNA:              dna,
-		StoredAt:         time.Now(),
-		ContentHash:      "test-hash-123",
+		DeviceID: "backend-test-device",
+		DNA:      dna,
+		StoredAt: time.Now(),
+		// A content hash is always a 64-character lowercase hex digest
+		// (ContentHash guarantees the shape, and FileBackend rejects anything
+		// else before interpolating it into a filesystem path).
+		ContentHash:      validAggregateRoot("backend-test-device"),
 		CompressedSize:   1000,
 		OriginalSize:     2000,
 		CompressionRatio: 0.5,
@@ -623,7 +948,7 @@ func testIndexAndQuery(t *testing.T, indexer Indexer, ctx context.Context) {
 
 	// Create and index multiple records
 	for i := 0; i < 5; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":      "linux",
 			"version": fmt.Sprintf("v%d", i+1),
 			"seq":     fmt.Sprintf("%d", i),
@@ -725,7 +1050,7 @@ func testDeviceStats(t *testing.T, indexer Indexer, ctx context.Context) {
 	totalSize := int64(0)
 
 	for i := 0; i < 3; i++ {
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(t, deviceID, map[string]string{
 			"os":    "linux",
 			"index": fmt.Sprintf("%d", i),
 		})
@@ -784,16 +1109,68 @@ func testDeviceStats(t *testing.T, indexer Indexer, ctx context.Context) {
 
 // Helper functions
 
-func createTestDNA(deviceID string, attributes map[string]string) *commonpb.DNA {
-	return &commonpb.DNA{
+// testFragmentID and testFragmentAuthority identify the single fragment that
+// test fixtures use to carry their attribute set.
+const (
+	testFragmentID        = "host:test"
+	testFragmentAuthority = "test"
+)
+
+// newTestFragment builds an ADR-017 fragment whose canonical state is attrs.
+// DNA carries attributes as fragments since the flat DNA.Attributes map was
+// removed (Issue #3331), so every fixture that used to set Attributes sets a
+// fragment instead.
+func newTestFragment(tb testing.TB, attrs map[string]string) *commonpb.Fragment {
+	tb.Helper()
+
+	state := make(sdna.MapState, len(attrs))
+	for k, v := range attrs {
+		state[k] = v
+	}
+
+	frag, err := sdna.NewFragment(testFragmentID, testFragmentAuthority, state)
+	if err != nil {
+		tb.Fatalf("sdna.NewFragment(%q) failed: %v", testFragmentID, err)
+	}
+	return frag
+}
+
+// attachTestFragment appends attrs to dna as a single fragment and returns dna.
+// An empty attribute set attaches no fragment, matching the previous behaviour
+// of an empty Attributes map: the flattened projection is empty either way.
+func attachTestFragment(tb testing.TB, dna *commonpb.DNA, attrs map[string]string) *commonpb.DNA {
+	tb.Helper()
+
+	if len(attrs) == 0 {
+		return dna
+	}
+	dna.Fragments = append(dna.Fragments, newTestFragment(tb, attrs))
+	return dna
+}
+
+// dnaAttrs returns the flat attribute projection of a DNA's fragments — the
+// read path that replaced DNA.Attributes (Issue #3331).
+//
+// This delegates to the same sdna.FlattenFragments that
+// service.FlattenDNAFragments wraps. The service wrapper cannot be called from
+// here: features/controller/service imports this package, so importing it back
+// into these in-package tests would be an import cycle.
+func dnaAttrs(dna *commonpb.DNA) map[string]string {
+	return sdna.FlattenFragments(dna.GetFragments())
+}
+
+func createTestDNA(tb testing.TB, deviceID string, attributes map[string]string) *commonpb.DNA {
+	tb.Helper()
+
+	dna := &commonpb.DNA{
 		Id:              deviceID,
-		Attributes:      attributes,
 		LastUpdated:     timestamppb.New(time.Now()),
 		ConfigHash:      "test-config-hash",
 		LastSyncTime:    timestamppb.New(time.Now()),
 		AttributeCount:  int32(len(attributes)),
 		SyncFingerprint: "test-sync-fingerprint",
 	}
+	return attachTestFragment(tb, dna, attributes)
 }
 
 // Benchmark tests
@@ -818,7 +1195,7 @@ func BenchmarkDNAStorage(b *testing.B) {
 	// Pre-create DNA records for benchmarking
 	dnas := make([]*commonpb.DNA, b.N)
 	for i := 0; i < b.N; i++ {
-		dnas[i] = createTestDNA(fmt.Sprintf("bench-device-%d", i), map[string]string{
+		dnas[i] = createTestDNA(b, fmt.Sprintf("bench-device-%d", i), map[string]string{
 			"os":     "linux",
 			"arch":   "amd64",
 			"seq":    fmt.Sprintf("%d", i),
@@ -859,7 +1236,7 @@ func BenchmarkDNARetrieval(b *testing.B) {
 	numDevices := 1000
 	for i := 0; i < numDevices; i++ {
 		deviceID := fmt.Sprintf("bench-device-%d", i)
-		dna := createTestDNA(deviceID, map[string]string{
+		dna := createTestDNA(b, deviceID, map[string]string{
 			"os":   "linux",
 			"arch": "amd64",
 			"seq":  fmt.Sprintf("%d", i),
@@ -895,7 +1272,7 @@ func BenchmarkCompression(b *testing.B) {
 	}()
 
 	// Create test DNA with varying sizes
-	dna := createTestDNA("bench-device", map[string]string{
+	dna := createTestDNA(b, "bench-device", map[string]string{
 		"os":          "linux",
 		"arch":        "amd64",
 		"large_field": string(make([]byte, 10000)), // 10KB field

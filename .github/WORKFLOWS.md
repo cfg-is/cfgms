@@ -105,11 +105,34 @@ This document describes the GitHub Actions workflows configured for the CFGMS pr
 
 **Timeout:** 10 minutes
 
-### 5. Release Workflow — removed 2026-05-25
+### 5. Signed Release Workflow (`.github/workflows/release.yml`)
 
-CFGMS does not currently ship signed release binaries from CI. The previous `release.yml` and `release-automation.yml` workflows were removed pre-1.0 because they produced unsigned binaries without the supporting code-signing certificates, key management, or attestation infrastructure to make them trustworthy. Distribution today is via `git clone && make build` against a tagged commit.
+**Status:** Implemented for pre-RC review; protected-environment execution and
+native signing remain unverified.
 
-A proper release-engineering pipeline (cross-platform signed builds, SBOM attestation, MSI/pkg installers) will be designed once the Hyper-V dev infrastructure (Phase 2, Epic #390) provides controlled build hosts.
+The workflow runs only for annotated semantic-version tags whose commit is
+reachable from `main`. Generic cross-platform archives use the Go toolchain
+pinned in `go.mod`, normalize timestamps and ownership, build twice, and fail
+unless the two trees match byte for byte.
+
+The protected `release` environment must provide a non-placeholder publisher
+public key, Windows signing certificate, Apple application/installer identities,
+and Apple notarization credentials. Release mode fails closed if any is absent.
+Windows executables and MSI are Authenticode-signed and verified. macOS
+executables and packages are signed, the package is notarized and stapled, and
+both layers are verified.
+
+Only after all platform jobs pass does the publish job:
+
+- generate an SPDX JSON SBOM;
+- generate and validate `SHA256SUMS`;
+- keyless-sign every artifact with a pinned Cosign installer;
+- create repository-bound build-provenance and SBOM attestations; and
+- create the corresponding tagged GitHub release.
+
+All third-party actions are pinned to full commit SHAs and job permissions are
+scoped to their purpose. No release has been produced or certified by adding
+this workflow.
 
 ## Activation Timeline
 
@@ -178,7 +201,7 @@ These workflows will **activate immediately** when repository becomes public:
 | No CodeQL SAST | CodeQL workflow | Industry-leading vulnerability detection |
 | No container scanning in CI | Trivy workflow | Catch base image vulnerabilities |
 | No license compliance | License check workflow | Prevent incompatible licenses |
-| No SBOM generation | Release workflow enhancement | Supply chain transparency, NTIA compliance |
+| No SBOM/provenance/signing pipeline | Protected signed-release workflow | Authenticated artifacts and supply-chain evidence |
 
 ## Security Posture Improvement
 

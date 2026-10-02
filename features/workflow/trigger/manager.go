@@ -12,27 +12,34 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// extractTenantFromContext extracts tenant ID from context, trying both logging and trigger context keys
+// extractTenantFromContext reads the authenticated tenant from ctxkeys.TenantID,
+// the single canonical context key the authentication middleware sets (Issue
+// #4326). Every trigger authorization decision (CreateTrigger, ListTriggers,
+// GetTrigger, UpdateTrigger, DeleteTrigger, ExecuteTrigger) reads the tenant
+// through this helper — never through logging.ExtractTenantFromContext, a
+// logging-only accessor that reads a different context key the middleware never
+// writes and therefore always returned "".
 func extractTenantFromContext(ctx context.Context) string {
-	// First try logging context (for compatibility)
-	if tenantID := logging.ExtractTenantFromContext(ctx); tenantID != "" {
+	if tenantID, ok := ctx.Value(ctxkeys.TenantID).(string); ok {
 		return tenantID
 	}
-
-	// Then try trigger context key (for API and integration tests)
-	if value := ctx.Value(TenantIDContextKey); value != nil {
-		if tenantID, ok := value.(string); ok {
-			return tenantID
-		}
-	}
-
 	return ""
+}
+
+// StoreRequirements declares the storage stores required by the workflow-trigger subsystem.
+// Collected by collectActiveStorageRequirements in features/controller/server and validated
+// at startup via interfaces.ValidateStorageRequirements — a missing TriggerStore fails
+// closed rather than silently degrading trigger persistence when a provider cannot supply it.
+var StoreRequirements = []interfaces.StoreRequirement{
+	{Subsystem: "workflow-trigger", Store: interfaces.StoreNameTrigger, Severity: interfaces.RequirementRequired},
 }
 
 // TriggerManagerImpl implements the TriggerManager interface
@@ -86,6 +93,23 @@ func NewTriggerManager(
 		workflowTrigger: workflowTrigger,
 		triggers:        make(map[string]*Trigger),
 		executions:      make(map[string]*TriggerExecution),
+	}
+}
+
+// leaseJobSetter is implemented by Scheduler implementations that support a
+// cluster-singleton lease claim (ADR-031 Decision 4) — currently CronScheduler
+// only. Type-asserted rather than added to the Scheduler interface so test
+// doubles that implement Scheduler without lease support are unaffected.
+type leaseJobSetter interface {
+	SetLeaseJob(job lease.SingletonJob)
+}
+
+// SetSchedulerLease wires the cluster-singleton lease claim the scheduler's
+// due-trigger check runs behind, if the configured Scheduler supports one. A
+// scheduler that does not (e.g. a test double) makes this a no-op.
+func (tm *TriggerManagerImpl) SetSchedulerLease(job lease.SingletonJob) {
+	if setter, ok := tm.scheduler.(leaseJobSetter); ok {
+		setter.SetLeaseJob(job)
 	}
 }
 
@@ -187,6 +211,9 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 	defer tm.mutex.Unlock()
 
 	tenantID := extractTenantFromContext(ctx)
+	if tenantID == "" {
+		return fmt.Errorf("tenant context required to create a trigger")
+	}
 	logger := tm.logger.WithTenant(tenantID)
 
 	// Generate ID if not provided
@@ -194,10 +221,10 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 		trigger.ID = tm.generateTriggerID()
 	}
 
-	// Set tenant ID from context
-	if trigger.TenantID == "" {
-		trigger.TenantID = tenantID
-	}
+	// The tenant always comes from the authenticated context, never from the
+	// caller-supplied trigger body (Issue #4326) — otherwise a request body could
+	// name any tenant and create a trigger outside the caller's own tenant.
+	trigger.TenantID = tenantID
 
 	// Set timestamps
 	now := time.Now()
@@ -210,15 +237,15 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 	}
 
 	logger.InfoCtx(ctx, "Creating trigger",
-		"trigger_id", trigger.ID,
-		"type", trigger.Type,
-		"workflow_name", trigger.WorkflowName)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID),
+		"type", logging.SanitizeLogValue(string(trigger.Type)),
+		"workflow_name", logging.SanitizeLogValue(trigger.WorkflowName))
 
 	// Validate trigger configuration
 	if err := tm.validateTrigger(ctx, trigger); err != nil {
 		logger.ErrorCtx(ctx, "Trigger validation failed",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("trigger validation failed: %w", err)
 	}
 
@@ -235,8 +262,8 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 		// Remove from memory if storage fails
 		delete(tm.triggers, trigger.ID)
 		logger.ErrorCtx(ctx, "Failed to save trigger to storage",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to save trigger: %w", err)
 	}
 
@@ -245,16 +272,16 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 		// Clean up on registration failure
 		delete(tm.triggers, trigger.ID)
 		if delErr := tm.deleteTriggerFromStorage(ctx, trigger.ID); delErr != nil {
-			logger.ErrorCtx(ctx, "Failed to delete trigger from storage during cleanup", "trigger_id", trigger.ID, "error", delErr.Error())
+			logger.ErrorCtx(ctx, "Failed to delete trigger from storage during cleanup", "trigger_id", logging.SanitizeLogValue(trigger.ID), "error", logging.SanitizeLogValue(delErr.Error()))
 		}
 		logger.ErrorCtx(ctx, "Failed to register trigger with handler",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to register trigger: %w", err)
 	}
 
 	logger.InfoCtx(ctx, "Trigger created successfully",
-		"trigger_id", trigger.ID)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID))
 
 	return nil
 }
@@ -268,7 +295,7 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 	logger := tm.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Updating trigger",
-		"trigger_id", trigger.ID)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID))
 
 	// Check if trigger exists
 	existingTrigger, exists := tm.triggers[trigger.ID]
@@ -279,7 +306,7 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 	// Ensure tenant ID matches (security check)
 	if existingTrigger.TenantID != tenantID {
 		logger.WarnCtx(ctx, "Attempted to update trigger from different tenant",
-			"trigger_id", trigger.ID,
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
 			"existing_tenant", existingTrigger.TenantID,
 			"request_tenant", tenantID)
 		return fmt.Errorf("trigger not found")
@@ -293,16 +320,16 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 	// Validate updated configuration
 	if err := tm.validateTrigger(ctx, trigger); err != nil {
 		logger.ErrorCtx(ctx, "Updated trigger validation failed",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("trigger validation failed: %w", err)
 	}
 
 	// Unregister old trigger
 	if err := tm.unregisterTriggerFromHandler(ctx, existingTrigger); err != nil {
 		logger.WarnCtx(ctx, "Failed to unregister old trigger",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		// Continue with update despite unregistration failure
 	}
 
@@ -314,11 +341,11 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 		// Restore old trigger on storage failure
 		tm.triggers[trigger.ID] = existingTrigger
 		if regErr := tm.registerTriggerWithHandler(ctx, existingTrigger); regErr != nil {
-			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", regErr.Error())
+			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(regErr.Error()))
 		}
 		logger.ErrorCtx(ctx, "Failed to save updated trigger to storage",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to save trigger: %w", err)
 	}
 
@@ -327,19 +354,19 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 		// Restore old trigger on registration failure
 		tm.triggers[trigger.ID] = existingTrigger
 		if saveErr := tm.saveTriggerToStorage(ctx, existingTrigger); saveErr != nil {
-			logger.ErrorCtx(ctx, "Failed to restore trigger to storage during rollback", "trigger_id", existingTrigger.ID, "error", saveErr.Error())
+			logger.ErrorCtx(ctx, "Failed to restore trigger to storage during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(saveErr.Error()))
 		}
 		if regErr := tm.registerTriggerWithHandler(ctx, existingTrigger); regErr != nil {
-			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", regErr.Error())
+			logger.ErrorCtx(ctx, "Failed to re-register old trigger during rollback", "trigger_id", existingTrigger.ID, "error", logging.SanitizeLogValue(regErr.Error()))
 		}
 		logger.ErrorCtx(ctx, "Failed to register updated trigger",
-			"trigger_id", trigger.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(trigger.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to register trigger: %w", err)
 	}
 
 	logger.InfoCtx(ctx, "Trigger updated successfully",
-		"trigger_id", trigger.ID)
+		"trigger_id", logging.SanitizeLogValue(trigger.ID))
 
 	return nil
 }
@@ -353,7 +380,7 @@ func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID strin
 	logger := tm.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Deleting trigger",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 
 	// Check if trigger exists
 	trigger, exists := tm.triggers[triggerID]
@@ -364,7 +391,7 @@ func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID strin
 	// Ensure tenant ID matches (security check)
 	if trigger.TenantID != tenantID {
 		logger.WarnCtx(ctx, "Attempted to delete trigger from different tenant",
-			"trigger_id", triggerID,
+			"trigger_id", logging.SanitizeLogValue(triggerID),
 			"trigger_tenant", trigger.TenantID,
 			"request_tenant", tenantID)
 		return fmt.Errorf("trigger not found")
@@ -373,8 +400,8 @@ func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID strin
 	// Unregister from handler
 	if err := tm.unregisterTriggerFromHandler(ctx, trigger); err != nil {
 		logger.WarnCtx(ctx, "Failed to unregister trigger from handler",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		// Continue with deletion despite unregistration failure
 	}
 
@@ -384,14 +411,14 @@ func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID strin
 	// Remove from storage
 	if err := tm.deleteTriggerFromStorage(ctx, triggerID); err != nil {
 		logger.ErrorCtx(ctx, "Failed to delete trigger from storage",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		// Don't restore to memory since we want to delete it
 		return fmt.Errorf("failed to delete trigger from storage: %w", err)
 	}
 
 	logger.InfoCtx(ctx, "Trigger deleted successfully",
-		"trigger_id", triggerID)
+		"trigger_id", logging.SanitizeLogValue(triggerID))
 
 	return nil
 }
@@ -424,12 +451,16 @@ func (tm *TriggerManagerImpl) ListTriggers(ctx context.Context, filter *TriggerF
 	defer tm.mutex.RUnlock()
 
 	tenantID := extractTenantFromContext(ctx)
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant context required to list triggers")
+	}
 
-	var triggers []*Trigger
+	triggers := make([]*Trigger, 0)
 
 	for _, trigger := range tm.triggers {
-		// Apply tenant filter (security) - skip tenant filtering if no tenant in context (admin access)
-		if tenantID != "" && trigger.TenantID != tenantID {
+		// Apply tenant filter (security): an absent tenant is refused above, never
+		// treated as admin access to every tenant's triggers (Issue #4326).
+		if trigger.TenantID != tenantID {
 			continue
 		}
 
@@ -491,8 +522,8 @@ func (tm *TriggerManagerImpl) ExecuteTrigger(ctx context.Context, triggerID stri
 	}
 
 	logger.InfoCtx(ctx, "Manually executing trigger",
-		"trigger_id", triggerID,
-		"workflow_name", trigger.WorkflowName)
+		"trigger_id", logging.SanitizeLogValue(triggerID),
+		"workflow_name", logging.SanitizeLogValue(trigger.WorkflowName))
 
 	// Create execution record
 	execution := &TriggerExecution{
@@ -541,18 +572,18 @@ func (tm *TriggerManagerImpl) ExecuteTrigger(ctx context.Context, triggerID stri
 
 		tm.mutex.Unlock()
 		logger.ErrorCtx(ctx, "Manual trigger execution failed",
-			"trigger_id", triggerID,
-			"execution_id", execution.ID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"execution_id", logging.SanitizeLogValue(execution.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
 	} else {
 		execution.Status = TriggerExecutionStatusSuccess
 		execution.WorkflowExecutionID = workflowExecution.ID
 
 		tm.mutex.Unlock()
 		logger.InfoCtx(ctx, "Manual trigger execution successful",
-			"trigger_id", triggerID,
-			"execution_id", execution.ID,
-			"workflow_execution_id", workflowExecution.ID)
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"execution_id", logging.SanitizeLogValue(execution.ID),
+			"workflow_execution_id", logging.SanitizeLogValue(workflowExecution.ID))
 	}
 
 	return execution, nil
@@ -753,8 +784,8 @@ func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID st
 		// Restore old status on failure
 		trigger.Status = oldStatus
 		logger.ErrorCtx(ctx, "Failed to update trigger status in storage",
-			"trigger_id", triggerID,
-			"error", err.Error())
+			"trigger_id", logging.SanitizeLogValue(triggerID),
+			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to update trigger status: %w", err)
 	}
 
@@ -764,23 +795,23 @@ func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID st
 			// Register with scheduler when activating
 			if err := tm.registerTriggerWithHandler(ctx, trigger); err != nil {
 				logger.WarnCtx(ctx, "Failed to register trigger with scheduler during activation",
-					"trigger_id", triggerID,
-					"error", err.Error())
+					"trigger_id", logging.SanitizeLogValue(triggerID),
+					"error", logging.SanitizeLogValue(err.Error()))
 				// Don't fail the status update for this
 			}
 		} else if status == TriggerStatusInactive && oldStatus == TriggerStatusActive {
 			// Unregister from scheduler when deactivating
 			if err := tm.unregisterTriggerFromHandler(ctx, trigger); err != nil {
 				logger.WarnCtx(ctx, "Failed to unregister trigger from scheduler during deactivation",
-					"trigger_id", triggerID,
-					"error", err.Error())
+					"trigger_id", logging.SanitizeLogValue(triggerID),
+					"error", logging.SanitizeLogValue(err.Error()))
 				// Don't fail the status update for this
 			}
 		}
 	}
 
 	logger.InfoCtx(ctx, "Trigger status updated",
-		"trigger_id", triggerID,
+		"trigger_id", logging.SanitizeLogValue(triggerID),
 		"old_status", oldStatus,
 		"new_status", status)
 

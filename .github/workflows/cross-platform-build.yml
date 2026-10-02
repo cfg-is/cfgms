@@ -1,134 +1,81 @@
 name: Cross-Platform Build Validation
 
+# QUEUE-ONLY. This workflow has no `pull_request` trigger, so it posts nothing on
+# the pull-request side — not even a skipped run. The PR-side `Cross-Platform
+# Compilation Check` and `Build Gate` contexts come from
+# cross-platform-build-pr.yml.
+#
+# The split is structural on purpose. A job gated `if: pull_request` still posts a
+# check run with conclusion `skipped` in the merge queue, and GitHub accepts a
+# `skipped` run as satisfying a required status check. With `build-gate` being
+# `needs: [native-builds, postgres-integration]`, its check run does not exist while
+# the native builds run — so the queue saw only a skipped `Build Gate` and merged
+# before this gate ever reported. See cross-platform-build-pr.yml for the measured
+# evidence.
+#
+# DO NOT add a `pull_request` trigger to this file.
 on:
-  pull_request:
-    branches: [ main, develop ]
-    # CONSERVATIVE: Only skip for pure documentation changes
-    # Build validation runs if ANY code changes are present
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - '.claude/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
   merge_group:
   workflow_dispatch:
 
+# Never cancel an in-flight merge_group run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.27.1'
 
 permissions: {}
 
 jobs:
-  # Fast cross-compilation check (single runner, all platforms)
-  cross-compile-check:
-    name: Cross-Platform Compilation Check
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Cache Go modules
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
-
-    - name: Download dependencies
-      run: go mod download
-
-    - name: Validate Cross-Platform Compilation
-      run: make build-cross-validate
-
-    - name: Build Summary
-      run: |
-        echo "## Cross-Platform Build Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "All target platforms compile successfully:" >> $GITHUB_STEP_SUMMARY
-        echo "- Linux (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
-        echo "- macOS (AMD64, ARM64)" >> $GITHUB_STEP_SUMMARY
-        echo "- Windows (AMD64)" >> $GITHUB_STEP_SUMMARY
-
-  # Native build tests on each platform
+  # One Linux unit pass on the MERGE COMMIT, in two shards (Issue #4220).
+  #
+  # The PR side already runs every unit package natively on Linux, Windows and
+  # macOS (test-suite.yml's unit-tests-* legs, cross-platform-build-pr.yml's
+  # Windows/macOS legs, Issue #4219). What a PR cannot see is its combination
+  # with whatever merged ahead of it, so the queue re-runs the Linux suite once
+  # against the merge commit — the same make targets and flags as the PR's
+  # unit-tests-* legs, split to run beside Controller Integration Tests (Linux),
+  # the queue's floor. Windows and macOS are not repeated here.
+  #
+  # `build-gate` below `needs:` these shards, so its check run does not exist
+  # until they finish. Keep that: a queue-side Build Gate with no `needs:`
+  # barrier would report before the tests it stands for.
   native-builds:
-    name: Native Build (${{ matrix.os }})
+    name: Native Build (Linux, shard ${{ matrix.shard }}/2)
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: Linux
-          - os: macos-latest
-            platform: macOS
-          - os: windows-latest
-            platform: Windows
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-
-    - name: Download dependencies
-      run: go mod download
-
-    - name: Build All Binaries
-      shell: bash
-      run: make build
-
-    - name: Run Unit Tests
-      shell: bash
-      env:
-        CFGMS_TEST_INTEGRATION: "0"  # Disable integration tests (no Docker infrastructure in cross-platform CI)
-      run: go test -race -short -timeout=5m ./pkg/... ./features/...
-
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      with:
-        name: binaries-${{ matrix.platform }}
-        path: bin/
-        retention-days: 5
-
-  # Integration tests with Docker infrastructure (Linux only)
-  integration-tests:
-    name: Integration Tests (Docker)
-    permissions:
-      contents: read
+        shard: [1, 2]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
+        cache: false
 
-    - name: Cache Go modules
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+    # Restore-only (Issue #4234): this job runs on merge_group /
+    # workflow_dispatch, whose ref is gh-readonly-queue/* or the manual
+    # dispatch ref — neither is refs/heads/develop, so a save here would be
+    # just as unreadable to other PRs as the per-PR-ref caches this story
+    # removes, and would count as a second writer alongside
+    # develop-sanity.yml. The develop-scoped writer is the only save path.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/go/pkg/mod
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
@@ -136,89 +83,116 @@ jobs:
     - name: Download dependencies
       run: go mod download
 
-    - name: Start Docker Test Services
+    # The same make targets, and so the same packages and flags (-race -short),
+    # as test-suite.yml's unit-tests-api / -controller-core / -heavy-providers /
+    # -rest legs, balanced into two shards from those legs' measured times.
+    - name: Build all binaries and run api + controller-core groups (shard 1)
+      if: matrix.shard == 1
+      env:
+        CFGMS_TEST_INTEGRATION: "0"  # no Docker here; Controller Integration Tests (Linux) covers it
       run: |
-        echo "🐳 Starting Docker test infrastructure..."
-        make test-integration-setup
-        echo "✅ Docker services ready"
+        make build
+        make test-framework-api-sharded
+        make test-go-group-controller-core
 
-    - name: Start Controller for Transport Tests
+    - name: Run heavy-providers + rest groups (shard 2)
+      if: matrix.shard == 2
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
       run: |
-        echo "🚀 Starting standalone controller for transport integration tests..."
-        # Source test environment variables
+        make test-go-group-heavy-providers
+        make test-go-group-rest
+
+  # The Postgres-backed suites no PR job can run (Issue #4220), in parallel
+  # with the shards so the queue's wall time stays at its floor (Controller
+  # Integration Tests (Linux)). This is what remained unique in the removed
+  # "Integration Tests (Docker)" job:
+  #   - features/controller/server's database-provider subtests, which skip
+  #     under -short and without CFGMS_TEST_DB_HOST, so no unit leg reaches them;
+  #   - the integration-tagged cert and database-provider suites.
+  # That job's TestRegistration and certificate -run tests already run in
+  # Controller Integration Tests (Linux), so they are not repeated here.
+  #
+  # -tags=integration so the database provider's //go:build integration files
+  # run (pkg/cert has none; the tag is a no-op there). -p 1 because
+  # pkg/cert/interfaces' database contract case and the database provider's
+  # setupTestDatabase drop and recreate the same schema; concurrent packages
+  # would drop tables from under each other's tests.
+  postgres-integration:
+    name: Postgres Integration Tests (Linux)
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234), as for the shards above.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Start Docker test services
+      run: make test-integration-setup
+
+    - name: Run Postgres-backed tests
+      env:
+        CFGMS_TEST_INTEGRATION: "1"
+      run: |
         set -a
         source .env.test
         set +a
-        # Start controller-standalone with HA profile (includes TimescaleDB)
-        docker compose -f docker-compose.test.yml --profile ha up -d controller-standalone
-        echo "⏳ Waiting for controller to be healthy..."
-        sleep 30
-        # Verify controller is running
-        docker compose -f docker-compose.test.yml ps controller-standalone
-        docker compose -f docker-compose.test.yml logs --tail=50 controller-standalone
-        echo "✅ Controller started"
-
-    - name: Run Integration Tests
-      run: |
-        echo "🧪 Running integration tests with Docker infrastructure..."
-        # Source test environment variables from make test-integration-setup
-        set -a
-        source .env.test
-        set +a
-        export CFGMS_TEST_INTEGRATION=1
-
-        # Run storage and controller server integration tests
         go test -race -timeout=10m ./pkg/testing/storage/... ./features/controller/server/...
+        go test -v -race -p 1 -tags=integration -timeout=20m ./pkg/cert/... ./pkg/storage/providers/database/...
 
-        # Run transport integration tests (requires Docker controller)
-        # TestRegistration includes TestSingleUseToken which is the known failing test
-        go test -v -race -timeout=15m ./test/integration/transport/... -run "TestRegistration"
-
-        # Run certificate integration tests
-        go test -v -race -timeout=10m ./test/integration/... \
-          -run "^Test(Certificate|ConfigValidation|Epic6Compliance|RegistrationTokenPersistence)$"
-
-        echo "✅ Integration tests completed"
-
-    - name: Cleanup Controller
-      if: always()
-      run: |
-        echo "🧹 Stopping controller..."
-        docker compose -f docker-compose.test.yml --profile ha down || true
-
-    - name: Cleanup Docker Services
+    - name: Cleanup Docker services
       if: always()
       run: make test-integration-cleanup
 
-  # Integration gate - all platforms must succeed
+  # QUEUE-REAL (#2595): the authoritative Build Gate on the merge commit. It
+  # `needs:` the Linux unit shards and the Postgres job above, so its check run
+  # does not exist until they finish (Issue #4220 AC4).
   build-gate:
     name: Build Gate
     permissions: {}
-    needs: [cross-compile-check, native-builds, integration-tests]
+    needs: [native-builds, postgres-integration]
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     steps:
     - name: Check Build Results
+      env:
+        NATIVE_RESULT: ${{ needs.native-builds.result }}
+        POSTGRES_RESULT: ${{ needs.postgres-integration.result }}
       run: |
-        echo "## Build Gate Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "## Build Gate Results" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+        echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Native Build (Linux, 2 shards) | $NATIVE_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "| Postgres Integration Tests (Linux) | $POSTGRES_RESULT |" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
 
-        cross_compile="${{ needs.cross-compile-check.result }}"
-        native="${{ needs.native-builds.result }}"
-        integration="${{ needs.integration-tests.result }}"
-
-        echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Cross-Compile Check | $cross_compile |" >> $GITHUB_STEP_SUMMARY
-        echo "| Native Builds | $native |" >> $GITHUB_STEP_SUMMARY
-        echo "| Integration Tests | $integration |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-
-        if [[ "$cross_compile" == "success" && "$native" == "success" && "$integration" == "success" ]]; then
-          echo "### BUILD GATE PASSED" >> $GITHUB_STEP_SUMMARY
-          echo "All platforms build and test successfully." >> $GITHUB_STEP_SUMMARY
+        if [[ "$NATIVE_RESULT" == "success" && "$POSTGRES_RESULT" == "success" ]]; then
+          echo "### BUILD GATE PASSED" >> "$GITHUB_STEP_SUMMARY"
         else
-          echo "### BUILD GATE FAILED" >> $GITHUB_STEP_SUMMARY
-          echo "One or more platform builds failed." >> $GITHUB_STEP_SUMMARY
+          echo "### BUILD GATE FAILED" >> "$GITHUB_STEP_SUMMARY"
           exit 1
         fi

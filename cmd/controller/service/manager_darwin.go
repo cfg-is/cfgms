@@ -105,6 +105,21 @@ func (m *darwinManager) Uninstall(purge bool) error {
 	return nil
 }
 
+// StageBinaryAndRestart copies newBinaryPath to the service install path,
+// then issues a `launchctl kickstart -k` for an in-place binary swap. The
+// -k flag kills the currently running daemon instance before relaunching it,
+// so the plist and config path are unchanged.
+func (m *darwinManager) StageBinaryAndRestart(newBinaryPath, configPath string) error {
+	if err := copyBinary(newBinaryPath, darwinInstallPath); err != nil {
+		return fmt.Errorf("stage binary: %w", err)
+	}
+	target := "system/" + darwinServiceName
+	if out, err := exec.Command("launchctl", "kickstart", "-k", target).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl kickstart %s: %w\n%s", target, err, out)
+	}
+	return nil
+}
+
 // Status returns the current state of the launchd daemon without requiring
 // elevated privileges.
 func (m *darwinManager) Status() (*ServiceStatus, error) {

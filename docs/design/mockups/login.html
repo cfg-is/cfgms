@@ -1,0 +1,251 @@
+<style>
+  :root {
+    --bg:#f5f4f3; --chrome:#ececea; --chrome-2:#ffffff; --border:#d0cfcd;
+    --text:#5f5e58; --text-dim:#6e6d68; --accent:#4a6b7c; --accent-ink:#ffffff;
+    --shadow:0 18px 50px -22px rgba(42, 42, 40,.4); --radius:14px;
+  }
+  @media (prefers-color-scheme: dark){ :root{
+    --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#b8b7b2; --text-dim:#9c9b96; --accent:#7b9fb0; --accent-ink:#16202a;
+    --shadow:0 22px 60px -26px rgba(0,0,0,.8); } }
+  :root[data-theme="light"]{ --bg:#f5f4f3; --chrome:#ececea; --chrome-2:#ffffff; --border:#d0cfcd;
+    --text:#5f5e58; --text-dim:#6e6d68; --accent:#4a6b7c; --accent-ink:#ffffff; --shadow:0 18px 50px -22px rgba(42, 42, 40,.4); }
+  :root[data-theme="dark"]{ --bg:#181817; --chrome:#1e1e1e; --chrome-2:#252526; --border:#3c3c3c;
+    --text:#b8b7b2; --text-dim:#9c9b96; --accent:#7b9fb0; --accent-ink:#16202a; --shadow:0 22px 60px -26px rgba(0,0,0,.8); }
+  *{box-sizing:border-box;}
+  body{margin:0; min-height:100dvh; background:var(--bg); color:var(--text); display:flex; flex-direction:column;
+    font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;}
+  .topbar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:11px 16px; background:var(--chrome);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5;}
+  .brand{display:flex; align-items:baseline; gap:8px; margin-right:auto;}
+  .brand b{font-size:14px; letter-spacing:.13em; text-transform:uppercase; font-weight:700;}
+  .brand span{font-size:11px; color:var(--text-dim); letter-spacing:.04em;}
+  .seg{display:inline-flex; position:relative; background:var(--chrome-2); border:1px solid var(--border); border-radius:10px; padding:3px;}
+  .seg button{position:relative; z-index:1; appearance:none; border:0; background:transparent; color:var(--text-dim);
+    font:inherit; font-size:12.5px; font-weight:600; padding:6px 13px; border-radius:7px; cursor:pointer; transition:color .18s ease;}
+  .seg button[aria-pressed="true"]{color:var(--accent-ink);}
+  .seg .thumb{position:absolute; top:3px; left:3px; height:calc(100% - 6px); background:var(--accent); border-radius:7px;
+    transition:transform .22s cubic-bezier(.4,.9,.3,1), width .22s cubic-bezier(.4,.9,.3,1); z-index:0;}
+  .seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+  .dims{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; color:var(--text-dim);
+    font-variant-numeric:tabular-nums; white-space:nowrap;}
+  .stage{flex:1; display:flex; align-items:flex-start; justify-content:center; padding:22px 16px 30px; overflow:auto;}
+  .frame-wrap{position:relative; margin:0 auto; border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow);
+    border:1px solid var(--border); background:var(--chrome); transition:width .22s ease, height .22s ease;}
+  .frame{display:block; border:0; transform-origin:0 0; background:transparent;}
+  .hint{text-align:center; color:var(--text-dim); font-size:12.5px; line-height:1.6; padding:0 20px 30px; max-width:600px; margin:0 auto;}
+</style>
+
+<div class="topbar">
+  <div class="brand"><b>CFGMS</b><span>login screen · passkey-only</span></div>
+  <div class="seg" role="group" aria-label="Preview viewport">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-dev="desktop" aria-pressed="true">Desktop</button>
+    <button data-dev="tablet" aria-pressed="false">Tablet</button>
+    <button data-dev="mobile" aria-pressed="false">Mobile</button>
+  </div>
+  <div class="seg themeseg" role="group" aria-label="Theme">
+    <span class="thumb" aria-hidden="true"></span>
+    <button data-theme-mode="auto" aria-pressed="true">Auto</button>
+    <button data-theme-mode="light" aria-pressed="false">Light</button>
+    <button data-theme-mode="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="dims" id="dims">—</div>
+</div>
+
+<div class="stage">
+  <div class="frame-wrap" id="wrap"><iframe class="frame" id="frame" title="CFGMS login mockup"></iframe></div>
+</div>
+
+<p class="hint">
+  Passkey-only login (ADR-021 Amendment 1 · Epic #2931/#2993) — rebuilt on the <b>live</b>
+  <code>Login.tsx</code> (no titlebar dots, copyright footer). <b>Usernameless-first hybrid:</b>
+  <b>Sign in with a passkey</b> is primary (leave username blank to pick the account on your key); the
+  optional username scopes to one account (e.g. a separate admin identity); <b>Remember Username</b>
+  prefills it only. Use the <b>state</b> switcher for <b>Sign in / Waiting / No passkey / Expired</b>. No password.
+</p>
+
+<script>
+  const DEVICES = { desktop:{w:1280,h:760}, tablet:{w:834,h:900}, mobile:{w:390,h:780} };
+  let current = "desktop", themeMode = "auto";
+  const frame = document.getElementById("frame"), wrap = document.getElementById("wrap");
+  const stage = document.querySelector(".stage"), dims = document.getElementById("dims");
+  const devSeg = document.querySelector(".seg:not(.themeseg)"), themeSeg = document.querySelector(".themeseg");
+  const devBtns = [...devSeg.querySelectorAll("button")], themeBtns = [...themeSeg.querySelectorAll("button")];
+  function posThumb(seg){ const t=seg.querySelector(".thumb"); const a=seg.querySelector('button[aria-pressed="true"]')||seg.querySelector("button"); t.style.width=a.offsetWidth+"px"; t.style.transform="translateX("+(a.offsetLeft-3)+"px)"; }
+
+  const MOCK_CSS = `
+    :root{
+      --bg-primary:#f5f4f3; --bg-surface:#ffffff; --bg-elevated:#ececea; --bg-sunk:#ececea; --border:#d0cfcd;
+      --text-primary:#5f5e58; --text-secondary:#6e6d68; --text-faint:#82807a;
+      --accent:#4a6b7c; --accent-ink:#ffffff;
+      --warn:#8a6924; --warn-bg:#f2eadb; --crit:#b56a5a; --crit-bg:#f0e6e4;
+    }
+    :root[data-theme="dark"]{
+      --bg-primary:#1e1e1e; --bg-surface:#252526; --bg-elevated:#2d2d2d; --bg-sunk:#1a1a1a; --border:#3c3c3c;
+      --text-primary:#b8b7b2; --text-secondary:#9c9b96; --text-faint:#7e7d78;
+      --accent:#7b9fb0; --accent-ink:#16202a;
+      --warn:#bd9547; --warn-bg:#2f2718; --crit:#c97a6a; --crit-bg:#2b201e;
+    }
+    *{box-sizing:border-box;}
+    html,body{margin:0; height:100%;}
+    body{background:var(--bg-primary); color:var(--text-primary); font-size:13.5px; line-height:1.45;
+      font-family:'Inter',ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased;
+      display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px 18px; gap:16px;}
+    .mono{font-family:'JetBrains Mono',ui-monospace,"SF Mono",Menlo,monospace;}
+
+    /* demo-only preview-state switch (not part of the real screen) */
+    .demo{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-faint);}
+    .demo .lbl{letter-spacing:.06em; text-transform:uppercase; font-weight:600;}
+    .demo .sw{display:inline-flex; background:var(--bg-surface); border:1px solid var(--border); border-radius:8px; padding:2px;}
+    .demo .sw button{appearance:none; border:0; background:transparent; font:inherit; font-size:11px; font-weight:600;
+      color:var(--text-secondary); padding:4px 9px; border-radius:6px; cursor:pointer;}
+    .demo .sw button.on{background:var(--accent); color:var(--accent-ink);}
+
+    /* terminal-window login card (live Login.css — no titlebar dots) */
+    .login-win{width:100%; max-width:400px; background:var(--bg-surface); border:1px solid var(--border); border-radius:13px;
+      overflow:hidden; box-shadow:0 18px 50px -22px rgba(42, 42, 40,.4);}
+    .login-titlebar{display:flex; align-items:center; gap:8px; padding:10px 13px; background:var(--bg-elevated); border-bottom:1px solid var(--border);}
+    .login-title{font-size:11.5px; color:var(--text-faint); margin:0 auto; letter-spacing:.02em;}
+
+    .login-body{padding:26px 26px 22px; display:flex; flex-direction:column; gap:16px;}
+    .login-wordmark{display:flex; flex-direction:column; gap:3px; align-items:center; text-align:center; margin-bottom:2px;}
+    .login-wordmark b{font-family:'Ubuntu Mono','JetBrains Mono',monospace; font-size:22px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;}
+    .login-wordmark span{font-size:11.5px; color:var(--text-faint); letter-spacing:.06em; text-transform:uppercase;}
+    .login-lead{text-align:center; font-size:13.5px; color:var(--text-secondary); margin:-4px 0 4px;}
+
+    .login-expired{display:none; align-items:flex-start; gap:9px; padding:10px 12px; border-radius:9px;
+      background:var(--warn-bg); border:1px solid var(--warn); font-size:12.5px; color:var(--warn);}
+    body[data-state="expired"] .login-expired{display:flex;}
+
+    .login-field{display:flex; flex-direction:column; gap:6px;}
+    .login-field .inp{display:flex; align-items:center; padding:11px 13px; background:var(--bg-sunk);
+      border:1px solid var(--border); border-radius:9px;}
+    .login-field .inp .val{font-size:14px; color:var(--text-primary); font-family:'JetBrains Mono',Menlo,monospace;}
+    .login-field .inp .val.ph{color:var(--text-faint);}
+    body[data-state="invalid"] .login-field .inp{border-color:var(--crit); background:var(--crit-bg);}
+
+    .login-remember{display:flex; align-items:center; gap:9px; font-size:12.5px; color:var(--text-secondary); cursor:pointer; margin-top:-6px;}
+    .login-remember .cbx{width:17px; height:17px; border-radius:5px; border:1px solid var(--border); background:var(--bg-sunk);
+      display:grid; place-items:center; color:var(--accent-ink); flex:none;}
+    .login-remember .cbx svg{opacity:0;}
+    .login-remember.on .cbx{background:var(--accent); border-color:var(--accent);}
+    .login-remember.on .cbx svg{opacity:1;}
+
+    .login-err{display:none; align-items:center; gap:8px; font-size:12.5px; color:var(--crit); margin-top:-6px;}
+    .login-err .dot{width:6px; height:6px; border-radius:50%; background:currentColor;}
+    body[data-state="invalid"] .login-err{display:flex;}
+
+    .login-signin{appearance:none; border:0; width:100%; padding:13px; border-radius:9px; background:var(--accent);
+      color:var(--accent-ink); font:inherit; font-size:14px; font-weight:600; cursor:pointer; display:flex;
+      align-items:center; justify-content:center; gap:9px; margin-top:2px;}
+    .login-signin .spin{width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; display:none;}
+    body[data-state="loading"] .login-signin .spin{display:block; animation:sp .7s linear infinite;}
+    body[data-state="loading"] .login-signin .txt{opacity:.85;}
+    @keyframes sp{to{transform:rotate(360deg);}}
+    @media (prefers-reduced-motion:reduce){.login-signin .spin{animation:none;}}
+
+    .login-helper{text-align:center; font-size:11.5px; color:var(--text-faint); margin:-8px 0 0; line-height:1.5;}
+
+    /* passkey-in-progress ("waiting") — the primary ceremony, not a 2nd factor */
+    .mfa{display:none; flex-direction:column; gap:12px; align-items:center; text-align:center; padding:6px 0;}
+    body[data-state="waiting"] .mfa{display:flex;}
+    body[data-state="waiting"] .login-lead, body[data-state="waiting"] .login-field, body[data-state="waiting"] .login-remember,
+    body[data-state="waiting"] .login-err, body[data-state="waiting"] .login-signin, body[data-state="waiting"] .login-helper{display:none;}
+    .mfa .mic{width:52px; height:52px; border-radius:14px; background:var(--bg-sunk); color:var(--accent); display:grid; place-items:center;}
+    .mfa h3{margin:0; font-size:16px; font-weight:700;}
+    .mfa p{margin:0; font-size:12.5px; color:var(--text-secondary); max-width:300px;}
+    .mfa .cancel{font-size:12px; color:var(--accent); font-weight:600; cursor:pointer;}
+
+    .login-foot{display:flex; justify-content:space-between; align-items:center; padding-top:4px; font-size:11.5px; color:var(--text-faint);}
+    .login-foot a{color:var(--accent); text-decoration:none; font-weight:600;}
+  `;
+
+  const KEY = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>';
+  const KEY_BIG = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>';
+
+  const MOCK_HTML = `
+    <div class="demo">
+      <span class="lbl">Preview state</span>
+      <div class="sw" role="group" aria-label="Preview state">
+        <button data-state="signin" class="on">Sign in</button>
+        <button data-state="waiting">Waiting</button>
+        <button data-state="invalid">No passkey</button>
+        <button data-state="expired">Expired</button>
+      </div>
+    </div>
+
+    <div class="login-win">
+      <div class="login-titlebar">
+        <span class="login-title mono">cfgms · secure session</span>
+      </div>
+      <div class="login-body">
+        <div class="login-wordmark"><b>CFGMS</b><span>config management</span></div>
+        <p class="login-lead">Sign in to the controller</p>
+
+        <div class="login-expired"><span class="mono">⚠</span><span>Your session expired. Sign in again with your passkey to continue.</span></div>
+
+        <div class="login-field">
+          <div class="inp"><span class="val ph">Username (Optional)</span></div>
+        </div>
+        <label class="login-remember on">
+          <span class="cbx"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4.2 4.2L19 7" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          Remember Username
+        </label>
+        <div class="login-err"><span class="dot"></span>No passkey matched. Check the username, or use the key that holds this account.</div>
+
+        <button class="login-signin">${KEY}<span class="txt">Sign in with a passkey</span><span class="spin"></span></button>
+
+        <p class="login-helper">Your passkey never leaves your device. No password to phish.</p>
+
+        <div class="mfa">
+          <div class="mic">${KEY_BIG}</div>
+          <h3>Waiting for your passkey</h3>
+          <p>Confirm on your security key or device to finish signing in.</p>
+          <span class="cancel">Cancel</span>
+        </div>
+
+        <div class="login-foot">
+          <a>Trouble signing in?</a>
+          <span class="mono">© 2026 cfg.is</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const MOCK_JS = `
+    var sb=[].slice.call(document.querySelectorAll('.demo .sw button'));
+    sb.forEach(function(b){b.addEventListener('click',function(){
+      document.body.dataset.state=b.dataset.state;
+      sb.forEach(function(x){x.classList.toggle('on',x===b);});});});
+    document.body.dataset.state='signin';
+    var rem=document.querySelector('.login-remember');
+    if(rem){rem.addEventListener('click',function(){rem.classList.toggle('on');});}
+    var btn=document.querySelector('.login-signin');
+    if(btn){btn.addEventListener('click',function(){
+      document.body.dataset.state='loading';
+      setTimeout(function(){document.body.dataset.state='waiting';},1100);});}
+    var cancel=document.querySelector('.mfa .cancel');
+    if(cancel){cancel.addEventListener('click',function(){document.body.dataset.state='signin';});}
+  `;
+
+  function currentTheme(){ if(themeMode!=="auto") return themeMode; const d=document.documentElement.getAttribute("data-theme"); return d || (matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"); }
+  function srcdoc(t){ return '<!doctype html><html lang="en" data-theme="'+t+'"><head><meta charset="utf-8">'+
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><style>'+MOCK_CSS+'</style></head><body>'+
+    MOCK_HTML+'<script>'+MOCK_JS+'<\/script></body></html>'; }
+  function layout(){ const d=DEVICES[current]; frame.style.width=d.w+"px"; frame.style.height=d.h+"px";
+    const avail=stage.clientWidth-32; const s=Math.min(1,avail/d.w); frame.style.transform="scale("+s+")";
+    wrap.style.width=(d.w*s)+"px"; wrap.style.height=(d.h*s)+"px"; dims.textContent=d.w+" × "+d.h+" · "+Math.round(s*100)+"%"; }
+  function render(){ frame.srcdoc=srcdoc(currentTheme()); layout(); }
+  devBtns.forEach(b=>b.addEventListener("click",()=>{ current=b.dataset.dev;
+    devBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(devSeg); layout(); }));
+  themeBtns.forEach(b=>b.addEventListener("click",()=>{ themeMode=b.dataset.themeMode;
+    themeBtns.forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false")); posThumb(themeSeg);
+    if(themeMode==="auto"){ document.documentElement.removeAttribute("data-theme"); render(); }
+    else { document.documentElement.setAttribute("data-theme",themeMode); } }));
+  new MutationObserver(render).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{ if(themeMode==="auto") render(); });
+  window.addEventListener("resize",()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); });
+  window.addEventListener("orientationchange",()=>setTimeout(()=>{ layout(); posThumb(devSeg); posThumb(themeSeg); },200));
+  render(); posThumb(devSeg); posThumb(themeSeg);
+</script>

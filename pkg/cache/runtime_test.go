@@ -474,8 +474,16 @@ func TestBackgroundCleanup(t *testing.T) {
 	err = rc.SetRuntimeState(ctx, "key1", "value1")
 	require.NoError(t, err)
 
-	// Wait for cleanup to run
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the background cleanup goroutine to actually run and record the
+	// expirations. Polling a condition (rather than reading once after a fixed
+	// sleep) avoids racing the cleanup goroutine's scheduling under CPU load:
+	// the sleep window elapsing does not guarantee the cleanup goroutine has
+	// been scheduled to process its ticks yet. Both the 30ms session and the
+	// 50ms runtime item must be expired and cleaned before the assertions
+	// below hold, so wait until both have been counted (ItemsExpired >= 2).
+	require.Eventually(t, func() bool {
+		return rc.GetCacheStats().ItemsExpired >= 2
+	}, 2*time.Second, 5*time.Millisecond, "background cleanup did not expire both items")
 
 	// Items should be cleaned up
 	_, err = rc.GetSession(ctx, "session1")

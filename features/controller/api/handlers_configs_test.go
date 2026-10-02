@@ -66,11 +66,9 @@ func storeTestConfig(t *testing.T, server *Server, tenantID, stewardID string) {
 	t.Helper()
 	cfg := &stewardtypes.StewardConfig{
 		Steward: stewardtypes.StewardSettings{
-			ID:   stewardID,
-			Mode: stewardtypes.ModeController,
+			ID: stewardID,
 			Logging: stewardtypes.LoggingConfig{
-				Level:  "info",
-				Format: "text",
+				Level: "info",
 			},
 			ErrorHandling: stewardtypes.ErrorHandlingConfig{
 				ModuleLoadFailure:  stewardtypes.ActionContinue,

@@ -48,6 +48,13 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Go Advisory Database — design advisories with no fixable version
+# GO-2026-5932: golang.org/x/crypto/openpgp is deprecated by design (no fix available).
+# CFGMS does not import or use the openpgp subpackage; the advisory surfaces because
+# golang.org/x/crypto is a transitive dependency. The CVE advisory carries UNKNOWN severity
+# and has no remediation path other than removing the import — which is not present here.
+GO-2026-5932
+
 # Common false positives in Go projects:
 # Uncomment specific patterns if they become problematic:
 

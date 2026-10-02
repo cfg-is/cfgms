@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,10 +18,26 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/api/proto/common"
+	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
+
+// agentDevAPIPermissions is the API-key permission set for the agent.dev role.
+// Corresponds to the RBAC permissions in features/rbac/defaults.go: steward.read,
+// config.read, module.read, tenant.read, and config.validate. No write or admin perms.
+var agentDevAPIPermissions = []string{
+	"steward:read",
+	"steward:list",
+	"steward:read-config",
+	"steward:read-modules",
+	"steward:validate-config",
+	"config:list",
+	"config:list-deployments",
+	"tenant:read",
+}
 
 // handleListAPIKeys handles GET /api/v1/api-keys
 // M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant
@@ -68,11 +85,43 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// RoleID takes precedence: resolve permissions from the named role.
+	// Only agent.dev is supported in this release; future roles extend this map.
+	if createReq.RoleID != "" {
+		switch createReq.RoleID {
+		case "agent.dev":
+			if len(createReq.Permissions) > 0 {
+				s.writeErrorResponse(w, http.StatusBadRequest,
+					"Cannot specify both role_id and permissions", "CONFLICTING_FIELDS")
+				return
+			}
+			createReq.Permissions = agentDevAPIPermissions
+		default:
+			s.writeErrorResponse(w, http.StatusBadRequest,
+				"Unknown role_id: "+createReq.RoleID, "UNKNOWN_ROLE")
+			return
+		}
+	}
+
 	// C1: Validate permissions against the known allow-list. "*" and unknown IDs are rejected.
 	for _, p := range createReq.Permissions {
 		if !isKnownPermission(p) {
 			s.writeErrorResponse(w, http.StatusBadRequest,
 				"Unknown or reserved permission ID: "+p, "INVALID_PERMISSION")
+			return
+		}
+	}
+
+	// Issue #4334: a caller may not grant a permission it does not itself hold. This
+	// is independent of the tenant-containment check below — it closes the
+	// privilege-escalation path where a caller holding only api-key:create could
+	// mint a key carrying any permission in the catalogue, including ones the
+	// caller was never granted.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	for _, p := range createReq.Permissions {
+		if !s.hasPermission(principal, p) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Cannot grant a permission you do not hold: "+p, "PERMISSION_ESCALATION")
 			return
 		}
 	}
@@ -83,10 +132,22 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		tenantID = "default"
 	}
 
+	// Issue #4334: the created key's tenant is bounded by the caller's own scope — a
+	// tenant-scoped caller cannot mint a key for a sibling tenant, nor for the
+	// catch-all "default" tenant outside its own subtree. An unset scope is refused
+	// outright (Issue #4316 fail-closed contract): holding api-key:create does not by
+	// itself prove a valid caller scope was established.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/api-keys") {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Cannot create an API key outside your tenant scope", "FORBIDDEN")
+		return
+	}
+
 	// Generate new API key (256-bit cryptographically secure)
 	keyBytes := make([]byte, 32)
 	if _, err := rand.Read(keyBytes); err != nil {
-		s.logger.Error("Failed to generate API key", "error", err)
+		s.logger.Error("Failed to generate API key", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to generate API key", "INTERNAL_ERROR")
 		return
 	}
@@ -135,7 +196,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.secretStore.StoreSecret(r.Context(), secretReq); err != nil {
-		s.logger.Error("Failed to persist API key to secret store", "error", err, "id", keyID)
+		s.logger.Error("Failed to persist API key to secret store", "error", logging.SanitizeLogValue(err.Error()), "id", keyID)
 		// Remove from memory cache since we couldn't persist
 		s.mu.Lock()
 		delete(s.apiKeys, keyString)
@@ -155,6 +216,28 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			TenantID:    tenantID,
 		},
 		Key: keyString,
+	}
+
+	// Bind the API key to the requested role via RBAC role assignment so that
+	// the role association is recorded for auditing and management queries.
+	if createReq.RoleID != "" && s.rbacManager != nil {
+		ctx := rbac.WithSensitiveOperationJustification(r.Context(),
+			"api-key creation: binding key "+keyID+" to role "+createReq.RoleID+" in tenant "+tenantID)
+		assignErr := s.rbacManager.AssignRole(ctx, &common.RoleAssignment{
+			Id:         uuid.New().String(),
+			SubjectId:  keyID,
+			RoleId:     createReq.RoleID,
+			TenantId:   tenantID,
+			AssignedBy: "api-admin",
+		})
+		if assignErr != nil {
+			s.logger.Warn("Failed to record RBAC role assignment for API key",
+				"id", keyID,
+				"role_id", logging.SanitizeLogValue(createReq.RoleID),
+				"tenant_id", logging.SanitizeLogValue(tenantID),
+				"error", logging.SanitizeLogValue(assignErr.Error()))
+			// Non-fatal: the key is usable; the role-assignment record is for audit only.
+		}
 	}
 
 	s.logger.Info("Created new API key",
@@ -189,6 +272,15 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if foundKey == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
+		return
+	}
+
+	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
+	// response so this endpoint cannot be used to probe for a key's existence across
+	// tenants.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "GET /api/v1/api-keys/{id}") {
 		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
 		return
 	}
@@ -236,15 +328,30 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
+	// response so this endpoint cannot be used to probe for a key's existence across
+	// tenants.
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "DELETE /api/v1/api-keys/{id}") {
+		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
+		return
+	}
+
 	// Delete from memory cache
 	delete(s.apiKeys, keyToDelete)
 
 	// M-AUTH-1: Also delete from secret store
 	keyHash := hashAPIKey(keyToDelete)
-	secretKey := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
-	if err := s.secretStore.DeleteSecret(r.Context(), secretKey); err != nil {
+	// SecretStore lookup path, not the credential itself — see middleware.go.
+	credentialRef := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
+	if err := s.secretStore.DeleteSecret(r.Context(), credentialRef); err != nil {
+		// Log a category, never err.Error(): the secret ref embeds the key hash.
+		reason := "secret_store_error"
+		if errors.Is(err, secretsif.ErrSecretNotFound) {
+			reason = "not_found"
+		}
 		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
-			"error", err, "id", keyID)
+			"reason", reason, "id", logging.SanitizeLogValue(keyID))
 		// Continue anyway - key is removed from memory
 	}
 

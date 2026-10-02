@@ -90,6 +90,11 @@ func NewControllerRouterWithGit(
 	}
 }
 
+// Close stops the background cache cleanup goroutine. Call on shutdown or after tests.
+func (r *controllerRouter) Close() {
+	r.sourceCache.Close()
+}
+
 // GetEffectiveConfigSource resolves the config source for tenantID, walking the tenant
 // path leaf-to-root and returning the first ancestor (inclusive) that has
 // config_source_type in its metadata. Results are cached for sourceCacheTTL.
@@ -231,16 +236,27 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 }
 
 // checkCrossTenant returns an error if the context tenant cannot access tenantID's config.
-// Rules (skip check when either side is unset/default for backward compatibility):
+// Rules (skip check when the context carries no tenant at all, for backward
+// compatibility with internal callers that never wire per-request tenant
+// context — e.g. background reconciliation, migration jobs):
 //   - same tenant → allowed
 //   - tenantID is an ancestor of the context tenant → allowed (cascade reads ancestors)
 //   - otherwise → cross-tenant denied
+//
+// "default" is NOT treated as a bypass value here: it is a genuine, reserved
+// tenant ID (features/tenant/manager.go's bootstrap/root tenant — see e.g.
+// ErrCannotSuspendDefault), not a sentinel for "unauthenticated." A caller
+// actually authenticated as tenant "default" is subject to the same
+// same-tenant/ancestor rules as any other tenant; treating it as an automatic
+// passthrough would let a "default"-tenant principal read any other tenant's
+// config, including tenants with no ancestor relationship to "default" at
+// all — the gap this function exists to close.
 func (r *controllerRouter) checkCrossTenant(ctx context.Context, tenantID string) error {
 	if tenantID == "" {
 		return nil // empty TenantID is handled as "route to controllerStore" elsewhere
 	}
 	ctxTenant, ok := ctx.Value(ctxkeys.TenantID).(string)
-	if !ok || ctxTenant == "" || ctxTenant == "default" {
+	if !ok || ctxTenant == "" {
 		return nil // no authenticated context tenant — backward-compat passthrough
 	}
 	if ctxTenant == tenantID {

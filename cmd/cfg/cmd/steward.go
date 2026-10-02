@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,19 +19,32 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/spf13/cobra"
+)
+
+const (
+	// operatorEnvelopeExpiry bounds the validity window of a client-signed
+	// operator command envelope (Issue #3694). Inline commands execute
+	// immediately, so a short, fixed window is deliberate — it is not a
+	// user-configurable flag.
+	operatorEnvelopeExpiry = 5 * time.Minute
+
+	// operatorNonceBytes is the raw byte length of a generated envelope nonce,
+	// before hex-encoding. Must be at least 16 per Issue #3694's AC.
+	operatorNonceBytes = 16
 )
 
 var (
 	stewardURL              string
-	stewardAPIKey           string
 	stewardTLSCACert        string
 	stewardTLSInsecure      bool
+	stewardServerName       string
 	stewardStatusJSONOutput bool
 	stewardDNAAttribute     string
 	stewardDNAJSONOutput    bool
@@ -44,30 +59,81 @@ var (
 	stewardLogsJSON   bool
 )
 
+var stewardMoveToTenant string
+
+var (
+	stewardMoveJSONOutput         bool
+	stewardDecommissionJSONOutput bool
+)
+
+// stewardYes is the persistent --yes/-y flag shared across the steward command
+// tree. It suppresses the multi-host confirmation prompt for mutating verbs but
+// never suppresses the 0-match fail-fast error (see confirmMultiHost).
+var stewardYes bool
+
 // stewardCmd is the parent command for steward subcommands.
 var stewardCmd = &cobra.Command{
 	Use:   "steward",
 	Short: "Manage registered stewards",
-	Long:  `Commands for inspecting and managing stewards registered with the controller.`,
+	Long: `Commands for inspecting and managing stewards registered with the controller.
+
+Every subcommand accepts the same selector grammar. See docs/administration/cli-selectors.md
+for the full grammar reference, per-shell quoting rules, and worked examples.
+
+Quick reference:
+  web-01              exact hostname match (case-insensitive)
+  'web-*'             hostname glob (must quote to prevent shell expansion)
+  acme-corp/web-01    host in a child tenant (/ or \ separator, both accepted)
+  os:linux            attribute filter (os, platform, arch, tag, dna.<key>)
+  'os:linux tag:prod' AND composition (space-separated terms, must quote)
+  id:steward-abc123   exact steward ID
+  all                 every steward in the caller's authorized subtree`,
 }
 
-// stewardListCmd lists all stewards registered with the controller.
+// stewardListCmd lists stewards registered with the controller.
+// An optional selector argument limits output to matching stewards via
+// POST /api/v1/fleet/resolve; without an argument the full fleet is listed
+// via GET /api/v1/stewards (backward compatible).
 var stewardListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [selector]",
 	Short: "List registered stewards",
-	Long: `Display all stewards registered with the controller.
+	Long: `Display stewards registered with the controller.
 
-Prints a tabular list of steward IDs, tenants, statuses, and last-seen times.
+Without a selector, prints the full fleet via GET /api/v1/stewards.
+With a selector, resolves matching stewards via POST /api/v1/fleet/resolve
+and prints only those that match. A selector that matches no stewards is an
+error; use "all" to match every steward in the caller's authorized subtree.
+
+Use this command as the dry-run before any mutating verb — it is read-only.
 
 Examples:
-  # List stewards using admin bundle (mTLS auto-discovery)
+  # List all stewards
   cfg steward list
 
-  # List stewards with explicit URL
-  cfg steward list --url=https://controller.example.com
+  # Exact hostname match (no quotes needed for a bare hostname)
+  cfg steward list web-01
 
-  # List stewards with API key authentication
-  cfg steward list --url=https://controller.example.com --api-key=your-key`,
+  # Hostname glob (must quote so the shell does not expand *)
+  cfg steward list 'web-*'
+
+  # Exact hostname in a child tenant
+  cfg steward list acme-corp/web-01
+
+  # Glob in a child tenant (must quote: contains both / and *)
+  cfg steward list 'acme-corp/web-*'
+
+  # Attribute filters
+  cfg steward list os:linux
+  cfg steward list 'os:linux arch:amd64'
+  cfg steward list 'os:linux tag:prod'
+  cfg steward list 'dna.role:db'
+
+  # All stewards in a child tenant
+  cfg steward list acme-corp/all
+
+  # Whole fleet
+  cfg steward list all`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runStewardList,
 }
 
@@ -87,13 +153,18 @@ var (
 	stewardRunResultDevice string
 )
 
-// Package-level vars for steward exec (single-steward ad-hoc run). Declared
-// separately from run-command vars so the two commands cannot share state.
+// Package-level vars for steward exec. Declared separately from run-command
+// vars so the two commands cannot share state.
 var (
 	stewardExecCommand    string
 	stewardExecShell      string
 	stewardExecTimeout    time.Duration
 	stewardExecJSONOutput bool
+)
+
+var (
+	stewardRunScriptJSONOutput  bool
+	stewardRunCommandJSONOutput bool
 )
 
 // runWaitPollInterval is the delay between status polls in the --wait loop.
@@ -112,8 +183,20 @@ var stewardRunScriptCmd = &cobra.Command{
 Exits immediately (async) by default. Use --wait to block until completion.
 
 Examples:
+  # Exact hostname target (bare token, no quotes needed)
+  cfg steward run-script --target web-01 --script my-script
+
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward run-script --target 'web-*' --script my-script --yes
+
+  # Child-tenant scope (forward slash, no quotes needed for exact name)
+  cfg steward run-script --target acme-corp/web-01 --script my-script
+
+  # Attribute filter
   cfg steward run-script --target os:linux --script my-script
-  cfg steward run-script --script my-script --version v2 --wait --wait-timeout 10m`,
+
+  # Wait for completion with a custom timeout
+  cfg steward run-script --target 'os:linux tag:prod' --script my-script --version v2 --wait --wait-timeout 10m`,
 	RunE: runRunScript,
 }
 
@@ -124,42 +207,75 @@ var stewardRunCommandCmd = &cobra.Command{
 
 The argument is treated as a file path if the path exists on disk; otherwise
 it is used as the inline script body. Content is base64-encoded and signed with
-the operator's mTLS bundle key before transmission.
+a dedicated payload-signing credential before transmission — a private key
+generated locally by cfg and never transmitted, distinct from the admin bundle
+used for mTLS transport authentication. The controller never holds this
+signing key at any point.
 
-Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+Requires an active session or admin bundle for the API connection (--bundle or
+CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
+'cfg credential request-signing-cert' first if none exists.
 
 Examples:
-  cfg steward run-command --shell bash "echo hello"
-  cfg steward run-command --shell bash ./scripts/deploy.sh --target os:linux`,
+  # Inline command to a single host by bare hostname
+  cfg steward run-command --shell bash --target web-01 "echo hello"
+
+  # Inline command to a hostname glob (must quote glob; requires --yes)
+  cfg steward run-command --shell bash --target 'web-*' "echo hello" --yes
+
+  # Script file to a child-tenant host (forward slash, no quotes needed)
+  cfg steward run-command --shell bash --target acme-corp/web-01 ./scripts/deploy.sh
+
+  # Attribute filter
+  cfg steward run-command --shell bash --target os:linux ./scripts/deploy.sh --yes`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCommand,
 }
 
 var stewardExecCmd = &cobra.Command{
-	Use:   "exec <steward-id>",
-	Short: "Execute an ad-hoc command on a single steward",
-	Long: `Sign and submit an inline command to a single named steward and display the result.
+	Use:   "exec <selector>",
+	Short: "Execute an ad-hoc command on matching stewards",
+	Long: `Sign and submit an inline command to matching stewards and display the result.
 
-The argument is the steward ID to target. The command is submitted as a signed
-inline script and the controller dispatches it exclusively to that steward.
-The CLI blocks until the job reaches a terminal state or the timeout elapses.
+The argument is a selector identifying which stewards to target — a bare
+hostname, id:, glob, or attribute filter. The command is submitted as a signed
+inline script and dispatched to every steward the selector matches.
+The CLI blocks until all jobs reach a terminal state or the timeout elapses.
 
-Requires an admin bundle with a private key (--bundle or CFGMS_ADMIN_BUNDLE).
+Requires an active session or admin bundle for the API connection (--bundle or
+CFGMS_ADMIN_BUNDLE), and a payload-signing credential for the signature — run
+'cfg credential request-signing-cert' first if none exists.
 
-The --shell flag is required. Allowed values: bash, sh, pwsh (cmd on Windows as fallback).
+The --shell flag is required. Allowed values: bash, sh (Unix); powershell, pwsh,
+cmd (Windows); pwsh is also valid on Unix (PowerShell Core is cross-platform).
+"powershell" targets Windows PowerShell 5.1 (powershell.exe) and requires no
+PowerShell Core install. There is no automatic fallback between shells — pick
+the one installed on the target host.
 
-Output is capped at 64 KB in the CLI display. If the output exceeds the cap a
-truncation warning is printed to stderr.
+Output is capped at 64 KB per steward in the CLI display. If the output for a
+steward exceeds the cap a truncation warning is printed to stderr.
 
 Examples:
-  # Run a command on a specific steward with 30-second timeout
-  cfg steward exec steward-abc123 --command "hostname" --shell bash --timeout 30s
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward exec web-01 --command "hostname" --shell bash
 
-  # Run a script file on a steward
-  cfg steward exec steward-abc123 --command ./scripts/check.sh --shell bash
+  # Hostname glob — fan out to all hosts starting with 'web-' (must quote; requires --yes)
+  cfg steward exec 'web-*' --command "uptime" --shell bash --yes
 
-  # Output as JSON
-  cfg steward exec steward-abc123 --command "uptime" --shell bash --json`,
+  # Exact hostname in a child tenant
+  cfg steward exec acme-corp/web-01 --command "uname -r" --shell bash
+
+  # Glob in a child tenant with tenant-path scoping (must quote)
+  cfg steward exec 'acme-corp/web-*' --command "df -h" --shell bash --yes
+
+  # Attribute filter: all Linux stewards (requires --yes)
+  cfg steward exec os:linux --command "uname -r" --shell bash --yes
+
+  # Explicit steward ID
+  cfg steward exec id:steward-abc123 --command "uptime" --shell bash --timeout 30s
+
+  # JSON output keyed by hostname#steward-id
+  cfg steward exec web-01 --command "uptime" --shell bash --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRunCommandSingle,
 }
@@ -200,28 +316,320 @@ Examples:
 	RunE: runRunCancel,
 }
 
-// stewardLogsCmd pulls recent log entries from a steward via the controller REST API.
-var stewardLogsCmd = &cobra.Command{
-	Use:   "logs <id>",
-	Short: "Pull recent log entries from a steward",
-	Long: `Pull recent log entries from the controller's log-pull endpoint for a steward.
+// stewardMoveCmd moves one or more stewards to a different tenant via the controller REST API.
+var stewardMoveCmd = &cobra.Command{
+	Use:   "move <selector>",
+	Short: "Move matching stewards to a different tenant",
+	Long: `Move one or more stewards to a different tenant.
 
-Note: Log pull is not yet available. Collect logs directly from the steward host.
+The selector is resolved against the fleet before any mutation occurs. A selector
+that matches more than one steward triggers the --yes confirmation gate; a
+single-match selector proceeds without prompting.
+
+Post-move, each steward is subject to the DESTINATION tenant's refresh policy and
+module/publisher trust configuration. Trust is never resolved from the old
+(source-tenant, device-key) pair — identity continuity is preserved while the
+trust context changes immediately to the destination tenant.
+
+Requires an admin bundle with mTLS access (Tier-3 endpoint).
 
 Examples:
-  cfg steward logs <steward-id>
-  cfg steward logs <steward-id> --tail 50 --level WARN
-  cfg steward logs <steward-id> --since 1h --module file`,
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward move web-01 --to-tenant dest-tenant
+
+  # Exact hostname in a child tenant
+  cfg steward move acme-corp/web-01 --to-tenant acme-corp/us-east
+
+  # Hostname glob — all hosts starting with 'web-' (must quote; requires --yes)
+  cfg steward move 'acme-corp/web-*' --to-tenant acme-corp/us-east --yes
+
+  # All stewards in a child tenant (requires --yes)
+  cfg steward move acme-corp/all --to-tenant acme-corp/us-east --yes
+
+  # Attribute filter with JSON output
+  cfg steward move os:linux --to-tenant dest-tenant --yes --json`,
 	Args: cobra.ExactArgs(1),
-	RunE: runStewardLogs,
+	RunE: runStewardMove,
 }
 
-func runStewardLogs(_ *cobra.Command, args []string) error {
-	stewardID := args[0]
+// stewardDecommissionCmd permanently decommissions one or more stewards from the fleet.
+var stewardDecommissionCmd = &cobra.Command{
+	Use:   "decommission <selector>",
+	Short: "Decommission matching stewards from the fleet",
+	Long: `Mark one or more stewards as deregistered after their hosts or VMs have been torn down.
+
+The selector is resolved against the fleet before any mutation occurs. A selector
+that matches more than one steward triggers the --yes confirmation gate; a
+single-match selector proceeds without prompting.
+
+Requires an admin mTLS certificate. Records are retained in durable storage
+for audit but no longer appear in cfg steward list. Any active connections are dropped.
+
+Examples:
+  # Exact hostname (bare token) — single-host, no confirmation prompt
+  cfg steward decommission web-01
+
+  # Exact hostname in a child tenant
+  cfg steward decommission acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'decom-' (must quote; requires --yes)
+  cfg steward decommission 'decom-*' --yes
+
+  # Tag filter — all stewards carrying the 'decom' tag (requires --yes)
+  cfg steward decommission 'tag:decom' --yes
+
+  # All stewards in a child tenant with JSON output (requires --yes)
+  cfg steward decommission acme-corp/all --yes --json`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardDecommission,
+}
+
+func runStewardDecommission(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
+	}
+
+	if err := confirmMultiHost(matches, stewardYes); err != nil {
+		return err
+	}
+
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			resp, err := client.doRequest(ctx, http.MethodDelete, "/api/v1/stewards/"+s.ID, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decommission steward: %w", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			switch resp.StatusCode {
+			case http.StatusOK:
+				return json.RawMessage(`{"status":"decommissioned"}`), nil
+			case http.StatusNotFound:
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			case http.StatusForbidden:
+				return nil, fmt.Errorf("decommission requires an admin mTLS certificate")
+			case http.StatusServiceUnavailable:
+				return nil, fmt.Errorf("fleet store unavailable; retry later")
+			default:
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+		})
+
+	if stewardDecommissionJSONOutput {
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
+	}
+
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			// Multi-host: print per-steward errors to stderr so partial failures
+			// are visible while the generic overallErr signals the non-zero exit.
+			// Single-host: skip printing here; the specific error is returned below.
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+		fmt.Printf("Steward %s decommissioned.\n", m.ID)
+	}
+
+	// For single-host failure, surface the specific per-steward error from RunE
+	// (cobra prints it) — preserves the pre-selector single-ID error semantics.
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
+	}
+	return overallErr
+}
+
+// stewardLogsCmd pulls recent log entries from one or more stewards via the controller REST API.
+var stewardLogsCmd = &cobra.Command{
+	Use:   "logs <selector>",
+	Short: "Pull recent log entries from stewards matching a selector",
+	Long: `Pull recent log entries from the controller's log-pull endpoint for every steward the selector matches.
+
+Note: Log pull is not yet available. Collect logs directly from the steward host.
+
+Examples:
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward logs web-01
+
+  # Exact hostname in a child tenant
+  cfg steward logs acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward logs 'web-*' --tail 20
+
+  # Attribute filter with options
+  cfg steward logs os:linux --tail 50 --level WARN
+
+  # Single host with time filter
+  cfg steward logs web-01 --since 1h --module file`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStewardLogs,
+}
+
+func runStewardMove(_ *cobra.Command, args []string) error {
+	selector := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
+	}
+
+	if err := confirmMultiHost(matches, stewardYes); err != nil {
+		return err
+	}
+
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			reqBody, err := json.Marshal(map[string]string{"new_tenant_id": stewardMoveToTenant})
+			if err != nil {
+				return nil, fmt.Errorf("failed to encode request: %w", err)
+			}
+
+			resp, err := client.doRequest(ctx, http.MethodPost, "/api/v1/stewards/"+s.ID+"/move", bytes.NewReader(reqBody))
+			if err != nil {
+				return nil, fmt.Errorf("failed to move steward: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+
+			switch resp.StatusCode {
+			case http.StatusForbidden:
+				return nil, fmt.Errorf("move denied: insufficient scope to move steward %s to tenant %s", s.ID, stewardMoveToTenant)
+			case http.StatusNotFound:
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			case http.StatusOK:
+				// handled below
+			default:
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+
+			var apiResp struct {
+				Data struct {
+					StewardID      string `json:"steward_id"`
+					TenantID       string `json:"tenant_id"`
+					PreviousTenant string `json:"previous_tenant"`
+					Status         string `json:"status"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(body, &apiResp); err != nil {
+				return nil, fmt.Errorf("failed to parse response: %w", err)
+			}
+
+			payload, err := json.Marshal(apiResp.Data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal result: %w", err)
+			}
+			return payload, nil
+		})
+
+	if stewardMoveJSONOutput {
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
+	}
+
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			// Multi-host: print per-steward errors to stderr so partial failures
+			// are visible while the generic overallErr signals the non-zero exit.
+			// Single-host: skip printing here; the specific error is returned below.
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+
+		var d struct {
+			StewardID      string `json:"steward_id"`
+			TenantID       string `json:"tenant_id"`
+			PreviousTenant string `json:"previous_tenant"`
+			Status         string `json:"status"`
+		}
+		if err := json.Unmarshal(r.Payload, &d); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse result: %v\n", key, err)
+			continue
+		}
+
+		switch d.Status {
+		case "no_change":
+			fmt.Printf("Steward %s is already in tenant %s (no change)\n", m.ID, d.TenantID)
+		case "moved":
+			fmt.Printf("Steward %s moved to tenant %s (was: %s)\n", m.ID, d.TenantID, d.PreviousTenant)
+		default:
+			fmt.Printf("Steward %s: status=%s tenant=%s\n", m.ID, d.Status, d.TenantID)
+		}
+	}
+
+	// For single-host failure, surface the specific per-steward error from RunE
+	// (cobra prints it) — preserves the pre-selector single-ID error semantics.
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
+	}
+	return overallErr
+}
+
+// logsNotImplementedPayload is the sentinel returned by the fan-out action when a
+// steward reports 501 (log pull not yet available). It lets the output phase
+// distinguish "not implemented" from a genuine read failure without forcing a
+// non-zero exit — matching the pre-selector single-ID behaviour.
+var logsNotImplementedPayload = json.RawMessage(`{"status":"not_implemented"}`)
+
+func runStewardLogs(_ *cobra.Command, args []string) error {
+	selector := args[0]
+
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
 	}
 
 	v := url.Values{}
@@ -235,84 +643,123 @@ func runStewardLogs(_ *cobra.Command, args []string) error {
 	if stewardLogsModule != "" {
 		v.Set("module", stewardLogsModule)
 	}
-	path := "/api/v1/stewards/" + stewardID + "/logs?" + v.Encode()
+	queryStr := v.Encode()
 
-	resp, err := client.Get(context.Background(), path)
-	if err != nil {
-		return fmt.Errorf("failed to fetch logs: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			path := "/api/v1/stewards/" + s.ID + "/logs?" + queryStr
+			resp, err := client.Get(ctx, path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch logs: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode == http.StatusNotImplemented {
+				return logsNotImplementedPayload, nil
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
 
-	if resp.StatusCode == http.StatusNotImplemented {
-		fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
-		return nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardLogsJSON {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Lines []struct {
-			Timestamp string `json:"timestamp"`
-			Level     string `json:"level"`
-			Module    string `json:"module"`
-			Message   string `json:"message"`
-		} `json:"lines"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var statusCheck struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(r.Payload, &statusCheck) == nil && statusCheck.Status == "not_implemented" {
+			fmt.Println("Log pull not yet available for this steward. Collect logs directly from the host.")
+			continue
+		}
+
+		var apiResp struct {
+			Lines []struct {
+				Timestamp string `json:"timestamp"`
+				Level     string `json:"level"`
+				Module    string `json:"module"`
+				Message   string `json:"message"`
+			} `json:"lines"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		for _, line := range apiResp.Lines {
+			fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+		}
 	}
 
-	for _, line := range apiResp.Lines {
-		fmt.Printf("%s [%s] [%s] %s\n", line.Timestamp, line.Level, line.Module, line.Message)
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	return nil
+	return overallErr
 }
 
 func init() {
 	stewardListCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardListCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardListCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardListCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardListCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	stewardStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardStatusCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardStatusCmd.Flags().BoolVar(&stewardStatusJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	stewardDNACmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardDNACmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardDNACmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardDNACmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardDNACmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardDNACmd.Flags().StringVar(&stewardDNAAttribute, "attribute", "", "Return a single attribute value by key (for scripted probes)")
 	stewardDNACmd.Flags().BoolVar(&stewardDNAJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	// run-script flags
 	stewardRunScriptCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunScriptCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunScriptCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunScriptCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardRunScriptCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardRunScriptCmd.Flags().StringVar(&stewardRunTarget, "target", "", "Fleet selector (e.g. os:linux, group:prod)")
 	stewardRunScriptCmd.Flags().StringVar(&stewardRunScript, "script", "", "Script ID from the controller library")
 	stewardRunScriptCmd.Flags().StringVar(&stewardRunVersion, "version", "", "Script version (default: latest)")
@@ -320,70 +767,98 @@ func init() {
 	stewardRunScriptCmd.Flags().BoolVar(&stewardRunWait, "wait", false, "Block until all jobs reach terminal state")
 	stewardRunScriptCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunScriptCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
+	stewardRunScriptCmd.Flags().BoolVar(&stewardRunScriptJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results (requires --target)")
 
 	// run-command flags
 	stewardRunCommandCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunCommandCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunCommandCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardRunCommandCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardRunCommandCmd.Flags().StringVar(&stewardRunTarget, "target", "", "Fleet selector (e.g. os:linux, group:prod)")
-	stewardRunCommandCmd.Flags().StringVar(&stewardRunShell, "shell", "", "Shell to use (e.g. bash, sh, powershell)")
+	stewardRunCommandCmd.Flags().StringVar(&stewardRunShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardRunCommandCmd.Flags().StringArrayVar(&stewardRunParams, "param", nil, "Parameter key=value (repeatable)")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunWait, "wait", false, "Block until all jobs reach terminal state")
 	stewardRunCommandCmd.Flags().BoolVar(&stewardRunSkipOffline, "skip-offline", false, "Skip offline stewards instead of queuing for them")
 	stewardRunCommandCmd.Flags().DurationVar(&stewardRunWaitTimeout, "wait-timeout", 5*time.Minute, "Maximum time to wait when --wait is set")
+	stewardRunCommandCmd.Flags().BoolVar(&stewardRunCommandJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results (requires --target)")
 
 	// exec flags (single-steward ad-hoc run)
 	stewardExecCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardExecCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardExecCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardExecCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardExecCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardExecCmd.Flags().StringVar(&stewardExecCommand, "command", "", "Command to execute on the steward (inline string or file path)")
-	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, pwsh)")
+	stewardExecCmd.Flags().StringVar(&stewardExecShell, "shell", "", "Shell to use (bash, sh, powershell, pwsh, cmd)")
 	stewardExecCmd.Flags().DurationVar(&stewardExecTimeout, "timeout", 30*time.Second, "Maximum time to wait for job completion")
 	stewardExecCmd.Flags().BoolVar(&stewardExecJSONOutput, "json", false, "Emit JSON job record instead of plain output")
 
 	// run-status flags
 	stewardRunStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunStatusCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardRunStatusCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// run-result flags
 	stewardRunResultCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunResultCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunResultCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunResultCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardRunResultCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardRunResultCmd.Flags().StringVar(&stewardRunResultDevice, "device", "", "Filter output to a single device ID")
 
 	// run-cancel flags
 	stewardRunCancelCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardRunCancelCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardRunCancelCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardRunCancelCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardRunCancelCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	// modules flags
 	stewardModulesCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardModulesCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardModulesCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardModulesCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	stewardModulesCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardModulesCmd.Flags().BoolVar(&stewardModulesJSON, "json", false, "Emit JSON output instead of human-readable text")
 
 	// logs flags
 	stewardLogsCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardLogsCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardLogsCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
 	stewardLogsCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardLogsCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
 	stewardLogsCmd.Flags().IntVar(&stewardLogsTail, "tail", 100, "Number of log lines to return (1-1000)")
 	stewardLogsCmd.Flags().StringVar(&stewardLogsSince, "since", "", "Return logs from this duration ago (e.g. 1h, 30m)")
 	stewardLogsCmd.Flags().StringVar(&stewardLogsLevel, "level", "", "Filter by log level (DEBUG, INFO, WARN, ERROR)")
 	stewardLogsCmd.Flags().StringVar(&stewardLogsModule, "module", "", "Filter by module name")
 	stewardLogsCmd.Flags().BoolVar(&stewardLogsJSON, "json", false, "Emit raw JSON output instead of human-readable text")
 
+	// move flags (Issue #2342, #2444)
+	stewardMoveCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardMoveCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardMoveCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardMoveCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
+	stewardMoveCmd.Flags().StringVar(&stewardMoveToTenant, "to-tenant", "", "Destination tenant ID (required)")
+	stewardMoveCmd.Flags().BoolVar(&stewardMoveJSONOutput, "json", false, "Emit keyed-by-steward JSON results")
+	if err := stewardMoveCmd.MarkFlagRequired("to-tenant"); err != nil {
+		panic(err)
+	}
+
+	// decommission flags (Issue #2408, #2444)
+	stewardDecommissionCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
+	stewardDecommissionCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate (env: CFGMS_TLS_CA_CERT)")
+	stewardDecommissionCmd.Flags().BoolVar(&stewardTLSInsecure, "tls-insecure", false, "Skip TLS verification (env: CFGMS_TLS_INSECURE)")
+	stewardDecommissionCmd.Flags().StringVar(&stewardServerName, "server-name", "", "Override TLS server name for certificate verification")
+	stewardDecommissionCmd.Flags().BoolVar(&stewardDecommissionJSONOutput, "json", false, "Emit keyed-by-steward JSON results")
+
+	// --yes/-y is a persistent flag on the steward command tree so it is
+	// accepted (and inert where irrelevant) by every subcommand. Mutating
+	// verbs call confirmMultiHost which checks this flag.
+	stewardCmd.PersistentFlags().BoolVarP(&stewardYes, "yes", "y", false,
+		"Skip confirmation prompts for multi-host mutating commands")
+
 	stewardCmd.AddCommand(stewardListCmd)
 	stewardCmd.AddCommand(stewardStatusCmd)
 	stewardCmd.AddCommand(stewardDNACmd)
 	stewardCmd.AddCommand(stewardModulesCmd)
+	stewardCmd.AddCommand(stewardMoveCmd)
+	stewardCmd.AddCommand(stewardDecommissionCmd)
 	stewardCmd.AddCommand(stewardRunScriptCmd)
 	stewardCmd.AddCommand(stewardRunCommandCmd)
 	stewardCmd.AddCommand(stewardExecCmd)
@@ -394,21 +869,19 @@ func init() {
 
 	// upgrade subcommands
 	stewardUpgradeCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeVersion, "version", "", "Target steward version (required)")
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradePlatform, "platform", "", "Target platform (e.g. linux, windows; auto-detected if omitted)")
 	stewardUpgradeCmd.Flags().StringVar(&stewardUpgradeArch, "arch", "", "Target architecture (e.g. amd64, arm64; auto-detected if omitted)")
 	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeWait, "wait", false, "Block until all stewards reach a terminal state")
 	stewardUpgradeCmd.Flags().DurationVar(&stewardUpgradeWaitTimeout, "wait-timeout", 2*time.Minute, "Maximum time to wait when --wait is set")
+	stewardUpgradeCmd.Flags().BoolVar(&stewardUpgradeJSONOutput, "json", false, "Emit keyed-by-steward JSON dispatch results")
 
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeStatusCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeStatusCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to query directly")
 
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardURL, "url", "", "Controller API URL")
-	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardAPIKey, "api-key", "", "API key for authentication")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeID, "upgrade-id", "", "Upgrade record ID to roll back")
 	stewardUpgradeRollbackCmd.Flags().StringVar(&stewardUpgradeToVersion, "to-version", "", "Target version to roll back to (optional; used with --upgrade-id)")
@@ -416,40 +889,25 @@ func init() {
 	stewardCmd.AddCommand(stewardUpgradeCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeStatusCmd)
 	stewardUpgradeCmd.AddCommand(stewardUpgradeRollbackCmd)
+
+	// Refresh management subcommands (Issue #2097).
+	stewardCmd.AddCommand(refreshCmd)
 }
 
-// getStewardClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getStewardClient creates an API client using an active session or an admin mTLS bundle.
 func getStewardClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(stewardURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	apiKey := stewardAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := stewardTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := stewardServerName
 
-	tlsCACertPath := stewardTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // stewardEntry is a local representation of a steward from the API response.
@@ -463,46 +921,71 @@ type stewardEntry struct {
 	} `json:"dna,omitempty"`
 }
 
-// stewardStatusCmd shows detailed status for a single steward.
+// stewardStatusCmd shows detailed status for every steward a selector matches.
 var stewardStatusCmd = &cobra.Command{
-	Use:   "status <id>",
-	Short: "Show detailed status for a steward",
-	Long: `Display full details for a single steward registered with the controller.
+	Use:   "status <selector>",
+	Short: "Show detailed status for stewards matching a selector",
+	Long: `Display full details for every steward the selector matches.
 
 Prints labelled fields including id, status, last_seen, version, hostname, OS,
-connection state, and other available metadata.
+connection state, and other available metadata. With --json, emits a
+keyed-by-steward JSON array (one entry per matched steward).
 
 Examples:
-  # Show status using admin bundle (mTLS auto-discovery)
-  cfg steward status <steward-id>
+  # Exact hostname match (bare token, no quotes needed)
+  cfg steward status web-01
 
-  # Show status with explicit URL
-  cfg steward status <steward-id> --url=https://controller.example.com
+  # Exact hostname in a child tenant
+  cfg steward status acme-corp/web-01
 
-  # Show status as JSON
-  cfg steward status <steward-id> --json`,
+  # Hostname glob — all hosts starting with 'web-' (must quote)
+  cfg steward status 'web-*'
+
+  # Glob in a child tenant (must quote)
+  cfg steward status 'acme-corp/web-*'
+
+  # Attribute filter: all Linux stewards
+  cfg steward status os:linux
+
+  # Exact steward ID
+  cfg steward status id:steward-abc123
+
+  # JSON output keyed by hostname#steward-id
+  cfg steward status 'os:linux tag:prod' --json
+
+  # With explicit controller URL
+  cfg steward status web-01 --url=https://controller.example.com`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardStatus,
 }
 
-// stewardDNACmd shows the DNA snapshot for a single steward.
+// stewardDNACmd shows the DNA snapshot for every steward a selector matches.
 var stewardDNACmd = &cobra.Command{
-	Use:   "dna <id>",
-	Short: "Show DNA snapshot for a steward",
+	Use:   "dna <selector>",
+	Short: "Show DNA snapshot for stewards matching a selector",
 	Long: `Display the most recent DNA snapshot for a steward registered with the controller.
 
 Use --attribute to retrieve a single dotted-path attribute value for scripted probes.
 Use --json to write the raw API response body to stdout.
 
 Examples:
-  # Show full DNA in human-readable form
-  cfg steward dna <steward-id>
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward dna web-01
 
-  # Show DNA as raw JSON
-  cfg steward dna <steward-id> --json
+  # Exact hostname in a child tenant
+  cfg steward dna acme-corp/web-01
+
+  # Hostname glob — all hosts starting with 'db-' (must quote)
+  cfg steward dna 'db-*'
+
+  # All Linux stewards in a child tenant
+  cfg steward dna 'acme-corp/os:linux'
+
+  # Show full DNA as raw JSON
+  cfg steward dna web-01 --json
 
   # Retrieve a single attribute value (exits non-zero if not present)
-  cfg steward dna <steward-id> --attribute os`,
+  cfg steward dna web-01 --attribute os`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardDNA,
 }
@@ -516,104 +999,156 @@ type stewardDNAInfo struct {
 	Attributes   map[string]string `json:"attributes,omitempty"`
 }
 
-func runStewardDNA(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+func runStewardDNA(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	path := "/api/v1/stewards/" + stewardID + "/dna"
-	if stewardDNAAttribute != "" {
-		path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
-	}
-
-	resp, err := client.Get(context.Background(), path)
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward DNA: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		if stewardDNAAttribute != "" {
-			return fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, stewardID)
-		}
-		return fmt.Errorf("steward %s not found or has no DNA snapshot", stewardID)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Single attribute: the handler returns {"value":"<val>"} directly (no data wrapper).
-	if stewardDNAAttribute != "" {
-		var attrResp struct {
-			Value string `json:"value"`
-		}
-		if err := json.Unmarshal(body, &attrResp); err != nil {
-			return fmt.Errorf("failed to parse attribute response: %w", err)
-		}
-		fmt.Println(attrResp.Value)
-		return nil
-	}
-
-	if stewardDNAJSONOutput {
-		_, err := os.Stdout.Write(body)
 		return err
 	}
 
-	var apiResp struct {
-		Data stewardDNAInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			path := "/api/v1/stewards/" + s.ID + "/dna"
+			if stewardDNAAttribute != "" {
+				path += "?attribute=" + url.QueryEscape(stewardDNAAttribute)
+			}
+
+			resp, err := client.Get(ctx, path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward DNA: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
+
+			if resp.StatusCode == http.StatusNotFound {
+				if stewardDNAAttribute != "" {
+					return nil, fmt.Errorf("attribute %q not found for steward %s", stewardDNAAttribute, s.ID)
+				}
+				return nil, fmt.Errorf("steward %s not found or has no DNA snapshot", s.ID)
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
+
+	if stewardDNAJSONOutput {
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	d := apiResp.Data
-	fmt.Printf("Hostname:      %s\n", d.Hostname)
-	fmt.Printf("OS:            %s\n", d.OS)
-	if d.Architecture != "" {
-		fmt.Printf("Architecture:  %s\n", d.Architecture)
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
+
+		// --attribute: print "<key>: <value>" per steward in multi-match,
+		// just "<value>" in single-match (backward compatible).
+		if stewardDNAAttribute != "" {
+			var attrResp struct {
+				Value string `json:"value"`
+			}
+			if err := json.Unmarshal(r.Payload, &attrResp); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %s: failed to parse attribute response: %v\n", key, err)
+				continue
+			}
+			if len(matches) > 1 {
+				fmt.Printf("%s: %s\n", key, attrResp.Value)
+			} else {
+				fmt.Println(attrResp.Value)
+			}
+			continue
+		}
+
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var apiResp struct {
+			Data stewardDNAInfo `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		d := apiResp.Data
+		fmt.Printf("Hostname:      %s\n", d.Hostname)
+		fmt.Printf("OS:            %s\n", d.OS)
+		if d.Architecture != "" {
+			fmt.Printf("Architecture:  %s\n", d.Architecture)
+		}
+		if d.CollectedAt != "" {
+			fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+		}
+		for k, v := range d.Attributes {
+			fmt.Printf("%s=%s\n", k, v)
+		}
 	}
-	if d.CollectedAt != "" {
-		fmt.Printf("CollectedAt:   %s\n", d.CollectedAt)
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	for k, v := range d.Attributes {
-		fmt.Printf("%s=%s\n", k, v)
-	}
-	return nil
+	return overallErr
 }
 
-// stewardModulesCmd lists modules currently loaded by a named steward.
+// stewardModulesCmd lists modules currently loaded by every steward a selector matches.
 var stewardModulesCmd = &cobra.Command{
-	Use:   "modules <id>",
-	Short: "List modules loaded by a steward",
-	Long: `Display the modules currently loaded by a named steward.
+	Use:   "modules <selector>",
+	Short: "List modules loaded by stewards matching a selector",
+	Long: `Display the modules currently loaded by every steward the selector matches.
 
-Retrieves module data from the steward's DNA attributes reported to the controller.
-When the steward does not report module data, a 501 response is returned and the
-command exits 0 with an informational message.
+Retrieves module data from each steward's DNA attributes reported to the controller.
+When a steward does not report module data, a 501 response is returned and the
+entry exits 0 with an informational message.
 
 Examples:
-  # List modules using admin bundle (mTLS auto-discovery)
-  cfg steward modules <steward-id>
+  # Exact hostname (bare token, no quotes needed)
+  cfg steward modules web-01
 
-  # List modules with explicit URL
-  cfg steward modules <steward-id> --url=https://controller.example.com
+  # Exact hostname in a child tenant
+  cfg steward modules acme-corp/web-01
 
-  # Output raw JSON
-  cfg steward modules <steward-id> --json`,
+  # Hostname glob — all hosts starting with 'db-' (must quote)
+  cfg steward modules 'db-*'
+
+  # All Linux stewards
+  cfg steward modules os:linux
+
+  # All stewards in a child tenant, JSON output
+  cfg steward modules 'acme-corp/os:linux' --json
+
+  # With explicit controller URL
+  cfg steward modules web-01 --url=https://controller.example.com`,
 	Args: cobra.ExactArgs(1),
 	RunE: runStewardModules,
 }
@@ -636,148 +1171,237 @@ type stewardStatusInfo struct {
 	} `json:"dna,omitempty"`
 }
 
-func runStewardStatus(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+func runStewardStatus(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID)
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
+		return err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			resp, err := client.Get(ctx, "/api/v1/stewards/"+s.ID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardStatusJSONOutput {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Data stewardStatusInfo `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
 
-	s := apiResp.Data
-	fmt.Printf("ID:               %s\n", s.ID)
-	fmt.Printf("Status:           %s\n", s.Status)
-	fmt.Printf("Connection:       %s\n", s.ConnectionState)
-	lastSeen := ""
-	if !s.LastSeen.IsZero() {
-		lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
-	}
-	fmt.Printf("Last Seen:        %s\n", lastSeen)
-	fmt.Printf("Version:          %s\n", s.Version)
-	if s.DNA != nil {
-		fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
-		fmt.Printf("OS:               %s\n", s.DNA.OS)
-		if s.DNA.Architecture != "" {
-			fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
+
+		var apiResp struct {
+			Data stewardStatusInfo `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse result: %v\n", key, err)
+			continue
+		}
+
+		s := apiResp.Data
+		fmt.Printf("ID:               %s\n", s.ID)
+		fmt.Printf("Status:           %s\n", s.Status)
+		fmt.Printf("Connection:       %s\n", s.ConnectionState)
+		lastSeen := ""
+		if !s.LastSeen.IsZero() {
+			lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+		}
+		fmt.Printf("Last Seen:        %s\n", lastSeen)
+		fmt.Printf("Version:          %s\n", s.Version)
+		if s.DNA != nil {
+			fmt.Printf("Hostname:         %s\n", s.DNA.Hostname)
+			fmt.Printf("OS:               %s\n", s.DNA.OS)
+			if s.DNA.Architecture != "" {
+				fmt.Printf("Architecture:     %s\n", s.DNA.Architecture)
+			}
+		}
+		if s.TenantID != "" {
+			fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+		}
+		if s.Group != "" {
+			fmt.Printf("Group:            %s\n", s.Group)
 		}
 	}
-	if s.TenantID != "" {
-		fmt.Printf("Tenant ID:        %s\n", s.TenantID)
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
 	}
-	if s.Group != "" {
-		fmt.Printf("Group:            %s\n", s.Group)
-	}
-	return nil
+	return overallErr
 }
 
-func runStewardModules(cmd *cobra.Command, args []string) error {
-	stewardID := args[0]
+// modulesNotImplementedPayload is the sentinel returned by the fan-out action
+// when a steward reports 501 (module list not yet available). Mirrors the
+// logsNotImplementedPayload pattern so the output phase can distinguish
+// "not implemented" from a genuine read failure without forcing a non-zero exit.
+var modulesNotImplementedPayload = json.RawMessage(`{"status":"not_implemented"}`)
+
+func runStewardModules(_ *cobra.Command, args []string) error {
+	selector := args[0]
 
 	client, err := getStewardClient()
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
-	resp, err := client.Get(context.Background(), "/api/v1/stewards/"+stewardID+"/modules")
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
 	if err != nil {
-		return fmt.Errorf("failed to fetch steward modules: %w", err)
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
-		}
-	}()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("steward %s not found", stewardID)
+		return err
 	}
 
-	if resp.StatusCode == http.StatusNotImplemented {
-		fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
-		return nil
-	}
+	results, overallErr := fanOutConcurrent(context.Background(), matches,
+		func(ctx context.Context, s StewardInfo) (json.RawMessage, error) {
+			resp, err := client.Get(ctx, "/api/v1/stewards/"+s.ID+"/modules")
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch steward modules: %w", err)
+			}
+			defer func() {
+				if err := resp.Body.Close(); err != nil {
+					fmt.Fprintf(os.Stderr, "failed to close response body: %v\n", err)
+				}
+			}()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
-	}
+			if resp.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("steward %s not found", s.ID)
+			}
+			if resp.StatusCode == http.StatusNotImplemented {
+				return modulesNotImplementedPayload, nil
+			}
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				return nil, fmt.Errorf("API request failed: %s - %s", resp.Status, string(body))
+			}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response: %w", err)
-	}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return body, nil
+		})
 
 	if stewardModulesJSON {
-		_, err := os.Stdout.Write(body)
-		return err
+		entries := keyedOutput(matches, results)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(entries); err != nil {
+			return err
+		}
+		return overallErr
 	}
 
-	var apiResp struct {
-		Data struct {
-			Modules []struct {
-				Name    string `json:"name"`
-				Version string `json:"version,omitempty"`
-			} `json:"modules"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
-	}
+	for _, m := range matches {
+		key := stewardKey(m)
+		r := results[key]
+		if r.Err != nil {
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "error: %s: %v\n", key, r.Err)
+			}
+			continue
+		}
 
-	if len(apiResp.Data.Modules) == 0 {
-		fmt.Println("No modules loaded.")
-		return nil
-	}
+		if len(matches) > 1 {
+			fmt.Printf("=== %s ===\n", key)
+		}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(w, "NAME\tVERSION"); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(w, "----\t-------"); err != nil {
-		return err
-	}
-	for _, m := range apiResp.Data.Modules {
-		if _, err := fmt.Fprintf(w, "%s\t%s\n", m.Name, m.Version); err != nil {
+		var statusCheck struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(r.Payload, &statusCheck) == nil && statusCheck.Status == "not_implemented" {
+			fmt.Println("Module list not available for this steward. Upgrade the steward to a version that reports module DNA attributes.")
+			continue
+		}
+
+		var apiResp struct {
+			Data struct {
+				Modules []struct {
+					Name    string `json:"name"`
+					Version string `json:"version,omitempty"`
+				} `json:"modules"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(r.Payload, &apiResp); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %s: failed to parse response: %v\n", key, err)
+			continue
+		}
+
+		if len(apiResp.Data.Modules) == 0 {
+			fmt.Println("No modules loaded.")
+			continue
+		}
+
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "NAME\tVERSION"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "----\t-------"); err != nil {
+			return err
+		}
+		for _, mod := range apiResp.Data.Modules {
+			if _, err := fmt.Fprintf(w, "%s\t%s\n", mod.Name, mod.Version); err != nil {
+				return err
+			}
+		}
+		if err := w.Flush(); err != nil {
 			return err
 		}
 	}
-	return w.Flush()
+
+	if overallErr != nil && len(matches) == 1 {
+		for _, r := range results {
+			if r.Err != nil {
+				return r.Err
+			}
+		}
+	}
+	return overallErr
 }
 
 func runStewardList(cmd *cobra.Command, args []string) error {
@@ -786,6 +1410,36 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
+	// Selector path: resolve matching stewards via POST /api/v1/fleet/resolve.
+	if len(args) > 0 {
+		matches, err := resolveOrFailFast(context.Background(), client, args[0])
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(w, "ID\tSTATUS\tVERSION\tLAST SEEN\tHOSTNAME"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "--\t------\t-------\t---------\t--------"); err != nil {
+			return err
+		}
+		for _, s := range matches {
+			hostname := ""
+			if s.DNA != nil {
+				hostname = s.DNA.Hostname
+			}
+			lastSeen := ""
+			if !s.LastSeen.IsZero() {
+				lastSeen = s.LastSeen.Format("2006-01-02 15:04:05")
+			}
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.ID, s.Status, s.Version, lastSeen, hostname); err != nil {
+				return err
+			}
+		}
+		return w.Flush()
+	}
+
+	// No-arg path: unchanged GET /api/v1/stewards behavior (backward compatible).
 	resp, err := client.Get(context.Background(), "/api/v1/stewards")
 	if err != nil {
 		return fmt.Errorf("failed to fetch stewards: %w", err)
@@ -810,6 +1464,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 
 	if len(apiResp.Data) == 0 {
 		fmt.Println("No stewards registered.")
+		printPendingRegistrationCount(client)
 		return nil
 	}
 
@@ -833,7 +1488,26 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	printPendingRegistrationCount(client)
+	return nil
+}
+
+// printPendingRegistrationCount appends a trailing pending-count line to the
+// default `cfg steward list` output so a queued steward is distinguishable from
+// one that never contacted the controller (Issue #3786). Best-effort: a caller
+// without the registration:list-pending permission gets a 403 here, which is
+// silently omitted rather than failing the whole command. A zero count is also
+// omitted — the line exists to surface a backlog, not to announce its absence.
+func printPendingRegistrationCount(client *APIClient) {
+	pending, status, err := client.ListPendingRegistrationsWithHTTPStatus(context.Background())
+	if err != nil || status != http.StatusOK || len(pending) == 0 {
+		return
+	}
+	fmt.Printf("\n%d pending registration(s) — cfg registration pending\n", len(pending))
 }
 
 // ---------------------------------------------------------------------------
@@ -844,7 +1518,7 @@ func runStewardList(cmd *cobra.Command, args []string) error {
 type commandSignature struct {
 	Algorithm string `json:"algorithm"`
 	Value     string `json:"value"`      // base64-encoded raw signature bytes
-	PublicKey string `json:"public_key"` // cert PEM from the operator bundle
+	PublicKey string `json:"public_key"` // cert PEM from the payload-signing credential
 }
 
 // runRecord mirrors the fields returned by GET /api/v1/runs/{run_id}.
@@ -877,6 +1551,22 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	var matches []StewardInfo
+	if stewardRunTarget != "" {
+		matches, err = resolveOrFailFast(context.Background(), client, stewardRunTarget)
+		if err != nil {
+			return err
+		}
+		if err := confirmMultiHost(matches, stewardYes); err != nil {
+			return err
+		}
+	}
+
 	reqBody := map[string]interface{}{
 		"target":         stewardRunTarget,
 		"script_id":      stewardRunScript,
@@ -888,11 +1578,6 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/script", bytes.NewReader(bodyJSON))
@@ -917,9 +1602,13 @@ func runRunScript(_ *cobra.Command, _ []string) error {
 
 	runID := apiResp.Data.RunID
 
+	if stewardRunScriptJSONOutput && len(matches) > 0 {
+		return emitKeyedDispatchOutput(matches, map[string]interface{}{"run_id": runID})
+	}
+
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)
-		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout)
+		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout, os.Stdout)
 	}
 
 	fmt.Println(runID)
@@ -936,12 +1625,43 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	sig, err := signCommandContent(content)
+	params, err := parseRunParams(stewardRunParams)
 	if err != nil {
 		return err
 	}
 
-	params, err := parseRunParams(stewardRunParams)
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	var matches []StewardInfo
+	if stewardRunTarget != "" {
+		matches, err = resolveOrFailFast(context.Background(), client, stewardRunTarget)
+		if err != nil {
+			return err
+		}
+		if err := confirmMultiHost(matches, stewardYes); err != nil {
+			return err
+		}
+	}
+
+	// The operator signature binds an explicit, resolved target-ID list (Issue #3694).
+	// An empty --target means "all stewards" server-side, so resolve "all" here too;
+	// otherwise reuse the resolution already done above for the confirm gate.
+	envelopeMatches := matches
+	if stewardRunTarget == "" {
+		envelopeMatches, err = resolveOrFailFast(context.Background(), client, "all")
+		if err != nil {
+			return err
+		}
+	}
+	targetIDs := make([]string, len(envelopeMatches))
+	for i, m := range envelopeMatches {
+		targetIDs[i] = m.ID
+	}
+
+	sig, envelope, err := buildAndSignEnvelope(content, stewardRunShell, targetIDs)
 	if err != nil {
 		return err
 	}
@@ -953,16 +1673,14 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 		"params":       params,
 		"skip_offline": stewardRunSkipOffline,
 		"signature":    sig,
+		"targets":      envelope.Targets,
+		"nonce":        envelope.Nonce,
+		"expires_at":   envelope.ExpiresAt.Format(time.RFC3339),
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
@@ -987,9 +1705,13 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 
 	runID := apiResp.Data.RunID
 
+	if stewardRunCommandJSONOutput && len(matches) > 0 {
+		return emitKeyedDispatchOutput(matches, map[string]interface{}{"run_id": runID})
+	}
+
 	if stewardRunWait {
 		fmt.Printf("Run ID: %s\n", runID)
-		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout)
+		return waitForRun(context.Background(), client, runID, stewardRunWaitTimeout, os.Stdout)
 	}
 
 	fmt.Println(runID)
@@ -997,7 +1719,7 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 }
 
 // ---------------------------------------------------------------------------
-// exec (single-steward ad-hoc run)
+// exec (selector-based ad-hoc run)
 // ---------------------------------------------------------------------------
 
 // execCLIOutputCap is the maximum bytes of job output the CLI displays.
@@ -1005,7 +1727,7 @@ func runRunCommand(_ *cobra.Command, args []string) error {
 const execCLIOutputCap = 64 * 1024
 
 func runRunCommandSingle(_ *cobra.Command, args []string) error {
-	stewardID := args[0]
+	selector := args[0]
 
 	if stewardExecCommand == "" {
 		return fmt.Errorf("--command is required")
@@ -1019,31 +1741,51 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	sig, err := signCommandContent(content)
-	if err != nil {
-		return err
-	}
-
 	timeout := stewardExecTimeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 
+	client, err := getStewardClient()
+	if err != nil {
+		return fmt.Errorf("failed to create API client: %w", err)
+	}
+
+	// Resolve selector to determine match count for the confirm gate.
+	// exec is a mutating verb (A4): confirmMultiHost blocks when N > 1 and
+	// --yes is absent.
+	matches, err := resolveOrFailFast(context.Background(), client, selector)
+	if err != nil {
+		return err
+	}
+	if err := confirmMultiHost(matches, stewardYes); err != nil {
+		return err
+	}
+
+	// The operator signature binds the explicit, already-resolved target-ID list
+	// (Issue #3694) — reusing `matches` from the confirm-gate resolution above.
+	targetIDs := make([]string, len(matches))
+	for i, m := range matches {
+		targetIDs[i] = m.ID
+	}
+	sig, envelope, err := buildAndSignEnvelope(content, stewardExecShell, targetIDs)
+	if err != nil {
+		return err
+	}
+
 	reqBody := map[string]interface{}{
-		"target":    "id:" + stewardID,
-		"content":   base64.StdEncoding.EncodeToString(content),
-		"shell":     stewardExecShell,
-		"signature": sig,
+		"target":     selector,
+		"content":    base64.StdEncoding.EncodeToString(content),
+		"shell":      stewardExecShell,
+		"signature":  sig,
+		"targets":    envelope.Targets,
+		"nonce":      envelope.Nonce,
+		"expires_at": envelope.ExpiresAt.Format(time.RFC3339),
 	}
 
 	bodyJSON, err := json.Marshal(reqBody)
 	if err != nil {
 		return fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	client, err := getStewardClient()
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
 	}
 
 	resp, err := client.doRequest(context.Background(), http.MethodPost, "/api/v1/runs/command", bytes.NewReader(bodyJSON))
@@ -1067,18 +1809,28 @@ func runRunCommandSingle(_ *cobra.Command, args []string) error {
 	}
 
 	runID := apiResp.Data.RunID
-	fmt.Printf("Run ID: %s\n", runID)
+	// In --json mode, route progress text to stderr so stdout carries only
+	// the keyed JSON payload.
+	progressW := io.Writer(os.Stdout)
+	if stewardExecJSONOutput {
+		progressW = os.Stderr
+	}
+	if _, err := fmt.Fprintf(progressW, "Run ID: %s\n", runID); err != nil {
+		return fmt.Errorf("failed to write progress: %w", err)
+	}
 
-	if err := waitForRun(context.Background(), client, runID, timeout); err != nil {
+	if err := waitForRun(context.Background(), client, runID, timeout, progressW); err != nil {
 		return err
 	}
 
-	return fetchAndDisplayExecOutput(client, runID, stewardID)
+	return fetchAndDisplayExecOutput(client, runID, matches)
 }
 
-// fetchAndDisplayExecOutput retrieves job records for runID and prints the output
-// for the job targeting stewardID. Applies the 64 KB CLI display cap.
-func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error {
+// fetchAndDisplayExecOutput retrieves job records for runID and prints output
+// for every steward in matches. Each steward gets a host-prefixed block in
+// human mode; --json produces a keyed-by-steward array (story 4 schema).
+// Applies the 64 KB CLI display cap per steward in human mode.
+func fetchAndDisplayExecOutput(client *APIClient, runID string, matches []StewardInfo) error {
 	resp, err := client.Get(context.Background(), "/api/v1/runs/"+runID+"/jobs")
 	if err != nil {
 		return fmt.Errorf("failed to fetch job output: %w", err)
@@ -1097,29 +1849,62 @@ func fetchAndDisplayExecOutput(client *APIClient, runID, stewardID string) error
 		return fmt.Errorf("failed to parse job results: %w", err)
 	}
 
-	if stewardExecJSONOutput {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(apiResp.Data)
+	// Index returned jobs by device ID for O(1) lookup when building per-steward output.
+	jobByDevice := make(map[string]runJobRecord, len(apiResp.Data))
+	for _, job := range apiResp.Data {
+		jobByDevice[job.DeviceID] = job
 	}
 
-	for _, job := range apiResp.Data {
-		if job.DeviceID != stewardID {
+	if stewardExecJSONOutput {
+		// Build keyed-by-steward output using story 4's keyedOutput helper.
+		perStewardResult := make(map[string]fanOutResult, len(matches))
+		for _, m := range matches {
+			key := stewardKey(m)
+			job, ok := jobByDevice[m.ID]
+			if !ok {
+				perStewardResult[key] = fanOutResult{
+					Err: fmt.Errorf("no job record returned for steward %s", m.ID),
+				}
+				continue
+			}
+			payload, merr := json.Marshal(map[string]interface{}{
+				"exit_code": job.ExitCode,
+				"output":    job.Output,
+				"status":    job.Status,
+			})
+			if merr != nil {
+				return fmt.Errorf("failed to marshal job output: %w", merr)
+			}
+			perStewardResult[key] = fanOutResult{
+				Success: job.Status == "completed",
+				Payload: payload,
+			}
+		}
+		entries := keyedOutput(matches, perStewardResult)
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(entries)
+	}
+
+	// Human output: one host-prefixed block per matched steward, in match order.
+	for _, m := range matches {
+		key := stewardKey(m)
+		job, ok := jobByDevice[m.ID]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "warning: no job record returned for %s\n", key)
 			continue
 		}
 		output := job.Output
 		if len(output) > execCLIOutputCap {
-			fmt.Fprintf(os.Stderr, "warning: output truncated at 64 KB\n")
+			fmt.Fprintf(os.Stderr, "warning: output for %s truncated at 64 KB\n", key)
 			output = output[:execCLIOutputCap]
 		}
+		fmt.Printf("=== %s ===\n", key)
 		fmt.Printf("Exit code: %d\n", job.ExitCode)
 		if output != "" {
 			fmt.Print(output)
 		}
-		return nil
 	}
-
-	fmt.Println("No output returned for steward", stewardID)
 	return nil
 }
 
@@ -1274,30 +2059,34 @@ func readCommandContent(arg string) ([]byte, error) {
 	return []byte(arg), nil
 }
 
-// signCommandContent locates the operator's admin bundle, extracts its private
-// key, and signs content. Returns an error if no bundle or no private key is found.
+// signCommandContent signs content with the zero-custody CSR-issued payload-signing
+// credential (Issue #3696) — the keypair `cfg credential request-signing-cert`
+// generates locally and never transmits, distinct from the admin bundle used for mTLS
+// transport authentication. The controller never holds this private key at any point:
+// it signed only the public half at issuance (features/controller/api/handlers_signing_credential.go).
 func signCommandContent(content []byte) (*commandSignature, error) {
-	bundleEnvVal, _ := os.LookupEnv("CFGMS_ADMIN_BUNDLE")
-	bundleFilePath, err := findBundlePath(bundleEnvVal)
+	credStore, err := newCredentialStore()
 	if err != nil {
-		return nil, fmt.Errorf("bundle resolution failed: %w", err)
-	}
-	if bundleFilePath == "" {
-		return nil, fmt.Errorf("no admin bundle found: run-command requires a bundle with a private key for signing; use --bundle or set CFGMS_ADMIN_BUNDLE")
+		return nil, fmt.Errorf("credential store unavailable: %w", err)
 	}
 
-	b, err := bundle.Read(bundleFilePath)
+	keyPEM, err := credStore.Load(context.Background(), signingCredentialName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bundle at %s: %w", bundleFilePath, err)
+		return nil, fmt.Errorf("no payload-signing credential found: run 'cfg credential request-signing-cert' first: %w", err)
 	}
 
-	if b.KeyPEM == "" {
-		return nil, fmt.Errorf("bundle at %s has no private key: run-command requires signing capability", bundleFilePath)
+	privKey, err := parsePrivKeyFromPEM(string(keyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse payload-signing credential private key: %w", err)
 	}
 
-	privKey, err := parsePrivKeyFromPEM(b.KeyPEM)
+	certPath, err := signingCertPath()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse bundle private key: %w", err)
+		return nil, err
+	}
+	certPEM, err := os.ReadFile(certPath) // #nosec G304 -- fixed default location or an operator-set CFGMS_SIGNING_CERT path, not user/network input
+	if err != nil {
+		return nil, fmt.Errorf("no payload-signing certificate found at %s: run 'cfg credential request-signing-cert' first: %w", certPath, err)
 	}
 
 	var algorithm string
@@ -1307,7 +2096,7 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	case *ecdsa.PrivateKey:
 		algorithm = "ecdsa-sha256"
 	default:
-		return nil, fmt.Errorf("unsupported key type %T in bundle (expected RSA or ECDSA)", privKey)
+		return nil, fmt.Errorf("unsupported key type %T in payload-signing credential (expected RSA or ECDSA)", privKey)
 	}
 
 	digest, err := hashContent(content, algorithm)
@@ -1323,8 +2112,66 @@ func signCommandContent(content []byte) (*commandSignature, error) {
 	return &commandSignature{
 		Algorithm: algorithm,
 		Value:     base64.StdEncoding.EncodeToString(sigBytes),
-		PublicKey: b.CertPEM,
+		PublicKey: string(certPEM),
 	}, nil
+}
+
+// signingCertPath resolves the payload-signing certificate location: the
+// CFGMS_SIGNING_CERT environment variable when set to a non-empty value, otherwise the
+// default location 'cfg credential request-signing-cert' writes to when run without
+// --cert-out (<user config dir>/cfgms/signing-cert.pem).
+func signingCertPath() (string, error) {
+	if p, ok := os.LookupEnv("CFGMS_SIGNING_CERT"); ok && p != "" {
+		return p, nil
+	}
+	configDir, err := userConfigDirFn()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine user config directory: %w", err)
+	}
+	return filepath.Join(configDir, "cfgms", "signing-cert.pem"), nil
+}
+
+// generateOperatorNonce returns a fresh operatorpayload.Envelope nonce: at least
+// operatorNonceBytes of crypto/rand, hex-encoded. Never derived from a counter,
+// timestamp, or UUID (Issue #3694 AC) — those are all predictable or reused across
+// process restarts, defeating the replay protection a nonce exists to provide.
+func generateOperatorNonce() (string, error) {
+	buf := make([]byte, operatorNonceBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// buildAndSignEnvelope resolves the fields of an operatorpayload.Envelope binding
+// content, shell, and the caller's already-resolved target steward IDs to a fresh
+// nonce and a bounded expiry, then signs its canonical bytes with the operator's
+// zero-custody payload-signing credential (Issue #3694; credential switched from the
+// admin bundle to the CSR-issued key by Issue #3696). Returns the signature to embed
+// in the request body alongside the returned envelope, whose Targets/Nonce/ExpiresAt
+// the caller forwards as separate request fields so the controller and steward can
+// independently verify against the exact bytes that were signed.
+func buildAndSignEnvelope(content []byte, shell string, targets []string) (*commandSignature, operatorpayload.Envelope, error) {
+	nonce, err := generateOperatorNonce()
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, err
+	}
+	envelope := operatorpayload.Envelope{
+		Content:   content,
+		Shell:     shell,
+		Targets:   targets,
+		Nonce:     nonce,
+		ExpiresAt: time.Now().Add(operatorEnvelopeExpiry).UTC(),
+	}
+	canonicalBytes, err := operatorpayload.CanonicalBytes(envelope)
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, fmt.Errorf("build operator envelope: %w", err)
+	}
+	sig, err := signCommandContent(canonicalBytes)
+	if err != nil {
+		return nil, operatorpayload.Envelope{}, err
+	}
+	return sig, envelope, nil
 }
 
 // parsePrivKeyFromPEM decodes a PEM block and parses a private key in any of
@@ -1378,8 +2225,10 @@ func fetchRunRecord(ctx context.Context, client *APIClient, runID string) (*runR
 }
 
 // waitForRun polls GET /api/v1/runs/{runID} every runWaitPollInterval until the
-// run reaches a terminal state or the timeout elapses.
-func waitForRun(ctx context.Context, client *APIClient, runID string, timeout time.Duration) error {
+// run reaches a terminal state or the timeout elapses. Progress text is written
+// to progressW so callers can route it to stdout or stderr without mutating
+// global state.
+func waitForRun(ctx context.Context, client *APIClient, runID string, timeout time.Duration, progressW io.Writer) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
@@ -1389,8 +2238,12 @@ func waitForRun(ctx context.Context, client *APIClient, runID string, timeout ti
 		}
 
 		if isRunTerminal(run.Status) {
-			fmt.Printf("Status: %s\n", run.Status)
-			fmt.Printf("Jobs: %d total, %d completed, %d failed\n", run.JobCount, run.CompletedJobs, run.FailedJobs)
+			if _, err := fmt.Fprintf(progressW, "Status: %s\n", run.Status); err != nil {
+				return fmt.Errorf("failed to write progress: %w", err)
+			}
+			if _, err := fmt.Fprintf(progressW, "Jobs: %d total, %d completed, %d failed\n", run.JobCount, run.CompletedJobs, run.FailedJobs); err != nil {
+				return fmt.Errorf("failed to write progress: %w", err)
+			}
 			return nil
 		}
 
@@ -1399,7 +2252,9 @@ func waitForRun(ctx context.Context, client *APIClient, runID string, timeout ti
 				timeout, runID, run.Status, run.CompletedJobs, run.JobCount)
 		}
 
-		fmt.Printf("Waiting... status: %s (%d/%d completed)\n", run.Status, run.CompletedJobs, run.JobCount)
+		if _, err := fmt.Fprintf(progressW, "Waiting... status: %s (%d/%d completed)\n", run.Status, run.CompletedJobs, run.JobCount); err != nil {
+			return fmt.Errorf("failed to write progress: %w", err)
+		}
 
 		select {
 		case <-time.After(runWaitPollInterval):

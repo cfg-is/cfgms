@@ -8,12 +8,14 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	dpTypes "github.com/cfgis/cfgms/pkg/dataplane/types"
@@ -24,26 +26,57 @@ import (
 // configReturnSession overrides ReceiveConfig to return a real signed-config payload.
 type configReturnSession struct {
 	testDataPlaneSession
-	data    []byte
-	version string
+	transfer *dpTypes.ConfigTransfer
 }
 
 func (s *configReturnSession) ReceiveConfig(_ context.Context) (*dpTypes.ConfigTransfer, error) {
-	return &dpTypes.ConfigTransfer{Data: s.data, Version: s.version}, nil
+	return s.transfer, nil
 }
 
-// buildMinimalSignedConfigBytes returns a marshalled SignedConfig suitable for
-// passing through syncConfigNow without a signature verifier.
-func buildMinimalSignedConfigBytes(t *testing.T, stewardID string) []byte {
+// marshalSignedConfig signs the protobuf configuration through the production
+// helper and returns the payload that the controller signs again at transport.
+func marshalSignedConfig(
+	t *testing.T,
+	signer signature.Signer,
+	config *controllerpb.StewardConfig,
+) []byte {
 	t.Helper()
-	protoConfig := &controllerpb.SignedConfig{
-		Config: &controllerpb.StewardConfig{
-			Steward: &controllerpb.StewardSettings{Id: stewardID},
-		},
-	}
+	protoConfig, err := signature.SignProtoConfig(signer, config)
+	require.NoError(t, err)
 	data, err := proto.Marshal(protoConfig)
 	require.NoError(t, err)
 	return data
+}
+
+func buildMinimalSignedConfigBytes(
+	t *testing.T,
+	signer signature.Signer,
+	stewardID string,
+) []byte {
+	t.Helper()
+	return marshalSignedConfig(t, signer, &controllerpb.StewardConfig{
+		Steward: &controllerpb.StewardSettings{Id: stewardID},
+	})
+}
+
+// buildSignedConfigTransfer exercises the same detached-signature format used
+// by the production controller transport.
+func buildSignedConfigTransfer(
+	t *testing.T,
+	signer signature.Signer,
+	data []byte,
+	version string,
+) *dpTypes.ConfigTransfer {
+	t.Helper()
+	sig, err := signer.Sign(data)
+	require.NoError(t, err)
+	sigJSON, err := json.Marshal(sig)
+	require.NoError(t, err)
+	return &dpTypes.ConfigTransfer{
+		Data:      data,
+		Version:   version,
+		Signature: sigJSON,
+	}
 }
 
 // TestSyncConfigNow_AppliesConfigAndPublishesStatus verifies that syncConfigNow
@@ -52,12 +85,12 @@ func buildMinimalSignedConfigBytes(t *testing.T, stewardID string) []byte {
 // deferred config to a reconnecting steward (Issue #1720).
 func TestSyncConfigNow_AppliesConfigAndPublishesStatus(t *testing.T) {
 	const stewardID = "steward-sync-on-connect"
-	configData := buildMinimalSignedConfigBytes(t, stewardID)
+	_, signer, certPEM := newSigningCA(t)
+	configData := buildMinimalSignedConfigBytes(t, signer, stewardID)
 
 	sess := &configReturnSession{
 		testDataPlaneSession: *newTestSession(),
-		data:                 configData,
-		version:              "v-deferred-1",
+		transfer:             buildSignedConfigTransfer(t, signer, configData, "v-deferred-1"),
 	}
 
 	exec, err := execution.NewExecutor(&execution.ExecutorConfig{Logger: newTestLogger(t)})
@@ -65,6 +98,7 @@ func TestSyncConfigNow_AppliesConfigAndPublishesStatus(t *testing.T) {
 
 	capture := newEventCapture()
 	c := newMinimalClientWithCP(t, sess, exec, capture, stewardID, "tenant-sync-test")
+	c.signingCertPEMs = []string{certPEM}
 
 	err = c.syncConfigNow(context.Background(), "on-connect", nil)
 	require.NoError(t, err, "syncConfigNow must succeed for a valid stored config")
@@ -95,12 +129,12 @@ func TestSyncConfigNow_AppliesConfigAndPublishesStatus(t *testing.T) {
 // InitializeConfigExecutor in an unexpected ordering.
 func TestSyncConfigNow_NilExecutor_ReturnsError(t *testing.T) {
 	const stewardID = "steward-nil-exec"
-	configData := buildMinimalSignedConfigBytes(t, stewardID)
+	_, signer, certPEM := newSigningCA(t)
+	configData := buildMinimalSignedConfigBytes(t, signer, stewardID)
 
 	sess := &configReturnSession{
 		testDataPlaneSession: *newTestSession(),
-		data:                 configData,
-		version:              "v-nil-exec",
+		transfer:             buildSignedConfigTransfer(t, signer, configData, "v-nil-exec"),
 	}
 
 	capture := newEventCapture()
@@ -111,6 +145,7 @@ func TestSyncConfigNow_NilExecutor_ReturnsError(t *testing.T) {
 		heartbeatStop:    make(chan struct{}),
 		convergenceStop:  make(chan struct{}),
 		convergeInterval: 30 * time.Minute,
+		signingCertPEMs:  []string{certPEM},
 		logger:           newTestLogger(t),
 	}
 	c.mu.Lock()

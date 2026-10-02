@@ -9,15 +9,38 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/cfgis/cfgms/pkg/version"
 )
 
 const (
+	// linuxLauncherPath is where the launcher binary is installed. The steward's
+	// push-upgrade handler execs "cfgms-launcher swap" at this exact path
+	// (features/steward/client launcherPath()), so a launcher-managed install is
+	// what makes a Linux steward upgradeable via the control plane. It must not change.
+	linuxLauncherPath = "/usr/local/bin/cfgms-launcher"
+	// linuxLauncherRoot is the launcher install root holding versions/ and
+	// state.json. Matches the launcher's defaultRoot() on Linux.
+	linuxLauncherRoot = "/opt/cfgms"
+	// linuxLauncherBinaryName is the launcher binary as shipped in the install
+	// bundle, expected alongside the cfgms-steward binary being installed.
+	linuxLauncherBinaryName = "cfgms-steward-launcher"
+	// linuxInstallPath is the legacy bare-steward binary path. Retained only so
+	// Uninstall(purge) also cleans up pre-launcher (direct-service) installs.
 	linuxInstallPath = "/usr/local/bin/cfgms-steward"
 	linuxSystemdUnit = "/etc/systemd/system/cfgms-steward.service"
 	linuxServiceName = "cfgms-steward"
 	linuxCACertPath  = "/etc/cfgms/controller-ca.crt"
+	// linuxLogDir is the platform-conventional log directory for the CFGMS steward.
+	// CFGMS_INSTALL_PREFIX is respected for test isolation (see platformLogDir).
+	linuxLogDir = "/var/log/cfgms"
+	// linuxServiceUser is the OS user that owns the log directory, matching the
+	// user created by tier1-bootstrap.sh.
+	linuxServiceUser = "cfgms"
 )
 
 // platformCACertPath returns the path where the CA cert is written, respecting
@@ -27,6 +50,50 @@ func platformCACertPath() string {
 		return filepath.Join(prefix, linuxCACertPath)
 	}
 	return linuxCACertPath
+}
+
+// platformLogDir returns the steward log directory, respecting CFGMS_INSTALL_PREFIX
+// for test isolation.
+func platformLogDir() string {
+	if prefix := os.Getenv("CFGMS_INSTALL_PREFIX"); prefix != "" {
+		return filepath.Join(prefix, linuxLogDir)
+	}
+	return linuxLogDir
+}
+
+// serviceUserIDs looks up the OS user by name and returns its uid and gid.
+func serviceUserIDs(name string) (uid, gid int, err error) {
+	u, err := user.Lookup(name)
+	if err != nil {
+		return 0, 0, fmt.Errorf("service user %q not found: %w", name, err)
+	}
+	uid64, err := strconv.ParseInt(u.Uid, 10, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid uid %q for user %q: %w", u.Uid, name, err)
+	}
+	gid64, err := strconv.ParseInt(u.Gid, 10, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid gid %q for user %q: %w", u.Gid, name, err)
+	}
+	return int(uid64), int(gid64), nil
+}
+
+// createLogDir creates dir with mode 0750 and ownership uid:gid. Idempotent:
+// if the directory already exists the mode and ownership are still applied.
+func createLogDir(dir string, uid, gid int) error {
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return fmt.Errorf("failed to create log directory %s: %w", dir, err)
+	}
+	// Chmod explicitly to enforce 0750 regardless of process umask.
+	// #nosec G302 -- this is a log directory; owner/group traversal is required
+	// while "other" has no access, and log files retain stricter modes.
+	if err := os.Chmod(dir, 0750); err != nil {
+		return fmt.Errorf("failed to set permissions on log directory %s: %w", dir, err)
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		return fmt.Errorf("failed to set ownership of log directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func newManager(binaryPath string) Manager {
@@ -45,11 +112,12 @@ func (m *linuxManager) IsElevated() bool {
 // enables/starts the service. Running Install on an already-installed service
 // stops it first, replaces the binary, then restarts.
 //
+// When controllerURL is non-empty, it is embedded in ExecStart as --controller-url.
 // If caCertPEM is non-empty, the CA cert is written to the platform-standard
 // path before the service is registered. When expectedFingerprint is also
 // non-empty, fingerprint verification runs first — a mismatch returns an error
 // without any disk writes or service changes.
-func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) error {
+func (m *linuxManager) Install(token, controllerURL, caCertPEM, expectedFingerprint string) error {
 	if err := validateToken(token); err != nil {
 		return err
 	}
@@ -67,9 +135,48 @@ func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) err
 	// Stop existing service if running (idempotent: ignore failure if not running).
 	_ = exec.Command("systemctl", "stop", linuxServiceName).Run()
 
-	fmt.Printf("Installing to %s...\n", linuxInstallPath)
-	if err := copyBinary(m.binaryPath, linuxInstallPath); err != nil {
-		return fmt.Errorf("failed to copy binary: %w", err)
+	// A launcher-managed install (steward supervised by cfgms-launcher, staged
+	// under /opt/cfgms/versions/) is what makes the steward upgradeable via the
+	// control plane: the push-upgrade handler execs "cfgms-launcher swap" and
+	// requires the launcher at linuxLauncherPath. A bare direct-service steward
+	// cannot be push-upgraded. The launcher binary ships alongside the steward
+	// binary in the install bundle.
+	launcherSrc := filepath.Join(filepath.Dir(m.binaryPath), linuxLauncherBinaryName)
+	if _, err := os.Stat(launcherSrc); err != nil {
+		return fmt.Errorf("launcher binary %q not found next to the steward binary: %w\n"+
+			"  a launcher-managed install requires %s in the install bundle",
+			launcherSrc, err, linuxLauncherBinaryName)
+	}
+
+	ver := version.Short()
+
+	fmt.Printf("Installing launcher to %s...\n", linuxLauncherPath)
+	if err := copyBinary(launcherSrc, linuxLauncherPath); err != nil {
+		return fmt.Errorf("failed to install launcher: %w", err)
+	}
+
+	// Bootstrap the launcher layout: stage the steward binary as the current
+	// version under /opt/cfgms/versions/<ver>/ and record it in state.json. This
+	// reuses the launcher's own "swap" surface, so the on-disk layout is identical
+	// to what a subsequent push-upgrade produces.
+	fmt.Printf("Staging steward %s under %s...\n", ver, linuxLauncherRoot)
+	// #nosec G204 -- launcher path/root are fixed constants, version is parsed
+	// semver, binary path is manager-owned, and no shell interprets arguments.
+	if out, err := exec.Command(linuxLauncherPath, "swap", "--root", linuxLauncherRoot, ver, m.binaryPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to stage steward binary via launcher: %w\n%s", err, out)
+	}
+
+	// Create the log directory before registering the service. The systemd unit
+	// sets CFGMS_LOG_DIR=/var/log/cfgms; the directory must exist when the service
+	// starts or the steward falls back to the ephemeral /tmp/cfgms path (Issue #2483).
+	uid, gid, err := serviceUserIDs(linuxServiceUser)
+	if err != nil {
+		return fmt.Errorf("service user lookup: %w — create the %q OS user before running install", err, linuxServiceUser)
+	}
+	logDir := platformLogDir()
+	fmt.Printf("Creating log directory %s...\n", logDir)
+	if err := createLogDir(logDir, uid, gid); err != nil {
+		return fmt.Errorf("failed to prepare log directory: %w", err)
 	}
 
 	// Write CA cert before registering the service so the service finds it on first start.
@@ -81,7 +188,7 @@ func (m *linuxManager) Install(token, caCertPEM, expectedFingerprint string) err
 	}
 
 	fmt.Println("Writing systemd unit...")
-	unit := generateSystemdUnit(token)
+	unit := generateSystemdUnit(token, controllerURL)
 	if err := writeSystemdUnit(linuxSystemdUnit, []byte(unit)); err != nil {
 		return fmt.Errorf("failed to write systemd unit %s: %w", linuxSystemdUnit, err)
 	}
@@ -129,6 +236,20 @@ func (m *linuxManager) Uninstall(purge bool) error {
 	}
 
 	if purge {
+		// Launcher binary + layout (versions/, state.json) for launcher-managed installs.
+		if _, err := os.Stat(linuxLauncherPath); err == nil {
+			fmt.Printf("Removing %s...\n", linuxLauncherPath)
+			if err := os.Remove(linuxLauncherPath); err != nil {
+				return fmt.Errorf("failed to remove launcher: %w", err)
+			}
+		}
+		if _, err := os.Stat(linuxLauncherRoot); err == nil {
+			fmt.Printf("Removing %s...\n", linuxLauncherRoot)
+			if err := os.RemoveAll(linuxLauncherRoot); err != nil {
+				return fmt.Errorf("failed to remove launcher root: %w", err)
+			}
+		}
+		// Legacy bare-steward binary (pre-launcher direct-service installs).
 		if _, err := os.Stat(linuxInstallPath); err == nil {
 			fmt.Printf("Removing %s...\n", linuxInstallPath)
 			if err := os.Remove(linuxInstallPath); err != nil {
@@ -146,7 +267,7 @@ func (m *linuxManager) Uninstall(purge bool) error {
 func (m *linuxManager) Status() (*ServiceStatus, error) {
 	status := &ServiceStatus{
 		ServiceName: linuxServiceName,
-		InstallPath: linuxInstallPath,
+		InstallPath: linuxLauncherPath,
 	}
 
 	// Service is installed if the unit file exists.
@@ -171,13 +292,23 @@ func writeSystemdUnit(path string, content []byte) error {
 }
 
 // generateSystemdUnit returns a systemd unit that runs cfgms-steward with the
-// given registration token. Restart=always and RestartSec=10 ensure the steward
-// recovers from transient failures.
+// given registration token. When controllerURL is non-empty, --controller-url is
+// appended to ExecStart so the steward connects to the specified controller.
+// Restart=always and RestartSec=10 ensure the steward recovers from transient failures.
 //
 // Security note: the token appears in the unit file (readable by root). This
 // mirrors the behaviour of --regtoken in ps output. The token is a one-time
 // registration credential — after registration the steward uses mTLS certs.
-func generateSystemdUnit(token string) string {
+func generateSystemdUnit(token, controllerURL string) string {
+	// The launcher supervises the steward and forwards --child-args to it. Args
+	// are space-separated (the launcher splits on whitespace); the registration
+	// token is validated to be free of spaces/quotes, so no per-arg quoting is
+	// needed inside the child-args string.
+	childArgs := fmt.Sprintf(`--regtoken %s`, token)
+	if controllerURL != "" {
+		childArgs += fmt.Sprintf(` --controller-url %s`, controllerURL)
+	}
+	execStart := fmt.Sprintf(`%s run --root %s --child-args "%s"`, linuxLauncherPath, linuxLauncherRoot, childArgs)
 	return fmt.Sprintf(`[Unit]
 Description=CFGMS Steward
 Documentation=https://docs.cfg.is/steward
@@ -186,7 +317,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s --regtoken "%s"
+Environment=CFGMS_LOG_DIR=/var/log/cfgms
+Environment=CFGMS_SECURITY_PROFILE=public-beta
+ExecStart=%s
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -195,5 +328,5 @@ SyslogIdentifier=cfgms-steward
 
 [Install]
 WantedBy=multi-user.target
-`, linuxInstallPath, token)
+`, execStart)
 }

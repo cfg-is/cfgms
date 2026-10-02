@@ -5,18 +5,59 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
+// capturingLogEntry holds a single captured log entry (message + key-value pairs).
+type capturingLogEntry struct {
+	Message string
+	Data    []interface{}
+}
+
+// capturingLogger embeds NoopLogger and records every call to Debug/Info/Warn/Error/Fatal
+// so tests can assert that sensitive values are not leaked into logs.
+type capturingLogger struct {
+	logging.NoopLogger
+	mu      sync.Mutex
+	entries map[string][]capturingLogEntry
+}
+
+func newCapturingLogger() *capturingLogger {
+	return &capturingLogger{
+		entries: map[string][]capturingLogEntry{
+			"debug": {}, "info": {}, "warn": {}, "error": {}, "fatal": {},
+		},
+	}
+}
+
+func (l *capturingLogger) capture(level, msg string, kvs []interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries[level] = append(l.entries[level], capturingLogEntry{Message: msg, Data: kvs})
+}
+
+func (l *capturingLogger) Debug(msg string, kvs ...interface{}) { l.capture("debug", msg, kvs) }
+func (l *capturingLogger) Info(msg string, kvs ...interface{})  { l.capture("info", msg, kvs) }
+func (l *capturingLogger) Warn(msg string, kvs ...interface{})  { l.capture("warn", msg, kvs) }
+func (l *capturingLogger) Error(msg string, kvs ...interface{}) { l.capture("error", msg, kvs) }
+func (l *capturingLogger) Fatal(msg string, kvs ...interface{}) { l.capture("fatal", msg, kvs) }
+
+func (l *capturingLogger) GetLogs(level string) []capturingLogEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.entries[level]
+}
+
 func TestProviderRegistry_RegisterProvider(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	// Test registering a new provider
 	mockProvider := &MockProvider{name: "test"}
@@ -30,8 +71,8 @@ func TestProviderRegistry_RegisterProvider(t *testing.T) {
 }
 
 func TestProviderRegistry_GetProvider(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	// Test getting non-existent provider
 	_, err := registry.GetProvider("nonexistent")
@@ -49,8 +90,8 @@ func TestProviderRegistry_GetProvider(t *testing.T) {
 }
 
 func TestProviderRegistry_ListProviders(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	// Should have built-in providers
 	providers := registry.ListProviders()
@@ -70,8 +111,8 @@ func TestProviderRegistry_ListProviders(t *testing.T) {
 }
 
 func TestProviderRegistry_ExecuteOperation(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	// Use a mock provider so the test is build-tag-neutral; the builtin provider
 	// gate is verified by TestDefaultBuildProvidersReturnErrNotImplemented.
@@ -96,8 +137,8 @@ func TestProviderRegistry_ExecuteOperation(t *testing.T) {
 }
 
 func TestProviderRegistry_ExecuteOperation_InvalidProvider(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
 		Provider:  "nonexistent",
@@ -112,8 +153,8 @@ func TestProviderRegistry_ExecuteOperation_InvalidProvider(t *testing.T) {
 }
 
 func TestProviderRegistry_ExecuteOperation_InvalidConfig(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := logging.NewNoopLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	config := &APIConfig{
 		Provider:  "microsoft",
@@ -224,8 +265,8 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 	// The builtin providers return ErrProviderNotImplemented in default builds;
 	// this test exercises the engine's variable-storage path, not the provider stubs.
 	moduleFactory := createTestFactory()
-	logger := pkgtesting.NewMockLogger(true)
-	engine := NewEngine(moduleFactory, logger, nil)
+	logger := logging.NewNoopLogger()
+	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
 
 	const providerName = "test-api-provider"
 	err := engine.providerRegistry.RegisterProvider(providerName, &MockProvider{name: providerName})
@@ -269,8 +310,8 @@ func TestEngine_ExecuteAPIStep_WithProviderRegistry(t *testing.T) {
 // TestProviderNoPayloadLogging verifies that config.Parameters and config.Auth credential
 // values never appear in log output at any level in either build.
 func TestProviderNoPayloadLogging(t *testing.T) {
-	logger := pkgtesting.NewMockLogger(true)
-	registry := NewProviderRegistry(logger)
+	logger := newCapturingLogger()
+	registry := NewProviderRegistry(logger, nil)
 
 	// Register a succeeding mock so the completion-log path is exercised.
 	const providerName = "test-log-provider"

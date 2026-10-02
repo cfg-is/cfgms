@@ -125,3 +125,10 @@ func TestCreateAuditStore_FileDB(t *testing.T) {
 	require.NotNil(t, store)
 	t.Cleanup(func() { _ = store.Close() })
 }
+
+// TestSQLiteProvider_ClusterCapable_False verifies SQLite is not cluster-capable.
+func TestSQLiteProvider_ClusterCapable_False(t *testing.T) {
+	p, err := interfaces.GetStorageProvider("sqlite")
+	require.NoError(t, err)
+	assert.False(t, p.ClusterCapable(), "SQLiteProvider must not be cluster-capable (single-file DB cannot serve as shared state across controller nodes)")
+}

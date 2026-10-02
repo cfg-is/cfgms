@@ -96,6 +96,16 @@ echo ""
 echo "⏱️  Estimated time: 2-5 minutes"
 echo ""
 
+# A push from a linked worktree runs this hook with GIT_DIR pointing at
+# <main>/.git/worktrees/<name>. Left set, every git command in the test suite
+# targets that directory instead of the repo it runs in: one `git init` in a
+# scratch directory re-initialises the MAIN repository as core.bare=true, and
+# tests that stage files write into the worktree's index. Clear git's
+# repository-local variables so make test finds the repo from its working
+# directory, exactly as it does when run by hand.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 # Run make test (fast validation)
 if ! make test; then
     echo ""
@@ -144,7 +154,7 @@ cat > "$HOOKS_DIR/pre-commit" << 'HOOK_EOF'
 #
 
 # Allowed root-level directories
-ALLOWED_DIRS="^(api|cmd|commercial|docs|examples|features|internal|pkg|scripts|templates|test|\.claude|\.devcontainer|\.github)/"
+ALLOWED_DIRS="^(api|cmd|commercial|docs|examples|features|internal|pkg|scripts|templates|test|web|\.claude|\.devcontainer|\.github)/"
 
 # Allowed root-level files (config, docs, build files)
 ALLOWED_FILES="^(\.|CLAUDE|README|CHANGELOG|CONTRIBUTING|CONTRIBUTORS|CODE_OF_CONDUCT|CODEOWNERS|DEVELOPMENT|ARCHITECTURE|LICENSING|QUICK_START|SECURITY|LICENSE|Makefile|Dockerfile|docker-compose|go\.(mod|sum)|buf\.(gen\.)?yaml|staticcheck\.conf|windows-setup\.ps1|\.agent-dispatch\.yaml|codeql-workspace\.yml)"
@@ -189,7 +199,8 @@ if [ $blocked -ne 0 ]; then
     echo -e "$blocked_files"
     echo ""
     echo "Allowed directories: api/ cmd/ commercial/ docs/ examples/ features/"
-    echo "                     internal/ pkg/ scripts/ templates/ test/"
+    echo "                     internal/ pkg/ scripts/ templates/ test/ web/"
+    echo "                     .claude/ .devcontainer/ .github/"
     echo ""
     echo "If these are test artifacts, unstage them:"
     echo "  git reset HEAD <file>"
@@ -200,12 +211,12 @@ if [ $blocked -ne 0 ]; then
 fi
 
 # Log-injection gate — catches CodeQL "Log entries created from user input"
-# at commit time. Only runs on staged .go files under features/**/api/ to
-# keep the pre-commit hook fast.
+# at commit time. Runs on every staged non-test .go file (matches the linter's
+# repo-wide default scope in discoverScope()).
 staged_log_files=()
 while IFS= read -r f; do
     case "$f" in
-        features/*/api/*.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
+        *.go) [[ "$f" == *_test.go ]] || staged_log_files+=("$f") ;;
     esac
 done < <(git diff --cached --name-only --diff-filter=ACMR)
 
@@ -214,6 +225,16 @@ if [ ${#staged_log_files[@]} -gt 0 ]; then
         echo ""
         echo "Wrap each flagged value with logging.SanitizeLogValue(...) before committing,"
         echo "or bypass with --no-verify if you've audited the call site as safe."
+        echo ""
+        exit 1
+    fi
+fi
+
+# Built web output gate (Issue #3043) — real Vite output must never be
+# committed. Only runs when something under web/dist/ is staged.
+if git diff --cached --name-only --diff-filter=ACM -- web/dist | grep -q .; then
+    if ! ./scripts/check-web-dist.sh --staged; then
+        echo "Or bypass with --no-verify if you are deliberately changing the placeholder itself."
         echo ""
         exit 1
     fi
@@ -230,6 +251,7 @@ echo "📋 What These Hooks Do:"
 echo "   Pre-commit:"
 echo "   • Blocks commits with files outside allowed project directories"
 echo "   • Catches test artifacts (tenant data, binaries, log output)"
+echo "   • Catches built web output staged under web/dist/ (Issue #3043)"
 echo ""
 echo "   Pre-push:"
 echo "   • Runs 'make test' before every push"

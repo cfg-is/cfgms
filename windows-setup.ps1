@@ -3,7 +3,13 @@
 
 param(
     [switch]$SkipDocker,
-    [switch]$SkipClaudeCode
+    [switch]$SkipClaudeCode,
+    # Claude Code is exempt from this script's pin-everything rule (Issue
+    # #4473, founder decision 2026-10-01): it ships several releases a week,
+    # so a hand-maintained pin almost always lags what's actually shipping.
+    # Defaults to npm's `stable` dist-tag; pass an exact version to pin one
+    # release (e.g. to hold back a bad release or reproduce a past setup).
+    [string]$ClaudeCodeVersion = 'stable'
 )
 
 Write-Host "=== CFGMS Windows Development Environment Setup ===" -ForegroundColor Cyan
@@ -17,27 +23,230 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# Install Chocolatey if not present
-if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
-    Write-Host "`n=== Installing Chocolatey ===" -ForegroundColor Yellow
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-    # Refresh environment variables
-    $env:ChocolateyInstall = Convert-Path "$((Get-Command choco).Path)\..\.."
-    Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
-    refreshenv
-} else {
-    Write-Host "Chocolatey already installed" -ForegroundColor Green
+# Core development tools, installed via winget (Windows Package Manager,
+# built into Windows 10 1809+/Windows 11) -- never a piped remote script.
+# winget resolves each package through its own signed-manifest catalog and
+# validates the downloaded installer's signature/hash itself before running
+# it, the same trust model this repo's Dockerfile gives apt-get for Linux
+# packages (CLAUDE.md's own banned-pattern list targets exactly the
+# `iex (...).DownloadString(...)` shape this replaces -- Issue #4343). Every
+# package is pinned to an exact version so a bare `winget install` can never
+# silently pick up a newer, unvetted release; refresh these the same way the
+# repo refreshes any other pin (see the `refresh-pins` skill).
+#
+# Refresh-if-stale: verify each version is still published with
+# `winget show --id <ID> --versions` before bumping.
+function Update-SessionPath {
+    # winget-installed tools land on the Machine/User PATH via the installer,
+    # not via a Chocolatey-style shell profile refresh -- re-read both from
+    # the registry so this session sees them without a new shell.
+    $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machine;$user"
 }
 
-# Install core development tools
-Write-Host "`n=== Installing Core Development Tools ===" -ForegroundColor Yellow
-choco install -y golang git make gh nodejs
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: winget (Windows Package Manager) is not available." -ForegroundColor Red
+    Write-Host "It ships with Windows 10 1809+/Windows 11 via the 'App Installer' package." -ForegroundColor Red
+    Write-Host "Install it from the Microsoft Store, then re-run this script." -ForegroundColor Red
+    exit 1
+}
 
-# Refresh environment to pick up new PATHs
-refreshenv
+Write-Host "`n=== Installing Core Development Tools (winget) ===" -ForegroundColor Yellow
+
+$coreTools = @(
+    @{ Name = 'Go';         Id = 'GoLang.Go';       Version = '1.27.1'; Command = 'go' },   # matches .devcontainer/Dockerfile's golang:1.27.1-trixie
+    @{ Name = 'Git';        Id = 'Git.Git';         Version = '2.47.1'; Command = 'git' },
+    @{ Name = 'Make';       Id = 'GnuWin32.Make';   Version = '3.81';   Command = 'make' },
+    @{ Name = 'GitHub CLI'; Id = 'GitHub.cli';      Version = '2.63.2'; Command = 'gh' },
+    @{ Name = 'Node.js';    Id = 'OpenJS.NodeJS';   Version = '26.0.0'; Command = 'node' }    # major must track web/.nvmrc
+)
+
+foreach ($tool in $coreTools) {
+    if (Get-Command $tool.Command -ErrorAction SilentlyContinue) {
+        Write-Host "  [OK] $($tool.Name) already on PATH — skipping" -ForegroundColor Green
+        continue
+    }
+    Write-Host "  installing $($tool.Name) $($tool.Version) ..."
+    & winget install --id $tool.Id --version $tool.Version --exact --silent `
+        --accept-package-agreements --accept-source-agreements | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [--] $($tool.Name): winget install failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+    } else {
+        Write-Host "  [OK] $($tool.Name)" -ForegroundColor Green
+    }
+}
+
+Update-SessionPath
+
+# =====================================================================
+# CFGMS validation tooling (lint + security scanners)
+#
+# A Windows dev box runs the same gates as CI (`make test-commit`,
+# `make security-scan`), so it needs the same tools at the same versions.
+# Every version below is pinned to match
+# .github/workflows/dependency-pin-check.yml and .devcontainer/Dockerfile
+# — if you bump one, bump all three or the pin-check workflow will flag it.
+#
+# Two install paths, deliberately:
+#
+#   go install        for tools that are go-gettable at a version tag.
+#
+#   Verified download for tools distributed only as release binaries. Each
+#                     is SHA-256 checked against a value pinned HERE rather
+#                     than fetched at runtime — same reasoning as
+#                     .github/scripts/install-trivy.sh: a checksum fetched
+#                     at runtime is worthless if the supply chain is
+#                     mid-compromise. Take the values from the release's
+#                     own checksums asset when bumping a version.
+#
+# Trivy note: NEVER pin v0.69.4, v0.69.5 or v0.69.6 — those releases are
+# known-compromised (CVE-2026-33634). See docs/runbooks/trivy-rollback.md.
+# =====================================================================
+Write-Host "`n=== Installing CFGMS Validation Tooling ===" -ForegroundColor Yellow
+
+$goPath = (& go env GOPATH)
+if ($LASTEXITCODE -ne 0 -or -not $goPath) {
+    Write-Host "  [--] Go not on PATH — skipping tooling install" -ForegroundColor Yellow
+    $goBinDir = $null
+} else {
+    $goBinDir = Join-Path $goPath 'bin'
+    if (-not (Test-Path $goBinDir)) {
+        New-Item -ItemType Directory -Path $goBinDir -Force | Out-Null
+    }
+}
+
+if ($goBinDir) {
+
+    # --- go install path -------------------------------------------------
+    # golangci-lint belongs here rather than in the verified-download list below:
+    # it refuses to start when the Go it was built with is older than the version
+    # go.mod targets via its `toolchain` directive, so an upstream release archive
+    # breaks `make lint` on every toolchain bump until upstream rebuilds. Building
+    # from source ties its build Go to the Go on this box, which the same bump
+    # already moved. See the comment in .devcontainer/Dockerfile (Issue #3627).
+    $goTools = @(
+        @{ Name = 'gosec';         Package = 'github.com/securego/gosec/v2/cmd/gosec@v2.29.0' },
+        @{ Name = 'staticcheck';   Package = 'honnef.co/go/tools/cmd/staticcheck@2026.2.1' },
+        @{ Name = 'gitleaks';      Package = 'github.com/zricethezav/gitleaks/v8@v8.30.1' },
+        @{ Name = 'go-licenses';   Package = 'github.com/google/go-licenses/v2@v2.0.1' },
+        @{ Name = 'golangci-lint'; Package = 'github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0' }
+    )
+
+    foreach ($tool in $goTools) {
+        Write-Host "  installing $($tool.Name) ..."
+        & go install $tool.Package
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [--] $($tool.Name): go install failed" -ForegroundColor Yellow
+        } else {
+            Write-Host "  [OK] $($tool.Name)" -ForegroundColor Green
+        }
+    }
+
+    # --- verified-download path ------------------------------------------
+    # Installs $Name.exe into $DestDir after verifying the download's
+    # SHA-256. Returns $true only when the binary was installed; a hash
+    # mismatch installs nothing and returns $false.
+    function Install-VerifiedBinary {
+        param(
+            [Parameter(Mandatory)][string]$Name,
+            [Parameter(Mandatory)][string]$Url,
+            [Parameter(Mandatory)][string]$Sha256,
+            [Parameter(Mandatory)][string]$DestDir,
+            # File to pull out of the archive. Omit for a bare .exe download.
+            [string]$ArchiveMember
+        )
+
+        $work = Join-Path ([System.IO.Path]::GetTempPath()) ("cfgms-$Name-" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+        try {
+            $leaf    = Split-Path $Url -Leaf
+            $archive = Join-Path $work $leaf
+
+            $progressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x slower with the progress bar
+            Invoke-WebRequest -Uri $Url -OutFile $archive -UseBasicParsing
+
+            $actual = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $Sha256.ToLowerInvariant()) {
+                Write-Host "  [!!] $Name : SHA-256 MISMATCH - refusing to install" -ForegroundColor Red
+                Write-Host "       expected $($Sha256.ToLowerInvariant())"
+                Write-Host "       actual   $actual"
+                return $false
+            }
+
+            $dest = Join-Path $DestDir "$Name.exe"
+
+            if (-not $ArchiveMember) {
+                Copy-Item -Path $archive -Destination $dest -Force
+            }
+            elseif ($leaf -like '*.zip') {
+                Expand-Archive -Path $archive -DestinationPath $work -Force
+                # Some archives nest the binary one directory down.
+                $found = @(Get-ChildItem -Path $work -Filter $ArchiveMember -Recurse -File)
+                if ($found.Count -eq 0) {
+                    Write-Host "  [--] $Name : '$ArchiveMember' not found in archive" -ForegroundColor Yellow
+                    return $false
+                }
+                Copy-Item -Path $found[0].FullName -Destination $dest -Force
+            }
+            else {
+                # .tar.gz — bsdtar ships with Windows 10 1803+ and Server 2019+.
+                & tar -xzf $archive -C $work $ArchiveMember
+                $extracted = Join-Path $work $ArchiveMember
+                if ($LASTEXITCODE -ne 0 -or -not (Test-Path $extracted)) {
+                    Write-Host "  [--] $Name : could not extract '$ArchiveMember'" -ForegroundColor Yellow
+                    return $false
+                }
+                Copy-Item -Path $extracted -Destination $dest -Force
+            }
+
+            Write-Host "  [OK] $Name -> $dest" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "  [--] $Name : $($_.Exception.Message)" -ForegroundColor Yellow
+            return $false
+        }
+        finally {
+            Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $verifiedTools = @(
+        @{
+            Name   = 'trivy'
+            Url    = 'https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_windows-64bit.zip'
+            Sha256 = '94c40e0696e4b907a74b7b2e1438d5d72ebaca83115817407f568a002d520842'
+            Member = 'trivy.exe'
+        },
+        @{
+            Name   = 'trufflehog'
+            Url    = 'https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.9/trufflehog_3.97.9_windows_amd64.tar.gz'
+            Sha256 = '7436c13a12f378738db1b65803b00fa3b816db3dc28084e52b9a377c6b12901d'
+            Member = 'trufflehog.exe'
+        },
+        @{
+            Name   = 'nancy'
+            Url    = 'https://github.com/sonatype-nexus-community/nancy/releases/download/v2.1.0/nancy-v2.1.0-windows-amd64.exe'
+            Sha256 = '77ecff35d3772794d4119b98b6405170d7b480bdc92076871ead4f52f574a0cf'
+            Member = $null
+        }
+    )
+
+    foreach ($tool in $verifiedTools) {
+        Write-Host "  installing $($tool.Name) ..."
+        $null = Install-VerifiedBinary -Name $tool.Name -Url $tool.Url `
+            -Sha256 $tool.Sha256 -DestDir $goBinDir -ArchiveMember $tool.Member
+    }
+
+    # Pre-seed the Trivy vulnerability DB so the first `make security-scan`
+    # isn't also a large download. Best-effort — a failure here is not fatal.
+    if (Test-Path (Join-Path $goBinDir 'trivy.exe')) {
+        Write-Host "  warming Trivy vulnerability DB (best-effort) ..."
+        & (Join-Path $goBinDir 'trivy.exe') fs --download-db-only 2>$null | Out-Null
+    }
+}
 
 # Install Docker Desktop (required for integration tests)
 if (-not $SkipDocker) {
@@ -47,8 +256,13 @@ if (-not $SkipDocker) {
     if (Get-Command docker -ErrorAction SilentlyContinue) {
         Write-Host "Docker already installed" -ForegroundColor Green
     } else {
-        # Install Docker Desktop
-        choco install -y docker-desktop
+        # Install Docker Desktop -- winget, pinned (Issue #4343). Refresh the
+        # same way as $coreTools above via `winget show --id Docker.DockerDesktop --versions`.
+        & winget install --id Docker.DockerDesktop --version 4.36.0 --exact --silent `
+            --accept-package-agreements --accept-source-agreements | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [--] Docker Desktop: winget install failed (exit $LASTEXITCODE)" -ForegroundColor Yellow
+        }
 
         Write-Host "`nDocker Desktop installed. Important notes:" -ForegroundColor Cyan
         Write-Host "  - You may need to restart your computer after installation"
@@ -83,42 +297,55 @@ if (-not $SkipDocker) {
 }
 
 # Refresh environment
-refreshenv
+Update-SessionPath
 
-# Install Claude Code via npm
+# Install Claude Code via npm. Unlike every other tool this script installs
+# (Issue #4343: pinned so npm can integrity-check a known tarball), Claude
+# Code is deliberately NOT pinned -- see the -ClaudeCodeVersion param comment
+# above. `stable`, not `latest`: `latest` is npm's most-recently-published
+# tag and can sit ahead of general availability, while `stable` is the
+# vetted-rollout tag the CLI's own auto-updater follows. npm still
+# integrity-checks whatever version `stable` (or an explicit override)
+# resolves to against the registry.
 if (-not $SkipClaudeCode) {
-    Write-Host "`n=== Installing Claude Code ===" -ForegroundColor Yellow
-    npm install -g @anthropic-ai/claude-code
+    Write-Host "`n=== Installing Claude Code ($ClaudeCodeVersion) ===" -ForegroundColor Yellow
+    npm install -g "@anthropic-ai/claude-code@$ClaudeCodeVersion"
 }
 
 # Refresh environment one more time
-refreshenv
+Update-SessionPath
 
 # Verify installations
 Write-Host "`n=== Verification ===" -ForegroundColor Green
 
 $tools = @(
-    @{Name="Go"; Command="go version"},
-    @{Name="Git"; Command="git --version"},
-    @{Name="Make"; Command="make --version"},
-    @{Name="GitHub CLI"; Command="gh --version"},
-    @{Name="Node.js"; Command="node --version"},
-    @{Name="npm"; Command="npm --version"}
+    @{Name="Go"; Command=@('go','version')},
+    @{Name="Git"; Command=@('git','--version')},
+    @{Name="Make"; Command=@('make','--version')},
+    @{Name="GitHub CLI"; Command=@('gh','--version')},
+    @{Name="Node.js"; Command=@('node','--version')},
+    @{Name="npm"; Command=@('npm','--version')}
 )
 
 if (-not $SkipDocker) {
-    $tools += @{Name="Docker"; Command="docker --version"}
+    $tools += @{Name="Docker"; Command=@('docker','--version')}
 }
 
 if (-not $SkipClaudeCode) {
-    $tools += @{Name="Claude Code"; Command="claude --version"}
+    $tools += @{Name="Claude Code"; Command=@('claude','--version')}
 }
 
+# Each Command is an argument slice (exe, then its args) invoked via the call
+# operator -- never a composed string handed to Invoke-Expression (Issue
+# #4343: Invoke-Expression is CLAUDE.md's banned pattern regardless of
+# whether the string being evaluated is attacker-reachable here).
 foreach ($tool in $tools) {
     try {
-        $result = Invoke-Expression $tool.Command 2>$null
+        $exe = $tool.Command[0]
+        $exeArgs = $tool.Command[1..($tool.Command.Length - 1)]
+        $result = & $exe @exeArgs 2>$null
         if ($result) {
-            Write-Host "  [OK] $($tool.Name): $($result.Split("`n")[0])" -ForegroundColor Green
+            Write-Host "  [OK] $($tool.Name): $($result | Select-Object -First 1)" -ForegroundColor Green
         } else {
             Write-Host "  [--] $($tool.Name): Not found or not in PATH" -ForegroundColor Yellow
         }

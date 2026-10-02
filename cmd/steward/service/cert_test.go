@@ -85,7 +85,7 @@ func TestWriteCACertMode(t *testing.T) {
 
 	info, err := os.Stat(destPath)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0644), info.Mode().Perm())
+	assert.Equal(t, os.FileMode(0444), info.Mode().Perm())
 }
 
 func TestWriteCACertContent(t *testing.T) {

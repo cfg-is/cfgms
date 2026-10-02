@@ -52,20 +52,32 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 	if status == "" {
 		status = business.PendingRegistrationStatusPending
 	}
+	tokenLookupKey := business.RegistrationTokenLookupKey(entry.TokenStr)
+	keyPub := entry.IdentityKeyPub
+	if keyPub == nil {
+		keyPub = []byte{}
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO cfgms_pending_registrations
-			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			 device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.PendingID,
 		entry.StewardID,
 		entry.TenantID,
-		entry.TokenStr,
+		tokenLookupKey,
 		entry.SourceIP,
 		formatTime(registeredAt),
 		formatTime(entry.ExpiresAt),
 		formatNullTime(entry.ClaimedAt),
 		status,
+		entry.DeviceID,
+		keyPub,
+		entry.KeyProtectionLevel,
+		entry.CSRPEM,
+		entry.Hostname,
+		entry.Platform,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -80,28 +92,35 @@ func (s *SQLitePendingRegistrationStore) AddPending(ctx context.Context, entry *
 // Returns ErrPendingRegistrationNotFound if no record exists.
 func (s *SQLitePendingRegistrationStore) GetPendingByID(ctx context.Context, pendingID string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 		FROM cfgms_pending_registrations WHERE pending_id = ?`, pendingID)
 	return scanPendingEntry(row)
 }
 
-// GetPendingByToken retrieves the entry whose token_str matches the given token.
+// GetPendingByToken retrieves the entry whose token lookup key matches the raw
+// token. The plaintext branch is read-only migration compatibility.
 // Returns ErrPendingRegistrationNotFound if no matching record exists.
 func (s *SQLitePendingRegistrationStore) GetPendingByToken(ctx context.Context, tokenStr string) (*business.PendingRegistrationEntry, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
-		FROM cfgms_pending_registrations WHERE token_str = ? LIMIT 1`, tokenStr)
+		SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+		       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+		FROM cfgms_pending_registrations WHERE token_str IN (?, ?) LIMIT 1`,
+		business.RegistrationTokenLookupKey(tokenStr), tokenStr)
 	return scanPendingEntry(row)
 }
 
 // UpdateStatus updates the status of the entry identified by pendingID.
 // When status is "claimed", claimed_at is also set to the current UTC time.
-// Returns ErrPendingRegistrationNotFound if no record exists.
+// Returns ErrPendingRegistrationNotFound if no record exists, or (Issue #3895)
+// if a guarded transition's precondition on the entry's current status no
+// longer holds.
 func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendingID, status string) error {
 	var res sql.Result
 	var err error
 
-	if status == business.PendingRegistrationStatusClaimed {
+	switch status {
+	case business.PendingRegistrationStatusClaimed:
 		// Guard with AND status = 'approved' so concurrent polls of the same entry
 		// result in exactly one winner: RowsAffected = 0 means already claimed.
 		res, err = s.db.ExecContext(ctx, `
@@ -110,7 +129,38 @@ func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendi
 			WHERE pending_id = ? AND status = 'approved'`,
 			status, formatTime(nowUTC()), pendingID,
 		)
-	} else {
+	case business.PendingRegistrationStatusApproved:
+		// Issue #3895: guard with AND status = 'pending', mirroring the claimed
+		// transition's guard above. Without this, an approve landing on an
+		// any-node request after the entry was already claimed (or already
+		// approved/denied by a concurrent request) would flip it back to
+		// approved — reopening the claim window handleRegistrationStatus's own
+		// "AND status = 'approved'" guard exists to close, and enabling a second
+		// certificate issuance for one registration.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = ?
+			WHERE pending_id = ? AND status = 'pending'`,
+			status, pendingID,
+		)
+	case business.PendingRegistrationStatusDenied:
+		// Deny is guarded on 'pending' OR 'approved', not on 'pending' alone.
+		// approved → denied is the only mechanism that stops certificate
+		// issuance for a registration an operator approved by mistake or later
+		// judged hostile: an approved-but-unclaimed entry stays claimable until
+		// ExpiresAt, so refusing this transition would leave the operator with
+		// no way to revoke the approval before the steward claims its cert.
+		// 'claimed', 'denied' and 'expired' remain excluded — those are terminal
+		// (see pendingRegistrationTerminalStatuses in pkg/migrate/storage), and
+		// denying a claimed entry would falsely suggest an issued cert had been
+		// withdrawn.
+		res, err = s.db.ExecContext(ctx, `
+			UPDATE cfgms_pending_registrations
+			SET status = ?
+			WHERE pending_id = ? AND status IN ('pending', 'approved')`,
+			status, pendingID,
+		)
+	default:
 		res, err = s.db.ExecContext(ctx, `
 			UPDATE cfgms_pending_registrations SET status = ? WHERE pending_id = ?`,
 			status, pendingID,
@@ -126,8 +176,9 @@ func (s *SQLitePendingRegistrationStore) UpdateStatus(ctx context.Context, pendi
 	return nil
 }
 
-// ListPending returns all entries for the given tenantID ordered by registered_at ascending.
-// An empty tenantID returns entries for all tenants.
+// ListPending returns entries whose status is "pending" for the given tenantID,
+// ordered by registered_at ascending. An empty tenantID returns pending entries for all tenants.
+// Approved, denied, claimed, and expired entries are never included.
 func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
 	var (
 		query string
@@ -135,18 +186,58 @@ func (s *SQLitePendingRegistrationStore) ListPending(ctx context.Context, tenant
 	)
 	if tenantID == "" {
 		query = `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations WHERE status = ? ORDER BY registered_at ASC`
+		args = []interface{}{business.PendingRegistrationStatusPending}
+	} else {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
+			FROM cfgms_pending_registrations WHERE tenant_id = ? AND status = ? ORDER BY registered_at ASC`
+		args = []interface{}{tenantID, business.PendingRegistrationStatusPending}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: failed to list pending registrations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []*business.PendingRegistrationEntry
+	for rows.Next() {
+		e, err := scanPendingRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: failed to scan pending registration row: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// ListAll returns entries in every status for the given tenantID, ordered by
+// registered_at ascending. An empty tenantID returns entries for all tenants.
+func (s *SQLitePendingRegistrationStore) ListAll(ctx context.Context, tenantID string) ([]*business.PendingRegistrationEntry, error) {
+	var (
+		query string
+		args  []interface{}
+	)
+	if tenantID == "" {
+		query = `
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations ORDER BY registered_at ASC`
 	} else {
 		query = `
-			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status
+			SELECT pending_id, steward_id, tenant_id, token_str, source_ip, registered_at, expires_at, claimed_at, status,
+			       device_id, identity_key_pub, key_protection_level, csr_pem, hostname, platform
 			FROM cfgms_pending_registrations WHERE tenant_id = ? ORDER BY registered_at ASC`
 		args = []interface{}{tenantID}
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("sqlite: failed to list pending registrations: %w", err)
+		return nil, fmt.Errorf("sqlite: failed to list all pending registrations: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -194,15 +285,20 @@ func scanPendingEntry(row *sql.Row) (*business.PendingRegistrationEntry, error) 
 	e := &business.PendingRegistrationEntry{}
 	var registeredStr, expiresStr string
 	var claimedStr sql.NullString
+	var keyPub []byte
 	err := row.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&registeredStr, &expiresStr, &claimedStr, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
 	)
 	if err == sql.ErrNoRows {
 		return nil, business.ErrPendingRegistrationNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: failed to scan pending registration: %w", err)
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
 	}
 	populatePendingEntry(e, registeredStr, expiresStr, claimedStr)
 	return e, nil
@@ -213,11 +309,16 @@ func scanPendingRow(rows *sql.Rows) (*business.PendingRegistrationEntry, error) 
 	e := &business.PendingRegistrationEntry{}
 	var registeredStr, expiresStr string
 	var claimedStr sql.NullString
+	var keyPub []byte
 	if err := rows.Scan(
 		&e.PendingID, &e.StewardID, &e.TenantID, &e.TokenStr, &e.SourceIP,
 		&registeredStr, &expiresStr, &claimedStr, &e.Status,
+		&e.DeviceID, &keyPub, &e.KeyProtectionLevel, &e.CSRPEM, &e.Hostname, &e.Platform,
 	); err != nil {
 		return nil, err
+	}
+	if len(keyPub) > 0 {
+		e.IdentityKeyPub = keyPub
 	}
 	populatePendingEntry(e, registeredStr, expiresStr, claimedStr)
 	return e, nil

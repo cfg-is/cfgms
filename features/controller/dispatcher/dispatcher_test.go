@@ -15,8 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/run"
-	script "github.com/cfgis/cfgms/features/modules/script"
+	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -40,6 +41,20 @@ type testControlPlane struct {
 	eventHandler cpinterfaces.EventHandler
 	sendErr      error // if set, SendCommand returns this error
 }
+
+type testCommandSigner struct{}
+
+func (testCommandSigner) Sign([]byte) (*configsignature.ConfigSignature, error) {
+	return &configsignature.ConfigSignature{
+		Algorithm:      configsignature.AlgorithmRSASHA256,
+		Signature:      "controller-envelope-signature",
+		KeyFingerprint: "controller-key",
+	}, nil
+}
+func (testCommandSigner) Algorithm() configsignature.Algorithm {
+	return configsignature.AlgorithmRSASHA256
+}
+func (testCommandSigner) KeyFingerprint() string { return "controller-key" }
 
 func (p *testControlPlane) Name() string      { return "test" }
 func (p *testControlPlane) IsConnected() bool { return true }
@@ -111,8 +126,9 @@ func (p *testControlPlane) injectCompletion(ctx context.Context, deviceID, execu
 }
 
 // injectCompletionWithOutput simulates a steward publishing EventScriptCompleted
-// with the stdout_preview/stderr_preview keys the steward actually emits
-// (execute_script.go), used to verify output capture (Issue #1995, root cause D).
+// with the stdout/stderr keys current stewards emit (Issue #1978: steward now sends
+// full capped output under "stdout"/"stderr"; controller prefers these over *_preview).
+// Used to verify output capture (Issue #1995, root cause D).
 func (p *testControlPlane) injectCompletionWithOutput(ctx context.Context, deviceID, executionID string, exitCode int, stdout, stderr string) error {
 	p.mu.Lock()
 	h := p.eventHandler
@@ -129,10 +145,24 @@ func (p *testControlPlane) injectCompletionWithOutput(ctx context.Context, devic
 		Details: map[string]interface{}{
 			"execution_id":   executionID,
 			"exit_code":      float64(exitCode),
-			"stdout_preview": stdout,
+			"stdout":         stdout,
+			"stderr":         stderr,
+			"stdout_preview": stdout, // kept for compat; dispatcher prefers "stdout"
 			"stderr_preview": stderr,
 			"duration_ms":    float64(100),
 		},
+	}
+	return h(ctx, event)
+}
+
+// injectEvent sends an arbitrary EventScriptCompleted event to the registered handler.
+// Used for edge-case tests (e.g. oversized output) that need full control over event fields.
+func (p *testControlPlane) injectEvent(ctx context.Context, event *controlplaneTypes.Event) error {
+	p.mu.Lock()
+	h := p.eventHandler
+	p.mu.Unlock()
+	if h == nil {
+		return fmt.Errorf("no event handler registered")
 	}
 	return h(ctx, event)
 }
@@ -300,6 +330,51 @@ func queuedExec(executionID, scriptRef string) *script.QueuedExecution {
 		Shell:       script.ShellBash,
 		Timeout:     5 * time.Minute,
 	}
+}
+
+func TestDispatcherPublicBetaContractRejectsMissingSigner(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	dispatcher, err := New(&Config{
+		Queue:              queue,
+		ControlPlane:       &testControlPlane{},
+		RequireSignedAdhoc: true,
+		Logger:             logging.NewNoopLogger(),
+	})
+	require.Nil(t, dispatcher)
+	require.ErrorContains(t, err, "requires a command signer")
+}
+
+func TestDispatcherPublicBetaContractPreservesBothSignatureLayers(t *testing.T) {
+	queue := newTestQueue(t, nil)
+	controlPlane := &testControlPlane{}
+	dispatcher, err := New(&Config{
+		Queue:              queue,
+		ControlPlane:       controlPlane,
+		Signer:             testCommandSigner{},
+		RequireSignedAdhoc: true,
+		Logger:             logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	execution := &script.QueuedExecution{
+		ExecutionID: "exec-public-beta",
+		Shell:       script.ShellBash,
+		Metadata: map[string]interface{}{
+			"signature_algorithm":  "rsa-sha256",
+			"signature_value":      "operator-content-signature",
+			"signature_public_key": "operator-certificate",
+		},
+	}
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, prepared))
+
+	require.Len(t, controlPlane.sent, 1)
+	sent := controlPlane.sent[0]
+	require.NotNil(t, sent.Signature, "controller command envelope must be signed")
+	assert.Equal(t, "controller-envelope-signature", sent.Signature.Signature)
+	assert.Equal(t, "rsa-sha256", sent.Command.Params["signature_algorithm"])
+	assert.Equal(t, "operator-content-signature", sent.Command.Params["signature_value"])
+	assert.Equal(t, "operator-certificate", sent.Command.Params["signature_public_key"])
 }
 
 // ----------------------------------------------------------------------------
@@ -1194,8 +1269,175 @@ func TestDispatcher_OutputThreadedToJobRecord(t *testing.T) {
 	jobs, err := manager.ListRunJobs(context.Background(), runID)
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
-	assert.Equal(t, "CFG-70-02\n", jobs[0].Output, "stdout_preview must be persisted as Output")
+	assert.Equal(t, "CFG-70-02\n", jobs[0].Output, "stdout must be persisted as Output")
 	assert.Equal(t, 0, jobs[0].ExitCode)
+}
+
+// TestDispatcher_OutputExceedsControllerCeiling verifies Issue #1978 AC:
+// when a completion event carries combined stdout+stderr exceeding the 4 MB controller
+// ceiling, the dispatcher drops the output before storage so the job record has empty
+// output rather than unbounded data. This is defense-in-depth against a compromised
+// steward bypassing the steward-side 1 MB cap.
+func TestDispatcher_OutputExceedsControllerCeiling(t *testing.T) {
+	store := run.NewRunStoreSQL(mustOpenMemDB(t))
+	require.NoError(t, store.Init(context.Background()))
+	manager := run.NewManager(store, nil)
+
+	const runID = "run-ceiling-1"
+	require.NoError(t, store.CreateRun(&run.RunRecord{
+		RunID: runID, TenantID: "tenant-abc", CreatedAt: time.Now().UTC(),
+		Status: run.RunStatusRunning, JobCount: 1,
+	}))
+	require.NoError(t, store.CreateJob(&run.JobRecord{
+		JobID: "job-ceiling", RunID: runID, DeviceID: "device-1",
+		ExecutionID: "exec-ceiling", Status: run.JobStatusPending, CreatedAt: time.Now().UTC(),
+	}))
+
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+	d.SetRunCompletionSink(manager)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	require.NoError(t, q.QueueExecution("device-1", runTrackedExec("exec-ceiling", "script-ceiling", runID, "job-ceiling")))
+	d.OnHeartbeat("device-1")
+	require.Eventually(t, func() bool { return cp.sentCount() >= 1 }, 2*time.Second, 10*time.Millisecond)
+
+	// Inject an event with 5 MB of stdout — exceeds the 4 MB controller ceiling.
+	fiveMBOutput := strings.Repeat("X", 5*1024*1024)
+	oversizedEvent := &controlplaneTypes.Event{
+		ID:        "evt-ceiling",
+		Type:      controlplaneTypes.EventScriptCompleted,
+		StewardID: "device-1",
+		Timestamp: time.Now(),
+		Details: map[string]interface{}{
+			"execution_id": "exec-ceiling",
+			"exit_code":    float64(0),
+			"stdout":       fiveMBOutput,
+			"stderr":       "",
+			"duration_ms":  float64(100),
+		},
+	}
+	require.NoError(t, cp.injectEvent(context.Background(), oversizedEvent))
+
+	require.Eventually(t, func() bool {
+		jobs, err := manager.ListRunJobs(context.Background(), runID)
+		return err == nil && len(jobs) == 1 && jobs[0].Status == run.JobStatusCompleted
+	}, 2*time.Second, 10*time.Millisecond, "job must reach terminal state despite ceiling enforcement")
+
+	jobs, err := manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Empty(t, jobs[0].Output,
+		"output exceeding the 4 MB ceiling must be dropped — job record must have empty output")
+}
+
+// TestDispatcher_TTLReleasesWedgedDeviceLock verifies AC1 (Story #2468):
+// a device lock held beyond the per-execution lock TTL (Timeout * graceMultiplier)
+// is automatically released by the periodic sweep, and a second execution for the
+// same device can then be dispatched.
+//
+// The dispatcher is configured with a short PollInterval so the sweep fires quickly.
+// The queued execution uses a short Timeout so the lock TTL expires within the test
+// window — no fake clock injection is needed.
+func TestDispatcher_TTLReleasesWedgedDeviceLock(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+
+	// shortTimeout drives a short lock TTL: lockTTL = shortTimeout * graceMultiplier.
+	// With the default multiplier of 2, lockTTL = 200 ms. The sweep fires every
+	// pollInterval (50 ms), so the lock is released within ~250 ms of being acquired.
+	const shortTimeout = 100 * time.Millisecond
+	const pollInterval = 50 * time.Millisecond
+
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: pollInterval,
+		Logger:       logging.NewLogger("debug"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Queue exec-wedged and dispatch it. No completion event will ever arrive,
+	// simulating a steward that silently disconnects mid-execution.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-wedged",
+		ScriptID:    "script-wedge",
+		ScriptRef:   "script-wedge",
+		Shell:       script.ShellBash,
+		Timeout:     shortTimeout,
+	}))
+	d.OnHeartbeat("device-wedge")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-wedged must be dispatched")
+
+	// Queue exec-after WHILE the device lock is held by exec-wedged.
+	require.NoError(t, q.QueueExecution("device-wedge", &script.QueuedExecution{
+		ExecutionID: "exec-after-ttl",
+		ScriptID:    "script-after",
+		ScriptRef:   "script-after",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+	}))
+
+	// The TTL sweep fires on each poll tick. Once the lock TTL elapses, the sweep
+	// releases the lock and the following dispatchAll sends a second command.
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 2
+	}, 3*time.Second, 20*time.Millisecond,
+		"TTL sweep must release the wedged lock so a second command can be sent")
+}
+
+// TestDispatcher_ReleaseForCancelledExecution verifies that
+// ReleaseDeviceForCancelledExecution releases the lock when executionID matches
+// and returns false when it does not (race-safety against stale cancels).
+func TestDispatcher_ReleaseForCancelledExecution(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d := newTestDispatcher(t, q, cp)
+
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	// Dispatch exec-A, acquiring the device lock for "device-x".
+	require.NoError(t, q.QueueExecution("device-x", queuedExec("exec-A", "script-abc")))
+	d.OnHeartbeat("device-x")
+	require.Eventually(t, func() bool {
+		return cp.sentCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "exec-A must be dispatched")
+
+	// A cancel for a DIFFERENT executionID must not release the lock.
+	released := d.ReleaseDeviceForCancelledExecution("device-x", "exec-B-stale")
+	assert.False(t, released, "stale cancel must not release the lock held by exec-A")
+
+	// Verify the lock is still held — exec-A has not completed.
+	require.Never(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 50*time.Millisecond, 5*time.Millisecond,
+		"lock must still be held after stale cancel")
+
+	// Cancel for the CORRECT executionID releases the lock immediately.
+	released = d.ReleaseDeviceForCancelledExecution("device-x", "exec-A")
+	assert.True(t, released, "cancel with matching executionID must release the lock")
+
+	// Lock is now free — a new dispatch can proceed.
+	require.Eventually(t, func() bool {
+		if !d.tryAcquireDevice("device-x") {
+			return false
+		}
+		d.releaseDevice("device-x")
+		return true
+	}, 500*time.Millisecond, 10*time.Millisecond,
+		"lock must be free after correct-ID cancel")
 }
 
 // mustOpenMemDB opens an in-memory SQLite database closed via t.Cleanup.
@@ -1205,6 +1447,148 @@ func mustOpenMemDB(t *testing.T) *sql.DB {
 	require.NoError(t, err, "open in-memory sqlite")
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// ----------------------------------------------------------------------------
+// Dispatcher hardening tests — Issue #2781
+// ----------------------------------------------------------------------------
+
+// testGrantManager is a minimal in-process GrantManager for dispatcher hardening
+// tests. It records all CreateGrant calls so tests can assert on them.
+type testGrantManager struct {
+	mu     sync.Mutex
+	grants []grantRecord
+}
+
+type grantRecord struct {
+	deviceID    string
+	tenantID    string
+	executionID string
+	scope       []string
+}
+
+func (g *testGrantManager) CreateGrant(deviceID, tenantID, executionID string, scope []string, ttl time.Duration) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.grants = append(g.grants, grantRecord{deviceID: deviceID, tenantID: tenantID, executionID: executionID, scope: scope})
+	return nil
+}
+
+func (g *testGrantManager) ConsumeGrant(_ string) error { return nil }
+
+func (g *testGrantManager) createdGrants() []grantRecord {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]grantRecord, len(g.grants))
+	copy(out, g.grants)
+	return out
+}
+
+// minimalPrepared returns a PreparedExecution with empty content suitable for
+// sendCommand unit tests. Size and shell are valid; script content is a one-byte
+// no-op so the content-size guard does not fire.
+func minimalPrepared() *script.PreparedExecution {
+	return &script.PreparedExecution{
+		ExecutionID:   "exec-harden-1",
+		ScriptContent: "#",
+		Shell:         script.ShellBash,
+	}
+}
+
+// newHardenDispatcher creates a Dispatcher wired to a real (non-nil) grant manager
+// so the tenant_id validation path in sendCommand is exercised.
+func newHardenDispatcher(t *testing.T, gm GrantManager) *Dispatcher {
+	t.Helper()
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		PollInterval: 24 * time.Hour,
+		Logger:       logging.NewLogger("debug"),
+	})
+	require.NoError(t, err)
+	d.SetGrantManager(gm)
+	return d
+}
+
+// TestDispatcher_Harden_MissingTenantID_FailsClosed verifies Issue #2781's
+// dispatcher hardening: when a script's Metadata has required_api_scope set but
+// tenant_id is absent, sendCommand must return an explicit error rather than
+// silently calling CreateGrant with tenantID="".
+func TestDispatcher_Harden_MissingTenantID_FailsClosed(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-missing",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			// tenant_id intentionally absent
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.Error(t, err, "sendCommand must fail when tenant_id is missing from script metadata")
+	assert.Contains(t, err.Error(), "missing or invalid tenant_id")
+	assert.Empty(t, gm.createdGrants(), "CreateGrant must not be called when tenant_id is missing")
+}
+
+// TestDispatcher_Harden_WrongTypeTenantID_FailsClosed verifies that a non-string
+// tenant_id in script metadata is treated identically to a missing one — fail
+// closed, never silently create an unscoped grant.
+func TestDispatcher_Harden_WrongTypeTenantID_FailsClosed(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-wrongtype",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			"tenant_id":          42, // int, not string
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.Error(t, err, "sendCommand must fail when tenant_id has wrong type")
+	assert.Contains(t, err.Error(), "missing or invalid tenant_id")
+	assert.Empty(t, gm.createdGrants(), "CreateGrant must not be called for wrong-typed tenant_id")
+}
+
+// TestDispatcher_Harden_ValidTenantID_CreatesGrant verifies the positive path:
+// when tenant_id is a valid non-empty string, CreateGrant is called with exactly
+// that tenantID, and sendCommand succeeds.
+func TestDispatcher_Harden_ValidTenantID_CreatesGrant(t *testing.T) {
+	gm := &testGrantManager{}
+	d := newHardenDispatcher(t, gm)
+
+	exec := &script.QueuedExecution{
+		ExecutionID: "exec-harden-valid",
+		ScriptID:    "s1",
+		ScriptRef:   "s1",
+		Shell:       script.ShellBash,
+		Timeout:     5 * time.Minute,
+		Metadata: map[string]interface{}{
+			"required_api_scope": []interface{}{"steward:read-scripts"},
+			"tenant_id":          "root/tenant-a",
+		},
+	}
+
+	err := d.sendCommand(context.Background(), "device-1", exec, minimalPrepared())
+	require.NoError(t, err, "sendCommand must succeed with a valid tenant_id")
+	grants := gm.createdGrants()
+	require.Len(t, grants, 1)
+	assert.Equal(t, "root/tenant-a", grants[0].tenantID)
+	assert.Equal(t, "device-1", grants[0].deviceID)
+	assert.Equal(t, "exec-harden-valid", grants[0].executionID)
 }
 
 // TestDispatcher_New_ValidationErrors verifies that New rejects nil config fields.

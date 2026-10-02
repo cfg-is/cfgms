@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -389,7 +390,16 @@ func TestConcurrentRegistration_PerennialToken_AllRequestsSucceed(t *testing.T) 
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			body, _ := json.Marshal(map[string]string{"token": "cfgms_reg_concurrent_integ_test"})
+			// Each registration submits a locally generated CSR (Issue #3780); the
+			// controller signs the submitted public key and never sees a private key.
+			_, csrPEM, csrErr := generateRegistrationKeypairAndCSR(fmt.Sprintf("concurrent-steward-%d", idx))
+			if csrErr != nil {
+				return
+			}
+			body, _ := json.Marshal(map[string]string{
+				"token":   "cfgms_reg_concurrent_integ_test",
+				"csr_pem": csrPEM,
+			})
 			resp, postErr := ts.Client().Post(
 				ts.URL+"/api/v1/register",
 				"application/json",

@@ -33,6 +33,7 @@ import (
 	"sync"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
 // ErrProviderNotImplemented is returned by stub provider implementations in default builds.
@@ -108,15 +109,18 @@ type ProviderInfo struct {
 	Version             string
 }
 
-// NewProviderRegistry creates a new provider registry
-func NewProviderRegistry(logger logging.Logger) *ProviderRegistry {
+// NewProviderRegistry creates a new provider registry.
+// secrets is the controller's central secret store threaded to providers that need it
+// (e.g. the github provider for App-JWT minting). Pass nil when no secrets store is
+// available (e.g. steward-side usage); providers will surface a clear error on execution.
+func NewProviderRegistry(logger logging.Logger, secrets secretsif.SecretStore) *ProviderRegistry {
 	registry := &ProviderRegistry{
 		providers: make(map[string]APIProvider),
 		logger:    logger,
 	}
 
 	// Register built-in providers
-	registry.registerBuiltinProviders()
+	registry.registerBuiltinProviders(secrets)
 
 	return registry
 }
@@ -182,7 +186,10 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 
 	// Refresh authentication token if needed
 	if err := provider.RefreshToken(ctx, config); err != nil {
-		r.logger.Warn("Failed to refresh token", "provider", config.Provider, "error", err)
+		// The error text is deliberately not logged: RefreshToken operates on the
+		// credential-bearing APIConfig, and a provider's error could echo token
+		// material. Log a fixed category only.
+		r.logger.Warn("Failed to refresh token", "provider", logging.SanitizeLogValue(config.Provider), "reason", "refresh_failed")
 		// Continue with existing token - some providers may not need refresh
 	}
 
@@ -193,9 +200,9 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 	}
 
 	r.logger.Info("API operation completed",
-		"provider", config.Provider,
-		"service", config.Service,
-		"operation", config.Operation,
+		"provider", logging.SanitizeLogValue(config.Provider),
+		"service", logging.SanitizeLogValue(config.Service),
+		"operation", logging.SanitizeLogValue(config.Operation),
 		"success", response.Success)
 
 	return response, nil
@@ -203,12 +210,14 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 
 // registerBuiltinProviders registers the built-in API providers.
 // Entries in providerOverrides (set by providers_experimental.go init()) replace defaults.
-func (r *ProviderRegistry) registerBuiltinProviders() {
+// secrets is forwarded to providers that require a secret store (e.g. GitHubAppProvider).
+func (r *ProviderRegistry) registerBuiltinProviders(secrets secretsif.SecretStore) {
 	defaults := map[string]APIProvider{
 		"microsoft":   &MicrosoftProvider{},
 		"google":      &GoogleProvider{},
 		"salesforce":  &SalesforceProvider{},
 		"connectwise": &ConnectWiseProvider{},
+		"github":      NewGitHubAppProvider(secrets, r.logger, nil),
 	}
 	for name, p := range providerOverrides {
 		defaults[name] = p

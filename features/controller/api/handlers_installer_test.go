@@ -493,15 +493,7 @@ func extractTarGz(t *testing.T, data []byte) map[string][]byte {
 // It also writes an init marker with the computed CA fingerprint to caPath.
 func setupTestCertManager(t *testing.T, caPath string) (*cert.Manager, string) {
 	t.Helper()
-	certMgr, err := cert.NewManager(&cert.ManagerConfig{
-		StoragePath: t.TempDir(),
-		CAConfig: &cert.CAConfig{
-			Organization: "Test CFGMS",
-			Country:      "US",
-			ValidityDays: 365,
-		},
-	})
-	require.NoError(t, err)
+	certMgr := newSharedTestCertManager(t)
 
 	caCertPEM, err := certMgr.GetCACertificate()
 	require.NoError(t, err)
@@ -616,6 +608,55 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 	assert.Contains(t, files, "installer/README.txt")
 }
 
+func TestHandleDownloadInstallPackage_CacheValidatorsAndRanges(t *testing.T) {
+	server, store := setupTestServerWithBlobStore(t)
+	require.NoError(t, store.PutBlob(
+		context.Background(),
+		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		bytes.NewReader([]byte("range-test-installer-binary")),
+		blob.BlobMeta{ContentType: "application/octet-stream"},
+	))
+
+	request := func(rangeHeader, etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/linux/amd64", nil)
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		if rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		server.handleDownloadInstallPackage(rec, req)
+		return rec
+	}
+
+	full := request("", "")
+	require.Equal(t, http.StatusOK, full.Code)
+	require.Greater(t, full.Body.Len(), 10)
+	assert.Equal(t, "bytes", full.Header().Get("Accept-Ranges"))
+	assert.Equal(t, "public, max-age=300, must-revalidate", full.Header().Get("Cache-Control"))
+	etag := full.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	partial := request("bytes=0-9", "")
+	require.Equal(t, http.StatusPartialContent, partial.Code)
+	assert.Equal(t, full.Body.Bytes()[:10], partial.Body.Bytes())
+
+	notModified := request("", etag)
+	assert.Equal(t, http.StatusNotModified, notModified.Code)
+	assert.Zero(t, notModified.Body.Len())
+
+	multiple := request("bytes=0-1,8-9", "")
+	assert.Equal(t, http.StatusRequestedRangeNotSatisfiable, multiple.Code)
+
+	server.publicDownloadCache.invalidate(installerDownloadCacheKey("linux", "amd64"))
+	rebuilt := request("", "")
+	require.Equal(t, http.StatusOK, rebuilt.Code)
+	assert.Equal(t, full.Body.Bytes(), rebuilt.Body.Bytes(), "generated package must be deterministic")
+	assert.Equal(t, etag, rebuilt.Header().Get("ETag"))
+}
+
 // TestHandleDownloadInstallPackage_NotFound verifies that a missing artifact returns
 // 404 with the writeErrorResponse JSON shape (not a raw http.Error string).
 func TestHandleDownloadInstallPackage_NotFound(t *testing.T) {
@@ -668,6 +709,101 @@ func TestHandleDownloadInstallPackage_InvalidArch(t *testing.T) {
 	var errResp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 	assert.Equal(t, "INVALID_ARCH", errResp.Error.Code)
+}
+
+// --- Any-node service (Issue #3761) ---
+
+// TestInstallerHandlers_SucceedOnNonAuthoritativeNode is the [REQUIRED TEST] for this
+// file (Issue #3761, ADR-031 Decision 1): handleUploadInstallerArtifact and
+// handleDeleteInstallerArtifact used to return 503 and leave s.blobStore untouched
+// when the serving node held no lease-backed leadership. Any-node service means every
+// cluster node accepts both writes — the shared blob store is the serialization point,
+// not leadership — so against a real, deliberately non-authoritative *ha.Manager
+// (ClusterMode, no lease ever acquired) the upload must land in the store and the
+// delete must remove what is there.
+func TestInstallerHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
+	newNonAuthoritativeServer := func(t *testing.T) (*Server, blob.BlobStore) {
+		t.Helper()
+		server, store := setupTestServerWithBlobStore(t)
+		server.haManager = newNonAuthoritativeHAManager(t)
+		return server, store
+	}
+
+	t.Run("upload succeeds and writes to blobStore", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
+
+		body := bytes.NewBufferString("fake-installer-content")
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+		req = withTenant(req, "test-tenant")
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+
+		server.handleUploadInstallerArtifact(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code,
+			"upload must succeed regardless of leadership: %s", rec.Body.String())
+
+		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
+			TenantID:  "test-tenant",
+			Namespace: "installers",
+		})
+		require.NoError(t, err)
+		assert.Len(t, blobs, 1, "the uploaded artifact must land in the blob store")
+	})
+
+	t.Run("delete succeeds and removes the artifact", func(t *testing.T) {
+		server, store := newNonAuthoritativeServer(t)
+
+		// Pre-store an artifact so the delete has something real to remove.
+		require.NoError(t, store.PutBlob(
+			context.Background(),
+			blob.BlobKey{TenantID: "test-tenant", Namespace: "installers", Name: "linux-amd64"},
+			bytes.NewBufferString("existing-artifact"),
+			blob.BlobMeta{ContentType: "application/octet-stream"},
+		))
+
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+		req = withTenant(req, "test-tenant")
+		req = withVars(req, map[string]string{"platform": "linux", "arch": "amd64"})
+		rec := httptest.NewRecorder()
+
+		server.handleDeleteInstallerArtifact(rec, req)
+
+		require.Equal(t, http.StatusNoContent, rec.Code)
+
+		blobs, err := store.ListBlobs(context.Background(), blob.BlobKey{
+			TenantID:  "test-tenant",
+			Namespace: "installers",
+		})
+		require.NoError(t, err)
+		assert.Empty(t, blobs, "the artifact must actually be deleted on a non-authoritative node")
+	})
+}
+
+// TestInstallerHandlers_SucceedOnAuthoritativeNode is the mirror case: a real,
+// deliberately authoritative *ha.Manager (SingleServerMode) must also reach the
+// existing upload/delete logic unchanged — removing the gate must not have broken
+// the leader path either.
+func TestInstallerHandlers_SucceedOnAuthoritativeNode(t *testing.T) {
+	server, _ := setupTestServerWithBlobStore(t)
+	server.haManager = newAuthoritativeHAManager(t)
+
+	body := bytes.NewBufferString("content")
+	uploadReq := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64", body)
+	uploadReq = withTenant(uploadReq, "test-tenant")
+	uploadReq = withVars(uploadReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	uploadRec := httptest.NewRecorder()
+
+	server.handleUploadInstallerArtifact(uploadRec, uploadReq)
+	require.Equal(t, http.StatusOK, uploadRec.Code, uploadRec.Body.String())
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
+	deleteReq = withTenant(deleteReq, "test-tenant")
+	deleteReq = withVars(deleteReq, map[string]string{"platform": "linux", "arch": "amd64"})
+	deleteRec := httptest.NewRecorder()
+
+	server.handleDeleteInstallerArtifact(deleteRec, deleteReq)
+	assert.Equal(t, http.StatusNoContent, deleteRec.Code)
 }
 
 // TestHandleDownloadInstallPackage_RouterNoAuth verifies that the download route is

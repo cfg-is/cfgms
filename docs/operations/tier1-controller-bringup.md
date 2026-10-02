@@ -3,7 +3,16 @@
 **M1 deliverable.** This runbook is the source of truth for `scripts/tier1-bootstrap.sh`.
 Every Tier 1 rebuild from here on is: provision VM, copy script, run script.
 
-Storage backend: flatfile + SQLite. No git, no SOPS, no external database.
+Storage backend: flatfile + SQLite by default (`tier1-bootstrap.sh` has not
+changed). No git, no external database out of the box.
+
+**`ctrl-node-01` deviates from this default as of 2026-08-05**: its storage
+backend was migrated from flatfile+SQLite to the shared PostgreSQL instance
+provisioned in #3124, via the real, live cutover documented in
+[`controller-ha-real-cluster-runbook.md` §2](../testing/controller-ha-real-cluster-runbook.md#2-storage-migration-story-3127)
+(#3127). The steps below still describe how a *fresh* Tier 1 controller is
+bootstrapped (flatfile+SQLite); they do not describe `ctrl-node-01`'s
+current running configuration.
 
 ---
 
@@ -88,6 +97,14 @@ Optional flags:
 | `--skip-tenant-seed`    | _(off)_                 | Skip tenant tree seeding               |
 | `--skip-smoke`          | _(off)_                 | Skip smoke test                        |
 
+The admin bundle `--init` issues is never written to disk on the controller (Issue
+#4342) — it is printed once, at the very end, and nowhere else. Every status line
+below goes to stderr — including the lines the script's children print, such as
+the `--init` completion banner, `cfg tenant create`'s confirmations and the smoke
+test's `[PASS]` results; only the bundle YAML itself goes to stdout, so redirecting
+stdout (`... > admin.bundle.yaml`) captures exactly the bundle and nothing else.
+The transcript below shows both streams interleaved, as they appear on a terminal.
+
 Expected output (abbreviated):
 
 ```
@@ -101,10 +118,7 @@ Expected output (abbreviated):
 [bootstrap] Step 4: Config
 [bootstrap] Config rendered to /etc/cfgms/controller.cfg
 [bootstrap] Step 5: Controller init
-Controller initialization complete:
-  CA Fingerprint:    SHA256:xxxx...
-  Storage Provider:  flatfile
-  Initialized At:    2026-06-02T00:00:00Z
+[bootstrap] Controller initialized; admin bundle issued (kept on tmpfs only, never persistent storage).
 [bootstrap] Step 6: Systemd service
 [bootstrap] cfgms-controller service started.
 [bootstrap] Step 7: Tenant seed
@@ -124,8 +138,13 @@ Result: 4 passed, 0 failed
  Tier 1 Controller Bootstrap Complete
 ==========================================
 
-Admin bundle:  /etc/cfgms/admin.bundle.yaml
+Admin bundle: issued for this run and printed to stdout, below — that is
+the only copy. It is never written to disk on ctrl.cfgms.lab.
 ...
+controller_url: "https://ctrl.cfgms.lab:9080"
+cert_pem: |
+  -----BEGIN CERTIFICATE-----
+  ...
 ```
 
 If any step fails, the script exits non-zero and the error message identifies the
@@ -136,57 +155,105 @@ already-completed steps.
 
 ## 5. Distribute Admin Bundle
 
-The admin bundle (`/etc/cfgms/admin.bundle.yaml`) grants full admin access to the
-controller REST API. Treat it like a root SSH key: never leave it on disk longer than
-necessary to copy it to the keychain.
+The admin bundle grants full admin access to the controller REST API. Treat it like
+a root SSH key. As of Issue #4342, the bootstrap script never writes it to disk on
+the controller — not even transiently past the run — so there is no server-side file
+to `scp` or clean up. It exists only in the tmpfs directory `--init` writes it to
+while the script is still running, and is printed to the script's own stdout exactly
+once, at the very end (§4), as its only copy.
 
-**Step 1 — Copy bundle to workstation (operator machine):**
+**Step 1 — Capture the bundle (operator workstation):**
+
+If you ran bootstrap over `ssh`, redirect stdout directly so the file contains
+nothing but the bundle (every other message the run produces — the script's own
+status lines and the output of every command it invokes — goes to stderr, which
+your terminal still shows live):
 
 ```bash
-scp ctrl.cfgms.lab:/etc/cfgms/admin.bundle.yaml /tmp/admin.bundle.yaml
+ssh ctrl.cfgms.lab 'sudo bash tier1-bootstrap.sh --hostname=ctrl.cfgms.lab' \
+  > admin.bundle.yaml
 ```
 
-**Step 2 — Store in OS keychain:**
+If you ran it interactively at the console instead, copy the YAML printed after
+`Tier 1 Controller Bootstrap Complete` into a local file yourself.
 
-Linux:
+**Step 2 — Connect with `cfg` (recommended):**
+
 ```bash
-secret-tool store --label="CFGMS Admin Bundle" service cfgms bundle admin \
-  < /tmp/admin.bundle.yaml
+cfg connect --bundle admin.bundle.yaml --url https://ctrl.cfgms.lab:9080
 ```
 
-macOS:
-```bash
-security add-generic-password -s cfgms -a admin \
-  -w "$(cat /tmp/admin.bundle.yaml)"
-```
+This is `cfg`'s normal stateless invoke-and-exit credential model, not a mechanism
+specific to this runbook: it stores a session token in your OS-native keychain and
+the credential itself SOPS-encrypted under your user config directory
+(`os.UserConfigDir()/cfgms/credentials/`), then discards the plaintext. Reconnect in
+future sessions with `cfg connect ctrl.cfgms.lab` — no bundle re-import needed.
 
 **Step 3 — Remove the plaintext copy:**
 
 ```bash
-rm /tmp/admin.bundle.yaml
+rm admin.bundle.yaml
 ```
 
-**Step 4 — Load the bundle in future shell sessions:**
+`cfg connect` has already stored what it needs; the plaintext file served only to
+get the bundle from the controller onto your workstation.
+
+**Optional — also store it in the OS keychain for `cfgms-bundle-load`:**
+
+Some workflows in this runbook (§6, §8, §10) use `tier1-smoke-test.sh --bundle
+<path>`, which needs the bundle as a raw YAML file rather than a `cfg` session.
+If you want those to work without re-running bootstrap, store a second copy via
+`secret-tool` (Linux) or `security` (macOS) *before* removing the plaintext copy in
+Step 3, then load it on demand with `source scripts/cfgms-bundle-load`:
 
 ```bash
-source scripts/cfgms-bundle-load
+# Linux
+secret-tool store --label="CFGMS Admin Bundle" service cfgms bundle admin \
+  < admin.bundle.yaml
+# macOS
+security add-generic-password -s cfgms -a admin -w "$(cat admin.bundle.yaml)"
 ```
 
-`cfgms-bundle-load` retrieves the bundle from the keychain, writes it to a temp file,
+`cfgms-bundle-load` retrieves this OS-keychain copy, writes it to a temp file,
 exports `CFGMS_ADMIN_BUNDLE`, and registers a `trap` to delete the temp file when the
-shell exits. After sourcing it, `cfg` and `tier1-smoke-test.sh` pick up `CFGMS_ADMIN_BUNDLE`
-automatically.
+shell exits — unrelated to and unaffected by `cfg connect`'s own credential store.
+Windows operators: store it in the platform credential manager instead of `secret-tool`/
+`security`; `cfgms-bundle-load` does not support Windows today, so run
+`tier1-smoke-test.sh --bundle <path>` with a manually retrieved copy.
+
+**If you did not capture the bundle:** do not re-run `tier1-bootstrap.sh` expecting
+a fresh one — it detects the issuance marker at `/etc/cfgms/.admin-bundle-issued` and
+skips re-issuing (Issue #4342: re-running must not silently re-expose the
+credential). Issue a replacement instead:
+
+```bash
+cfgms-controller bootstrap-admin --regenerate
+cfgms-controller bootstrap-admin --revoke <old-serial>   # shown when --regenerate ran
+```
 
 ---
 
 ## 6. Manual Upgrade
 
-To upgrade the controller binary without reprovisioning:
+Verify the candidate's release signature, provenance, and checksum before it
+reaches the controller. Read the release notes for state-format compatibility;
+if the new release performs an irreversible state migration, a binary-only
+rollback is not safe and the cold backup from §8 is required.
+
+Stage the candidate without overwriting either the running binary or the
+previous rollback copy:
 
 ```bash
+sudo install -o root -g root -m 0755 \
+  /path/to/new/cfgms-controller \
+  /usr/local/bin/cfgms-controller.candidate
+
 sudo systemctl stop cfgms-controller
-sudo cp /path/to/new/cfgms-controller /usr/local/bin/cfgms-controller
-sudo chmod +x /usr/local/bin/cfgms-controller
+sudo cp --preserve=mode,ownership,timestamps \
+  /usr/local/bin/cfgms-controller \
+  /usr/local/bin/cfgms-controller.previous
+sudo mv /usr/local/bin/cfgms-controller.candidate \
+  /usr/local/bin/cfgms-controller
 sudo systemctl start cfgms-controller
 ```
 
@@ -196,6 +263,26 @@ Run the smoke test after upgrade to confirm the new version operates correctly:
 source scripts/cfgms-bundle-load
 bash scripts/tier1-smoke-test.sh
 ```
+
+If startup or the smoke test fails, capture the journal and roll back immediately:
+
+```bash
+sudo journalctl -u cfgms-controller --no-pager -n 200
+sudo systemctl stop cfgms-controller
+sudo cp --preserve=mode,ownership,timestamps \
+  /usr/local/bin/cfgms-controller.previous \
+  /usr/local/bin/cfgms-controller.rollback
+sudo mv /usr/local/bin/cfgms-controller.rollback \
+  /usr/local/bin/cfgms-controller
+sudo systemctl start cfgms-controller
+
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+Retain `cfgms-controller.previous` until the upgraded controller has completed
+the environment's soak period. For an incompatible state migration, restore the
+pre-upgrade archive as described in §8 before starting the previous binary.
 
 Do not re-run `tier1-bootstrap.sh` for upgrades — the `--init` step is idempotent
 but binary placement goes through the download path. Use `--binary-path` if you
@@ -226,10 +313,101 @@ before `--init`.
 
 ## 8. Recovery
 
-Tier 1 has no automated backup. The controller's state lives in `/var/lib/cfgms/`.
-If the VM is lost or unrecoverable, all state is discarded.
+Tier 1 has no online backup command. A complete recoverable copy consists of:
 
-**To rebuild from scratch:**
+- `/var/lib/cfgms/` — SQLite, flat-file data, CA, server certificate, and audit data
+- `/etc/cfgms/controller.cfg` — deployment configuration
+- the external encryption key
+
+The key must be backed up at the same consistency point but escrowed separately
+from the state archive under equivalent or stronger access control. Loss of it
+makes encrypted data unrecoverable; disclosure compromises every secret
+protected by it.
+
+**The key is a sealed blob, so it must be exported, not copied.** Since ADR-030
+the key lives at `/etc/cfgms/secrets.key.cred`, sealed by `systemd-creds` to this
+host's TPM2 (or, under the `--allow-host-key` opt-in, to this host's disk-resident
+host key). Archiving that file protects against losing the *file*, not against
+losing the *machine*: a rebuilt host, a reset TPM, or a removed vTPM makes the
+blob permanently unreadable. The backup below therefore unseals the key and
+escrows the plaintext, and the restore re-seals it on the target host. Check
+`/etc/cfgms/.bootstrap-record` to see which binding a given host used.
+
+### Cold backup
+
+Stop the controller so SQLite and flat-file state are captured at one consistency
+point. Create the archive on an encrypted filesystem, copy the archive and checksum
+to encrypted off-host storage, and then remove the staging copy.
+
+```bash
+sudo systemctl stop cfgms-controller
+
+sudo sh -eu <<'EOF'
+umask 077
+install -d -m 0700 /backup/cfgms
+backup_base="/backup/cfgms/controller-$(date -u +%Y%m%dT%H%M%SZ)"
+state_file="${backup_base}.state.tar.gz"
+key_file="${backup_base}.secrets.key"
+tar --create --gzip --acls --xattrs --numeric-owner \
+  --file "${state_file}.tmp" \
+  --directory / \
+  var/lib/cfgms \
+  etc/cfgms/controller.cfg
+systemd-creds decrypt --name=cfgms-secrets-key /etc/cfgms/secrets.key.cred "${key_file}.tmp"
+chmod 0600 "${key_file}.tmp"
+mv "${state_file}.tmp" "${state_file}"
+mv "${key_file}.tmp" "${key_file}"
+sha256sum "${state_file}" "${key_file}" > "${backup_base}.sha256"
+printf 'Created coordinated backup set %s\n' "${backup_base}"
+EOF
+
+sudo systemctl start cfgms-controller
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+Test restoration on an isolated host at the same release before relying on a
+backup. Never extract an untrusted archive.
+
+### Cold restore
+
+Provision the `cfgms` service account and systemd unit first, but leave the
+controller stopped. Verify the checksum and inspect the member list before
+extracting:
+
+```bash
+sudo systemctl stop cfgms-controller
+cd /backup/cfgms
+sha256sum --check controller-YYYYMMDDTHHMMSSZ.sha256
+tar --list --gzip --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz
+
+sudo tar --extract --gzip --acls --xattrs --numeric-owner \
+  --file controller-YYYYMMDDTHHMMSSZ.state.tar.gz \
+  --directory /
+# Re-seal the escrowed key to THIS host. The blob from the old host cannot be
+# unsealed here — that is precisely what sealing it buys.
+sudo systemd-creds encrypt --name=cfgms-secrets-key --with-key=tpm2 \
+  controller-YYYYMMDDTHHMMSSZ.secrets.key \
+  /etc/cfgms/secrets.key.cred
+sudo chown -R cfgms:cfgms /var/lib/cfgms
+sudo chown cfgms:cfgms /etc/cfgms/controller.cfg
+sudo chmod 0750 /var/lib/cfgms /etc/cfgms
+sudo chmod 0640 /etc/cfgms/controller.cfg
+sudo chown root:root /etc/cfgms/secrets.key.cred
+sudo chmod 0400 /etc/cfgms/secrets.key.cred
+
+sudo systemctl start cfgms-controller
+source scripts/cfgms-bundle-load
+bash scripts/tier1-smoke-test.sh
+```
+
+After restore, verify audit-chain integrity, tenant inventory, steward
+reconnections, certificate validity, and a signed configuration operation in
+addition to the smoke test.
+
+### Rebuild without a backup
+
+If no usable backup exists:
 
 1. Provision a new Debian 12 VM (§2)
 2. Copy `tier1-bootstrap.sh` and `tier1-smoke-test.sh` to the new VM
@@ -237,9 +415,6 @@ If the VM is lost or unrecoverable, all state is discarded.
 4. Distribute the new admin bundle (§5)
 5. Re-register stewards — existing steward registrations are not portable across
    controller reinitializations (new CA means all mTLS credentials are invalid)
-
-For disaster recovery planning, consider scheduling periodic exports of tenant
-configuration data using `cfg` before they are needed.
 
 ---
 
@@ -273,14 +448,39 @@ Never use the develop tip for Tier 1 — always use a tagged release.
 The script renders `/etc/cfgms/controller.cfg` from the canonical template
 (`docs/deployment/controller.cfg`) with `--hostname` substituted into
 `common_name` and `dns_names`. Manually: copy the template and edit those fields.
-Storage backend must be `flatfile_root` + `sqlite_path` (no git, no SOPS).
+Storage backend must be `flatfile_root` + `sqlite_path` (no git, no SOPS). Also set
+`admin_bundle_path` to a tmpfs-backed path (e.g. under `/run`) rather than leaving it
+unset — an unset value defaults to `/etc/cfgms/admin.bundle.yaml`, a persistent path,
+which is exactly what Issue #4342 removed from the scripted flow.
+
+The scripted flow is stricter than that, and deliberately so: it accepts exactly one
+value, `/run/cfgms-admin-bundle/admin.bundle.yaml`, the dedicated tmpfs directory it
+creates and cleans up itself. Any other value — including one supplied via `--config`
+— fails the run in step 4 with a message naming the key, before anything is written
+or removed. The script will not create files in, or delete files from, a directory an
+operator chose, because that directory can be `/etc/cfgms` (sealed root key, this
+config) or `/var/lib/cfgms` (CA, storage). If you need the bundle somewhere else, run
+`--init` by hand (below) and take responsibility for capturing and removing it.
+
+A config written before Issue #4342 has no `admin_bundle_path` at all. The script
+appends the tmpfs value to it on the next run, so an already-provisioned host
+converges without a manual edit; leaving the key unset would let `--init` fall back to
+`/etc/cfgms/admin.bundle.yaml` and put the admin certificate and key on persistent
+storage. The bundle that earlier version left at `/etc/cfgms/admin.bundle.yaml` is
+removed on every run, including runs that fail after step 4.
 
 **Step 5 — Init**
-The script runs `cfgms-controller --init --config /etc/cfgms/controller.cfg`.
-This is idempotent: if `/etc/cfgms/.admin-bundle-issued` exists, init is skipped.
-The init command creates the CA, server certificates, storage backend, and admin
-bundle. Save the CA fingerprint printed at this step — stewards need it at
-registration time.
+The script runs `cfgms-controller --init --config /etc/cfgms/controller.cfg`. The
+init command creates the CA, server certificates, storage backend, and admin bundle
+(at `admin_bundle_path` from step 4) in one call. Save the CA fingerprint printed at
+this step — stewards need it at registration time. Immediately capture the admin
+bundle from wherever you pointed `admin_bundle_path` and remove it — manual `--init`
+does not get the scripted flow's automatic stdout delivery or cleanup trap.
+Idempotency here is CA-based, not marker-based: re-running `--init` after the CA
+exists fails with "controller is already initialized," telling you to remove the CA
+directory first if you genuinely mean to re-initialize. (The scripted flow's own
+`/etc/cfgms/.admin-bundle-issued` marker is written by `tier1-bootstrap.sh` itself,
+not by `--init` — it has no meaning when you run `--init` by hand.)
 
 **Step 6 — Systemd**
 The script writes the unit file to `/etc/systemd/system/cfgms-controller.service`
@@ -296,12 +496,15 @@ cfg tenant create --tenant-id=agent-test --parent=team-root
 cfg tenant create --tenant-id=infra-hyperv --parent=team-root
 ```
 The `cfg` binary uses `CFGMS_ADMIN_BUNDLE` for authentication. Run these after
-the controller is running and the admin bundle is available.
+the controller is running, using the copy of the admin bundle you captured in step 5
+(e.g. `CFGMS_ADMIN_BUNDLE=/run/cfgms-admin-bundle/admin.bundle.yaml cfg tenant create ...`
+if it is still where `--init` wrote it, or your own saved copy otherwise).
 
 **Step 8 — Smoke test**
-The script runs `scripts/tier1-smoke-test.sh`. Manually run it the same way:
+The script runs `scripts/tier1-smoke-test.sh`. Manually run it the same way, using
+the same bundle copy as step 7:
 ```bash
-CFGMS_ADMIN_BUNDLE=/etc/cfgms/admin.bundle.yaml bash scripts/tier1-smoke-test.sh
+CFGMS_ADMIN_BUNDLE=/path/to/admin.bundle.yaml bash scripts/tier1-smoke-test.sh
 ```
 Expected: 4 checks pass (health + 3 tenant-exists). See §10.
 
@@ -328,13 +531,16 @@ Expected output:
 Result: 4 passed, 0 failed
 ```
 
-To run it manually after bootstrap:
+To run it manually right after bootstrap, on the controller, while the bundle
+`--init` issued is still present on tmpfs (before the bootstrap script's own cleanup
+trap removes it — see §4/§5):
 
 ```bash
-CFGMS_ADMIN_BUNDLE=/etc/cfgms/admin.bundle.yaml bash scripts/tier1-smoke-test.sh
+CFGMS_ADMIN_BUNDLE=/run/cfgms-admin-bundle/admin.bundle.yaml bash scripts/tier1-smoke-test.sh
 ```
 
-Or from an operator workstation after sourcing the bundle:
+Or from an operator workstation after sourcing the bundle (requires the optional
+OS-keychain storage step in §5):
 
 ```bash
 source scripts/cfgms-bundle-load

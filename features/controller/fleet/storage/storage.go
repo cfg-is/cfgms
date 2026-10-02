@@ -26,9 +26,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sync"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
+	sdna "github.com/cfgis/cfgms/features/steward/dna"
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -46,13 +49,43 @@ type Manager struct {
 	storage    Backend
 	compressor Compressor
 	indexer    Indexer
+	pruneWg    sync.WaitGroup
+
+	// maintenanceLeaseMu guards maintenanceLease, read by startMaintenanceTasks'
+	// ticker loop and written by SetMaintenanceLease. NewManager starts that loop
+	// immediately (many call sites construct a Manager before any *ha.Manager
+	// exists), so the field defaults to the zero lease.SingletonJob (nil Manager,
+	// always runs) and callers that need cluster-singleton gating wire it in
+	// shortly after construction via SetMaintenanceLease (ADR-031 Decision 4).
+	maintenanceLeaseMu sync.RWMutex
+	maintenanceLease   lease.SingletonJob
+}
+
+// SetMaintenanceLease wires the cluster-singleton lease claim
+// (ADR-031 Decision 4) startMaintenanceTasks' ticker loop runs each cycle
+// behind. Safe to call at any time, including while the maintenance goroutine
+// is already running (NewManager starts it before a caller can wire this) —
+// the next tick reads the newly set value. A never-set (zero-value) lease
+// runs every cycle unconditionally, the correct behavior for a single-node
+// deployment.
+func (m *Manager) SetMaintenanceLease(job lease.SingletonJob) {
+	m.maintenanceLeaseMu.Lock()
+	defer m.maintenanceLeaseMu.Unlock()
+	m.maintenanceLease = job
+}
+
+func (m *Manager) getMaintenanceLease() lease.SingletonJob {
+	m.maintenanceLeaseMu.RLock()
+	defer m.maintenanceLeaseMu.RUnlock()
+	return m.maintenanceLease
 }
 
 // Config defines the configuration for DNA storage management.
 type Config struct {
 	// Storage backend configuration
-	Backend BackendType `json:"backend" yaml:"backend"`
-	DataDir string      `json:"data_dir" yaml:"data_dir"` // Directory for storage files (default: "data")
+	Backend     BackendType `json:"backend" yaml:"backend"`
+	DataDir     string      `json:"data_dir" yaml:"data_dir"`         // Directory for storage files (default: "data")
+	DatabaseURL string      `json:"database_url" yaml:"database_url"` // PostgreSQL connection string for BackendDatabase
 
 	// Compression configuration
 	CompressionLevel       int     `json:"compression_level" yaml:"compression_level"`               // 1-9, higher = better compression
@@ -121,8 +154,7 @@ type QueryOptions struct {
 	TimeRange   *TimeRange `json:"time_range,omitempty"`
 	Limit       int        `json:"limit,omitempty"`
 	Offset      int        `json:"offset,omitempty"`
-	IncludeData bool       `json:"include_data"`         // Include full DNA data or just metadata
-	Attributes  []string   `json:"attributes,omitempty"` // Filter to specific attributes
+	IncludeData bool       `json:"include_data"` // Include full DNA data or just metadata
 }
 
 // HistoryResult contains the results of a historical query
@@ -247,8 +279,17 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 	// Determine shard for storage
 	shardID := m.getShardID(deviceID, time.Now())
 
-	// Get next version number for this device
-	version, err := m.indexer.GetNextVersion(ctx, deviceID)
+	// Get the next version from the durable backend when possible. The in-memory
+	// indexer resets to version 1 on every controller restart, which causes
+	// (device_id, version) collisions with rows written by the previous process.
+	// SQLiteBackend.GetNextVersion reads MAX(version)+1 from dna_history, so it
+	// always picks up where the last process left off.
+	var version int64
+	if sqliteBackend, ok := m.storage.(*SQLiteBackend); ok {
+		version, err = sqliteBackend.GetNextVersion(ctx, deviceID)
+	} else {
+		version, err = m.indexer.GetNextVersion(ctx, deviceID)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get next version: %w", err)
 	}
@@ -287,13 +328,18 @@ func (m *Manager) Store(ctx context.Context, deviceID string, dna *commonpb.DNA,
 		// Don't fail the store operation for index errors
 	}
 
-	// Trigger retention policy if needed
-	go m.enforceRetentionPolicy(deviceID)
+	// Trigger retention policy if needed; WaitGroup ensures Close() waits before
+	// the database connection is torn down.
+	m.pruneWg.Add(1)
+	go func() {
+		defer m.pruneWg.Done()
+		m.enforceRetentionPolicy(deviceID)
+	}()
 
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA stored successfully",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"original_size", originalSize,
 		"compressed_size", compressedSize,
 		"compression_ratio", compressionRatio,
@@ -318,45 +364,62 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 		options = &QueryOptions{IncludeData: true}
 	}
 
-	// Query index for matching records
-	recordRefs, totalCount, err := m.indexer.QueryRecords(ctx, deviceID, options)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query DNA records: %w", err)
-	}
-
 	var records []*DNARecord
+	var totalCount int64
 	var bytesProcessed int64
 	var compressionSavings int64
+	var recordsScanned int64
 
-	// Retrieve and decompress records
-	for _, ref := range recordRefs {
-		record, err := m.storage.GetRecord(ctx, ref.ContentHash, ref.ShardID)
+	switch backend := m.storage.(type) {
+	case *SQLiteBackend:
+		// Read directly from the durable store — the in-memory indexer starts empty
+		// after every controller restart, so using it here would make GetHistory return
+		// zero records for any device that was not seen in the current process lifetime.
+		durableRecords, count, err := backend.GetHistoryByDeviceID(ctx, deviceID, options)
 		if err != nil {
-			m.logger.Error("Failed to retrieve DNA record", "error", err, "content_hash", ref.ContentHash)
-			continue
+			return nil, fmt.Errorf("failed to query DNA records: %w", err)
 		}
-
-		// Override the device ID with the one from the reference (for deduplication support)
-		record.DeviceID = ref.DeviceID
-		record.Version = ref.Version
-		record.StoredAt = ref.StoredAt
-
-		// Decompress data if requested
-		if options.IncludeData {
-			if err := m.decompressRecord(record); err != nil {
-				m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
+		totalCount = count
+		recordsScanned = int64(len(durableRecords))
+		for _, record := range durableRecords {
+			if options.IncludeData {
+				if err := m.decompressRecord(record); err != nil {
+					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", record.ContentHash)
+					continue
+				}
+			}
+			records = append(records, record)
+			bytesProcessed += record.OriginalSize
+			compressionSavings += (record.OriginalSize - record.CompressedSize)
+		}
+	default:
+		// Fall back to in-memory indexer for non-durable backends (file, memory).
+		recordRefs, count, err := m.indexer.QueryRecords(ctx, deviceID, options)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query DNA records: %w", err)
+		}
+		totalCount = count
+		recordsScanned = int64(len(recordRefs))
+		for _, ref := range recordRefs {
+			record, err := m.storage.GetRecord(ctx, ref.ContentHash, ref.ShardID)
+			if err != nil {
+				m.logger.Error("Failed to retrieve DNA record", "error", err, "content_hash", ref.ContentHash)
 				continue
 			}
+			// Override the device ID with the one from the reference (for deduplication support)
+			record.DeviceID = ref.DeviceID
+			record.Version = ref.Version
+			record.StoredAt = ref.StoredAt
+			if options.IncludeData {
+				if err := m.decompressRecord(record); err != nil {
+					m.logger.Error("Failed to decompress DNA record", "error", err, "content_hash", ref.ContentHash)
+					continue
+				}
+			}
+			records = append(records, record)
+			bytesProcessed += record.OriginalSize
+			compressionSavings += (record.OriginalSize - record.CompressedSize)
 		}
-
-		// Filter attributes if requested
-		if len(options.Attributes) > 0 && record.DNA != nil {
-			record.DNA = m.filterAttributes(record.DNA, options.Attributes)
-		}
-
-		records = append(records, record)
-		bytesProcessed += record.OriginalSize
-		compressionSavings += (record.OriginalSize - record.CompressedSize)
 	}
 
 	executionTime := time.Since(startTime)
@@ -368,7 +431,7 @@ func (m *Manager) GetHistory(ctx context.Context, deviceID string, options *Quer
 		Metadata: &QueryMetadata{
 			ExecutionTime:      executionTime,
 			CacheHit:           false, // TODO: Implement caching
-			RecordsScanned:     int64(len(recordRefs)),
+			RecordsScanned:     recordsScanned,
 			BytesProcessed:     bytesProcessed,
 			CompressionSavings: compressionSavings,
 		},
@@ -418,6 +481,10 @@ func (m *Manager) GetStorageStats(ctx context.Context) (*StorageStats, error) {
 func (m *Manager) Close() error {
 	m.logger.Info("Shutting down DNA storage manager")
 
+	// Wait for any in-flight per-device prune goroutines so that all database
+	// transactions are committed before we tear down the connection pool.
+	m.pruneWg.Wait()
+
 	// Close components in order
 	if err := m.indexer.Close(); err != nil {
 		m.logger.Error("Failed to close indexer", "error", err)
@@ -465,34 +532,75 @@ func DefaultConfig() *Config {
 
 // Helper methods
 
+// generateContentHash returns a deterministic identifier for DNA content used
+// for deduplication (Issue #3329). See ContentHash for the precedence rules and
+// for why a steward-supplied aggregate root is never trusted unvalidated.
 func (m *Manager) generateContentHash(dna *commonpb.DNA) (string, error) {
-	// Create deterministic hash of DNA content for deduplication
-	hasher := sha256.New()
+	return ContentHash(dna)
+}
 
-	// Hash DNA ID and attributes in deterministic order
-	hasher.Write([]byte(dna.Id))
-
-	// Sort attributes for consistent hashing
-	keys := make([]string, 0, len(dna.Attributes))
-	for k := range dna.Attributes {
-		keys = append(keys, k)
-	}
-
-	// Simple sort for deterministic ordering
-	for i := 0; i < len(keys); i++ {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[i] > keys[j] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
+// ContentHash returns a deterministic identifier for DNA content (Issue #3329).
+// It is the aggregate-root-first hash exported so callers outside this package
+// (e.g. controller/server's expected-DNA-hash wiring) can compute the same
+// identity without duplicating the fallback logic.
+//
+// The returned value is always a 64-character lowercase hex digest. It is used
+// as a content-address: a log field, a database key, and — for the file backend
+// — a filesystem path component. DNA.aggregate_root is an arbitrary,
+// unbounded, steward-supplied string on the registration path
+// (RegisterSteward -> storeDNA -> Manager.Store), where no equivalent of the
+// heartbeat path's sdna.IsValidAggregateRoot check runs, so the field is never
+// returned unless it has exactly the shape sdna.AggregateRoot produces.
+// Precedence, strongest first:
+//
+//  1. The root recomputed server-side from the manifest — self-supplied data,
+//     independent of what the steward claimed the root to be.
+//  2. The claimed aggregate root, when it is a well-formed digest.
+//  3. A hash of the stable identity fields (ID, ConfigHash, SyncFingerprint)
+//     that exclude timestamps and the retired flat attributes map, for DNA that
+//     has not yet been migrated to the fragment model — and for any DNA whose
+//     claimed root is malformed.
+func ContentHash(dna *commonpb.DNA) (string, error) {
+	if manifest := dna.GetManifest(); len(manifest) > 0 {
+		root, err := sdna.AggregateRoot(manifest)
+		if err != nil {
+			return "", fmt.Errorf("failed to compute aggregate root from manifest: %w", err)
 		}
+		return root, nil
 	}
-
-	for _, key := range keys {
-		hasher.Write([]byte(key))
-		hasher.Write([]byte(dna.Attributes[key]))
+	if root := dna.GetAggregateRoot(); sdna.IsValidAggregateRoot(root) {
+		return root, nil
 	}
-
+	// Fallback for DNA that has not yet been migrated to the fragment model, and
+	// for a malformed claimed root.
+	hasher := sha256.New()
+	hasher.Write([]byte(dna.GetId()))
+	hasher.Write([]byte(dna.GetConfigHash()))
+	hasher.Write([]byte(dna.GetSyncFingerprint()))
 	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
+// hashPrefixLen is the number of leading characters of a content hash emitted
+// in log fields — enough to correlate records without logging the full address.
+const hashPrefixLen = 16
+
+// shortHash returns at most the first hashPrefixLen characters of contentHash.
+//
+// Slicing a hash unconditionally (contentHash[:16]) panics on any shorter value,
+// and the slice expression is evaluated eagerly at the call site regardless of
+// log level — so a single short hash crashes the controller process even with
+// debug logging off. ContentHash now guarantees a 64-hex digest, but hashes read
+// back from a backend or written by an older process are not re-validated, so
+// every log site goes through here.
+//
+// The prefix is routed through logging.SanitizeLogValue because a content hash
+// reaching this helper is not necessarily validated: hashes read back from a
+// backend, or written by an older process, skip validateHashPathComponent. That
+// also makes the result a CodeQL-recognised sanitised value at every call site —
+// go/log-injection hardcodes its sanitiser list and ignores the repository's
+// Models-as-Data pack, so a barrier entry there would be inert (Issue #3329).
+func shortHash(contentHash string) string {
+	return logging.SanitizeLogValue(contentHash[:min(hashPrefixLen, len(contentHash))])
 }
 
 func (m *Manager) getShardID(deviceID string, timestamp time.Time) string {
@@ -561,7 +669,7 @@ func (m *Manager) storeReference(ctx context.Context, deviceID, contentHash stri
 	duration := time.Since(startTime)
 	m.logger.Debug("DNA reference stored (deduplicated)",
 		"device_id", deviceID,
-		"content_hash", contentHash[:16],
+		"content_hash", shortHash(contentHash),
 		"version", version,
 		"duration", duration)
 
@@ -573,37 +681,16 @@ func (m *Manager) decompressRecord(record *DNARecord) error {
 	return nil
 }
 
-func (m *Manager) filterAttributes(dna *commonpb.DNA, attributes []string) *commonpb.DNA {
-	if len(attributes) == 0 {
-		return dna
-	}
-
-	filtered := &commonpb.DNA{
-		Id:              dna.Id,
-		Attributes:      make(map[string]string),
-		LastUpdated:     dna.LastUpdated,
-		ConfigHash:      dna.ConfigHash,
-		LastSyncTime:    dna.LastSyncTime,
-		AttributeCount:  dna.AttributeCount,
-		SyncFingerprint: dna.SyncFingerprint,
-	}
-
-	for _, attr := range attributes {
-		if value, exists := dna.Attributes[attr]; exists {
-			filtered.Attributes[attr] = value
-		}
-	}
-
-	return filtered
-}
-
 func (m *Manager) startMaintenanceTasks() {
 	ticker := time.NewTicker(m.config.FlushInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Run periodic maintenance
-		m.runMaintenance()
+		// Run periodic maintenance, behind this cycle's cluster-singleton lease
+		// claim (ADR-031 Decision 4) — see SetMaintenanceLease.
+		m.getMaintenanceLease().RunIfLeader(context.Background(), func(context.Context) {
+			m.runMaintenance()
+		})
 	}
 }
 
@@ -625,12 +712,50 @@ func (m *Manager) runMaintenance() {
 }
 
 func (m *Manager) enforceRetentionPolicy(deviceID string) {
-	// Device-specific retention policy enforcement
-	// This would remove old records based on configured policies
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return
+	}
+
+	ctx := context.Background()
+
+	var cutoff time.Time
+	if m.config.RetentionPeriod > 0 {
+		cutoff = time.Now().Add(-m.config.RetentionPeriod)
+	}
+
+	deleted, err := sqliteBackend.PruneDevice(ctx, deviceID, m.config.MaxRecordsPerDevice, cutoff)
+	if err != nil {
+		m.logger.Error("Failed to enforce per-device retention policy",
+			"device_id", logging.SanitizeLogValue(deviceID), "error", err)
+		return
+	}
+	if deleted > 0 {
+		m.logger.Info("Pruned DNA records under per-device retention policy",
+			"device_id", logging.SanitizeLogValue(deviceID), "rows_deleted", deleted)
+	}
 }
 
 func (m *Manager) enforceGlobalRetentionPolicy() error {
-	// Global retention policy enforcement across all devices
+	sqliteBackend, ok := m.storage.(*SQLiteBackend)
+	if !ok {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	var cutoff time.Time
+	if m.config.RetentionPeriod > 0 {
+		cutoff = time.Now().Add(-m.config.RetentionPeriod)
+	}
+
+	deleted, err := sqliteBackend.PruneAllDevices(ctx, m.config.MaxRecordsPerDevice, cutoff)
+	if err != nil {
+		return fmt.Errorf("global retention sweep failed: %w", err)
+	}
+	if deleted > 0 {
+		m.logger.Info("Global retention sweep pruned DNA records", "rows_deleted", deleted)
+	}
 	return nil
 }
 

@@ -7,7 +7,9 @@ package openbao
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -46,22 +48,156 @@ func (s *OpenBaoSecretStore) kvPath(tenantID, key string) string {
 // StoreSecret writes a secret to OpenBao KV v2.
 // M-AUTH-1: TenantID is required; empty TenantID returns ErrTenantRequired.
 func (s *OpenBaoSecretStore) StoreSecret(ctx context.Context, req *interfaces.SecretRequest) error {
+	if err := validateSecretRequest(req); err != nil {
+		return err
+	}
+
+	path := s.kvPath(req.TenantID, req.Key)
+	_, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), kvData(req))
+	if err != nil {
+		return fmt.Errorf("failed to store secret %s: %w",
+			logging.SanitizeLogValue(req.Key), err)
+	}
+
+	return nil
+}
+
+// CompareAndSwapSecret implements interfaces.SecretStore.CompareAndSwapSecret using
+// OpenBao KV v2's native check-and-set option — a real server-side atomic write, so
+// this is correct across any number of controller nodes concurrently writing the
+// same key (OpenBao is this codebase's one ClusterCapable SecretStore provider).
+// expectedVersion 0 uses OpenBao's own "must not already exist" CAS semantics.
+func (s *OpenBaoSecretStore) CompareAndSwapSecret(ctx context.Context, key string, expectedVersion int, req *interfaces.SecretRequest) (int, bool, error) {
+	if err := validateSecretRequest(req); err != nil {
+		return 0, false, err
+	}
+	if key == "" {
+		return 0, false, fmt.Errorf("secret key cannot be empty")
+	}
+	if expectedVersion < 0 {
+		return 0, false, fmt.Errorf("expected version cannot be negative")
+	}
+
+	logical, stored, err := s.casCurrentVersion(ctx, req.TenantID, req.Key)
+	if err != nil {
+		return 0, false, err
+	}
+	if logical != expectedVersion {
+		return 0, false, nil
+	}
+
+	// The read above is advisory: it only translates the caller's expectedVersion
+	// (in which an expired record counts as absent) into the version OpenBao
+	// actually holds. The check-and-set below is still the single atomic decision,
+	// evaluated by the OpenBao server, so a concurrent write from another node
+	// between the two makes this report a lost race rather than clobber anything.
+	return s.putWithCheckAndSet(ctx, req, stored)
+}
+
+// casCurrentVersion reports the version CompareAndSwapSecret must compare
+// expectedVersion against, alongside the version OpenBao physically holds.
+//
+// The two differ for a record past the application-level expires_at this provider
+// writes. The interface requires an expired record to be treated as absent, so
+// logical is 0 for one while stored keeps the real KV version — which is what lets
+// a create-if-absent take an abandoned TTL-bounded claim over with a check-and-set
+// rather than be blocked by it forever (Issue #3775). OpenBao does not evaluate
+// expires_at itself, so this provider must.
+func (s *OpenBaoSecretStore) casCurrentVersion(ctx context.Context, tenantID, key string) (logical, stored int, err error) {
+	path := s.kvPath(tenantID, key)
+	kvSecret, err := s.client.KVv2(s.mountPath).Get(ctx, logging.SanitizeLogValue(path))
+	if err != nil {
+		if isNotFound(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to read current secret %s for compare-and-swap: %w",
+			logging.SanitizeLogValue(key), err)
+	}
+	if kvSecret == nil || kvSecret.VersionMetadata == nil {
+		return 0, 0, nil
+	}
+
+	current := kvSecretToSecret(tenantID, key, kvSecret)
+	if current.ExpiresAt != nil && time.Now().After(*current.ExpiresAt) {
+		return 0, current.Version, nil
+	}
+	return current.Version, current.Version, nil
+}
+
+// putWithCheckAndSet performs one KV v2 check-and-set write, translating a
+// check-and-set mismatch into the interface's ok=false/nil-error lost-race result
+// and leaving every other failure as a genuine error.
+func (s *OpenBaoSecretStore) putWithCheckAndSet(ctx context.Context, req *interfaces.SecretRequest, expectedVersion int) (int, bool, error) {
+	path := s.kvPath(req.TenantID, req.Key)
+	kvSecret, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), kvData(req),
+		openbao.WithCheckAndSet(expectedVersion))
+	if err != nil {
+		if isCheckAndSetMismatch(err) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("failed to compare-and-swap secret %s: %w",
+			logging.SanitizeLogValue(req.Key), err)
+	}
+
+	newVersion := 0
+	if kvSecret != nil && kvSecret.VersionMetadata != nil {
+		newVersion = kvSecret.VersionMetadata.Version
+	}
+	return newVersion, true, nil
+}
+
+// CompareAndSwapIsClusterAtomic implements
+// interfaces.ClusterAtomicCompareAndSwapper. OpenBao KV v2's check-and-set is
+// evaluated by the OpenBao server, so the guarantee holds for any number of
+// controller nodes writing the same key concurrently.
+func (s *OpenBaoSecretStore) CompareAndSwapIsClusterAtomic() bool { return true }
+
+// validateSecretRequest applies the validation shared by every write path.
+func validateSecretRequest(req *interfaces.SecretRequest) error {
+	if req == nil {
+		return fmt.Errorf("secret request cannot be nil")
+	}
 	if req.Key == "" {
 		return fmt.Errorf("secret key cannot be empty")
 	}
 	if req.TenantID == "" {
 		return fmt.Errorf("TenantID is required: %w", cfgconfig.ErrTenantRequired)
 	}
+	if err := validateNoPathTraversal(req.TenantID, "TenantID"); err != nil {
+		return err
+	}
+	if err := validateNoPathTraversal(req.Key, "secret key"); err != nil {
+		return err
+	}
+	return nil
+}
 
-	path := s.kvPath(req.TenantID, req.Key)
+// validateNoPathTraversal rejects a KV path component (a tenant ID or a
+// secret key) that contains an empty, ".", or ".." "/"-separated segment.
+// OpenBao KV v2 paths are opaque strings routed hierarchically by segment —
+// unlike a filesystem, there is no directory to Clean or symlink to resolve —
+// so containment here means rejecting any segment that could be interpreted
+// as walking out of the tenant's own subtree once joined into "<tenantID>/<key>".
+// TenantID legitimately contains "/" (CFGMS tenant IDs are hierarchical paths,
+// e.g. "root/msp-a/client-1"), so only individual segments are rejected, not
+// "/" itself.
+func validateNoPathTraversal(component, label string) error {
+	for _, seg := range strings.Split(component, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%s must not contain empty, '.', or '..' path segments: %s",
+				label, logging.SanitizeLogValue(component))
+		}
+	}
+	return nil
+}
 
+// kvData builds the KV v2 data payload shared by StoreSecret and CompareAndSwapSecret.
+func kvData(req *interfaces.SecretRequest) map[string]interface{} {
 	data := map[string]interface{}{
 		"value":       req.Value,
 		"created_by":  req.CreatedBy,
 		"description": req.Description,
 	}
-
-	// Embed tags and metadata into the KV data payload.
 	if len(req.Tags) > 0 {
 		data["tags"] = strings.Join(req.Tags, ",")
 	}
@@ -73,49 +209,69 @@ func (s *OpenBaoSecretStore) StoreSecret(ctx context.Context, req *interfaces.Se
 	if req.TTL > 0 {
 		data["expires_at"] = time.Now().Add(req.TTL).Format(time.RFC3339)
 	}
+	return data
+}
 
-	_, err := s.client.KVv2(s.mountPath).Put(ctx, logging.SanitizeLogValue(path), data)
-	if err != nil {
-		return fmt.Errorf("failed to store secret %s: %w",
-			logging.SanitizeLogValue(req.Key), err)
+// isCheckAndSetMismatch reports whether err is OpenBao's response to a failed
+// check-and-set write (HTTP 400, "check-and-set parameter did not match the
+// current version" / "check-and-set parameter required for this call") rather than
+// an infrastructure failure. CompareAndSwapSecret's contract requires this to be a
+// non-error, ok=false result — a genuine store failure must not be mistaken for a
+// lost race, and vice versa.
+func isCheckAndSetMismatch(err error) bool {
+	var respErr *openbao.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
 	}
-
-	return nil
+	if respErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(respErr.Error()), "check-and-set")
 }
 
 // GetSecret retrieves the current version of a secret.
-// The key must be in the format "tenantID/secretKey".
+// The key must be in the format "tenantID/keyName".
+//
+// An absent secret is reported as an error wrapping interfaces.ErrSecretNotFound,
+// and only an absent secret is: a denial (the token's policy grants create/update
+// but not read), an expired token, a KV mount misconfiguration or a read timeout
+// all return an error that does NOT wrap the sentinel. Callers act on the
+// difference — pkg/cert's cluster-CA load treats "not found" as an unclaimed key
+// path it may bootstrap a new fleet CA into, so classifying a transient failure as
+// absence would re-root the fleet.
 func (s *OpenBaoSecretStore) GetSecret(ctx context.Context, key string) (*interfaces.Secret, error) {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return nil, err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 	kvSecret, err := s.client.KVv2(s.mountPath).Get(ctx, logging.SanitizeLogValue(path))
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+			return nil, fmt.Errorf("secret not found: %s: %w",
+				logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 		}
 		return nil, fmt.Errorf("failed to get secret %s: %w",
 			logging.SanitizeLogValue(key), err)
 	}
 	if kvSecret == nil {
-		return nil, fmt.Errorf("secret not found: %s", logging.SanitizeLogValue(key))
+		return nil, fmt.Errorf("secret not found: %s: %w",
+			logging.SanitizeLogValue(key), interfaces.ErrSecretNotFound)
 	}
 
-	return kvSecretToSecret(tenantID, secretKey, kvSecret), nil
+	return kvSecretToSecret(tenantID, keyName, kvSecret), nil
 }
 
 // DeleteSecret permanently deletes all versions of a secret.
-// Key must be in the format "tenantID/secretKey".
+// Key must be in the format "tenantID/keyName".
 func (s *OpenBaoSecretStore) DeleteSecret(ctx context.Context, key string) error {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 	// DeleteMetadata removes all versions and the metadata entry.
 	if err := s.client.KVv2(s.mountPath).DeleteMetadata(ctx, logging.SanitizeLogValue(path)); err != nil {
 		if isNotFound(err) {
@@ -136,7 +292,10 @@ func (s *OpenBaoSecretStore) ListSecrets(ctx context.Context, filter *interfaces
 	}
 
 	tenantID := filter.TenantID
-	listPath := s.mountPath + "/metadata/" + logging.SanitizeLogValue(tenantID)
+	if err := validateNoPathTraversal(tenantID, "TenantID"); err != nil {
+		return nil, err
+	}
+	listPath := s.mountPath + "/metadata/" + tenantID
 
 	logicalSecret, err := s.client.Logical().ListWithContext(ctx, listPath)
 	if err != nil {
@@ -253,14 +412,14 @@ func (s *OpenBaoSecretStore) StoreSecrets(ctx context.Context, secrets map[strin
 }
 
 // GetSecretVersion retrieves a specific version of a secret.
-// Key must be "tenantID/secretKey".
+// Key must be "tenantID/keyName".
 func (s *OpenBaoSecretStore) GetSecretVersion(ctx context.Context, key string, version int) (*interfaces.Secret, error) {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return nil, err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 	kvSecret, err := s.client.KVv2(s.mountPath).GetVersion(ctx, logging.SanitizeLogValue(path), version)
 	if err != nil {
 		if isNotFound(err) {
@@ -275,20 +434,20 @@ func (s *OpenBaoSecretStore) GetSecretVersion(ctx context.Context, key string, v
 			version, logging.SanitizeLogValue(key))
 	}
 
-	secret := kvSecretToSecret(tenantID, secretKey, kvSecret)
+	secret := kvSecretToSecret(tenantID, keyName, kvSecret)
 	secret.Version = version
 	return secret, nil
 }
 
 // ListSecretVersions returns the version history for a secret.
-// Key must be "tenantID/secretKey".
+// Key must be "tenantID/keyName".
 func (s *OpenBaoSecretStore) ListSecretVersions(ctx context.Context, key string) ([]*interfaces.SecretVersion, error) {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return nil, err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 	versionMetas, err := s.client.KVv2(s.mountPath).GetVersionsAsList(ctx, logging.SanitizeLogValue(path))
 	if err != nil {
 		if isNotFound(err) {
@@ -315,14 +474,14 @@ func (s *OpenBaoSecretStore) ListSecretVersions(ctx context.Context, key string)
 }
 
 // GetSecretMetadata retrieves metadata for a secret without its value.
-// Key must be "tenantID/secretKey".
+// Key must be "tenantID/keyName".
 func (s *OpenBaoSecretStore) GetSecretMetadata(ctx context.Context, key string) (*interfaces.SecretMetadata, error) {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return nil, err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 	kvMeta, err := s.client.KVv2(s.mountPath).GetMetadata(ctx, logging.SanitizeLogValue(path))
 	if err != nil {
 		if isNotFound(err) {
@@ -336,7 +495,7 @@ func (s *OpenBaoSecretStore) GetSecretMetadata(ctx context.Context, key string) 
 	}
 
 	meta := &interfaces.SecretMetadata{
-		Key:      secretKey,
+		Key:      keyName,
 		TenantID: tenantID,
 		Version:  kvMeta.CurrentVersion,
 	}
@@ -379,14 +538,14 @@ func (s *OpenBaoSecretStore) GetSecretMetadata(ctx context.Context, key string) 
 }
 
 // UpdateSecretMetadata updates KV v2 custom metadata for a secret without changing the value.
-// Key must be "tenantID/secretKey".
+// Key must be "tenantID/keyName".
 func (s *OpenBaoSecretStore) UpdateSecretMetadata(ctx context.Context, key string, metadata map[string]string) error {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return err
 	}
 
-	path := s.kvPath(tenantID, secretKey)
+	path := s.kvPath(tenantID, keyName)
 
 	// Convert map[string]string to map[string]interface{} for the API.
 	customMeta := make(map[string]interface{}, len(metadata))
@@ -409,7 +568,7 @@ func (s *OpenBaoSecretStore) UpdateSecretMetadata(ctx context.Context, key strin
 // RotateSecret writes a new version of the secret with newValue.
 // The old versions remain accessible via GetSecretVersion.
 func (s *OpenBaoSecretStore) RotateSecret(ctx context.Context, key string, newValue string) error {
-	tenantID, secretKey, err := splitKey(key)
+	tenantID, keyName, err := splitKey(key)
 	if err != nil {
 		return err
 	}
@@ -427,7 +586,7 @@ func (s *OpenBaoSecretStore) RotateSecret(ctx context.Context, key string, newVa
 	meta[interfaces.MetadataKeyLastRotated] = time.Now().Format(time.RFC3339)
 
 	return s.StoreSecret(ctx, &interfaces.SecretRequest{
-		Key:         secretKey,
+		Key:         keyName,
 		Value:       newValue,
 		Metadata:    meta,
 		Tags:        current.Tags,
@@ -464,20 +623,38 @@ func (s *OpenBaoSecretStore) Close() error {
 
 // ---- helpers ----
 
-// splitKey splits a "tenantID/secretKey" string into its components.
-func splitKey(key string) (tenantID, secretKey string, err error) {
+// splitKey splits a "tenantID/keyName" string into its components.
+//
+// The second result is deliberately named keyName, not secretKey: it holds a
+// secret's *name*, never its value. CodeQL's go/clear-text-logging query picks
+// its sources by identifier name (`.*secret.*`), so a variable called secretKey
+// was treated as secret material and its taint followed the returned
+// Secret/SecretMetadata struct field-insensitively into every caller — surfacing
+// as clear-text-logging alerts on sanitized tenant-ID log lines in
+// features/controller/api/handlers_web_accounts.go. Do not rename this back.
+func splitKey(key string) (tenantID, keyName string, err error) {
 	parts := strings.SplitN(key, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("secret key must be in format 'tenantID/key', got: %s",
 			logging.SanitizeLogValue(key))
 	}
+	// A key containing extra "/"-separated segments (Issue #4340) — e.g.
+	// "tenant-a/../../tenant-b/secret" — would otherwise be split into
+	// tenantID="tenant-a", keyName="../../tenant-b/secret" and joined back into
+	// a KV path that walks outside tenant-a's own subtree.
+	if err := validateNoPathTraversal(parts[0], "TenantID"); err != nil {
+		return "", "", err
+	}
+	if err := validateNoPathTraversal(parts[1], "secret key"); err != nil {
+		return "", "", err
+	}
 	return parts[0], parts[1], nil
 }
 
 // kvSecretToSecret converts an OpenBao KVSecret to a CFGMS Secret.
-func kvSecretToSecret(tenantID, secretKey string, kv *openbao.KVSecret) *interfaces.Secret {
+func kvSecretToSecret(tenantID, keyName string, kv *openbao.KVSecret) *interfaces.Secret {
 	secret := &interfaces.Secret{
-		Key:      secretKey,
+		Key:      keyName,
 		TenantID: tenantID,
 	}
 
@@ -524,14 +701,25 @@ func kvSecretToSecret(tenantID, secretKey string, kv *openbao.KVSecret) *interfa
 	return secret
 }
 
-// isNotFound returns true for HTTP 404-style errors from the OpenBao client.
+// isNotFound reports whether err represents an absent secret, judged by the
+// OpenBao client's own classification rather than by matching rendered error
+// text. Substring matching on err.Error() previously misclassified any error
+// whose rendered text happened to contain "404" (an ephemeral port number, a
+// request path, a request ID) or the phrase "not found" (a DNS or connection
+// failure rendering as "host not found") as absence — turning a backend
+// outage into a false report that the secret does not exist.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	return err == openbao.ErrSecretNotFound ||
-		strings.Contains(err.Error(), "404") ||
-		strings.Contains(err.Error(), "not found")
+	if errors.Is(err, openbao.ErrSecretNotFound) {
+		return true
+	}
+	var respErr *openbao.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
 
 // hasAllTags returns true if secret tags contain all filter tags.

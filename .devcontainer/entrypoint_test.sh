@@ -546,6 +546,360 @@ test_16_hard_refusal_missing_project_item_id() {
 }
 
 # ============================================================================
+# TEST 17 — dry-run: review gate invokes the shared story-review workflow
+# (Story #2308 — must fail against develop@HEAD, pass after this story)
+# The composed prompt must drive the review via `Workflow({name:"story-review"})`
+# with the marker gated on the aggregate `passed:true` verdict, and must NOT still
+# carry the old hand-spawn-three-specialist-agents prose.
+# ============================================================================
+test_17_review_gate_uses_story_review_workflow() {
+    setup_entrypoint_stubs
+
+    local output rc=0
+    output=$(CFGMS_PROJECT_ITEM_ID="pv2-test-item" \
+        CFGMS_TEST_PROJECT_QUEUE="$TEST_ENTRY_DIR/project-queue.sh" \
+        HOME="$TEST_ENTRY_DIR/home" \
+        bash "$SCRIPT_DIR/entrypoint.sh" 9999 --dry-run 2>&1) || rc=$?
+
+    if [[ "$rc" -ne 0 ]]; then
+        _fail "issue --dry-run exited $rc (expected 0)"
+        teardown_entrypoint_stubs
+        return
+    fi
+
+    # The review phase now invokes the shared workflow by name.
+    assert_contains "$output" 'name: "story-review"' \
+        "prompt invokes the story-review workflow"
+    assert_contains "$output" "test-agent-complete" \
+        "workflow is parameterized with the container test target"
+    # Marker is gated on the aggregate verdict, not a single lens.
+    assert_contains "$output" "touch /tmp/agent-validation-passed" \
+        "marker write instruction present"
+    assert_contains "$output" "aggregate workflow verdict" \
+        "marker is gated on the aggregate workflow verdict"
+    # The old hand-spawn-3-agents pattern is gone (regression guard).
+    assert_not_contains "$output" "spawn three specialist review agents" \
+        "old hand-spawn-three-agents prose removed"
+
+    teardown_entrypoint_stubs
+}
+
+# ============================================================================
+# _salvage_no_pr — exit-0-with-no-PR salvage (Issue #3397, root cause of #3158)
+#
+# The helpers are loaded via the CFGMS_ENTRYPOINT_SOURCE_ONLY hook, which
+# returns before any agent flow runs. Each test drives the function inside a
+# throwaway git repo with `git`, `gh` and `project-queue.sh` stubbed to record
+# their invocations, so the assertions are on what the function actually did.
+# ============================================================================
+
+setup_salvage_env() {
+    SALVAGE_DIR="$(mktemp -d)"
+    SALVAGE_LOG="$SALVAGE_DIR/calls.log"
+    : > "$SALVAGE_LOG"
+
+    # gh stub — records every invocation.
+    cat > "$SALVAGE_DIR/gh" <<STUB
+#!/usr/bin/env bash
+echo "gh \$*" >> "$SALVAGE_LOG"
+STUB
+    chmod +x "$SALVAGE_DIR/gh"
+
+    # project-queue.sh stub — records field updates.
+    cat > "$SALVAGE_DIR/project-queue.sh" <<STUB
+#!/usr/bin/env bash
+echo "project-queue \$*" >> "$SALVAGE_LOG"
+case "\$1" in
+    get-item) printf '{"fields":{"ZeroWorkRetries":"0"}}\n' ;;
+esac
+STUB
+    chmod +x "$SALVAGE_DIR/project-queue.sh"
+
+    # A real git repo, so `git status --porcelain` reports honestly. Only the
+    # network-touching subcommands are stubbed out.
+    SALVAGE_REPO="$SALVAGE_DIR/repo"
+    mkdir -p "$SALVAGE_REPO"
+    git -C "$SALVAGE_REPO" init -q
+    git -C "$SALVAGE_REPO" config user.email "test@example.com"
+    git -C "$SALVAGE_REPO" config user.name "Test"
+    echo "seed" > "$SALVAGE_REPO/seed.txt"
+    git -C "$SALVAGE_REPO" add seed.txt
+    git -C "$SALVAGE_REPO" commit -q -m "seed"
+    # An agent clone is branched from develop; salvage measures work against it.
+    git -C "$SALVAGE_REPO" update-ref refs/remotes/origin/develop HEAD
+
+    cat > "$SALVAGE_DIR/git" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "push" ]]; then
+    echo "git \$*" >> "$SALVAGE_LOG"
+    exit 0
+fi
+exec /usr/bin/env -u PATH_OVERRIDE $(command -v git) "\$@"
+STUB
+    chmod +x "$SALVAGE_DIR/git"
+
+    ORIG_SALVAGE_PATH="$PATH"
+    export PATH="$SALVAGE_DIR:$PATH"
+
+    # Load the helpers without running any agent flow.
+    # shellcheck disable=SC1090
+    CFGMS_ENTRYPOINT_SOURCE_ONLY=1 source "$SCRIPT_DIR/entrypoint.sh"
+}
+
+teardown_salvage_env() {
+    export PATH="$ORIG_SALVAGE_PATH"
+    rm -rf "$SALVAGE_DIR"
+    unset SALVAGE_DIR SALVAGE_LOG SALVAGE_REPO ORIG_SALVAGE_PATH
+}
+
+# T18 — dirty tree: the work is committed and pushed as a draft PR.
+test_18_salvage_captures_uncommitted_work() {
+    setup_salvage_env
+
+    echo "agent work" > "$SALVAGE_REPO/seed.txt"
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=0
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "exited 0 without opening a pull request" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_contains "$log" "git push -u origin feature/story-9999-agent" \
+        "salvaged branch is pushed"
+    assert_contains "$log" "pr create --base develop --draft" \
+        "salvaged work becomes a draft PR"
+    assert_contains "$log" "exited 0 without opening a pull request" \
+        "draft PR body carries the reason"
+
+    local subject
+    subject=$(git -C "$SALVAGE_REPO" log --format=%s -1)
+    assert_equals "$subject" "WIP: agent attempt for issue #9999 (exited 0 without opening a pull request)" \
+        "WIP commit records the issue and the reason"
+
+    teardown_salvage_env
+}
+
+# T18b — clean tree, but the agent already committed its work (Issue #4272).
+# That is work, not a zero-work run: push it and open the draft PR, and never
+# route the item for re-dispatch, which would delete the branch.
+test_18b_salvage_captures_committed_work() {
+    setup_salvage_env
+
+    echo "agent fix" > "$SALVAGE_REPO/fix.txt"
+    git -C "$SALVAGE_REPO" add fix.txt
+    git -C "$SALVAGE_REPO" commit -q -m "ci: the agent's own commit (Issue #9999)"
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=1
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "failed validation" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_contains "$log" "git push -u origin feature/story-9999-agent" \
+        "committed work is pushed"
+    assert_contains "$log" "pr create --base develop --draft" \
+        "committed work becomes a draft PR"
+    assert_not_contains "$log" "ZeroWorkRetries" \
+        "committed work is not counted as a zero-work retry"
+    assert_not_contains "$log" "status Ready" \
+        "committed work is not reset to Ready for re-dispatch"
+
+    local subject
+    subject=$(git -C "$SALVAGE_REPO" log --format=%s -1)
+    assert_equals "$subject" "ci: the agent's own commit (Issue #9999)" \
+        "no empty WIP commit is stacked on the agent's own commit"
+
+    teardown_salvage_env
+}
+
+# T19 — clean tree: no PR is invented; the item is routed for re-dispatch.
+test_19_salvage_routes_zero_work_for_redispatch() {
+    setup_salvage_env
+
+    (
+        cd "$SALVAGE_REPO" || exit 1
+        CURRENT_BRANCH="feature/story-9999-agent"
+        ISSUE_NUM="9999"
+        EXIT_CODE=0
+        PROJECT_QUEUE="$SALVAGE_DIR/project-queue.sh"
+        CFGMS_PROJECT_ITEM_ID="pv2-test-item"
+        _salvage_no_pr "exited 0 without opening a pull request" > /dev/null 2>&1
+    )
+
+    local log
+    log=$(cat "$SALVAGE_LOG")
+
+    assert_not_contains "$log" "pr create" \
+        "no draft PR is created when there is nothing to capture"
+    assert_contains "$log" "project-queue update-field pv2-test-item ZeroWorkRetries 1" \
+        "retry counter is incremented"
+    assert_contains "$log" "project-queue update-field pv2-test-item status Ready" \
+        "item is reset to Ready for re-dispatch"
+
+    teardown_salvage_env
+}
+
+# T20 — regression guard: the EXIT_CODE==0 branch must salvage a missing PR.
+# This is the exact gap that stranded #3158 — exit 0 was treated as success
+# without ever checking PR_URL.
+test_20_exit_zero_branch_checks_pr_url() {
+    local success_branch
+    success_branch=$(sed -n '/^if \[ "\$EXIT_CODE" -eq 0 \]; then/,/^else$/p' "$SCRIPT_DIR/entrypoint.sh")
+
+    assert_contains "$success_branch" '[ -z "$PR_URL" ]' \
+        "exit-0 branch tests for an empty PR_URL"
+    assert_contains "$success_branch" "_salvage_no_pr" \
+        "exit-0 branch calls the salvage path"
+}
+
+# ============================================================================
+# TEST 21 — ended-turn-waiting detection (Issue #4178)
+# Fixture transcripts shaped like real Claude session JSONL. The stalled ones
+# use wording observed verbatim in 2026-09-18/19 containers.
+# ============================================================================
+_t21_transcript() {
+    # $1 = path, $2 = last assistant text
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+path, last = sys.argv[1], sys.argv[2]
+recs = [
+    {"type": "user", "message": {"role": "user", "content": "implement the story"}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Starting validation now."},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "make test"}}]}},
+    {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "content": "Command running in background"}]}},
+    {"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": last}]}},
+]
+with open(path, "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+PY
+}
+
+test_21_ended_turn_waiting_detection() {
+    local dir; dir=$(mktemp -d)
+    local stalled=(
+        "I'll wait for the background task notification before continuing with validation and the PR update."
+        "I'll pause here and wait for the background task notification when the dispatched workflow run finishes."
+        "Waiting for the background test run (\`byeez3ry9\`) to finish before continuing."
+        "The hooks all look clean. Now I'll wait for the validation to complete."
+    )
+    local i=0 t
+    for t in "${stalled[@]}"; do
+        i=$((i + 1))
+        _t21_transcript "$dir/s$i.jsonl" "$t"
+        if ac_detect_ended_turn_waiting "$dir/s$i.jsonl"; then
+            echo "    ✓ stalled transcript $i detected"
+        else
+            _fail "stalled transcript $i not detected: $t"
+        fi
+    done
+
+    local normal=(
+        "PR #4175 is up and CI is running. Work is committed and pushed."
+        "Validation failed: TestFoo is red. I could not fix it within scope; see the PR comment."
+        "Done. The fix is committed and the PR description is updated."
+    )
+    i=0
+    for t in "${normal[@]}"; do
+        i=$((i + 1))
+        _t21_transcript "$dir/n$i.jsonl" "$t"
+        if ac_detect_ended_turn_waiting "$dir/n$i.jsonl"; then
+            _fail "normal transcript $i misclassified as waiting: $t"
+        else
+            echo "    ✓ normal transcript $i not flagged"
+        fi
+    done
+
+    # Only the LAST assistant message counts: an earlier "waiting" line that
+    # the agent then moved past is not a stall.
+    python3 - "$dir/moved-on.jsonl" <<'PY'
+import json, sys
+recs = [
+    {"message": {"role": "assistant", "content": [{"type": "text", "text": "Waiting for the background build to finish."}]}},
+    {"message": {"role": "assistant", "content": [{"type": "text", "text": "Build passed; PR opened."}]}},
+]
+with open(sys.argv[1], "w") as fh:
+    for r in recs:
+        fh.write(json.dumps(r) + "\n")
+PY
+    if ac_detect_ended_turn_waiting "$dir/moved-on.jsonl"; then
+        _fail "an earlier waiting line the agent moved past was flagged"
+    else
+        echo "    ✓ only the last assistant message is considered"
+    fi
+
+    if ac_detect_ended_turn_waiting "$dir/does-not-exist.jsonl"; then
+        _fail "missing transcript must not be flagged"
+    else
+        echo "    ✓ missing transcript is not flagged"
+    fi
+    rm -rf "$dir"
+}
+
+# ============================================================================
+# TEST 22 — the no-bg-wait rule reaches every headless prompt (Issue #4178)
+# ============================================================================
+test_22_no_bg_wait_rule_in_prompts() {
+    assert_contains "$AC_HEADLESS_NO_BG_WAIT_RULE" "FOREGROUND" "rule tells the agent to run in the foreground"
+    assert_contains "$AC_HEADLESS_NO_BG_WAIT_RULE" "NEVER end your turn" "rule forbids ending the turn to wait"
+
+    local entry review
+    entry=$(cat "$SCRIPT_DIR/entrypoint.sh")
+    review=$(cat "$SCRIPT_DIR/scripts/review-entrypoint.sh")
+    assert_contains "$entry" 'PROMPT_CONTENT+=$'"'"'\n\n'"'"'"${AC_HEADLESS_NO_BG_WAIT_RULE}"' \
+        "dev/fix entrypoint appends the rule at the single launch point"
+    assert_contains "$review" 'PROMPT_CONTENT+=$'"'"'\n\n'"'"'"${AC_HEADLESS_NO_BG_WAIT_RULE}"' \
+        "review entrypoint appends the rule"
+    assert_contains "$entry" '"outcome": "${AGENT_OUTCOME}"' \
+        "agent-result.json records the outcome"
+    assert_contains "$entry" 'AGENT_OUTCOME=$(ac_classify_outcome "$MODE" "$PR_URL" "$HEAD_ADVANCED"' \
+        "entrypoint classifies the outcome through ac_classify_outcome"
+}
+
+# ============================================================================
+# TEST 23 — outcome classification per mode (Issue #4178 review finding)
+# fix-pr / resolve-conflict always have a PR_URL (the PR pre-exists), so only
+# HEAD advancing counts as landed work there. 3 of the 4 observed stalls were
+# fix-pr containers; gating on an empty PR_URL made them unclassifiable.
+# ============================================================================
+test_23_outcome_classification_by_mode() {
+    local dir; dir=$(mktemp -d)
+    _t21_transcript "$dir/stall.jsonl" "I'll wait for the background task notification before continuing."
+    _t21_transcript "$dir/done.jsonl" "Done. Fix committed and pushed."
+    local pr="https://github.com/cfg-is/cfgms/pull/1"
+
+    _t23() { # desc want mode pr_url head_advanced jsonl
+        local got; got=$(ac_classify_outcome "$3" "$4" "$5" "$6")
+        if [[ "$got" == "$2" ]]; then echo "    ✓ $1"; else _fail "$1: want $2 got $got"; fi
+    }
+    _t23 "fix-pr, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting fix-pr "$pr" false "$dir/stall.jsonl"
+    _t23 "resolve-conflict, existing PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting resolve-conflict "$pr" false "$dir/stall.jsonl"
+    _t23 "fix-pr, commit landed, waiting text → normal" normal fix-pr "$pr" true "$dir/stall.jsonl"
+    _t23 "fix-pr, no commit, normal ending → normal" normal fix-pr "$pr" false "$dir/done.jsonl"
+    _t23 "issue mode, no PR, no commit, waiting → ended_turn_waiting" ended_turn_waiting issue "" false "$dir/stall.jsonl"
+    _t23 "issue mode, PR opened, waiting text → normal" normal issue "$pr" false "$dir/stall.jsonl"
+    _t23 "issue mode, missing transcript → normal" normal issue "" false "$dir/none.jsonl"
+    rm -rf "$dir"
+}
+
+# ============================================================================
 # runner
 # ============================================================================
 
@@ -565,6 +919,14 @@ run_test "T13 — review-level comments render" test_13_review_level_comments_re
 run_test "T14 — dry-run issue mode: no injection, project body present" test_14_dry_run_issue_mode_no_injection
 run_test "T15 — dry-run branch mode: no injection, project body present" test_15_dry_run_branch_mode_no_injection
 run_test "T16 — hard refusal when CFGMS_PROJECT_ITEM_ID unset" test_16_hard_refusal_missing_project_item_id
+run_test "T17 — dry-run: review gate invokes story-review workflow" test_17_review_gate_uses_story_review_workflow
+run_test "T18 — salvage: exit-0 with work becomes a draft PR" test_18_salvage_captures_uncommitted_work
+run_test "T18b — salvage: committed-only work becomes a draft PR, never a zero-work retry" test_18b_salvage_captures_committed_work
+run_test "T19 — salvage: exit-0 with no work routes for re-dispatch" test_19_salvage_routes_zero_work_for_redispatch
+run_test "T20 — regression guard: exit-0 branch checks PR_URL" test_20_exit_zero_branch_checks_pr_url
+run_test "T21 — ended-turn-waiting detection (Issue #4178)" test_21_ended_turn_waiting_detection
+run_test "T22 — headless no-bg-wait rule reaches every prompt (Issue #4178)" test_22_no_bg_wait_rule_in_prompts
+run_test "T23 — outcome classification per mode (Issue #4178)" test_23_outcome_classification_by_mode
 
 echo ""
 echo "============================================================"

@@ -26,21 +26,28 @@ package steward
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
-	"github.com/cfgis/cfgms/features/modules/script"
+	"github.com/cfgis/cfgms/features/modules/stdlib/script"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/dna"
 	"github.com/cfgis/cfgms/features/steward/dna/drift"
+	"github.com/cfgis/cfgms/features/steward/driftdiff"
 	"github.com/cfgis/cfgms/features/steward/execution"
 	"github.com/cfgis/cfgms/features/steward/factory"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/logging"
+	maintenancesteward "github.com/cfgis/cfgms/pkg/maintenance/providers/steward"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -80,11 +87,37 @@ type Steward struct {
 	previousDNA   *commonpb.DNA
 	previousDNAMu sync.Mutex
 
+	// driftDiffs buffers the DriftDiffRecord that onManagedResourceDrift builds for
+	// every managed-resource drift event (Issue #3373). Bounded and drop-oldest; see
+	// driftdiff.Accumulator. Drained at the end of each convergence pass by
+	// drainDriftDiffs. Held by value so a zero Steward still has a bounded buffer.
+	driftDiffs driftdiff.Accumulator
+
+	// configRevision identifies the desired-state revision the standalone engine is
+	// converging against, and is stamped on every drift-diff record so a record can be
+	// attributed to the cfg that produced it. Standalone mode receives no
+	// controller-assigned config version, so it is the content hash of the loaded cfg.
+	configRevision string
+
 	// Secret store for steward-side secret management
 	secretStore secretsif.SecretStore
 
+	// monitorDNARefreshes counts DNA snapshot refreshes triggered by a
+	// monitor-driven targeted reconcile that applied changes (standalone only).
+	// Read via export_test.go.
+	monitorDNARefreshes atomic.Int64
+
+	// wg tracks the convergence loop goroutine and the health monitor goroutine
+	// for clean shutdown.
+	wg sync.WaitGroup
+
 	// Shutdown coordination
 	shutdown chan struct{}
+
+	// healthCancel cancels the health monitor goroutine's context. Called in Stop()
+	// to guarantee the goroutine exits even if Stop() is called before
+	// HealthMonitor.Start() sets running=true (TOCTOU race on running.Load()).
+	healthCancel context.CancelFunc
 }
 
 // NewStandalone creates a new Steward instance for standalone operation.
@@ -151,6 +184,30 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		}
 	}
 
+	// Wire the steward-side reboot Gate into the factory unconditionally — even
+	// when no reboot_window is configured (Issue #4411). PatchModule fails closed
+	// on a nil window manager, so leaving this unset denies every auto-reboot on
+	// every device forever, whether or not a window was ever declared. A device
+	// with no configured window instead gets an ungated Gate, whose CanReboot
+	// always returns true, matching the intended default of "reboot as it always
+	// should have."
+	maintenanceGate, err := buildMaintenanceGate(cfg, stewardID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build maintenance reboot gate: %w", err)
+	}
+	moduleFactory.SetMaintenanceGate(maintenanceGate)
+
+	// Wire the module runtime so LoadModule can resolve an installed bundle
+	// when no built-in matches (Issue #4410). mode and additional_publishers
+	// are forwarded from steward.cfg's module_trust config exactly as loaded —
+	// never hardcoded — so strict-mode verification (Issue #4426) is honoured
+	// end to end.
+	moduleFactory.SetModuleRuntime(
+		factory.NewDefaultModuleRuntime(),
+		cfg.Steward.ModuleTrust.Mode,
+		cfg.Steward.ModuleTrust.AdditionalPublishers,
+	)
+
 	// Create state comparator for configuration drift detection
 	comparator := stewardtesting.NewStateComparator()
 
@@ -160,6 +217,11 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		Factory:       moduleFactory,
 		Comparator:    comparator,
 		ErrorHandling: cfg.Steward.ErrorHandling,
+		// Explicit rather than relying on executor.go's 120s fallback (Issue
+		// #3801) — see the matching comment at client_transport.go's ExecutorConfig
+		// literal for the reasoning (covers observed cloud-image VM provisioning,
+		// 25-27s, with comfortable headroom while still bounding a wedged module).
+		ModuleCallTimeoutSec: 120,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create executor: %w", err)
@@ -192,7 +254,7 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		logger.Warn("Failed to load script module for signing config wiring", "error", loadErr)
 	}
 
-	return &Steward{
+	s := &Steward{
 		standaloneConfig: cfg,
 		logger:           logger,
 		healthCheck:      healthMonitor,
@@ -203,8 +265,50 @@ func NewStandalone(configPath string, logger logging.Logger) (*Steward, error) {
 		executor:         executor,
 		dnaCollector:     dnaCollector,
 		driftDetector:    driftDetector,
+		configRevision:   configContentRevision(cfg),
 		shutdown:         make(chan struct{}),
-	}, nil
+	}
+
+	// Register the managed-resource drift handler at construction, not at Start, so
+	// every path that drives the executor records drift-diff records: the convergence
+	// loop, monitor-driven targeted reconciles, and a direct ExecuteConfiguration call.
+	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
+
+	return s, nil
+}
+
+// buildMaintenanceGate constructs the steward-side reboot Gate from the synced
+// StewardConfig (Issue #4411). Called unconditionally — a nil or empty
+// RebootWindow still produces a Gate (the ungated case, CanReboot always true);
+// only a Timezone that cannot be resolved to an IANA location fails construction.
+// Timezone is resolved via pkg/config.ResolveRebootWindowTimezone rather than the
+// raw config value, so a "device" or empty timezone resolves to the host zone
+// instead of failing time.LoadLocation.
+func buildMaintenanceGate(cfg config.StewardConfig, stewardID string) (*maintenancesteward.Gate, error) {
+	return maintenancesteward.New(maintenancesteward.Config{
+		Window:   cfg.Steward.RebootWindow,
+		Timezone: pkgconfig.ResolveRebootWindowTimezone(cfg.Steward.RebootWindow, cfg.Steward.TenantDefaultTimezone),
+		DeviceID: stewardID,
+	})
+}
+
+// configContentRevision derives the revision identifier stamped on every drift-diff
+// record produced in standalone mode.
+//
+// A standalone steward is driven by a local cfg file and receives no
+// controller-assigned config version, but a drift record still has to say which
+// desired state it was measured against — otherwise a record read later cannot be
+// attributed to the cfg that produced it. The revision is therefore the SHA-256 of
+// the effective (post-defaults, post-validation) configuration. encoding/json emits
+// map keys in sorted order, so the same cfg always produces the same revision, and
+// any edit to the cfg produces a different one.
+func configContentRevision(cfg config.StewardConfig) string {
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Start initializes and starts the steward's convergence loop.
@@ -241,23 +345,34 @@ func (s *Steward) startStandalone(ctx context.Context) error {
 		"resources", len(s.standaloneConfig.Resources),
 		"converge_interval", interval)
 
-	// Start health monitoring in background
+	// Start health monitoring in background. Tracked by s.wg so Stop() →
+	// s.wg.Wait() ensures the goroutine exits before cleanup proceeds.
+	// healthCtx is derived so Stop() can cancel it directly, covering the TOCTOU
+	// window where Stop() is called before HealthMonitor.Start() sets running=true.
+	healthCtx, healthCancel := context.WithCancel(ctx)
+	s.healthCancel = healthCancel
+	s.wg.Add(1)
 	go func() {
-		s.healthCheck.Start(ctx)
+		defer s.wg.Done()
+		s.healthCheck.Start(healthCtx)
 	}()
 
-	// Register managed resource drift handler on the execution engine.
-	// When the Compare step detects drift, this logs the event before Set corrects it.
-	s.executor.SetDriftEventHandler(s.onManagedResourceDrift)
+	// The managed-resource drift handler is registered in NewStandalone, before any
+	// executor path can run.
 
-	// Give monitors a moment to start
-	time.Sleep(50 * time.Millisecond)
+	// Start monitors for modules that implement the Monitor interface.
+	// Monitor events feed a targeted reconcile of the changed resource.
+	s.startMonitors(ctx)
 
 	// Converge immediately on startup
 	s.runConvergence(ctx)
 
 	// Start scheduled convergence loop
-	go s.convergenceLoop(ctx, interval)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.convergenceLoop(ctx, interval)
+	}()
 
 	s.logger.Info("Steward started successfully in standalone mode")
 	return nil
@@ -290,6 +405,10 @@ func (s *Steward) runConvergence(ctx context.Context) {
 	for _, err := range report.Errors {
 		s.logger.Error("Convergence error", "error", err)
 	}
+
+	// Empty the drift-diff accumulator this pass filled. Standalone mode has no
+	// controller to sync the records to, so this is their terminus (Issue #3373).
+	s.drainDriftDiffs()
 
 	// Collect a fresh DNA snapshot and compare against the previous one to detect
 	// changes to unmanaged attributes. This is a natural post-convergence activity:
@@ -397,7 +516,28 @@ func (s *Steward) detectUnmanagedDNADrift(ctx context.Context) ([]*drift.DriftEv
 
 // onManagedResourceDrift is the DriftEventHandler registered on the execution engine.
 // It is called by the convergence Compare step when a managed resource has drifted,
-// before Set corrects it. This gives visibility into what was out of compliance.
+// before Set corrects it.
+//
+// It does two things (Issue #3373, ADR-022 §6). It logs the event, as it always has,
+// and it builds a DriftDiffRecord from the StateDiff and records it in the steward's
+// drift-diff accumulator instead of discarding the diff. The record carries the full
+// compared field set — matching fields included — so a consumer can render how much of
+// the resource was in compliance, not only what drifted.
+//
+// Where the accumulated record goes depends on the engine that produced it, and the
+// two engines are separate by construction:
+//
+//   - Standalone (this type): there is no controller and therefore no DNA sync, so
+//     drainDriftDiffs() empties the accumulator at the end of every convergence pass
+//     and reports each record locally. Nothing is left to grow unbounded.
+//   - Controller-connected (features/steward/client.TransportClient): its own
+//     executor carries an equivalent handler wired in InitializeConfigExecutor, and
+//     its accumulator is drained onto DNATransfer.DriftDiffBytes on each SYNC_DNA
+//     cycle — that is the path that carries the record to the entity graph.
+//
+// Both engines build the record through driftdiff.BuildRecord and buffer it in a
+// driftdiff.Accumulator, so the two paths cannot diverge on record shape or on the
+// memory bound.
 func (s *Steward) onManagedResourceDrift(resourceName string, moduleName string, diff *stewardtesting.StateDiff) {
 	changedCount := len(diff.ChangedFields)
 	addedCount := len(diff.AddedFields)
@@ -410,6 +550,46 @@ func (s *Steward) onManagedResourceDrift(resourceName string, moduleName string,
 		"added_fields", addedCount,
 		"removed_fields", removedCount,
 		"summary", diff.GetDriftSummary())
+
+	rec := driftdiff.BuildRecord(diff, s.configRevision)
+	if rec == nil {
+		// No resource identifier on the diff: the record could not be addressed to an
+		// entity-graph EID, so buffering it would only waste the bounded buffer.
+		s.logger.Warn("Managed resource drift carried no resource identifier; drift-diff record not produced",
+			"resource", logging.SanitizeLogValue(resourceName),
+			"module", logging.SanitizeLogValue(moduleName))
+		return
+	}
+	s.driftDiffs.Append(rec)
+}
+
+// drainDriftDiffs empties the drift-diff accumulator and reports each record.
+//
+// Standalone mode has no controller to sync to, so this is where the accumulated
+// records terminate: each is reported to the local log with its full compared field
+// counts, and the buffer returns to empty every convergence pass. Records dropped
+// because the buffer filled between drains are reported as a count, never silently.
+func (s *Steward) drainDriftDiffs() {
+	records, dropped := s.driftDiffs.Drain()
+	if dropped > 0 {
+		s.logger.Warn("Drift-diff records were dropped: accumulator reached capacity between drains",
+			"dropped", dropped,
+			"capacity", s.driftDiffs.Capacity())
+	}
+	for _, rec := range records {
+		matching := 0
+		for _, f := range rec.Fields {
+			if f.Matching {
+				matching++
+			}
+		}
+		s.logger.Info("Managed resource drift-diff record",
+			"fragment_id", logging.SanitizeLogValue(rec.FragmentID),
+			"config_revision", logging.SanitizeLogValue(rec.ConfigRevision),
+			"detected_at", rec.DetectedAt.Format(time.RFC3339),
+			"total_fields", len(rec.Fields),
+			"matching_fields", matching)
+	}
 }
 
 // convergenceLoop runs scheduled convergence at the given interval until the
@@ -431,6 +611,37 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// startMonitors delegates to the executor's monitor engine, registering a
+// standalone-mode reconcile observer that refreshes DNA snapshots and increments
+// monitorDNARefreshes when a targeted reconcile applies changes.
+func (s *Steward) startMonitors(ctx context.Context) {
+	// Register the standalone-specific post-reconcile observer before starting
+	// the engine so the first reconcile already has it wired.
+	s.executor.SetMonitorReconcileObserver(func(rCtx context.Context, resourceID string) {
+		s.monitorDNARefreshes.Add(1)
+		if _, err := s.detectUnmanagedDNADrift(rCtx); err != nil {
+			s.logger.Warn("DNA refresh after targeted reconcile returned error",
+				"resource_id", logging.SanitizeLogValue(resourceID),
+				"error", err)
+		}
+	})
+	if err := s.executor.StartMonitors(ctx, s.standaloneConfig.Resources); err != nil {
+		s.logger.Warn("Failed to start module monitors", "error", err)
+	}
+}
+
+// CollectModuleDNAAttributes delegates to the executor's monitor engine.
+// See execution.Executor.CollectModuleDNAAttributes for the key convention.
+func (s *Steward) CollectModuleDNAAttributes(ctx context.Context) map[string]string {
+	return s.executor.CollectModuleDNAAttributes(ctx)
+}
+
+// CollectModuleFragments delegates to the executor's monitor engine.
+// See execution.Executor.CollectModuleFragments for the fragment convention.
+func (s *Steward) CollectModuleFragments(ctx context.Context) []*commonpb.Fragment {
+	return s.executor.CollectModuleFragments(ctx)
+}
+
 // Stop gracefully shuts down the steward and cleans up resources.
 //
 // This method:
@@ -444,7 +655,7 @@ func (s *Steward) convergenceLoop(ctx context.Context, interval time.Duration) {
 func (s *Steward) Stop(ctx context.Context) error {
 	s.logger.Info("Stopping steward", "id", s.standaloneConfig.Steward.ID)
 
-	// Signal shutdown to all background goroutines
+	// Signal shutdown to all background goroutines.
 	select {
 	case <-s.shutdown:
 		// Already closed
@@ -452,8 +663,22 @@ func (s *Steward) Stop(ctx context.Context) error {
 		close(s.shutdown)
 	}
 
-	// Stop health monitoring
+	// Cancel the health monitor's context so its goroutine exits via ctx.Done()
+	// even if Stop() races with HealthMonitor.Start() before running is set.
+	if s.healthCancel != nil {
+		s.healthCancel()
+	}
+
+	// Stop health monitoring (blocks until goroutine exits).
 	s.healthCheck.Stop()
+
+	// Wait for the convergence loop goroutine to exit.
+	s.wg.Wait()
+
+	// Stop the monitor engine: waits for all fan-in + event-loop goroutines to
+	// exit, then closes all monitor instances. Must happen before UnloadAllModules
+	// so no further ChangeEvents are produced after module Close().
+	s.executor.StopMonitors()
 
 	// Close drift detector
 	if s.driftDetector != nil {

@@ -186,8 +186,11 @@ func TestRBACStore_BulkOperations(t *testing.T) {
 	store := newRBACStore(t)
 	ctx := context.Background()
 
+	// A nil element must be skipped rather than aborting the batch, and every
+	// non-nil element must be persisted and readable.
 	perms := []*common.Permission{
 		{Id: "bp-1", Name: "bp1", ResourceType: "r", Actions: []string{"read"}},
+		nil,
 		{Id: "bp-2", Name: "bp2", ResourceType: "r", Actions: []string{"write"}},
 	}
 	require.NoError(t, store.StoreBulkPermissions(ctx, perms))
@@ -198,14 +201,74 @@ func TestRBACStore_BulkOperations(t *testing.T) {
 
 	roles := []*common.Role{
 		{Id: "br-1", Name: "br1"},
-		{Id: "br-2", Name: "br2"},
+		nil,
+		{Id: "br-2", Name: "br2", PermissionIds: []string{"bp-1"}},
 	}
 	require.NoError(t, store.StoreBulkRoles(ctx, roles))
 
+	gotRole, err := store.GetRole(ctx, "br-2")
+	require.NoError(t, err)
+	assert.Equal(t, "br2", gotRole.Name)
+	assert.Equal(t, []string{"bp-1"}, gotRole.PermissionIds)
+
 	subjects := []*common.Subject{
 		{Id: "bs-1", Type: common.SubjectType_SUBJECT_TYPE_USER, DisplayName: "Bob", TenantId: "t", IsActive: true},
+		nil,
 	}
 	require.NoError(t, store.StoreBulkSubjects(ctx, subjects))
+
+	gotSubject, err := store.GetSubject(ctx, "bs-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Bob", gotSubject.DisplayName)
+}
+
+// TestRBACStore_BulkOperations_Upsert covers the ON CONFLICT arm of each bulk
+// writer: re-running a batch with the same IDs must update the existing rows in
+// place rather than inserting duplicates or failing on the primary key. Default
+// permissions and roles are re-seeded on every controller start, so this is the
+// path exercised by every boot after the first.
+func TestRBACStore_BulkOperations_Upsert(t *testing.T) {
+	store := newRBACStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.StoreBulkPermissions(ctx, []*common.Permission{
+		{Id: "up-1", Name: "before", ResourceType: "res", Actions: []string{"read"}},
+	}))
+	require.NoError(t, store.StoreBulkPermissions(ctx, []*common.Permission{
+		{Id: "up-1", Name: "after", ResourceType: "res", Actions: []string{"read", "write"}},
+	}))
+
+	perms, err := store.ListPermissions(ctx, "res")
+	require.NoError(t, err)
+	require.Len(t, perms, 1, "re-storing the same permission ID must update, not duplicate")
+	assert.Equal(t, "after", perms[0].Name)
+	assert.Equal(t, []string{"read", "write"}, perms[0].Actions)
+
+	require.NoError(t, store.StoreBulkRoles(ctx, []*common.Role{
+		{Id: "ur-1", Name: "before", TenantId: "t-1"},
+	}))
+	require.NoError(t, store.StoreBulkRoles(ctx, []*common.Role{
+		{Id: "ur-1", Name: "after", TenantId: "t-1", PermissionIds: []string{"up-1"}},
+	}))
+
+	roles, err := store.ListRoles(ctx, "t-1")
+	require.NoError(t, err)
+	require.Len(t, roles, 1, "re-storing the same role ID must update, not duplicate")
+	assert.Equal(t, "after", roles[0].Name)
+	assert.Equal(t, []string{"up-1"}, roles[0].PermissionIds)
+
+	require.NoError(t, store.StoreBulkSubjects(ctx, []*common.Subject{
+		{Id: "us-1", Type: common.SubjectType_SUBJECT_TYPE_USER, DisplayName: "before", TenantId: "t-1", IsActive: true},
+	}))
+	require.NoError(t, store.StoreBulkSubjects(ctx, []*common.Subject{
+		{Id: "us-1", Type: common.SubjectType_SUBJECT_TYPE_USER, DisplayName: "after", TenantId: "t-1", IsActive: false},
+	}))
+
+	subjects, err := store.ListSubjects(ctx, "t-1", common.SubjectType_SUBJECT_TYPE_USER)
+	require.NoError(t, err)
+	require.Len(t, subjects, 1, "re-storing the same subject ID must update, not duplicate")
+	assert.Equal(t, "after", subjects[0].DisplayName)
+	assert.False(t, subjects[0].IsActive)
 }
 
 func TestRBACStore_GetSubjectRoles(t *testing.T) {

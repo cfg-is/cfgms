@@ -21,6 +21,28 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+// Encryptor provides symmetric encryption and decryption.
+// Returned by NewPlatformEncryptor for use outside this package.
+type Encryptor interface {
+	Encrypt(plaintext []byte) ([]byte, error)
+	Decrypt(ciphertext []byte) ([]byte, error)
+}
+
+// NewPlatformEncryptor creates an OS-native encryptor for the given directory.
+// On Linux/macOS: AES-256-GCM with HKDF-SHA256 derived from the machine ID.
+// On Windows: DPAPI.
+// The dir is used to persist the HKDF salt (Linux/macOS only).
+func NewPlatformEncryptor(dir string) (Encryptor, error) {
+	return newPlatformEncryptor(dir)
+}
+
+// NewEncryptorFromBytes creates an AES-256-GCM encryptor using the supplied machineID bytes
+// instead of reading the platform machine ID. Intended for use in tests where
+// /etc/machine-id or the platform equivalent is unavailable.
+func NewEncryptorFromBytes(machineID []byte, dir string) (Encryptor, error) {
+	return newAesGcmEncryptor(machineID, dir)
+}
+
 // platformEncryptor abstracts OS-native encryption for secret storage.
 // Each platform provides its own implementation via build tags.
 type platformEncryptor interface {

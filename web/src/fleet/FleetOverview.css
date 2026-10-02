@@ -1,0 +1,974 @@
+/* SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright 2026 Jordan Ritz
+ *
+ * Fleet overview (Story #2497) — mockups/fleet-overview.html table, toolbar,
+ * pager, and data states, on the design tokens
+ * (docs/design/web-ui-design-tokens.css). Mono carries machine data;
+ * tabular-nums on numerics; semantic state tokens color the Health pill.
+ * Below 720px the table folds into the mockup's two-column card layout.
+ * Story #2498 adds the saved-views panel and the asset-DNA drawer (mockup
+ * `pop-views` and `.det`).
+ */
+
+/* Fleet health tiles (Issue #2729) — three side-by-side summary cards above the table */
+.health-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding: 0 0 14px;
+}
+.ht {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.ht .ht-count {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ht .ht-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.ht.ok .ht-count,
+.ht.ok .ht-label {
+  color: var(--state-ok);
+}
+.ht.warn .ht-count,
+.ht.warn .ht-label {
+  color: var(--state-warn);
+}
+.ht.crit .ht-count,
+.ht.crit .ht-label {
+  color: var(--state-crit);
+}
+
+.ptool {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  flex-wrap: wrap;
+}
+.colpicker {
+  position: relative;
+}
+.colbtn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.colpop {
+  left: 0;
+  top: 40px;
+  min-width: 210px;
+}
+.ck {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ck:hover {
+  background: var(--bg-elevated);
+}
+.ck input {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+}
+.ck.dis {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.ptool .cnt {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.pill.ok {
+  background: var(--state-ok-bg);
+  color: var(--state-ok);
+}
+.pill.warn {
+  background: var(--state-warn-bg);
+  color: var(--state-warn);
+}
+.pill.crit {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.pill.neutral {
+  background: var(--state-neutral-bg);
+  color: var(--state-neutral);
+}
+
+table.tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+.tbl th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.tbl th .ar {
+  opacity: 0;
+  margin-left: 4px;
+  font-size: 9px;
+}
+.tbl th.sort .ar {
+  opacity: 1;
+  color: var(--accent);
+}
+.tbl td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.tbl tbody tr:last-child td {
+  border-bottom: 0;
+}
+/* Row hover only where rows are real table rows — in the <720px card fold
+ * the per-cell background would paint a patchwork. */
+@media (hover: hover) and (min-width: 720px) {
+  .tbl tbody tr:hover td {
+    background: var(--bg-elevated);
+  }
+}
+.nm {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.mut {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.mono2 {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.seen {
+  color: var(--text-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+.pager .sz select {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+.pager .pg {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+.pager .pg button {
+  appearance: none;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.pager .pg button.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.pager .pg button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.skel {
+  background: linear-gradient(
+    90deg,
+    var(--bg-elevated) 25%,
+    var(--bg-sunk) 37%,
+    var(--bg-elevated) 63%
+  );
+  background-size: 400% 100%;
+  animation: fleet-shimmer 1.3s ease infinite;
+  border-radius: 6px;
+  height: 12px;
+}
+@keyframes fleet-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+  }
+}
+.skrow {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 0.8fr 0.8fr;
+  gap: 14px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.skrow:last-child {
+  border-bottom: 0;
+}
+
+.notice .ic {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 22px;
+}
+.notice.err .ic {
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+}
+.notice.empty .ic {
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+}
+.notice .btn {
+  margin-top: 6px;
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.notice.err .detail {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* Phone layout: fold each row into the mockup's two-column card. Columns
+ * beyond the default six stay table-only (opt-in DNA reads best at width). */
+@media (max-width: 719px) {
+  .tbl thead {
+    display: none;
+  }
+  table.tbl,
+  .tbl tbody,
+  .tbl tr,
+  .tbl td {
+    display: block;
+    width: 100%;
+  }
+  .tbl tbody tr {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1fr 148px;
+    gap: 3px 10px;
+  }
+  .tbl td {
+    padding: 0;
+    border: 0;
+    white-space: normal;
+  }
+  /* Right column left-aligns to one gutter so status/time/IP scan cleanly. */
+  .tbl td.c-name {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .tbl td.c-health {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: start;
+  }
+  .tbl td.c-company {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .tbl td.c-seen {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+  }
+  .tbl td.c-user {
+    grid-column: 1;
+    grid-row: 3;
+  }
+  .tbl td.c-ip {
+    grid-column: 2;
+    grid-row: 3;
+    justify-self: start;
+  }
+  .tbl td.c-os,
+  .tbl td.c-agent,
+  .tbl td.c-serial,
+  .tbl td.c-model,
+  .tbl td.c-mac,
+  .tbl td.c-ring,
+  .tbl td.c-spacer,
+  .tbl td.c-act {
+    display: none;
+  }
+}
+@media (min-width: 720px) {
+  /* Trailing spacer eats all slack so data columns hug their content. */
+  .tbl th.c-spacer,
+  .tbl td.c-spacer {
+    width: 100%;
+    padding: 0;
+    cursor: default;
+  }
+}
+
+/* Rows are drill-in targets (Story #2498). */
+.tbl tbody tr.sel {
+  cursor: pointer;
+}
+.tbl tbody tr.sel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Saved views (mockup `pop-views`). */
+.viewpicker {
+  position: relative;
+}
+.vbtn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.vbtn .viewname {
+  color: var(--accent);
+}
+.viewpop {
+  left: 0;
+  top: 40px;
+  min-width: 230px;
+}
+/* Popover rows double as buttons here — keep the .pop .row look. */
+.viewpop button.row {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+.viewpop .viewrow {
+  padding: 2px 4px 2px 0;
+  gap: 2px;
+}
+.viewpop .viewapply {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 5px 6px 9px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewpop .viewact {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  border-radius: var(--radius-sm);
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: none;
+}
+.viewpop .viewact:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.viewform {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px 8px;
+}
+.viewform input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 6px 8px;
+}
+.viewform button {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.viewform button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Name-cell row link: covers the cell so middle-click / Ctrl+click / right-click
+ * "Open in new tab" work natively; display:block lets it fill the cell area. */
+a.row-link {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Asset-DNA drawer (mockup `.det`). The shell scrim is inert by default;
+ * the drawer's own scrim is always live while mounted. */
+.det-scrim {
+  opacity: 1;
+  pointer-events: auto;
+  z-index: 44;
+}
+.det {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 400px;
+  max-width: 92%;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow);
+  animation: det-in 0.24s ease;
+}
+@keyframes det-in {
+  from {
+    transform: translateX(103%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .det {
+    animation: none;
+  }
+}
+
+/* Expand toggle: full-width in-place view */
+.det.det-expanded {
+  width: 100%;
+  left: 0;
+  max-width: none;
+  animation: none;
+}
+@media (min-width: 1024px) {
+  /* On desktop the sidebar occupies 250px on the left — expanded drawer sits beside it. */
+  .det.det-expanded {
+    left: 250px;
+    width: calc(100% - 250px);
+  }
+}
+
+/* Asset tab strip — shared between the overlay drawer and the full-page StewardAssetPage. */
+.asset-page [role="tablist"],
+.det [role="tablist"] {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.asset-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 9px 10px 8px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.asset-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.asset-tab.soon {
+  opacity: 0.6;
+}
+
+/* Full asset page layout */
+.asset-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.asset-page [role="tabpanel"] {
+  min-height: 200px;
+}
+.det .dh {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.det .dh .nm {
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.det .dh .x {
+  margin-left: auto;
+}
+.det .db {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 0 20px;
+}
+.det .grp {
+  padding: 12px 16px 4px;
+}
+.det .grp .lbl {
+  margin-bottom: 2px;
+}
+.det .kv {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 6px 16px;
+  font-size: 12.5px;
+  align-items: baseline;
+}
+.det .kv .k {
+  color: var(--text-secondary);
+  flex: none;
+}
+.det .kv .v {
+  text-align: right;
+  word-break: break-word;
+}
+.det .gsep {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 16px;
+}
+.det .raw {
+  margin: 10px 16px 0;
+}
+.det .raw summary {
+  font-size: var(--text-sm);
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+.det .raw pre {
+  margin: 8px 0 0;
+  padding: 12px;
+  background: var(--bg-sunk);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}
+.det .kv .skel {
+  height: 12px;
+}
+
+/* Row action column — kebab button and popover (Story #2938).
+ * Mirrors the `.rowkebab` idiom from `asset-live-activity.html` lines 204-205.
+ * The `.pop .row` base styles come from AppShell.css; only resets/overrides here. */
+.tbl .c-act {
+  width: 36px;
+  padding: 0 4px;
+  text-align: center;
+}
+.ram-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.rowkebab {
+  opacity: 0;
+  border: 0;
+  appearance: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tbl tbody tr:hover .rowkebab,
+.rowkebab:focus-visible {
+  opacity: 1;
+}
+.rowkebab:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+/* Override the .pop base top/left defaults for the row-anchored popover. */
+.ram-pop {
+  top: calc(100% + 2px);
+  min-width: 160px;
+}
+.ram-pop button.row {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+/* Inline tag editor within the row action popover (Story #2938).
+ * Destructive affordances (remove button hover) use --state-crit per design tokens. */
+.row-tag-editor {
+  padding: 4px 0;
+}
+.rtag-hd {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.rtag-back {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+.rtag-back:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+.rtag-title {
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.rtag-err {
+  font-size: var(--text-sm);
+  color: var(--state-crit);
+  padding: 4px 10px;
+}
+.rtag-spin {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  padding: 6px 10px;
+}
+.rtag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px 8px;
+  min-height: 34px;
+}
+.rtag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px 6px 2px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+.rtag-rm {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.rtag-rm:hover {
+  color: var(--state-crit);
+}
+.rtag-rm:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rtag-empty {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  align-self: center;
+}
+.rtag-row {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--border);
+}
+.rtag-in {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.rtag-in::placeholder {
+  color: var(--text-faint);
+}
+.rtag-btn {
+  appearance: none;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.rtag-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Bulk action bar (Story #2939) — appears above the fleet table when ≥1 row selected. */
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  margin-bottom: 10px;
+  background: var(--tint-blue);
+  border: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.bulk-sel {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.bulk-n {
+  font-weight: 700;
+  color: var(--accent);
+}
+.bulk-summary {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+.bulkbar-grow {
+  flex: 1;
+}
+.bulk-tag-in {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid var(--border);
+  background: var(--bg-sunk);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.bulk-tag-in::placeholder {
+  color: var(--text-faint);
+}
+.bulk-tag-in:disabled {
+  opacity: 0.6;
+}
+.bbtn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.bbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.bbtn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.bbtn-primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.bbtn-clear {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bbtn-clear:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Checkbox column — leftmost column in the fleet table (Story #2939). */
+.tbl .c-cbx {
+  width: 40px;
+  padding: 0 10px;
+  text-align: center;
+  cursor: default;
+}
+.tbl thead .c-cbx {
+  /* Prevent the sort-click handler from registering on the checkbox header. */
+  cursor: default;
+}
+.tbl-cbx {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  margin: 0;
+  display: block;
+}

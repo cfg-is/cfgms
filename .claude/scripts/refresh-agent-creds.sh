@@ -3,6 +3,17 @@
 # Run this script directly in a terminal (requires TTY for interactive login).
 #
 # Usage: ./.claude/scripts/refresh-agent-creds.sh
+#
+# The login runs on exactly the CLI version the image ships -- recorded in
+# the `cfgms.claude_code_version` label on cfg-agent:latest (Issue #4473:
+# Claude Code installs npm's current `stable` release at build time rather
+# than a Dockerfile-pinned version; `docker inspect cfg-agent:latest
+# --format '{{index .Config.Labels "cfgms.claude_code_version"}}'` shows it).
+# This deliberately does NOT `npm update -g` first: that upgraded the CLI
+# inside a --rm container that is discarded seconds later, so its only
+# lasting effect was minting credentials with a version that no dispatched
+# agent ever runs. To move the CLI, rebuild the image (`/agent-setup
+# rebuild`).
 
 set -euo pipefail
 
@@ -31,8 +42,7 @@ exec docker run --rm -it \
   --user root \
   --entrypoint bash \
   cfg-agent:latest \
-  -c 'mkdir -p /workspace && npm update -g @anthropic-ai/claude-code && su agent -c '"'"'
-    init-firewall.sh
+  -c 'mkdir -p /workspace && init-firewall.sh && su agent -c '"'"'
     echo ""
     echo "Step 1/4: OAuth login..."
     claude --dangerously-skip-permissions -p ready

@@ -7,7 +7,7 @@ This guide explains the CFGMS logging architecture and how to use the global log
 CFGMS uses a centralized logging provider system that ensures:
 
 - **Structured Logging**: Consistent field formats across all components
-- **Tenant Isolation**: Logs respect multi-tenant boundaries
+- **Tenant Tagging**: Log entries are tagged with the tenant for filtering and audit trails
 - **Context Awareness**: Automatic extraction of tenant, session, and operation context
 - **Provider Flexibility**: Support for multiple backend providers (file, TimescaleDB)
 
@@ -151,7 +151,7 @@ ctx = logging.WithOperation(ctx, "config_apply")
 ### Extracting Context Information
 
 ```go
-// Extract tenant from context
+// Extract tenant from context — logging only, see warning below
 tenantID := logging.ExtractTenantFromContext(ctx)
 
 // Extract session from context
@@ -160,6 +160,18 @@ sessionID := logging.ExtractSessionFromContext(ctx)
 // Extract operation from context
 operation := logging.ExtractOperationFromContext(ctx)
 ```
+
+> **`ExtractTenantFromContext` and `WithTenant` are logging convenience
+> functions only — never use the returned value for an authorization
+> decision.** Both read/write `ctxkeys.TenantID`, the single canonical
+> context key the authentication middleware sets, so the value is always
+> the real authenticated tenant when one is present — but an absent tenant
+> here means only "no `tenant_id` field on this log line," not "caller is
+> unrestricted." An authorization decision (does this caller get this
+> tenant's data?) must read `ctxkeys.TenantID` directly and fail closed when
+> it is absent. `make check-architecture` enforces this: a file that reads
+> the tenant from `logging.ExtractTenantFromContext` and also uses it in a
+> tenant-equality comparison fails the build (Issue #4326).
 
 ## Migration Patterns
 
@@ -207,14 +219,17 @@ logger.InfoCtx(ctx, "Processing configuration",
 - ❌ Create component-specific logger interfaces
 - ❌ Skip context when logging
 
-## Tenant Isolation
+## Tenant Tagging
 
-The logging system automatically ensures tenant isolation:
+The logging system automatically tags log entries with the tenant so operators can
+filter and audit by tenant:
 
-- Logs include `tenant_id` extracted from context
+- Logs include `tenant_id` extracted from `ctxkeys.TenantID` via `ExtractTenantFromContext`
 - Provider backends can filter logs by tenant
-- No cross-tenant information leakage
-- Validation of tenant boundaries
+- This is a logging convenience, not an access-control boundary — actual tenant
+  isolation (which caller can read/write which tenant's data) is enforced by the
+  code paths that read `ctxkeys.TenantID` directly for authorization, not by the
+  logging path
 
 ## Provider Configuration
 

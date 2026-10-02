@@ -223,6 +223,8 @@ func (d *AuthDefenseSystem) ShouldLog() bool {
 	}
 
 	// Above threshold: sample
+	// #nosec G404 -- this random value controls diagnostic log sampling only;
+	// every defense and authorization decision is made before this branch.
 	if rand.Float64() < d.config.LogSampleRate {
 		return true
 	}

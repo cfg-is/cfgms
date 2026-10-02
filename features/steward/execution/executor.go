@@ -8,15 +8,20 @@ package execution
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
 	"github.com/cfgis/cfgms/features/steward/factory"
+	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
 	stewardtesting "github.com/cfgis/cfgms/features/steward/testing"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -27,6 +32,10 @@ import (
 type ExecutorConfig struct {
 	// TenantID for this steward (controller mode; may be empty in standalone mode)
 	TenantID string
+
+	// StewardID is the registered steward identity stamped into emitted LogEntry
+	// events. Leave empty in standalone mode or when event emission is not configured.
+	StewardID string
 
 	// Logger for execution logging
 	Logger logging.Logger
@@ -54,19 +63,72 @@ type ExecutorConfig struct {
 	// Ignored when Factory is supplied — callers wiring their own factory are
 	// responsible for injecting the secret store themselves.
 	SecretStore secretsif.SecretStore
+
+	// EventEmitter, when non-nil, receives convergence detection and outcome events.
+	// Enqueue must never block the caller; the concrete implementation drops when full.
+	EventEmitter EventEmitter
+
+	// ModuleCallTimeoutSec is the per-call timeout (in seconds) applied individually
+	// to each module.Get, module.Set, and verifyChanges invocation. Zero or negative
+	// values default to 120 s. There is no "infinite" option — all module calls have
+	// a finite deadline to prevent a hung module from wedging the convergence loop
+	// (ADR-012 §7).
+	ModuleCallTimeoutSec int
+
+	// ModuleDNASnapshot is an optional shared module-DNA store (#2520). When set,
+	// this executor records observed module state into it and reads from it in
+	// CollectModuleDNAAttributes. The steward client passes ONE store into every
+	// executor it builds so module DNA survives executor re-init on reconnect. Nil
+	// gives the executor a private store (standalone / tests).
+	ModuleDNASnapshot *ModuleDNASnapshot
+
+	// ModuleRuntime, ModuleTrustMode and AdditionalPublishers wire installed
+	// bundle module loading (Issue #4410) into the factory NewExecutor creates
+	// when Factory is nil — the controller-connected steward's path
+	// (features/steward/client.TransportClient sets no Factory field, so this
+	// is the only way that path can ever load a bundle). Ignored when Factory
+	// is supplied — callers wiring their own factory call SetModuleRuntime on
+	// it themselves (see features/steward/steward.go's NewStandalone).
+	ModuleRuntime        *moduleruntime.ModuleRuntime
+	ModuleTrustMode      config.ModuleTrustMode
+	AdditionalPublishers []string
 }
 
 // Executor applies configurations using the unified Get→Compare→Set→Verify workflow.
 // It serves both standalone mode (direct ExecuteConfiguration calls) and controller
 // mode (ApplyConfiguration with raw config bytes in, ConfigStatusReport out).
 type Executor struct {
-	factory      *factory.ModuleFactory
-	comparator   *stewardtesting.StateComparator
-	config       config.ErrorHandlingConfig
-	tenantID     string
-	logger       logging.Logger
+	factory    *factory.ModuleFactory
+	comparator *stewardtesting.StateComparator
+	config     config.ErrorHandlingConfig
+	tenantID   string
+	stewardID  string
+	logger     logging.Logger
+
+	// mu protects driftHandler and driftMode. Both can be written after construction
+	// (controller delivers new cfg, tests replace the handler) while ExecuteResource
+	// reads them concurrently from the monitor event loop.
+	mu           sync.RWMutex
 	driftHandler DriftEventHandler
 	driftMode    config.DriftMode
+
+	// eventEmitter, when non-nil, receives convergence detection and outcome events
+	// (ADR-012 §2). Enqueue is the only emitter call on the convergence goroutine;
+	// the actual LogStream send runs on the emitter's own goroutine.
+	eventEmitter EventEmitter
+
+	// moduleCallTimeout is the per-call deadline applied to module.Get, module.Set,
+	// and verifyChanges. Derived from ModuleCallTimeoutSec at construction; defaults
+	// to 120 s when the config field is zero or negative (ADR-012 §7).
+	moduleCallTimeout time.Duration
+
+	// moduleDNA is the shared, process-stable module-DNA snapshot (#2520). Injected
+	// via ExecutorConfig.ModuleDNASnapshot so it survives executor re-init on
+	// reconnect; NewExecutor allocates a private one when none is supplied.
+	moduleDNA *ModuleDNASnapshot
+
+	// Monitor engine fields (Issue #2435). Protected by monitorMu except where noted.
+	monitorFields
 }
 
 // NewExecutor creates an Executor. When cfg.Factory is nil, an empty registry and
@@ -97,32 +159,56 @@ func NewExecutor(cfg *ExecutorConfig) (*Executor, error) {
 		if cfg.SecretStore != nil {
 			f.SetSecretStore(cfg.SecretStore)
 		}
+		// Wire the module runtime (Issue #4410) so this auto-created factory —
+		// the one the controller-connected steward actually uses — can resolve
+		// installed bundle modules, not just built-ins. A nil ModuleRuntime is
+		// safe: SetModuleRuntime(nil, ...) simply disables bundle loading,
+		// matching LoadModule's pre-bundle-support behaviour.
+		f.SetModuleRuntime(cfg.ModuleRuntime, cfg.ModuleTrustMode, cfg.AdditionalPublishers)
 	}
 	if comp == nil {
 		comp = stewardtesting.NewStateComparator()
 	}
 
+	callTimeout := time.Duration(cfg.ModuleCallTimeoutSec) * time.Second
+	if callTimeout <= 0 {
+		callTimeout = 120 * time.Second
+	}
+
+	moduleDNA := cfg.ModuleDNASnapshot
+	if moduleDNA == nil {
+		moduleDNA = NewModuleDNASnapshot()
+	}
+
 	return &Executor{
-		factory:    f,
-		comparator: comp,
-		config:     errCfg,
-		tenantID:   cfg.TenantID,
-		logger:     cfg.Logger,
-		driftMode:  cfg.DriftMode,
+		factory:           f,
+		comparator:        comp,
+		config:            errCfg,
+		tenantID:          cfg.TenantID,
+		stewardID:         cfg.StewardID,
+		logger:            cfg.Logger,
+		driftMode:         cfg.DriftMode,
+		eventEmitter:      cfg.EventEmitter,
+		moduleCallTimeout: callTimeout,
+		moduleDNA:         moduleDNA,
 	}, nil
 }
 
 // SetDriftEventHandler registers a callback invoked when the Compare step detects
 // drift on a managed resource, before Set corrects it. Pass nil to remove a handler.
 func (e *Executor) SetDriftEventHandler(handler DriftEventHandler) {
+	e.mu.Lock()
 	e.driftHandler = handler
+	e.mu.Unlock()
 }
 
 // SetDriftMode updates the executor's drift mode. Call this when the
 // controller delivers a new cfg with an updated drift_mode field.
 // An empty string is treated as DriftModeApply (default behavior).
 func (e *Executor) SetDriftMode(mode config.DriftMode) {
+	e.mu.Lock()
 	e.driftMode = mode
+	e.mu.Unlock()
 }
 
 // ExecuteConfiguration executes the complete configuration for all resources.
@@ -150,15 +236,28 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 			switch result.Status {
 			case StatusSuccess, StatusNoChange:
 				report.SuccessfulCount++
-			case StatusFailed:
+			case StatusFailed, StatusTimeout:
 				report.FailedCount++
 			case StatusSkipped:
 				report.SkippedCount++
 			case StatusNonCompliant:
 				report.NonCompliantCount++
+			case StatusDeferred:
+				report.DeferredCount++
+			case StatusRetryExhausted:
+				report.RetryExhaustedCount++
 			}
 		}
 	}
+
+	// Drop DNA snapshot entries for resources no longer in the config so a removed
+	// resource disappears from module DNA (#2520). Only the full pass knows the
+	// complete managed set, so prune here rather than in ExecuteResource.
+	keep := make(map[string]struct{}, len(cfg.Resources))
+	for _, r := range cfg.Resources {
+		keep[e.GetResourceID(r)] = struct{}{}
+	}
+	e.pruneModuleDNAState(keep)
 
 	report.EndTime = time.Now()
 
@@ -168,6 +267,8 @@ func (e *Executor) ExecuteConfiguration(ctx context.Context, cfg config.StewardC
 		"failed", report.FailedCount,
 		"skipped", report.SkippedCount,
 		"non_compliant", report.NonCompliantCount,
+		"deferred", report.DeferredCount,
+		"retry_exhausted", report.RetryExhaustedCount,
 		"duration", report.EndTime.Sub(report.StartTime))
 
 	return report
@@ -185,14 +286,38 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	// For modules that manage filesystem resources (file, directory), use the path
 	// from config as the identifier. Otherwise fall back to the resource name.
+	// For typed module refs (e.g. "hyperv.vm"), this builds the module-internal
+	// typed resourceID (e.g. "vm:m2-test-vm").
 	resourceID := e.getResourceIdentifier(resource)
+
+	// A module ref may carry a resource-type suffix (e.g. "hyperv.vm"). The
+	// bundle component ("hyperv") selects the signed module bundle to load;
+	// the type suffix is resolved into the resourceID by getResourceIdentifier.
+	// Loading MUST use the bundle name only — there is one signed bundle per
+	// module (ADR-006), and the ".vm"/".vswitch" suffix is a
+	// resource-type selector, not a separate module.
+	bundle, _ := parseModuleRef(resource.Module)
+
+	// Snapshot drift mode and handler once for this resource's execution.
+	// Both may be updated concurrently while the monitor event loop dispatches calls.
+	e.mu.RLock()
+	driftMode := e.driftMode
+	driftHandler := e.driftHandler
+	e.mu.RUnlock()
+
+	// Generate correlation ID for the detection+outcome event pair (ADR-012 §2).
+	correlationID := uuid.New().String()
+	driftModeStr := "apply"
+	if driftMode == config.DriftModeMonitor {
+		driftModeStr = "report"
+	}
 
 	e.logger.Info("Executing resource configuration",
 		"resource", resource.Name,
 		"resource_id", resourceID,
 		"module", resource.Module)
 
-	module, err := e.factory.CreateModuleInstance(resource.Module)
+	module, err := e.factory.CreateModuleInstance(bundle)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to load module: %v", err)
 		result.ExecutionTime = time.Since(startTime)
@@ -236,15 +361,67 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 		}
 	}
 
-	currentState, err := module.Get(ctx, resourceID)
+	// Detection event: enqueued before module.Get so a module hang still leaves
+	// the detection observable on the out-of-band channel (ADR-012 §2 crash-isolation).
+	e.enqueueDetection(correlationID, resourceID, driftModeStr)
+
+	// module.Get with per-call deadline so a hung module cannot wedge the
+	// convergence loop (ADR-012 §7). The deadline is derived from the ambient ctx
+	// so outer cancellation still propagates.
+	getCallStart := time.Now()
+	getCtx, getCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer getCancel()
+	// effectiveBudget is the actual enforced duration — min(ctx.Deadline(), e.moduleCallTimeout).
+	// Logging this instead of the hardcoded e.moduleCallTimeout ensures the WARN is
+	// truthful when a caller supplies a tighter ambient deadline.
+	getEffectiveDl, _ := getCtx.Deadline()
+	getEffectiveBudget := getEffectiveDl.Sub(getCallStart)
+	currentState, err := module.Get(getCtx, resourceID)
 	if err != nil {
-		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Get did not finish within %s", getEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, getEffectiveBudget, result.ExecutionTime)
+			e.logger.Warn("module.Get timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", getEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to get current state: %v", err)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
 		}
 		return result
+	}
+
+	// Capture the observed state for module DNA publication (#2520 mechanism 1).
+	// The periodic convergence loop AND monitor-triggered targeted reconciles both
+	// land here, so caching the Get result keeps module DNA live at steady state —
+	// not only when a change-event fires — with no extra module call.
+	// bundle is passed as authority so CollectModuleFragments can emit fragments for
+	// steady-state-only resources that have no active monitor (#3333).
+	e.cacheModuleDNAState(resourceID, bundle, currentState)
+
+	// Managed-elsewhere short-circuit (Story #2577): a module may report from Get
+	// that the resource is real and in its desired terminal state but managed by a
+	// DIFFERENT authority — e.g. a clustered HA VM owned by another cluster node.
+	// This node is not the manager, so field-level drift against its local view is
+	// not meaningful; treat it as compliant with no Compare/Set/Verify. The
+	// accountable authority (the CNO for HA VMs) owns "does it exist / have an
+	// owner"; a non-owner only abstains.
+	if me, ok := currentState.(modules.ManagedElsewhere); ok {
+		if managed, authority := me.ManagedElsewhere(); managed {
+			result.Status = StatusNoChange
+			result.ExecutionTime = time.Since(startTime)
+			e.logger.Info("Resource managed on another node — compliant by delegation",
+				"resource", resource.Name,
+				"managed_by", authority)
+			return result
+		}
 	}
 
 	driftDetected, stateDiff := e.comparator.CompareStates(currentState, desiredState)
@@ -269,30 +446,87 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 	// Tag the event type for upstream telemetry before invoking the handler.
 	// "drift.detected.monitor" lets the controller distinguish monitor-mode stewards
 	// from apply-mode stewards that simply have not drifted.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		stateDiff.EventType = "drift.detected.monitor"
 	} else {
 		stateDiff.EventType = "drift.detected"
 	}
 
+	// Stamp the module-internal resource identifier so drift-diff accumulation can
+	// build the fragment_id for entity-graph EID resolution without re-deriving it.
+	stateDiff.ResourceID = resourceID
+
 	// Emit drift event. Handler fires in both modes — ordering is always preserved.
-	if e.driftHandler != nil {
-		e.driftHandler(resource.Name, resource.Module, &stateDiff)
+	if driftHandler != nil {
+		driftHandler(resource.Name, resource.Module, &stateDiff)
 	}
 
 	// In monitor mode, report non-compliance without correcting the drift.
-	if e.driftMode == config.DriftModeMonitor {
+	if driftMode == config.DriftModeMonitor {
 		result.Status = StatusNonCompliant
 		result.ExecutionTime = time.Since(startTime)
+		// Outcome: drift detected and reported; no correction applied.
+		e.enqueueOutcome(correlationID, "drift_reported", result.ExecutionTime)
 		e.logger.Info("Monitor mode: drift detected, skipping Set",
 			"resource", resource.Name,
 			"event_type", stateDiff.EventType)
 		return result
 	}
 
-	if err := module.Set(ctx, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
+	// module.Set with per-call deadline (ADR-012 §7).
+	setCallStart := time.Now()
+	setCtx, setCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer setCancel()
+	setEffectiveDl, _ := setCtx.Deadline()
+	setEffectiveBudget := setEffectiveDl.Sub(setCallStart)
+	if err := module.Set(setCtx, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("module.Set did not finish within %s", setEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, setEffectiveBudget, result.ExecutionTime)
+			e.logger.Warn("module.Set timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", setEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
+			return result
+		}
+		// Reboot-deferred: a module's Set returned ErrRebootDeferred because the
+		// current time falls outside the resource's reboot_window. This is not a
+		// failure — the action is intentionally deferred and will be retried on the
+		// next convergence pass once the window opens.
+		var rebootErr *modules.RebootDeferredError
+		if errors.As(err, &rebootErr) {
+			result.Status = StatusDeferred
+			result.DeferredUntil = rebootErr.NextWindow
+			result.Error = err.Error()
+			e.enqueueOutcome(correlationID, "deferred", result.ExecutionTime)
+			e.logger.Info("module.Set deferred: reboot outside window",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"deferred_until", result.DeferredUntil)
+			return result
+		}
+		// Retry-exhausted: a module's Set returned RetryExhaustedError because a
+		// provably-safe, bounded auto-retry has used up its attempt budget. This is a
+		// distinct, queryable terminal state — not a generic convergence failure, and
+		// not a state that will keep retrying automatically like StatusDeferred.
+		var retryExhaustedErr *modules.RetryExhaustedError
+		if errors.As(err, &retryExhaustedErr) {
+			result.Status = StatusRetryExhausted
+			result.Error = err.Error()
+			e.enqueueOutcome(correlationID, "retry-exhausted", result.ExecutionTime)
+			e.logger.Warn("module.Set: bounded auto-retry budget exhausted",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"failed_from", logging.SanitizeLogValue(retryExhaustedErr.FailedFrom),
+				"last_error", logging.SanitizeLogValue(retryExhaustedErr.LastError))
+			return result
+		}
+		result.Error = fmt.Sprintf("failed to apply configuration: %v", err)
+		// Outcome: Set failed; record before error-handling may continue.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -302,9 +536,29 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.ChangesApplied = true
 
-	if err := e.verifyChanges(ctx, module, resourceID, desiredState); err != nil {
-		result.Error = fmt.Sprintf("verification failed: %v", err)
+	// verifyChanges with per-call deadline (ADR-012 §7). The deadline applies to
+	// the module.Get call inside verifyChanges.
+	verifyCallStart := time.Now()
+	verifyCtx, verifyCancel := context.WithTimeout(ctx, e.moduleCallTimeout)
+	defer verifyCancel()
+	verifyEffectiveDl, _ := verifyCtx.Deadline()
+	verifyEffectiveBudget := verifyEffectiveDl.Sub(verifyCallStart)
+	if err := e.verifyChanges(verifyCtx, module, resourceID, desiredState); err != nil {
 		result.ExecutionTime = time.Since(startTime)
+		if errors.Is(err, context.DeadlineExceeded) {
+			result.Status = StatusTimeout
+			result.Error = fmt.Sprintf("verifyChanges did not finish within %s", verifyEffectiveBudget)
+			e.enqueueTimeoutOutcome(correlationID, verifyEffectiveBudget, result.ExecutionTime)
+			e.logger.Warn("verifyChanges timeout",
+				"resource", resource.Name,
+				"module", resource.Module,
+				"timeout_ms", verifyEffectiveBudget.Milliseconds(),
+				"elapsed_ms", result.ExecutionTime.Milliseconds())
+			return result
+		}
+		result.Error = fmt.Sprintf("verification failed: %v", err)
+		// Outcome: post-Set verification failed.
+		e.enqueueOutcome(correlationID, "error", result.ExecutionTime)
 		if rerr := e.handleResourceError(resource, err); rerr != nil {
 			result.Error = rerr.Error()
 			return result
@@ -314,6 +568,8 @@ func (e *Executor) ExecuteResource(ctx context.Context, resource config.Resource
 
 	result.Status = StatusSuccess
 	result.ExecutionTime = time.Since(startTime)
+	// Outcome: convergence applied and verified successfully.
+	e.enqueueOutcome(correlationID, "applied", result.ExecutionTime)
 
 	e.logger.Info("Resource configuration applied successfully",
 		"resource", resource.Name,
@@ -327,13 +583,58 @@ func (e *Executor) createConfigState(configData map[string]interface{}) (modules
 	return &genericConfigState{data: configData}, nil
 }
 
-// getResourceIdentifier returns the appropriate identifier for a module.
-// File/directory/script modules use the "path" config field; others use the resource name.
-func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
-	if path, ok := resource.Config["path"].(string); ok && path != "" {
-		return path
+// GetResourceID returns the module-internal resource identifier for the given
+// ResourceConfig. This is the identifier passed to module.Get, module.Set, and
+// Monitor() — callers that need to match ChangeEvent.ResourceID against cfg
+// resources must use this method to ensure the IDs are consistent.
+func (e *Executor) GetResourceID(resource config.ResourceConfig) string {
+	return e.getResourceIdentifier(resource)
+}
+
+// parseModuleRef splits a module reference into its bundle and resource-type
+// components on the FIRST ".". A ref without a dot has no resource type:
+//
+//	"hyperv.vm"   -> ("hyperv", "vm")
+//	"hyperv.vswitch" -> ("hyperv", "vswitch")
+//	"directory"   -> ("directory", "")
+//
+// The bundle component names the one signed module bundle to load (ADR-006);
+// the resource-type component is resolved by the steward executor into the
+// module's internal typed resourceID — the bundle is never split.
+func parseModuleRef(module string) (bundle, resourceType string) {
+	idx := strings.IndexByte(module, '.')
+	if idx < 0 {
+		return module, ""
 	}
-	return resource.Name
+	return module[:idx], module[idx+1:]
+}
+
+// getResourceIdentifier returns the module-internal identifier passed to the
+// module's Get/Set for a resource.
+//
+// Rules:
+//   - Untyped module ref (no "." — e.g. "file", "directory", "script"): keep
+//     the legacy behaviour — the "path" config field when set & non-empty,
+//     else the plain resource name. This preserves back-compat for the
+//     filesystem modules that key on a path.
+//   - Typed module ref (e.g. "hyperv.vm", "hyperv.vswitch"): build the module's
+//     typed resourceID as "<resourceType>:<name>" (e.g. "vm:m2-test-vm"). The
+//     plain resource name stays strictly validated; the type lives in the
+//     module field. This is uniform across all typed modules — there is no
+//     compound id and no config folding.
+func (e *Executor) getResourceIdentifier(resource config.ResourceConfig) string {
+	_, resourceType := parseModuleRef(resource.Module)
+
+	if resourceType == "" {
+		// Untyped module: legacy path/name behaviour (file, directory, script, …).
+		if path, ok := resource.Config["path"].(string); ok && path != "" {
+			return path
+		}
+		return resource.Name
+	}
+
+	// Typed resource: "<type>:<name>" (e.g. "vm:m2-test-vm", "vswitch:m2-test-vsw").
+	return resourceType + ":" + resource.Name
 }
 
 // verifyChanges confirms that the applied configuration matches the desired state.
@@ -434,6 +735,7 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 
 	hasErrors := false
 	hasNonCompliant := false
+	hasRetryExhausted := false
 
 	// Group per-resource results into per-module statuses
 	for _, result := range execReport.ResourceResults {
@@ -452,13 +754,15 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		successCount, _ := moduleStatus.Details["success_count"].(int)
 		errorCount, _ := moduleStatus.Details["error_count"].(int)
 		nonCompliantCount, _ := moduleStatus.Details["non_compliant_count"].(int)
+		deferredCount, _ := moduleStatus.Details["deferred_count"].(int)
+		retryExhaustedCount, _ := moduleStatus.Details["retry_exhausted_count"].(int)
 		totalCount, _ := moduleStatus.Details["total_count"].(int)
 		totalCount++
 
 		switch result.Status {
 		case StatusSuccess, StatusNoChange:
 			successCount++
-		case StatusFailed:
+		case StatusFailed, StatusTimeout:
 			errorCount++
 			hasErrors = true
 			moduleStatus.Status = "ERROR"
@@ -475,27 +779,64 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 			if moduleStatus.Status == "OK" {
 				moduleStatus.Status = "NON_COMPLIANT"
 			}
+		case StatusDeferred:
+			// Reboot-gated action deferred outside window — not an error; retried next pass.
+			deferredCount++
+			if moduleStatus.Status == "OK" {
+				moduleStatus.Status = "DEFERRED"
+			}
+		case StatusRetryExhausted:
+			// Bounded auto-retry gave up — a distinct, operator-actionable terminal state,
+			// not a generic error and not an automatic-retry-next-pass deferral.
+			retryExhaustedCount++
+			hasRetryExhausted = true
+			if moduleStatus.Status == "OK" {
+				moduleStatus.Status = "RETRY_EXHAUSTED"
+			}
+			if result.Error != "" {
+				errList, _ := moduleStatus.Details["retry_exhausted_errors"].([]string)
+				moduleStatus.Details["retry_exhausted_errors"] = append(errList, fmt.Sprintf("%s: %s", result.ResourceName, result.Error))
+			}
 		}
 
 		moduleStatus.Details["success_count"] = successCount
 		moduleStatus.Details["error_count"] = errorCount
 		moduleStatus.Details["non_compliant_count"] = nonCompliantCount
+		moduleStatus.Details["deferred_count"] = deferredCount
+		moduleStatus.Details["retry_exhausted_count"] = retryExhaustedCount
 		moduleStatus.Details["total_count"] = totalCount
 
 		if errorCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d errors)", successCount, totalCount, errorCount)
 		} else if nonCompliantCount > 0 {
 			moduleStatus.Message = fmt.Sprintf("Monitored %d resources (%d non-compliant)", totalCount, nonCompliantCount)
+		} else if retryExhaustedCount > 0 {
+			moduleStatus.Message = fmt.Sprintf("Applied %d/%d resources (%d retry-exhausted)", successCount, totalCount, retryExhaustedCount)
+		} else if deferredCount > 0 {
+			moduleStatus.Message = fmt.Sprintf("Deferred %d/%d resources (outside reboot_window)", deferredCount, totalCount)
 		} else {
 			moduleStatus.Message = fmt.Sprintf("Applied %d resources", totalCount)
 		}
 
 		report.Modules[moduleName] = moduleStatus
+
+		// Per-resource apply-outcome record (ADR-022 §6, Issue #3375).
+		// Status classification mirrors the per-module aggregation above so the two
+		// views stay consistent. Does not modify the Modules aggregation.
+		report.ApplyOutcomes = append(report.ApplyOutcomes, cpTypes.ApplyOutcomeRecord{
+			ResourceID: result.ResourceName,
+			ModuleName: moduleName,
+			Status:     applyOutcomeStatus(result.Status),
+			Error:      result.Error,
+			Timestamp:  time.Now(),
+		})
 	}
 
 	if len(execReport.Errors) > 0 {
 		hasErrors = true
 	}
+
+	hasDeferred := execReport.DeferredCount > 0
 
 	if hasErrors {
 		report.Status = "ERROR"
@@ -503,6 +844,12 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 	} else if hasNonCompliant {
 		report.Status = "NON_COMPLIANT"
 		report.Message = "Configuration monitored: drift detected but not corrected"
+	} else if hasRetryExhausted {
+		report.Status = "RETRY_EXHAUSTED"
+		report.Message = "Configuration applied: bounded auto-retry exhausted for at least one resource, needs an operator"
+	} else if hasDeferred {
+		report.Status = "DEFERRED"
+		report.Message = "Configuration partially deferred: reboot-gated actions outside window"
 	}
 
 	report.ExecutionTimeMs = time.Since(startTime).Milliseconds()
@@ -513,4 +860,25 @@ func (e *Executor) ApplyConfiguration(ctx context.Context, configData []byte, ve
 		"execution_time_ms", report.ExecutionTimeMs)
 
 	return report, nil
+}
+
+// applyOutcomeStatus maps a ResourceStatus to the apply-outcome status string used
+// in ApplyOutcomeRecord (ADR-022 §6, Issue #3375; "retry_exhausted" added by Issue
+// #3803). The classification mirrors the per-module aggregation in the same loop.
+func applyOutcomeStatus(s ResourceStatus) string {
+	switch s {
+	case StatusSuccess, StatusNoChange:
+		return "applied"
+	case StatusNonCompliant, StatusSkipped, StatusDeferred:
+		return "partial"
+	case StatusRetryExhausted:
+		// Deliberately its own bucket, not "partial": a retry-exhausted resource will
+		// NOT be retried again automatically (unlike deferred/skipped/non-compliant),
+		// and not "failed": it is a known, already-explained gate, not an
+		// unclassified convergence bug — this is exactly the distinction Issue #3803
+		// exists to make queryable.
+		return "retry_exhausted"
+	default: // StatusFailed, StatusTimeout, unknown
+		return "failed"
+	}
 }

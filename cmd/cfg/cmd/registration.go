@@ -18,9 +18,9 @@ import (
 
 var (
 	registrationAPIURL           string
-	registrationAPIKey           string
 	registrationTLSCACert        string
 	registrationTLSInsecure      bool
+	registrationServerName       string
 	registrationJSONOutput       bool
 	registrationDenyReason       string
 	registrationIPTrustTenantID  string
@@ -37,10 +37,11 @@ When the controller's registration workflow is set to manual-review, new steward
 are quarantined until an operator approves or denies them. Use these commands to
 list pending registrations and approve or deny them.
 
-This command communicates with the controller's REST API. The controller URL and
-API key can be provided via flags or environment variables:
+This command communicates with the controller's REST API and requires an admin mTLS
+bundle or an active session (cfg connect). The controller URL can be provided via
+flags or environment variables:
   - CFGMS_API_URL: Controller REST API URL (default: http://localhost:9080)
-  - CFGMS_API_KEY: API key for authentication
+  - CFGMS_ADMIN_BUNDLE: Path to the admin mTLS bundle
   - CFGMS_TLS_CA_CERT: Path to CA certificate for TLS verification
   - CFGMS_TLS_INSECURE: Skip TLS verification (development only)
 
@@ -165,9 +166,9 @@ Examples:
 
 func init() {
 	registrationCmd.PersistentFlags().StringVar(&registrationAPIURL, "api-url", "", "Controller REST API URL (env: CFGMS_API_URL)")
-	registrationCmd.PersistentFlags().StringVar(&registrationAPIKey, "api-key", "", "API key for authentication (env: CFGMS_API_KEY)")
 	registrationCmd.PersistentFlags().StringVar(&registrationTLSCACert, "tls-ca-cert", "", "Path to CA certificate for TLS verification (env: CFGMS_TLS_CA_CERT)")
 	registrationCmd.PersistentFlags().BoolVar(&registrationTLSInsecure, "tls-insecure", false, "Skip TLS verification (development only, env: CFGMS_TLS_INSECURE)")
+	registrationCmd.PersistentFlags().StringVar(&registrationServerName, "server-name", "", "Override TLS server name for certificate verification")
 
 	registrationPendingCmd.Flags().BoolVar(&registrationJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
@@ -191,42 +192,20 @@ func init() {
 	registrationCmd.AddCommand(registrationIPTrustCmd)
 }
 
-// getRegistrationClient creates an API client using bundle auth (mTLS) when available,
-// falling back to API key auth when no bundle is found or discovery is opted out.
+// getRegistrationClient creates an API client using an active session or an admin mTLS bundle.
 func getRegistrationClient() (*APIClient, error) {
 	apiURL := strings.TrimSuffix(registrationAPIURL, "/")
 	if apiURL == "" {
 		apiURL = os.Getenv("CFGMS_API_URL")
 	}
 
-	client, err := resolveBundleClient(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("bundle lookup failed: %w", err)
-	}
-	if client != nil {
-		return client, nil
-	}
-
-	if apiURL == "" {
-		apiURL = "http://localhost:9080"
-	}
-
-	apiKey := registrationAPIKey
-	if apiKey == "" {
-		apiKey = os.Getenv("CFGMS_API_KEY")
-	}
-
 	tlsInsecure := registrationTLSInsecure
-	if !tlsInsecure && os.Getenv("CFGMS_TLS_INSECURE") == "true" {
-		tlsInsecure = true
+	if !tlsInsecure {
+		tlsInsecure = os.Getenv("CFGMS_TLS_INSECURE") == "true"
 	}
+	serverName := registrationServerName
 
-	tlsCACertPath := registrationTLSCACert
-	if tlsCACertPath == "" {
-		tlsCACertPath = os.Getenv("CFGMS_TLS_CA_CERT")
-	}
-
-	return newClientFromFlags(apiURL, apiKey, tlsCACertPath, tlsInsecure)
+	return requireSessionOrBundleClient(apiURL, tlsInsecure, serverName)
 }
 
 // lookupRDNS performs a best-effort reverse DNS lookup for the given IP.

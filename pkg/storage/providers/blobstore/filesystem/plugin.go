@@ -186,6 +186,101 @@ func (s *FilesystemBlobStore) PutBlob(ctx context.Context, key blob.BlobKey, r i
 	return nil
 }
 
+// PutBlobIfAbsent stores a blob only if no blob currently exists for key,
+// atomic with respect to concurrent PutBlob/PutBlobIfAbsent calls for the same
+// key (Issue #3895). The metadata sidecar file's O_CREATE|O_EXCL create is the
+// atomicity point: exactly one concurrent caller can create it for a given
+// key, so blob data is written to the temp file first (harmless if this
+// caller loses) and only renamed into the final blob path after this caller
+// wins the sidecar create — the loser's temp file is discarded without ever
+// touching the final blob path.
+//
+// A process crash between winning the sidecar create and completing the
+// rename leaves a metadata sidecar with no corresponding blob file, which
+// would make every future PutBlobIfAbsent for this key report
+// ErrBlobAlreadyExists while GetBlob 404s on the missing blob file. Recoverable
+// via PutBlob (the handler's force=true path), which overwrites both files
+// unconditionally.
+func (s *FilesystemBlobStore) PutBlobIfAbsent(ctx context.Context, key blob.BlobKey, r io.Reader, meta blob.BlobMeta) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(s.root, key.TenantID, key.Namespace)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("blob put-if-absent: failed to create directory: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, ".blob-tmp-*")
+	if err != nil {
+		return fmt.Errorf("blob put-if-absent: failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	tmpConsumed := false
+	defer func() {
+		if !tmpConsumed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	h := sha256.New()
+	tee := io.TeeReader(r, h)
+	written, err := io.Copy(tmpFile, tee)
+	if err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("blob put-if-absent: failed to write blob data: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("blob put-if-absent: failed to close temp file: %w", err)
+	}
+
+	checksum := hex.EncodeToString(h.Sum(nil))
+	contentType := meta.ContentType
+	if contentType == "" {
+		contentType = defaultContentType
+	}
+	sidecar := blobMetaSidecar{
+		ContentType: contentType,
+		Size:        written,
+		Checksum:    checksum,
+		CreatedAt:   time.Now().UTC(),
+		Labels:      meta.Labels,
+	}
+	metaJSON, err := json.Marshal(sidecar)
+	if err != nil {
+		return fmt.Errorf("blob put-if-absent: failed to marshal metadata: %w", err)
+	}
+
+	// Atomicity point: exactly one concurrent caller wins this O_EXCL create
+	// for a given key.
+	metaFile, err := os.OpenFile(s.metaPath(key), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return blob.ErrBlobAlreadyExists
+		}
+		return fmt.Errorf("blob put-if-absent: failed to create metadata sidecar: %w", err)
+	}
+	if _, err := metaFile.Write(metaJSON); err != nil {
+		_ = metaFile.Close()
+		_ = os.Remove(s.metaPath(key))
+		return fmt.Errorf("blob put-if-absent: failed to write metadata sidecar: %w", err)
+	}
+	if err := metaFile.Close(); err != nil {
+		_ = os.Remove(s.metaPath(key))
+		return fmt.Errorf("blob put-if-absent: failed to close metadata sidecar: %w", err)
+	}
+
+	// Won the race: move the blob data into place.
+	if err := os.Rename(tmpPath, s.blobPath(key)); err != nil {
+		_ = os.Remove(s.metaPath(key))
+		return fmt.Errorf("blob put-if-absent: failed to rename to final path: %w", err)
+	}
+	tmpConsumed = true
+
+	return nil
+}
+
 // GetBlob returns a streaming reader for the blob.
 // The reader wraps the file in a checksumVerifyingReader that computes SHA-256
 // during reads and returns ErrBlobChecksumMismatch on the final read if the
@@ -267,8 +362,16 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 	}
 
 	var results []blob.BlobInfo
+	metadataRoot, err := os.OpenRoot(searchDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return results, nil
+		}
+		return nil, fmt.Errorf("list blobs: open metadata root: %w", err)
+	}
+	defer func() { _ = metadataRoot.Close() }()
 
-	err := filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(searchDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -279,7 +382,11 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 			return nil
 		}
 
-		metaBytes, err := os.ReadFile(path)
+		relativePath, err := filepath.Rel(searchDir, path)
+		if err != nil {
+			return fmt.Errorf("list blobs: resolve metadata path: %w", err)
+		}
+		metaBytes, err := metadataRoot.ReadFile(relativePath)
 		if err != nil {
 			return fmt.Errorf("list blobs: failed to read metadata: %w", err)
 		}
@@ -289,21 +396,34 @@ func (s *FilesystemBlobStore) ListBlobs(ctx context.Context, prefix blob.BlobKey
 			return fmt.Errorf("list blobs: failed to parse metadata: %w", err)
 		}
 
-		// Reconstruct the key from the relative path: <tenantID>/<namespace>/<name>.meta.json
-		rel, err := filepath.Rel(s.root, path)
-		if err != nil {
-			return err
-		}
-		rel = strings.TrimSuffix(rel, ".meta.json")
-		parts := strings.SplitN(filepath.ToSlash(rel), "/", 3)
-		if len(parts) != 3 {
-			return nil
+		// Reconstruct the key from relativePath (relative to searchDir, which
+		// is already rooted at <root>/<TenantID>[/<Namespace>]). This must not
+		// re-derive TenantID by splitting the full path on "/": TenantID
+		// itself legitimately contains "/" for a hierarchical tenant (e.g.
+		// "root/msp-a/client-1" — CLAUDE.md's recursive parent-child tenant
+		// model), and a fixed SplitN(rel, "/", 3) silently misassigns segments
+		// of the tenant path into Namespace/Name for any TenantID with more
+		// than one segment. Using searchDir — which was built from the
+		// already-known prefix.TenantID — as the split point sidesteps that
+		// entirely, since nothing downstream needs to reparse TenantID out of
+		// the full path.
+		name := strings.TrimSuffix(filepath.ToSlash(relativePath), ".meta.json")
+		namespace := prefix.Namespace
+		if namespace == "" {
+			// searchDir omitted Namespace, so relativePath is
+			// "<namespace>/<name>" — split off exactly the first segment.
+			idx := strings.Index(name, "/")
+			if idx < 0 {
+				return nil
+			}
+			namespace = name[:idx]
+			name = name[idx+1:]
 		}
 
 		key := blob.BlobKey{
-			TenantID:  parts[0],
-			Namespace: parts[1],
-			Name:      parts[2],
+			TenantID:  prefix.TenantID,
+			Namespace: namespace,
+			Name:      name,
 		}
 
 		if prefix.Name != "" && !strings.HasPrefix(key.Name, prefix.Name) {

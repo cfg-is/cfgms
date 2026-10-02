@@ -7,20 +7,275 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	common "github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/config/rollback"
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	clusterregistry "github.com/cfgis/cfgms/features/controller/clusterregistry"
+	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/config"
+	configroutingiface "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
 	controllerrouter "github.com/cfgis/cfgms/pkg/configrouting/providers/controller"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
+
+// ValidationFailedError is returned by SetConfiguration when the supplied
+// configuration fails pre-storage validation. The Errors slice contains only
+// config-derived validation failures (e.g. INVALID_RESOURCE_NAME) — infrastructure
+// errors such as TENANT_LOOKUP_ERROR are stripped before the error is constructed
+// and logged separately, so this type is safe to forward to the API caller.
+type ValidationFailedError struct {
+	Errors []config.ValidationError
+}
+
+func (e *ValidationFailedError) Error() string {
+	if len(e.Errors) == 0 {
+		return "configuration validation failed"
+	}
+	msgs := make([]string, len(e.Errors))
+	for i, ve := range e.Errors {
+		msgs[i] = fmt.Sprintf("%s: %s", ve.Field, ve.Message)
+	}
+	return "configuration validation failed: " + strings.Join(msgs, "; ")
+}
+
+// clusterRegistryAdapter adapts *ControllerService to the clusterMembership interface
+// expected by pkg/config.InheritanceResolver. It builds a fresh Registry snapshot on
+// each MemberClusters call from the controller's live in-memory steward state, which
+// reflects the DNA fragments last published by each steward's DNARefreshLoop ticker
+// (default 30 min — eventually consistent by design; see Issue #2425 Out of Scope).
+type clusterRegistryAdapter struct {
+	controllerSvc *ControllerService
+}
+
+// MemberClusters returns the sorted cluster names that stewardID belongs to,
+// derived from the cluster-wide steward DNA fragments. Cluster membership is
+// scoped to the queried steward's own tenant so that same-named clusters in
+// different tenants cannot pollute each other's member lists (BuildRegistry
+// contract: "Tenant scoping must be applied by the caller").
+//
+// Bug fix (Issue #3495): previously node-local (GetAllStewards), so a steward
+// whose cluster-tagged fragment was only observed by a peer controller node was
+// invisible here. Now uses ListFleetStewards so peer-node fragments are included.
+func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
+	// Use the fleet-wide source so peer-attached stewards with cluster
+	// membership fragments are included. Pass context.Background() (unscoped)
+	// and apply exact-tenant filtering manually to preserve the prior exact-match
+	// scoping behaviour (ListFleetStewards applies subtree scoping, which
+	// would be a wider change than intended for MemberClusters). ListFleetStewards
+	// reads durable storage directly on every call (ADR-031 Decision 3, Issue
+	// #3764), so there is no populate-lag window to degrade around.
+	stewards := a.controllerSvc.ListFleetStewards(context.Background())
+
+	// Resolve the queried steward's own tenant, which scopes the member list.
+	// The node-local registry is checked first: it is the freshest view for a
+	// steward attached to this node. A steward attached to a peer node is
+	// absent there, so fall back to the fleet-wide result — without this the
+	// fleet-wide read above could never be reached for exactly the stewards it
+	// exists to serve, and their membership stayed invisible (Issue #3495).
+	tenantID, known := "", false
+	if info, exists := a.controllerSvc.GetStewardInfo(stewardID); exists {
+		tenantID, known = info.TenantID, true
+	} else {
+		for _, s := range stewards {
+			if s.ID == stewardID {
+				tenantID, known = s.TenantID, true
+				break
+			}
+		}
+	}
+	if !known {
+		return nil
+	}
+	fleetData := make([]fleet.StewardData, 0, len(stewards))
+	for _, s := range stewards {
+		if s.TenantID != tenantID {
+			continue // scope to this steward's tenant only (exact match, same as before)
+		}
+		var frags []*common.Fragment
+		if s.DNA != nil {
+			frags = s.DNA.Fragments
+		}
+		fleetData = append(fleetData, fleet.StewardData{
+			ID:           s.ID,
+			TenantID:     s.TenantID,
+			DNAFragments: frags,
+		})
+	}
+	reg := clusterregistry.BuildRegistry(fleetData)
+	return reg.MemberClusters(stewardID)
+}
+
+// storedRoleConfig is the JSON shape written by handlers_roles.go (features/controller/api).
+// Duplicated here without importing the api package to break the service→api→service cycle.
+type storedRoleConfig struct {
+	Name     string                     `json:"name"`
+	Selector string                     `json:"selector"`
+	Fragment stewardtypes.StewardConfig `json:"fragment"`
+}
+
+// singleStewardProvider is a fleet.StewardProvider wrapping exactly one StewardData.
+// Used by roleConfigAdapter to check filter matches via the canonical fleet.MemoryQuery
+// (which calls the unexported matchesFilter) — one matcher, two consumers (Issue #2546).
+type singleStewardProvider struct{ s fleet.StewardData }
+
+func (p *singleStewardProvider) GetAllStewards() []fleet.StewardData {
+	return []fleet.StewardData{p.s}
+}
+
+// roleConfigAdapter adapts the controller's config store and steward state to the
+// roleConfigProvider interface expected by pkg/config.InheritanceResolver.
+// It lists all role-policies for the steward's tenant, parses each selector, and
+// returns the fragments whose selector matches the steward's current DNA + tags.
+type roleConfigAdapter struct {
+	controllerSvc *ControllerService
+	configStore   cfgconfig.ConfigStore
+	logger        logging.Logger
+}
+
+// MatchingRoleFragments returns the role config fragments whose selectors match
+// stewardID's current DNA + controller-stored tags, sorted alphabetically by role name.
+// DNA currency: os/arch/runtime_os are eventually-consistent (steward-reported, refreshed
+// on DNARefreshLoop; default 30 min); tags are always-current (controller store, updated
+// on each tag admin call). Dynamic-attribute correctness is tracked by epic #2520 — do
+// not block on it.
+func (a *roleConfigAdapter) MatchingRoleFragments(ctx context.Context, stewardID string) ([]config.RoleFragment, error) {
+	info, exists := a.controllerSvc.GetStewardInfo(stewardID)
+	if !exists {
+		return nil, nil
+	}
+
+	// Build attrs map from DNA fragments; merge in controller-stored tags so tag: selector terms work.
+	var attrs map[string]string
+	if info.DNA != nil {
+		attrs = FlattenDNAFragments(info.DNA.GetFragments())
+	} else {
+		attrs = make(map[string]string)
+	}
+	if ts := a.controllerSvc.TagStore(); ts != nil {
+		attrs = mergeTagsIntoAttrs(attrs, ts.TagsFor(stewardID))
+	}
+
+	entries, err := a.configStore.ListConfigs(ctx, &cfgconfig.ConfigFilter{
+		TenantID:  info.TenantID,
+		Namespace: "role-policies",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("role adapter: list role-policies for tenant %s: %w",
+			logging.SanitizeLogValue(info.TenantID), err)
+	}
+
+	stewardData := fleet.StewardData{
+		ID:            stewardID,
+		TenantID:      info.TenantID,
+		DNAAttributes: attrs,
+	}
+	q := fleet.NewMemoryQuery(&singleStewardProvider{s: stewardData})
+
+	var matched []config.RoleFragment
+	for _, entry := range entries {
+		var rc storedRoleConfig
+		if err := json.Unmarshal(entry.Data, &rc); err != nil {
+			a.logger.Warn("role adapter: skipping malformed role config entry",
+				"name", logging.SanitizeLogValue(entry.Key.Name),
+				"error", err)
+			continue
+		}
+		filter, _, err := selector.Parse(rc.Selector)
+		if err != nil {
+			a.logger.Warn("role adapter: skipping role config with unparseable selector",
+				"name", logging.SanitizeLogValue(rc.Name),
+				"error", err)
+			continue
+		}
+		count, _ := q.Count(ctx, filter)
+		if count > 0 {
+			matched = append(matched, config.RoleFragment{
+				Name:   rc.Name,
+				Config: rc.Fragment,
+			})
+		}
+	}
+
+	// Sort alphabetically by role name for deterministic merge order; later name
+	// overrides earlier for the same resource name (same upsert semantics as other layers).
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].Name < matched[j].Name
+	})
+
+	return matched, nil
+}
+
+// mergeTagsIntoAttrs returns a copy of attrs with ctrlTags merged into the "tags" key.
+// DNA-reported tags come first; controller-stored tags follow; duplicates are dropped.
+// Never mutates the input map — attrs may alias FlattenDNAFragments output (fresh map per call).
+func mergeTagsIntoAttrs(attrs map[string]string, ctrlTags []string) map[string]string {
+	if len(ctrlTags) == 0 {
+		return attrs
+	}
+	merged := make(map[string]string, len(attrs)+1)
+	for k, v := range attrs {
+		merged[k] = v
+	}
+	seen := make(map[string]struct{})
+	var all []string
+	for _, t := range strings.Split(merged["tags"], ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	for _, t := range ctrlTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; !dup {
+			seen[t] = struct{}{}
+			all = append(all, t)
+		}
+	}
+	merged["tags"] = strings.Join(all, ",")
+	return merged
+}
+
+// ConfigServiceOption configures optional dependencies for NewConfigurationServiceV2.
+type ConfigServiceOption func(*configServiceOptions)
+
+type configServiceOptions struct {
+	gitSecretStore secretsiface.SecretStore
+	gitWorkDir     string
+}
+
+// WithGitRouter enables git-sourced tenant config routing (Issue #4408). secretStore
+// supplies git credentials at transport time; gitWorkDir is the base directory for
+// cloned repositories. Without this option the constructed router only ever serves
+// the controller store — storeForSource returns the controller store whenever
+// either dependency is absent — so SyncTenantWithRemote silently no-ops for every
+// tenant, which is the pre-Issue-#4408 (and still default) behavior.
+func WithGitRouter(secretStore secretsiface.SecretStore, gitWorkDir string) ConfigServiceOption {
+	return func(o *configServiceOptions) {
+		o.gitSecretStore = secretStore
+		o.gitWorkDir = gitWorkDir
+	}
+}
 
 // FanoutCallback is invoked inside SetConfiguration after a successful ConfigStore write.
 // tenantID matches the authenticated tenant that issued the write; cfgID is the steward
@@ -39,30 +294,104 @@ type ConfigurationServiceV2 struct {
 	storageManager      *interfaces.StorageManager
 	fanoutCallback      FanoutCallback
 	callbackMu          sync.RWMutex
+	routerCloser        func() // stops the router's background cache goroutine
+	router              configroutingiface.ConfigSourceRouter
 }
 
 // NewConfigurationServiceV2 creates a new Epic 6 compliant Configuration service.
 // A ConfigSourceRouter wrapping the storage manager's config and tenant stores is
 // constructed here and injected into the InheritanceResolver so that SnapshotSources
 // is called once per cascade (atomic source resolution, per story #1393).
-func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService) *ConfigurationServiceV2 {
-	router := controllerrouter.NewControllerRouter(
-		storageManager.GetConfigStore(),
-		storageManager.GetTenantStore(),
-	)
-	return &ConfigurationServiceV2{
+// When controllerSvc is non-nil, cluster-policies cascade is enabled via a
+// clusterRegistryAdapter that derives membership from the live in-memory fleet state
+// (eventually consistent; see Issue #2425).
+// Pass WithGitRouter to construct a git-capable router (Issue #4408) — required for
+// configrouting.SyncService's periodic polling to reach a real git remote; without it
+// the router only ever serves the controller store.
+func NewConfigurationServiceV2(logger logging.Logger, storageManager *interfaces.StorageManager, controllerSvc *ControllerService, opts ...ConfigServiceOption) *ConfigurationServiceV2 {
+	var options configServiceOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var router configroutingiface.ConfigSourceRouter
+	if options.gitSecretStore != nil && options.gitWorkDir != "" {
+		router = controllerrouter.NewControllerRouterWithGit(
+			storageManager.GetConfigStore(),
+			storageManager.GetTenantStore(),
+			options.gitSecretStore,
+			options.gitWorkDir,
+			logger,
+		)
+	} else {
+		router = controllerrouter.NewControllerRouter(
+			storageManager.GetConfigStore(),
+			storageManager.GetTenantStore(),
+		)
+	}
+
+	var ir *config.InheritanceResolver
+	if controllerSvc != nil {
+		ir = config.NewInheritanceResolverWithRoles(
+			router,
+			storageManager.GetClientTenantStore(),
+			storageManager.GetTenantStore(),
+			&clusterRegistryAdapter{controllerSvc: controllerSvc},
+			&roleConfigAdapter{
+				controllerSvc: controllerSvc,
+				configStore:   storageManager.GetConfigStore(),
+				logger:        logger,
+			},
+		)
+	} else {
+		ir = config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore())
+	}
+
+	svc := &ConfigurationServiceV2{
 		logger:              logger,
 		configManager:       config.NewManagerWithStorageManager(storageManager),
-		inheritanceResolver: config.NewInheritanceResolver(router, storageManager.GetClientTenantStore(), storageManager.GetTenantStore()),
+		inheritanceResolver: ir,
 		validationManager:   config.NewValidationManager(storageManager.GetConfigStore(), storageManager.GetTenantStore()),
 		controllerSvc:       controllerSvc,
 		storageManager:      storageManager,
+		router:              router,
+	}
+	if c, ok := router.(interface{ Close() }); ok {
+		svc.routerCloser = c.Close
+	}
+	return svc
+}
+
+// ConfigSourceRouter returns the router backing this service, for wiring into
+// configrouting.SyncService's periodic git-tenant polling (Issue #4408). The
+// returned router is git-capable only when NewConfigurationServiceV2 was built
+// with WithGitRouter.
+func (s *ConfigurationServiceV2) ConfigSourceRouter() configroutingiface.ConfigSourceRouter {
+	return s.router
+}
+
+// Close stops the router's background cache cleanup goroutine. Safe to call multiple times.
+func (s *ConfigurationServiceV2) Close() {
+	if s.routerCloser != nil {
+		s.routerCloser()
 	}
 }
 
 // SetRollbackManager wires the canonical rollback manager into the service.
 func (s *ConfigurationServiceV2) SetRollbackManager(m rollback.RollbackManager) {
 	s.rollbackManager = m
+}
+
+// SetAuditManager wires the controller's durable audit sink into the
+// inheritance resolver, so a security-posture downgrade refused during
+// cascade resolution (module_trust or script_signing — Issue #4324) is
+// recorded via pkg/audit.Manager.RecordEvent. Optional: without it, refusals
+// are still enforced and logged, just not durably audited (matches
+// InheritanceResolver.WithAuditManager's nil-safe contract).
+func (s *ConfigurationServiceV2) SetAuditManager(m *audit.Manager) {
+	if s.inheritanceResolver != nil {
+		s.inheritanceResolver.WithAuditManager(m)
+	}
 }
 
 // RegisterFanoutCallback registers a callback that is invoked once, synchronously,
@@ -225,11 +554,24 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	// Validate configuration before storing
 	validationResult := s.validationManager.ValidateConfiguration(ctx, tenantID, stewardID, config)
 	if !validationResult.Valid {
-		var errorMessages []string
-		for _, err := range validationResult.Errors {
-			errorMessages = append(errorMessages, fmt.Sprintf("%s: %s", err.Field, err.Message))
+		// Separate config-derived errors (safe to return) from infrastructure errors.
+		// TENANT_LOOKUP_ERROR wraps a raw storage backend message that must not be
+		// forwarded to the caller; it is logged here instead.
+		vfe := &ValidationFailedError{}
+		for _, e := range validationResult.Errors {
+			if e.Code == "TENANT_LOOKUP_ERROR" {
+				s.logger.Error("Infrastructure error during configuration validation",
+					"tenant_id", logging.SanitizeLogValue(tenantID),
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"code", e.Code)
+				continue
+			}
+			vfe.Errors = append(vfe.Errors, e)
 		}
-		return fmt.Errorf("configuration validation failed: %v", errorMessages)
+		if len(vfe.Errors) > 0 {
+			return vfe
+		}
+		return fmt.Errorf("configuration validation failed: infrastructure error")
 	}
 
 	// Log validation warnings
@@ -259,9 +601,65 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 	return nil
 }
 
-// GetEffectiveConfiguration returns the effective configuration with inheritance metadata
+// GetEffectiveConfiguration returns the effective configuration with inheritance metadata.
+//
+// tenantID is trusted as given only when stewardID is empty (a tenant-only
+// cascade, e.g. GET /api/v1/tenants/{id}/reboot-window, where there is no
+// steward resource to resolve an owner for) or when the steward is not known to
+// the live registry. When stewardID names a live steward, its tenant is
+// resolved authoritatively here — mirroring GetConfiguration's GetStewardInfo
+// guard (Issue #1572) — rather than trusting the tenantID a caller supplies.
+//
+// Before Issue #4346 this was a bare passthrough with no check at all: its
+// caller, handleGetEffectiveConfig, set tenantID from the caller's OWN session
+// context and passed it straight through as if it were the target steward's
+// tenant, without ever looking up which tenant stewardID actually belongs to.
 func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
+	if stewardID != "" && s.controllerSvc != nil {
+		if stewardInfo, exists := s.controllerSvc.GetStewardInfo(stewardID); exists {
+			if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+				s.logger.Warn("Effective configuration request cross-tenant access denied",
+					"steward_id", logging.SanitizeLogValue(stewardID),
+					"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
+					"request_tenant", logging.SanitizeLogValue(reqTenant))
+				return nil, fmt.Errorf("cross-tenant access denied for steward %s", logging.SanitizeLogValue(stewardID))
+			}
+			tenantID = stewardInfo.TenantID
+		}
+	}
 	return s.inheritanceResolver.ResolveConfiguration(ctx, tenantID, stewardID)
+}
+
+// GetConfigStore returns the underlying config store for direct namespace access
+// (e.g., reading cluster-policies or role-policies entries by key).
+func (s *ConfigurationServiceV2) GetConfigStore() cfgconfig.ConfigStore {
+	return s.storageManager.GetConfigStore()
+}
+
+// GetClusterDeclaredResources returns the resource configs stored in the
+// cluster-policies/<clusterName> document for the given tenant. These are the
+// resources declared to exist in the cluster (the "declared" side of the
+// reconciliation comparison against the actual cluster registry).
+//
+// Returns nil resources (no error) when no cluster-policies document exists for
+// the cluster — the caller treats this as an empty declared set, meaning
+// only dead-owner and split-brain conditions can be detected (not create-coverage
+// gaps). A non-nil error is returned only for genuine parse failures.
+func (s *ConfigurationServiceV2) GetClusterDeclaredResources(ctx context.Context, tenantID, clusterName string) ([]stewardtypes.ResourceConfig, error) {
+	key := &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "cluster-policies",
+		Name:      clusterName,
+	}
+	entry, err := s.storageManager.GetConfigStore().GetConfig(ctx, key)
+	if err != nil {
+		return nil, nil // not found is non-fatal; no declared resources
+	}
+	var cfg stewardtypes.StewardConfig
+	if err := yaml.Unmarshal(entry.Data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing cluster-policies/%s: %w", clusterName, err)
+	}
+	return cfg.Resources, nil
 }
 
 // RollbackConfiguration performs configuration rollback via the canonical rollback manager.

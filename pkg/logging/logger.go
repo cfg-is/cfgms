@@ -103,9 +103,15 @@ func NewNoopLogger() Logger {
 	return &NoopLogger{}
 }
 
-// parseLevel converts a string level to a Level
+// parseLevel converts a string level to a Level.
+//
+// Case-insensitive. This accepted only lowercase while
+// interfaces.LogLevelToSyslogSeverity accepted only uppercase, so the two
+// parsers disagreed on every input: "DEBUG" from a config file silently became
+// InfoLevel here, and "debug" from CFGMS_LOG_LEVEL silently became
+// informational there. Either spelling now works in both.
 func parseLevel(level string) Level {
-	switch level {
+	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "debug":
 		return DebugLevel
 	case "info":

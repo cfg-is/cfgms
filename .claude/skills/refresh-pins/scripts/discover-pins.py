@@ -8,15 +8,38 @@ lockstep bumps.
 
 Discovery sources:
 - go.mod              — Go toolchain directive
-- .github/workflows/  — GO_VERSION env vars, go-version: in setup-go uses
-- cmd/*/Dockerfile    — FROM golang:X-alpine tags
-- .devcontainer/Dockerfile — same
+- .github/workflows/  — GO_VERSION env vars, go-version: in setup-go uses, and
+  `docker pull` / `pull_with_retry` pre-pull steps that warm a golang: base
+  image ahead of the build — these must move in lockstep with the Dockerfile
+  FROM line below but live in a workflow step, not a Dockerfile.
+- **/Dockerfile*      — FROM golang:X tags (toolchain, lockstep) and every other
+  base image (alpine, debian, ...) as its own `kind: "docker"` pin. Globbed from
+  the repo root, not from cmd/ and .devcontainer/ only: Dockerfile.test-runner
+  sits at the root and was invisible to the earlier globs, so a toolchain bump
+  left the image that runs the integration suites on the old Go version.
+- **/*.ps1            — every PowerShell script in the repo (windows-setup.ps1
+  today). Tool-pin version strings are grepped here the same as the other
+  install-surface files; a matched `Url = '...'` line also pulls in its
+  paired `Sha256 = '...'` line, which carries no version string of its own to
+  grep for. Claude Code CLI is NOT grepped here — it is exempt from pin
+  tracking entirely (founder decision 2026-10-01, Issue #4473; see
+  references/cooldown-policy.md "Claude Code CLI exemption").
+- go.mod require blocks — every DIRECT module requirement, `kind: "gomod"`.
+  Indirect requirements are deliberately not enumerated (334 of them here);
+  their versions are chosen by MVS rather than by us, so the actionable signal
+  is a CVE, not staleness. SKILL.md Phase 2 covers the full transitive graph
+  with a single vulnerability scan instead.
+- web/package.json — direct dependencies and devDependencies, `kind: "npm"`.
 - .github/workflows/dependency-pin-check.yml — the existing tool pin list
   (check_version <name> <repo> <version> calls)
 - .github/workflows/*.yml — GitHub Action SHA pins (uses: <owner>/<name>@<sha>)
   — one inventory entry per unique (action, sha) tuple so SHA drift across
   workflows is naturally visible (multiple entries with the same action name
   but different SHAs).
+- .mcp.json — git-pinned MCP servers (git+https://github.com/<owner>/<repo>@<tag>,
+  e.g. serena). kind="mcp"; these are agent *tooling* dependencies whose tool
+  names are consumed by name in .claude/agents/*.md, so a tool-renaming release
+  is a breaking change (see references/decision-matrix.md "MCP server pins").
 
 Run from repo root or any subdir — uses `git rev-parse --show-toplevel`
 to anchor.
@@ -48,13 +71,281 @@ def grep_files(pattern: re.Pattern, files: list[Path], root: Path) -> list[dict]
             for i, line in enumerate(f.read_text().splitlines(), 1):
                 if pattern.search(line):
                     locations.append({
-                        "file": str(f.relative_to(root)),
+                        "file": f.relative_to(root).as_posix(),
                         "line": i,
                         "match": line.strip(),
                     })
         except UnicodeDecodeError:
             continue
     return locations
+
+
+#: Directories that contain dependency *copies* rather than our own sources.
+#: Anything discovered inside them is not a pin we control.
+_VENDOR_DIRS = {".git", "node_modules", ".cache", "vendor", "worktrees"}
+
+
+def all_dockerfiles(root: Path) -> list[Path]:
+    """Every Dockerfile in the repo, wherever it lives.
+
+    Earlier globs looked only under cmd/*/ and .devcontainer/, which missed
+    Dockerfile.test-runner at the repo root — the image that runs the
+    integration suites. A toolchain bump driven by this inventory would have
+    left it on the old Go version, so base-image discovery globs from the root
+    and filters vendored trees instead of enumerating known locations.
+    """
+    out: list[Path] = []
+    for f in sorted(root.glob("**/Dockerfile*")):
+        if _VENDOR_DIRS & set(f.parts):
+            continue
+        if f.is_file():
+            out.append(f)
+    return out
+
+
+def all_ps1_files(root: Path) -> list[Path]:
+    """Every PowerShell script in the repo, wherever it lives.
+
+    Mirrors all_dockerfiles(): globbed from the repo root rather than a fixed
+    location list, and filtered through the same _VENDOR_DIRS set. Issue #4472
+    found pins declared only in windows-setup.ps1 (golangci-lint, trufflehog,
+    Claude Code CLI, the winget Go package) that no discoverer searched.
+    """
+    out: list[Path] = []
+    for f in sorted(root.glob("**/*.ps1")):
+        if _VENDOR_DIRS & set(f.parts):
+            continue
+        if f.is_file():
+            out.append(f)
+    return out
+
+
+#: FROM [--flag=value ...] <ref> [AS <stage>]
+#:
+#: Only the reference is captured here; it is split in parse_image_ref rather
+#: than by regex. A single pattern cannot separate the tag from a registry port
+#: — in `registry.example.com:5000/foo/bar:latest` both are a colon followed by
+#: characters, and a naive alternation binds `:5000` as the tag, yielding
+#: image=registry.example.com tag=5000. That is worse than missing the line:
+#: it emits a confidently wrong pin.
+_FROM_RE = re.compile(
+    r"^\s*FROM\s+(?:--[A-Za-z0-9-]+=\S+\s+)*(?P<ref>\S+)",
+)
+
+
+def parse_image_ref(ref: str) -> tuple[str, str, str] | None:
+    """Split a Docker image reference into (image, tag, digest).
+
+    Returns None for a reference that carries no version information — a
+    multi-stage stage name (`FROM builder`) or a bare image with neither tag nor
+    digest. Those are not pins.
+
+    The tag is the part after the LAST colon, and only when that colon comes
+    after the last slash. Anything earlier is a registry port, which belongs to
+    the image. Splitting from the right is what makes a registry host with a
+    port parse correctly.
+    """
+    digest = ""
+    if "@" in ref:
+        ref, _, digest = ref.partition("@")
+        if not digest.startswith("sha256:"):
+            digest = ""
+
+    tag = ""
+    colon = ref.rfind(":")
+    if colon != -1 and colon > ref.rfind("/"):
+        tag = ref[colon + 1:]
+        ref = ref[:colon]
+
+    if not tag and not digest:
+        return None
+    return ref, tag, digest
+
+
+def discover_base_images(root: Path) -> list[dict]:
+    """Container base images pinned by FROM lines, excluding golang:.
+
+    golang: images are the Go toolchain's concern — they must move in lockstep
+    with go.mod and every workflow GO_VERSION, so discover_go_toolchain() owns
+    them and emitting them here too would produce a second, competing pin.
+
+    Everything else — alpine, debian, and any future base — is its own pin. The
+    shipped controller and steward images are built FROM alpine, so an Alpine
+    advisory lands directly in a released artifact; before this discoverer
+    existed nothing in the sweep looked at it.
+
+    One entry per unique (image, tag, digest). A digest-pinned image keeps the
+    digest as `current` because that is what Docker actually resolves; the tag
+    is carried alongside for readability, since `alpine:3.23` can be repointed
+    at a new digest without the tag changing.
+    """
+    by_pin: dict[tuple[str, str, str], list[dict]] = {}
+
+    for df in all_dockerfiles(root):
+        try:
+            lines = df.read_text().splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        rel = df.relative_to(root).as_posix()
+        for i, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            m = _FROM_RE.match(line)
+            if not m:
+                continue
+            ref = m.group("ref")
+
+            # A build-arg-substituted reference (FROM ${BASE}, FROM node:${VER})
+            # cannot be resolved without evaluating the build. Warn on stderr
+            # rather than skipping quietly: a silently dropped FROM line is
+            # exactly the failure this discoverer exists to remove, and stderr
+            # keeps the JSON on stdout parseable.
+            if "$" in ref:
+                print(
+                    f"discover-pins: WARNING {rel}:{i} build-arg FROM not "
+                    f"resolvable, image left untracked: {line.strip()}",
+                    file=sys.stderr,
+                )
+                continue
+
+            parsed = parse_image_ref(ref)
+            if parsed is None:
+                # Multi-stage stage reference, or an image with neither tag nor
+                # digest — no version to track.
+                continue
+            image, tag, digest = parsed
+            if image == "golang" or image.endswith("/golang"):
+                continue
+            by_pin.setdefault((image, tag, digest), []).append(
+                {"file": rel, "line": i, "match": line.strip()}
+            )
+
+    pins: list[dict] = []
+    for (image, tag, digest), locations in sorted(by_pin.items()):
+        pins.append({
+            "name": f"docker:{image}:{tag}" if tag else f"docker:{image}",
+            "kind": "docker",
+            "current": digest or tag,
+            "tag": tag or None,
+            "digest": digest or None,
+            "release_source": f"https://hub.docker.com/_/{image}",
+            "ecosystem": None,  # OS-package CVEs come from the image scan, not GHSA
+            "package": image,
+            "locations": locations,
+        })
+    return pins
+
+
+def discover_go_modules(root: Path) -> list[dict]:
+    """Direct module requirements from go.mod.
+
+    Only direct requirements are emitted. The indirect set is an order of
+    magnitude larger (334 vs 47 here) and its versions are selected by minimum
+    version selection rather than chosen by us — bumping one directly usually
+    means raising the parent that requires it. Enumerating them as pins would
+    also make Phase 2's per-pin research infeasible.
+
+    That is not a coverage hole: SKILL.md Phase 2 runs one vulnerability scan
+    across the whole transitive graph, which reaches every indirect module.
+    Staleness is tracked per direct pin; vulnerability is tracked in bulk.
+
+    `ecosystem`/`package` are populated so the existing GHSA query in Phase 2
+    works unchanged against these entries.
+    """
+    go_mod = root / "go.mod"
+    if not go_mod.exists():
+        return []
+
+    pins: list[dict] = []
+    in_require = False
+    # `module/path v1.2.3` optionally followed by `// indirect`
+    req_re = re.compile(
+        r"^\s*(?P<path>[A-Za-z0-9._~/-]+\.[A-Za-z0-9._~/-]+)\s+"
+        r"(?P<version>v\S+)(?P<rest>.*)$"
+    )
+
+    for i, line in enumerate(go_mod.read_text().splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("require ("):
+            in_require = True
+            continue
+        if in_require and stripped == ")":
+            in_require = False
+            continue
+        if stripped.startswith("//"):
+            continue
+
+        target = stripped
+        if not in_require:
+            if not stripped.startswith("require "):
+                continue
+            target = stripped[len("require "):]
+
+        m = req_re.match(target)
+        if not m:
+            continue
+        if "indirect" in m.group("rest"):
+            continue
+
+        path = m.group("path")
+        pins.append({
+            "name": f"gomod:{path}",
+            "kind": "gomod",
+            "current": m.group("version"),
+            "release_source": f"https://proxy.golang.org/{path}/@latest",
+            "ecosystem": "GO",
+            "package": path,
+            "locations": [{"file": "go.mod", "line": i, "match": stripped}],
+        })
+    return pins
+
+
+def discover_npm_packages(root: Path) -> list[dict]:
+    """Direct dependencies and devDependencies from web/package.json.
+
+    The frontend has its own dependency tree that no other discoverer touches.
+    devDependencies are included because the build toolchain runs in CI against
+    repository contents — a compromised build-time package is a supply-chain
+    exposure regardless of whether it ships.
+
+    Transitive npm packages are handled the same way as indirect Go modules: by
+    the bulk vulnerability scan in Phase 2, not by enumeration.
+    """
+    pkg_json = root / "web" / "package.json"
+    if not pkg_json.exists():
+        return []
+    try:
+        data = json.loads(pkg_json.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return []
+
+    raw_lines = pkg_json.read_text().splitlines()
+    pins: list[dict] = []
+
+    for section in ("dependencies", "devDependencies"):
+        block = data.get(section) or {}
+        if not isinstance(block, dict):
+            continue
+        for name in sorted(block):
+            spec = block[name]
+            if not isinstance(spec, str):
+                continue
+            locations = [
+                {"file": "web/package.json", "line": i, "match": line.strip()}
+                for i, line in enumerate(raw_lines, 1)
+                if f'"{name}"' in line
+            ]
+            pins.append({
+                "name": f"npm:{name}",
+                "kind": "npm",
+                "current": spec,
+                "dev": section == "devDependencies",
+                "release_source": f"https://registry.npmjs.org/{name}",
+                "ecosystem": "NPM",
+                "package": name,
+                "locations": locations,
+            })
+    return pins
 
 
 def discover_go_toolchain(root: Path) -> dict:
@@ -94,16 +385,34 @@ def discover_go_toolchain(root: Path) -> dict:
         workflows, root,
     ))
 
-    # Dockerfile FROM golang: pins (active uncommented lines only)
-    dockerfiles = list((root / "cmd").glob("*/Dockerfile")) + \
-                  list((root / "cmd").glob("*/Dockerfile.*"))
-    devcontainer_df = root / ".devcontainer" / "Dockerfile"
-    if devcontainer_df.exists():
-        dockerfiles.append(devcontainer_df)
+    # Dockerfile FROM golang: pins (active uncommented lines only).
+    # Globbed repo-wide — see all_dockerfiles() for why the previous
+    # cmd/*+devcontainer globs were not enough.
     locations.extend(grep_files(
         re.compile(r"^\s*FROM\s+golang:\d+\.\d+(\.\d+)?"),
-        dockerfiles, root,
+        all_dockerfiles(root), root,
     ))
+
+    # Workflow pre-pull steps (`docker pull` / the retry-wrapped
+    # `pull_with_retry` helper) that warm the same golang: base image a
+    # Dockerfile FROM line above references. These must move in lockstep with
+    # that FROM digest, but live in a workflow step rather than a Dockerfile,
+    # so they need their own grep target (issue #4472 — production-gates.yml's
+    # pre-pull of the builder image was invisible to every existing pattern).
+    locations.extend(grep_files(
+        re.compile(r"^\s*(?:docker\s+pull|pull_with_retry)\s+[\"']?golang:\d+\.\d+(\.\d+)?"),
+        workflows, root,
+    ))
+
+    # Any other literal occurrence of the toolchain version that the
+    # structural patterns above don't match — e.g. a Windows dev-setup
+    # script's winget package pin, which names the version with neither a
+    # FROM nor a GO_VERSION/go-version key.
+    if current:
+        locations.extend(grep_files(
+            re.compile(re.escape(current)),
+            all_ps1_files(root), root,
+        ))
 
     return {
         "name": "go-toolchain",
@@ -116,14 +425,69 @@ def discover_go_toolchain(root: Path) -> dict:
     }
 
 
+# NOTE: there is deliberately no discover_claude_code_cli() here. Claude Code
+# CLI is exempt from pin tracking entirely (founder decision 2026-10-01,
+# Issue #4473; see references/cooldown-policy.md "Claude Code CLI
+# exemption") — .devcontainer/Dockerfile and windows-setup.ps1 both resolve
+# npm's `stable` dist-tag at build/setup time instead of naming a version, so
+# there is no version string left for a discoverer to find or a bump story to
+# target. A prior version of this script had a discoverer for `ARG
+# CLAUDE_CODE_VERSION` in .devcontainer/Dockerfile; that ARG no longer
+# exists, having been replaced by the unrelated `CLAUDE_CODE_VERSION_OVERRIDE`
+# build-arg, which pins one exact release rather than declaring the tracked
+# version and is itself out of scope for pin discovery.
+
+
+#: A PowerShell verified-download block (windows-setup.ps1) pairs a version-
+#: bearing Url line with a Sha256 line that carries no version string of its
+#: own:
+#:   Url    = 'https://.../v3.97.4/trufflehog_3.97.4_windows_amd64.tar.gz'
+#:   Sha256 = '6ce9a957...'
+#: A literal version-string grep matches the Url line but can never match the
+#: Sha256 line next to it, so without pairing the hash silently falls out of
+#: lockstep tracking whenever the version bumps — the gap issue #4472 reported
+#: for trufflehog.
+_PS1_SHA256_RE = re.compile(r"^\s*Sha256\s*=")
+_PS1_BLOCK_BOUNDARY_RE = re.compile(r"^\s*(\}|Name\s*=)")
+
+
+def _paired_ps1_sha256_locations(f: Path, matched_lines: set[int], root: Path) -> list[dict]:
+    """For each matched `Url = '...'` line, find the Sha256 line in the same block."""
+    try:
+        lines = f.read_text().splitlines()
+    except (UnicodeDecodeError, OSError):
+        return []
+    extra = []
+    for ln in sorted(matched_lines):
+        idx = ln - 1
+        if idx < 0 or idx >= len(lines) or "Url" not in lines[idx]:
+            continue
+        for j in range(idx + 1, min(idx + 6, len(lines))):
+            if _PS1_BLOCK_BOUNDARY_RE.match(lines[j]):
+                break
+            if _PS1_SHA256_RE.match(lines[j]):
+                extra.append({
+                    "file": f.relative_to(root).as_posix(),
+                    "line": j + 1,
+                    "match": lines[j].strip(),
+                })
+                break
+    return extra
+
+
 def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
     """Grep in-scope paths for additional usage locations of a tool version string.
 
     Searches for the literal version string across workflow files (excluding the
     dependency-pin-check.yml declaration file itself), devcontainer Dockerfile,
-    Makefile, cmd Dockerfiles, and shell scripts. Returns location dicts for
-    every match — these are the install/usage pins that must move lockstep with
-    the check_version declaration.
+    Makefile, cmd Dockerfiles, shell scripts, and every PowerShell script in the
+    repo (windows-setup.ps1 and any future one — see all_ps1_files()). Returns
+    location dicts for every match — these are the install/usage pins that must
+    move lockstep with the check_version declaration.
+
+    A PowerShell Url match additionally pulls in its paired Sha256 line (see
+    _paired_ps1_sha256_locations()), since that line carries no version string
+    a plain grep could find on its own.
     """
     search_files: list[Path] = []
 
@@ -145,7 +509,18 @@ def discover_tool_usage_locations(version: str, root: Path) -> list[dict]:
     for f in sorted((root / "scripts").glob("*.sh")):
         search_files.append(f)
 
-    return grep_files(re.compile(re.escape(version)), search_files, root)
+    search_files.extend(all_ps1_files(root))
+
+    locations = grep_files(re.compile(re.escape(version)), search_files, root)
+
+    ps1_matched_lines_by_file: dict[str, set[int]] = {}
+    for loc in locations:
+        if loc["file"].endswith(".ps1"):
+            ps1_matched_lines_by_file.setdefault(loc["file"], set()).add(loc["line"])
+    for rel_file, matched_lines in ps1_matched_lines_by_file.items():
+        locations.extend(_paired_ps1_sha256_locations(root / rel_file, matched_lines, root))
+
+    return locations
 
 
 def discover_tool_pins(root: Path) -> list[dict]:
@@ -244,7 +619,7 @@ def discover_github_actions(root: Path) -> list[dict]:
             if entry["hint"] is None and hint is not None:
                 entry["hint"] = hint
             entry["locations"].append({
-                "file": str(wf.relative_to(root)),
+                "file": wf.relative_to(root).as_posix(),
                 "line": i,
                 "match": line.strip(),
             })
@@ -265,11 +640,101 @@ def discover_github_actions(root: Path) -> list[dict]:
     return pins
 
 
+def discover_mcp_pins(root: Path) -> list[dict]:
+    """MCP server pins in .mcp.json — git+https://github.com/<owner>/<repo>@<tag>.
+
+    Each git-pinned MCP server (e.g. serena) becomes one pin entry. Generic:
+    any current/future .mcp.json server pinned to a GitHub git tag is covered.
+
+    These are agent *tooling* dependencies — the planning/dev agents consume
+    their tools by name (e.g. `mcp__serena__find_symbol` appears in
+    .claude/agents/*.md `tools:` allowlists and prose), so a release that
+    renames/removes a tool is a BREAKING change that needs a rewire story, not a
+    one-line pin bump. The blast-radius classification lives in Phase 3 (see
+    references/decision-matrix.md "MCP server pins"); this discovery only emits
+    the pin + its .mcp.json location.
+    """
+    pins: list[dict] = []
+    mcp_file = root / ".mcp.json"
+    if not mcp_file.exists():
+        return pins
+    try:
+        text = mcp_file.read_text()
+        data = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return pins
+    git_ref = re.compile(
+        r"git\+https://github\.com/([^/]+)/([^/@]+?)(?:\.git)?@(v?[0-9][^\s\"']*)"
+    )
+    raw_lines = text.splitlines()
+    servers = data.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        return pins
+    for name in sorted(servers):
+        cfg = servers[name]
+        args = cfg.get("args", []) if isinstance(cfg, dict) else []
+        match = None
+        for arg in args:
+            if isinstance(arg, str):
+                match = git_ref.search(arg)
+                if match:
+                    break
+        if not match:
+            continue  # non-git-pinned server (uvx latest, npx, local path) — not a versioned pin
+        owner, repo, tag = match.group(1), match.group(2), match.group(3)
+        locations = [
+            {"file": ".mcp.json", "line": i, "match": line.strip()}
+            for i, line in enumerate(raw_lines, 1)
+            if git_ref.search(line)
+        ]
+        # An MCP server's git ref can be pinned a second time, independently, in
+        # a Dockerfile that bakes it into the agent image (e.g. `uv tool install
+        # --from git+https://github.com/<owner>/<repo>@<tag> <name>`). setup-env.sh
+        # repoints .mcp.json at that baked binary at container startup, so a bump
+        # that only touches .mcp.json is a no-op — both locations must move
+        # together. Missing this cost story #3074 a manual scope correction.
+        drift_tag = None
+        for dockerfile in sorted(root.glob("**/Dockerfile*")):
+            if ".git" in dockerfile.parts:
+                continue
+            try:
+                docker_lines = dockerfile.read_text().splitlines()
+            except (UnicodeDecodeError, OSError):
+                continue
+            rel = dockerfile.relative_to(root).as_posix()
+            for i, line in enumerate(docker_lines, 1):
+                dmatch = git_ref.search(line)
+                if dmatch and dmatch.group(1) == owner and dmatch.group(2) == repo:
+                    locations.append({"file": rel, "line": i, "match": line.strip()})
+                    if dmatch.group(3) != tag:
+                        drift_tag = dmatch.group(3)
+        pin = {
+            "name": name,
+            "kind": "mcp",
+            "current": tag,
+            "release_source": f"gh:{owner}/{repo}",
+            "ecosystem": None,  # git-installed; GHSA rarely resolves — Phase 2 falls back to release notes
+            "package": None,
+            "locations": locations,
+        }
+        if drift_tag:
+            # Two divergent pins of the same server — surface it like the
+            # actions/checkout "mixed pins" case so Phase 3's justification
+            # calls out unifying them, not just bumping .mcp.json's tag.
+            pin["drift_current"] = drift_tag
+        pins.append(pin)
+    return pins
+
+
 def main() -> int:
     root = repo_root()
     inventory = [discover_go_toolchain(root)]
     inventory.extend(discover_tool_pins(root))
     inventory.extend(discover_github_actions(root))
+    inventory.extend(discover_mcp_pins(root))
+    inventory.extend(discover_base_images(root))
+    inventory.extend(discover_go_modules(root))
+    inventory.extend(discover_npm_packages(root))
     json.dump(inventory, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0

@@ -4,16 +4,32 @@ package factory
 
 import (
 	"context"
-	"errors"
+	"crypto/ed25519"
+	"crypto/rand"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/cfgis/cfgms/features/modules"
-	"github.com/cfgis/cfgms/features/modules/file"
+	"github.com/cfgis/cfgms/features/modules/stdlib/file"
 	"github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/features/steward/discovery"
+	moduleruntime "github.com/cfgis/cfgms/features/steward/modules/runtime"
+	stewardtrust "github.com/cfgis/cfgms/features/steward/modules/trust"
 	"github.com/cfgis/cfgms/pkg/logging"
-	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	maintinterfaces "github.com/cfgis/cfgms/pkg/maintenance/interfaces"
+	pkgtrust "github.com/cfgis/cfgms/pkg/modules/trust"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
+	storagecfg "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
+
+	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -224,79 +240,192 @@ func TestGetModuleInfo(t *testing.T) {
 
 func TestAllBuiltinModulesLoad(t *testing.T) {
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
-	for _, name := range []string{"acme", "directory", "file", "firewall", "hyperv", "package", "patch", "script"} {
+	for _, name := range []string{"acme", "activedirectory", "cert_trust", "directory", "file", "firewall", "github_runner", "hostname", "hyperv", "package", "patch", "script", "time", "user"} {
 		mod, err := factory.LoadModule(name)
 		assert.NoError(t, err, "built-in module %q must load without error", name)
 		assert.NotNil(t, mod, "built-in module %q must not be nil", name)
 	}
 }
 
-// stubFailingSecretStoreModule implements modules.Module and modules.SecretStoreInjectable.
-// SetSecretStore always returns an error to exercise the warning-log path in attemptSecretStoreInjection.
-type stubFailingSecretStoreModule struct{}
+// TestModuleFactory_ConcurrentLoadModule_NoDataRace exercises the single
+// long-lived factory the way the steward does: one shared *ModuleFactory reached
+// concurrently from many goroutines (convergence executor, command handlers —
+// which run one goroutine per command — and the Tier-2 observe sweep). Before
+// the factory carried a mutex, the unguarded reads/writes of f.instances and
+// f.injectionStatus made this a "fatal error: concurrent map writes", an
+// unrecoverable process abort that no recover() can catch.
+//
+// Run under -race (make test runs the suite with -race) this fails on any
+// unsynchronized access to the factory's mutable state.
+func TestModuleFactory_ConcurrentLoadModule_NoDataRace(t *testing.T) {
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
 
-func (s *stubFailingSecretStoreModule) Get(_ context.Context, _ string) (modules.ConfigState, error) {
-	return nil, nil
+	// Names spanning the constructor map plus the specially-handled patch module.
+	names := []string{"file", "directory", "script", "user", "time", "package", "firewall", "cert_trust", "hostname", "patch"}
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, goroutines*len(names))
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			<-start
+			for i := range names {
+				// Rotate the starting offset so goroutines contend on different
+				// names at the same moment rather than marching in lockstep.
+				name := names[(i+g)%len(names)]
+				mod, err := f.LoadModule(name)
+				if err != nil {
+					errs <- err
+					continue
+				}
+				if mod == nil {
+					errs <- fmt.Errorf("module %q loaded as nil", name)
+				}
+				// Concurrent readers of the same guarded state.
+				_ = f.GetLoadedModules()
+				_ = f.ListModulesWithLoggers()
+			}
+		}(g)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent LoadModule: %v", err)
+	}
+
+	// Every requested module must be cached exactly once (the instance cache is
+	// consistent, not corrupted, after concurrent loads).
+	loaded := f.GetLoadedModules()
+	assert.ElementsMatch(t, names, loaded, "each concurrently loaded module must be cached exactly once")
 }
 
-func (s *stubFailingSecretStoreModule) Set(_ context.Context, _ string, _ modules.ConfigState) error {
-	return nil
+// TestModuleFactory_ConcurrentLoadModule_ReturnsSharedInstance verifies that
+// serializing construction under the factory mutex yields a single shared
+// instance per module name: concurrent callers must not each get their own
+// module object, which would silently split module state across call paths.
+func TestModuleFactory_ConcurrentLoadModule_ReturnsSharedInstance(t *testing.T) {
+	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	const goroutines = 24
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make(chan modules.Module, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			mod, err := f.LoadModule("file")
+			if err == nil {
+				results <- mod
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var first modules.Module
+	count := 0
+	for mod := range results {
+		count++
+		if first == nil {
+			first = mod
+			continue
+		}
+		assert.Same(t, first, mod, "all concurrent LoadModule callers must receive the same cached instance")
+	}
+	assert.Equal(t, goroutines, count, "every goroutine must load the module successfully")
 }
 
-func (s *stubFailingSecretStoreModule) SetSecretStore(_ secretsif.SecretStore) error {
-	return errors.New("injection always fails")
+// TestModuleFactory_ConcurrentMutatorsAndLoads_NoDataRace drives the setters
+// (SetStewardID / SetSecretStore / SetMaintenanceGate / RegisterModule /
+// UnloadModule) concurrently with LoadModule. These all touch the same guarded
+// fields the load path reads, so any missing lock shows up under -race.
+func TestModuleFactory_ConcurrentMutatorsAndLoads_NoDataRace(t *testing.T) {
+	f := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, "steward-1", logging.NewNoopLogger())
+
+	const iterations = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			if _, err := f.LoadModule("file"); err != nil {
+				t.Errorf("LoadModule(file): %v", err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.SetStewardID(fmt.Sprintf("steward-%d", i))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.SetMaintenanceGate(nil)
+			f.SetSecretStore(nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < iterations; i++ {
+			f.RegisterModule("script", file.New())
+			f.UnloadModule("script")
+		}
+	}()
+
+	close(start)
+	wg.Wait()
 }
 
-func (s *stubFailingSecretStoreModule) GetSecretStore() (secretsif.SecretStore, bool) {
-	return nil, false
-}
+// TestGithubRunner_IsInBuiltinModuleConstructors asserts that "github_runner" is
+// present in builtinModuleConstructors (contrast with hyperv, which is absent
+// from the map and handled separately by newHypervModule). The loaded instance
+// must satisfy modules.Module.
+func TestGithubRunner_IsInBuiltinModuleConstructors(t *testing.T) {
+	ctor, ok := builtinModuleConstructors["github_runner"]
+	assert.True(t, ok, `"github_runner" must be in builtinModuleConstructors`)
 
-// stubSecretStore is a no-op SecretStore that satisfies the interface so the
-// factory's nil-guard does not short-circuit before reaching SetSecretStore.
-type stubSecretStore struct{}
-
-func (s *stubSecretStore) StoreSecret(_ context.Context, _ *secretsif.SecretRequest) error {
-	return nil
+	if ok {
+		instance := ctor()
+		assert.NotNil(t, instance, "github_runner constructor must return a non-nil instance")
+		_, isModule := interface{}(instance).(modules.Module)
+		assert.True(t, isModule, "github_runner instance must satisfy modules.Module")
+	}
 }
-func (s *stubSecretStore) GetSecret(_ context.Context, _ string) (*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
-func (s *stubSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) GetSecrets(_ context.Context, _ []string) (map[string]*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) StoreSecrets(_ context.Context, _ map[string]*secretsif.SecretRequest) error {
-	return nil
-}
-func (s *stubSecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *stubSecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
-	return nil
-}
-func (s *stubSecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
-func (s *stubSecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
-func (s *stubSecretStore) HealthCheck(_ context.Context) error                      { return nil }
-func (s *stubSecretStore) Close() error                                             { return nil }
 
 // TestInstallHyperV_BuiltinModuleNoSignatureCheck asserts that the hyperv module
-// is registered as a compiled-in builtin (not disk-loaded). Compiled-in builtins
-// do not require disk-load signature verification.
+// is a compiled-in builtin (not disk-loaded). Compiled-in builtins do not require
+// disk-load signature verification.
+//
+// hyperv is handled by newHypervModule (wires the durable provision store) and
+// early-returned in loadBuiltinModule — it is intentionally absent from
+// builtinModuleConstructors. The factory still loads it without error.
 //
 // Tracked for future: when pluggable disk-loaded modules are added, a
 // signature/integrity gate must be implemented before load.
 func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
+	// hyperv is intentionally absent from the map; it is handled via newHypervModule.
 	_, ok := builtinModuleConstructors["hyperv"]
-	assert.True(t, ok, `"hyperv" must be registered in builtinModuleConstructors`)
+	assert.False(t, ok, `"hyperv" must NOT be in builtinModuleConstructors — it is handled by newHypervModule`)
 
 	// All builtin module names are simple identifiers (no path separators).
 	// A disk-load path would contain "/" or "\" — none must exist in M1.
@@ -307,22 +436,483 @@ func TestInstallHyperV_BuiltinModuleNoSignatureCheck(t *testing.T) {
 			"builtin module name %q must not contain path separators (no disk-load in M1)", name)
 	}
 
-	// hyperv must be loadable via the factory (exercises the constructor).
+	// hyperv must still be loadable via the factory (exercises newHypervModule).
 	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
 	mod, err := factory.LoadModule("hyperv")
 	assert.NoError(t, err, "hyperv builtin must load without error")
 	assert.NotNil(t, mod, "hyperv builtin module must not be nil")
 }
 
-func TestModuleFactory_injectSecretStore_logsWarning(t *testing.T) {
-	mock := pkgtesting.NewMockLogger(true)
-	f := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, mock)
-	f.secretStore = &stubSecretStore{}
+// TestPatch_NotInBuiltinModuleConstructors asserts that "patch" is absent from
+// builtinModuleConstructors (handled by newPatchModule which injects the maintenance
+// gate) and is still loadable via the factory without error.
+func TestPatch_NotInBuiltinModuleConstructors(t *testing.T) {
+	_, ok := builtinModuleConstructors["patch"]
+	assert.False(t, ok, `"patch" must NOT be in builtinModuleConstructors — it is handled by newPatchModule`)
 
-	mod := &stubFailingSecretStoreModule{}
-	f.attemptSecretStoreInjection(mod, "test-module")
+	// patch must still be loadable via the factory (exercises newPatchModule).
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("patch")
+	assert.NoError(t, err, "patch builtin must load without error")
+	assert.NotNil(t, mod, "patch builtin module must not be nil")
+}
 
-	warnLogs := mock.GetLogs("warn")
-	require.Len(t, warnLogs, 1)
-	assert.Equal(t, "failed to inject secret store into module", warnLogs[0].Message)
+// TestPatch_SetMaintenanceGate verifies that SetMaintenanceGate stores the gate
+// and that LoadModule("patch") loads without error when a gate is configured.
+func TestPatch_SetMaintenanceGate(t *testing.T) {
+	var gate maintinterfaces.Gate = alwaysAllowGate{}
+
+	factory := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, "test-steward", logging.NewNoopLogger())
+	factory.SetMaintenanceGate(gate)
+	assert.Equal(t, gate, factory.gate, "SetMaintenanceGate must store the gate on the factory")
+
+	mod, err := factory.LoadModule("patch")
+	require.NoError(t, err, "patch must load without error when a gate is configured")
+	require.NotNil(t, mod, "patch module must not be nil")
+}
+
+// alwaysAllowGate is a minimal Gate fixture that always permits reboots.
+// Represents an ungated device (no reboot_window declared).
+type alwaysAllowGate struct{}
+
+func (alwaysAllowGate) CanReboot(_ context.Context, _ string) (bool, error) { return true, nil }
+func (alwaysAllowGate) NextWindow(_ context.Context, _ string) (time.Time, error) {
+	return time.Time{}, nil
+}
+
+// TestModuleFactory_Hyperv_DurableStoreCreated verifies that when LoadModule
+// creates the hyperv module, the factory attempts to construct a durable
+// provision store and creates the backing directory. Uses
+// CFGMS_HYPERV_PROVISION_STORE_DIR to redirect the store into a writable temp
+// directory — without this override the default path (/var/lib/cfgms/...) is
+// not writable in CI and the factory silently falls back to the in-memory store.
+func TestModuleFactory_Hyperv_DurableStoreCreated(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", root)
+
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule("hyperv")
+	require.NoError(t, err, "hyperv builtin must load without error")
+	require.NotNil(t, mod, "hyperv builtin module must not be nil")
+
+	// The durable store constructor calls os.MkdirAll on the root; verify the
+	// directory exists as a side-effect proving the durable code path was reached.
+	_, statErr := os.Stat(root)
+	assert.NoError(t, statErr, "provision store root must be created by the durable store constructor")
+}
+
+// TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack verifies the
+// fallback branch of newHypervModule: when the durable provision store cannot
+// be constructed (CFGMS_HYPERV_PROVISION_STORE_DIR points at an unwritable
+// path), the factory (a) still returns a usable hyperv module with no error,
+// (b) emits the fallback Warn, and (c) selects no durable store, leaving the
+// module on its in-memory provision store for this boot.
+//
+// Without this test the degrade-to-in-memory path is silent: provision records
+// written during a session would be lost on restart, which can strand VMs in
+// surface-and-wait indefinitely.
+func TestModuleFactory_Hyperv_DurableStoreUnavailable_FallsBack(t *testing.T) {
+	// Construct a store root that os.MkdirAll cannot create regardless of uid:
+	// a regular file used as a parent path component yields ENOTDIR, which fails
+	// even when the test runs as root. (A chmod-0 directory is unreliable here
+	// because root bypasses the permission bits and MkdirAll would succeed.)
+	parent := t.TempDir()
+	occupied := filepath.Join(parent, "occupied")
+	require.NoError(t, os.WriteFile(occupied, []byte("x"), 0o600))
+	unwritable := filepath.Join(occupied, "provisions")
+	t.Setenv("CFGMS_HYPERV_PROVISION_STORE_DIR", unwritable)
+
+	cap := logging.NewCapturingLogger()
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, cap)
+
+	// (a) The module still loads, without error, despite the store failure.
+	mod, err := factory.LoadModule("hyperv")
+	require.NoError(t, err, "hyperv must load even when the durable store is unavailable")
+	require.NotNil(t, mod, "hyperv module must not be nil on the fallback path")
+
+	// (b) Exactly one fallback Warn was emitted by newHypervProvisionStore.
+	require.Len(t, cap.WarnMessages, 1, "exactly one fallback Warn must be emitted")
+	assert.Equal(t,
+		"hyperv: durable provision store unavailable; using in-memory fallback for this boot",
+		cap.WarnMessages[0])
+
+	// (c) No durable store was selected: the store constructor returns nil for
+	// this path, so newHypervModule builds the module on its in-memory store.
+	assert.Nil(t, factory.newHypervProvisionStore(),
+		"durable provision store must be nil when the root path is unwritable")
+
+	// The unwritable root must not have been created as a side-effect (the
+	// stat fails because a parent path component is a regular file).
+	_, statErr := os.Stat(unwritable)
+	assert.Error(t, statErr,
+		"durable store root must not exist on the fallback path")
+}
+
+// capturingADLogger is a Logger that records every call (including Debug,
+// which logging.CapturingLogger deliberately drops). It exists to prove the
+// factory's own logger — not a noop — reaches the activedirectory module,
+// which has no SetLogger method and so is wired via constructor injection
+// rather than attemptLoggerInjection.
+type capturingADLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *capturingADLogger) record(msg string, kv ...interface{}) {
+	parts := []string{msg}
+	for _, v := range kv {
+		parts = append(parts, fmt.Sprintf("%v", v))
+	}
+	l.mu.Lock()
+	l.lines = append(l.lines, strings.Join(parts, " "))
+	l.mu.Unlock()
+}
+
+func (l *capturingADLogger) Lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, len(l.lines))
+	copy(out, l.lines)
+	return out
+}
+
+func (l *capturingADLogger) Debug(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingADLogger) Info(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingADLogger) Warn(msg string, kv ...interface{})  { l.record(msg, kv...) }
+func (l *capturingADLogger) Error(msg string, kv ...interface{}) { l.record(msg, kv...) }
+func (l *capturingADLogger) Fatal(msg string, kv ...interface{}) { l.record(msg, kv...) }
+
+func (l *capturingADLogger) DebugCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) InfoCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) WarnCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) ErrorCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+func (l *capturingADLogger) FatalCtx(_ context.Context, msg string, kv ...interface{}) {
+	l.record(msg, kv...)
+}
+
+// TestActiveDirectory_NotInBuiltinModuleConstructors asserts that
+// "activedirectory" is absent from the zero-argument constructor map — it
+// needs the factory's logger, which the map's func() modules.Module shape
+// cannot carry. Contrast with TestHyperv/TestPatch above: same reason, third
+// module of this kind.
+func TestActiveDirectory_NotInBuiltinModuleConstructors(t *testing.T) {
+	_, ok := builtinModuleConstructors["activedirectory"]
+	assert.False(t, ok, `"activedirectory" must NOT be in builtinModuleConstructors — it is handled by newActiveDirectoryModule`)
+}
+
+// TestActiveDirectory_ModuleLoads proves the steward's built-in load path —
+// the one factory.go's own comment calls out as the single extension point —
+// returns a working, interface-valid instance for the name "activedirectory"
+// rather than the "unknown built-in module" error the factory returned before
+// this story registered it.
+func TestActiveDirectory_ModuleLoads(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err, "activedirectory builtin must load without error")
+	require.NotNil(t, mod, "activedirectory builtin module must not be nil")
+
+	assert.NoError(t, factory.ValidateModuleInterface(mod),
+		"loaded activedirectory instance must satisfy modules.Module")
+}
+
+// TestActiveDirectory_NameMatchesManifest pins loadBuiltinModule's literal
+// "activedirectory" string to the module's own declared name in module.yaml,
+// so a future rename of one without the other silently reproduces the exact
+// bug this story fixes: a complete, tested module the steward refuses to load.
+func TestActiveDirectory_NameMatchesManifest(t *testing.T) {
+	manifestPath := filepath.Join("..", "..", "modules", "extended", "activedirectory", "module.yaml")
+	data, err := os.ReadFile(manifestPath) //nolint:gosec // fixed, repo-relative test path
+	require.NoError(t, err, "must be able to read the activedirectory module manifest")
+
+	var manifest struct {
+		Name string `yaml:"name"`
+	}
+	require.NoError(t, yaml.Unmarshal(data, &manifest))
+	require.Equal(t, "activedirectory", manifest.Name,
+		"module.yaml's name must match the literal loadBuiltinModule accepts")
+
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+	mod, err := factory.LoadModule(manifest.Name)
+	require.NoError(t, err, "the name read from module.yaml must be loadable")
+	require.NotNil(t, mod)
+}
+
+// TestActiveDirectory_FactoryLoggerReaches proves the factory's own logger —
+// not logging.NewNoopLogger() — reaches the module instance. The module has
+// no SetLogger method, so it implements neither modules.LoggingInjectable nor
+// modules.SecretStoreInjectable; attemptLoggerInjection silently no-ops on
+// it, and the only wiring path is newActiveDirectoryModule passing f.logger
+// into the constructor. Get(ctx, "status") emits a Debug log unconditionally
+// on entry, which a noop logger would silently swallow.
+func TestActiveDirectory_FactoryLoggerReaches(t *testing.T) {
+	cap := &capturingADLogger{}
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, cap)
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err)
+	require.NotNil(t, mod)
+
+	_, _ = mod.Get(context.Background(), "status")
+
+	lines := cap.Lines()
+	require.NotEmpty(t, lines, "the factory logger must have recorded a log line from the module")
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "Getting local AD object") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected the module's Get() Debug log to reach the factory's logger, got: %v", lines)
+}
+
+// TestActiveDirectory_NetworkADNotRegistered asserts that the sibling
+// network_activedirectory module — ruled out of the product and deleted by
+// Issue #4447 — is not reachable through the same built-in load path this
+// story wires up for "activedirectory". Registering it here would resurrect
+// a module the founder has already decided against.
+func TestActiveDirectory_NetworkADNotRegistered(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	_, ok := builtinModuleConstructors["network_activedirectory"]
+	assert.False(t, ok, "network_activedirectory must not be a builtin module constructor")
+
+	_, err := factory.LoadModule("network_activedirectory")
+	assert.Error(t, err, "network_activedirectory must not be loadable as a built-in module")
+}
+
+// TestActiveDirectory_UnavailableErrorNotUnknownModule is the required test
+// distinguishing "the module loaded and this host has no AD" from "the
+// steward refused the name" — the exact gap this story closes. On the Linux
+// runners make test-complete uses, the module has no PowerShell/AD access,
+// so Get(ctx, "status") must surface that unavailability, never the
+// registration-time "unknown built-in module: activedirectory" error the
+// factory returned for this name before it was wired in. A successful AD
+// query is out of scope and is not asserted — only the error identity is.
+func TestActiveDirectory_UnavailableErrorNotUnknownModule(t *testing.T) {
+	factory := New(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{ModuleLoadFailure: config.ActionFail}, logging.NewNoopLogger())
+
+	mod, err := factory.LoadModule("activedirectory")
+	require.NoError(t, err, "activedirectory must load: this is the registration this story adds")
+	require.NotNil(t, mod)
+
+	result, getErr := mod.Get(context.Background(), "status")
+	require.NoError(t, getErr, "Get(status) itself does not fail; unavailability is carried in the returned status")
+	require.NotNil(t, result)
+
+	state := result.AsMap()
+	errMsg, _ := state["error"].(string)
+	assert.NotContains(t, errMsg, "unknown built-in module",
+		"a loaded module's status error must never be the factory's registration-failure message")
+	assert.NotEmpty(t, errMsg, "on a host with no AD/PowerShell access, the status must carry an unavailability error")
+	assert.Equal(t, "unhealthy", state["health_status"],
+		"status must reflect AD unavailability, not a successful query")
+}
+
+// --- Issue #4426: module_trust modes proven end to end on the wired load path ---
+
+// testEnforcerRuntimeWithKnownPublishers mirrors bundle_test.go's
+// testEnforcerRuntime but additionally resolves additional_publishers names
+// against knownPublishers, standing in for the ldflags-injected compiled-in
+// registry a production build carries (Issue #4398).
+func testEnforcerRuntimeWithKnownPublishers(
+	t *testing.T,
+	cfgmsPub ed25519.PublicKey,
+	knownPublishers map[string]pkgtrust.PublisherIdentity,
+) *moduleruntime.ModuleRuntime {
+	t.Helper()
+	return moduleruntime.NewModuleRuntimeWithEnforcer(
+		shortRuntimeDir(t),
+		stewardtrust.NewStewardTrustEnforcerWithKnownPublishers(
+			func() pkgtrust.PublisherIdentity {
+				return pkgtrust.PublisherIdentity{Name: "cfgms", PublicKey: []byte(cfgmsPub), Algorithm: "ed25519"}
+			},
+			knownPublishers,
+		),
+	)
+}
+
+// TestLoadModule_TrustMode_StrictAcceptsResolvedAdditionalPublisher exercises
+// Issue #4398's already-merged additional_publishers resolution end to end on
+// the wired LoadModule path: a bundle signed only by a publisher named in
+// module_trust.additional_publishers (never the baked-in CFGMS identity) must
+// load under strict mode.
+func TestLoadModule_TrustMode_StrictAcceptsResolvedAdditionalPublisher(t *testing.T) {
+	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	vendorPub, vendorPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "vendor-a", vendorPriv)
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+
+	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, map[string]pkgtrust.PublisherIdentity{
+		"vendor-a": {Name: "vendor-a", PublicKey: []byte(vendorPub), Algorithm: "ed25519"},
+	})
+
+	f := newTestFactory()
+	f.SetModuleRuntime(rt, config.ModuleTrustModeStrict, []string{"vendor-a"})
+	t.Cleanup(func() { f.UnloadAllModules() })
+
+	instance, err := f.LoadModule("widget")
+	require.NoError(t, err, "strict mode must accept a bundle signed by a correctly resolved additional_publishers entry")
+	assert.NotNil(t, instance)
+}
+
+// TestLoadModule_TrustMode_StrictRejectsSignerOutsideCFGMSAndAdditionalPublishers
+// is the refusal half of the same AC: a bundle signed by a publisher that is
+// neither the baked-in CFGMS identity nor a resolved additional_publishers
+// entry must be refused, and no module process may be tracked as started —
+// even though additional_publishers is configured (with a different, unrelated
+// entry), proving the signer itself — not merely an empty allow-list — is what
+// is being checked.
+func TestLoadModule_TrustMode_StrictRejectsSignerOutsideCFGMSAndAdditionalPublishers(t *testing.T) {
+	cfgmsPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	vendorAPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	_, untrustedPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "untrusted-vendor", untrustedPriv)
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+
+	rt := testEnforcerRuntimeWithKnownPublishers(t, cfgmsPub, map[string]pkgtrust.PublisherIdentity{
+		"vendor-a": {Name: "vendor-a", PublicKey: []byte(vendorAPub), Algorithm: "ed25519"},
+	})
+
+	f := newTestFactory()
+	f.SetModuleRuntime(rt, config.ModuleTrustModeStrict, []string{"vendor-a"})
+
+	_, err = f.LoadModule("widget")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
+
+	f.mu.RLock()
+	_, tracked := f.bundleHandles["widget"]
+	f.mu.RUnlock()
+	assert.False(t, tracked, "no module process may be started when the signer is trusted by neither CFGMS identity nor additional_publishers")
+}
+
+// TestLoadModule_BypassMode_LoadsUnsignedBundleAndWarnsNamingMode is the
+// [REQUIRED TEST] for bypass mode: a bundle with an absent signature loads
+// under module_trust.mode: bypass, and the steward emits a warning naming the
+// mode at load time — a mode that disables a trust check must be visible in
+// the log, not silent.
+func TestLoadModule_BypassMode_LoadsUnsignedBundleAndWarnsNamingMode(t *testing.T) {
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "cfgms", nil) // unsigned
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+
+	capturingLogger := logging.NewCapturingLogger()
+	f := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, "test-steward", capturingLogger)
+	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
+	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	t.Cleanup(func() { f.UnloadAllModules() })
+
+	instance, err := f.LoadModule("widget")
+	require.NoError(t, err, "bypass mode must load a bundle with an absent signature")
+	assert.NotNil(t, instance)
+
+	entry, found := capturingLogger.FindWarn("loading module bundle with module_trust.mode=bypass: signature verification disabled")
+	require.True(t, found, "bypass mode must emit a warning naming the mode at load time; got messages: %v", capturingLogger.WarnMessages)
+	assert.Equal(t, "widget", entry["module"])
+	assert.Equal(t, "bypass", entry["mode"])
+}
+
+// TestLoadModule_BypassMode_LoadsInvalidSignatureBundle is the other half of
+// the same AC: a bundle whose signature would fail strict verification (signed
+// by a publisher neither baked-in nor configured) still loads under bypass
+// mode, since bypass never verifies the signature at all.
+func TestLoadModule_BypassMode_LoadsInvalidSignatureBundle(t *testing.T) {
+	_, untrustedPriv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "untrusted-vendor", untrustedPriv)
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+
+	capturingLogger := logging.NewCapturingLogger()
+	f := NewWithStewardID(discovery.ModuleRegistry{}, config.ErrorHandlingConfig{}, "test-steward", capturingLogger)
+	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
+	f.SetModuleRuntime(rt, config.ModuleTrustModeBypass, nil)
+	t.Cleanup(func() { f.UnloadAllModules() })
+
+	instance, err := f.LoadModule("widget")
+	require.NoError(t, err, "bypass mode must load a bundle even when its signature would fail strict verification")
+	assert.NotNil(t, instance)
+	assert.GreaterOrEqual(t, capturingLogger.WarnCount(), 1, "bypass mode must emit a warning at load time")
+}
+
+// TestModuleTrustCascade_RefusedDowngradeReachesLoadGate exercises
+// pkg/config/inheritance.go's tightening-only module_trust cascade end to end:
+// a child tenant attempting to move from strict to controller without
+// authorize_downgrade is refused, and the *effective* mode produced by the
+// real merge path — not a value asserted in isolation — is what this test
+// forwards to ModuleFactory.SetModuleRuntime and LoadModule. An unsigned
+// bundle that controller mode would have accepted is still refused, proving
+// the refusal survives all the way to the load gate.
+func TestModuleTrustCascade_RefusedDowngradeReachesLoadGate(t *testing.T) {
+	sm := pkgtesting.SetupTestStorage(t)
+	ctx := context.Background()
+
+	ts := sm.GetTenantStore()
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{ID: "root", Name: "Root", Status: business.TenantStatusActive}))
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{ID: "msp", Name: "MSP", ParentID: "root", Status: business.TenantStatusActive}))
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{ID: "client", Name: "Client", ParentID: "msp", Status: business.TenantStatusActive}))
+
+	cs := sm.GetConfigStore()
+
+	rootData, err := yaml.Marshal(config.StewardConfig{
+		Steward: config.StewardSettings{
+			ModuleTrust: config.ModuleTrustConfig{Mode: config.ModuleTrustModeStrict},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreConfig(ctx, &storagecfg.ConfigEntry{
+		Key:  &storagecfg.ConfigKey{TenantID: "root", Namespace: "msp-policies", Name: "global"},
+		Data: rootData,
+	}))
+
+	// "client" is at Group level (tenantPath root -> msp -> client) and attempts
+	// an unauthorized strict -> controller downgrade.
+	childData, err := yaml.Marshal(config.StewardConfig{
+		Steward: config.StewardSettings{
+			ModuleTrust: config.ModuleTrustConfig{Mode: config.ModuleTrustModeController},
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cs.StoreConfig(ctx, &storagecfg.ConfigEntry{
+		Key:  &storagecfg.ConfigKey{TenantID: "client", Namespace: "group-policies", Name: "client-groups"},
+		Data: childData,
+	}))
+
+	ir := pkgconfig.NewInheritanceResolverWithStorageManager(sm)
+	effective, err := ir.ResolveConfiguration(ctx, "client", "steward-1")
+	require.NoError(t, err)
+	require.Equal(t, config.ModuleTrustModeStrict, effective.Config.Steward.ModuleTrust.Mode,
+		"an unauthorized downgrade must leave the effective mode at the parent's stricter value")
+
+	installRoot := t.TempDir()
+	installEchoBundle(t, installRoot, "widget", "cfgms", nil) // unsigned
+	t.Setenv(installedModulesBundleDirEnvVar, installRoot)
+
+	f := newTestFactory()
+	rt := moduleruntime.NewModuleRuntime(shortRuntimeDir(t))
+	f.SetModuleRuntime(rt, effective.Config.Steward.ModuleTrust.Mode, effective.Config.Steward.ModuleTrust.AdditionalPublishers)
+
+	_, err = f.LoadModule("widget")
+	require.Error(t, err, "the refused strict->controller downgrade must still block an unsigned bundle reaching Start")
+	assert.ErrorIs(t, err, pkgtrust.ErrPublisherNotTrusted)
 }

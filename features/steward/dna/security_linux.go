@@ -316,6 +316,8 @@ func linuxIsProcessRunning(ctx context.Context, name string) bool {
 	cmdCtx, cancel := context.WithTimeout(ctx, linuxSecCmdTimeout)
 	defer cancel()
 
+	// #nosec G204 -- name comes only from the compile-time avChecks table and is
+	// passed as a single pgrep argv under a fixed timeout, without a shell.
 	output, err := exec.CommandContext(cmdCtx, "pgrep", "-c", name).Output()
 	if err != nil {
 		return false

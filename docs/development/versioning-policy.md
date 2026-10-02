@@ -84,8 +84,6 @@ LTS versions will be designated starting with v1.0.0:
 
 ## Release Cadence
 
-### Planned Cadence
-
 - **Minor releases**: Every 6-8 weeks during active development
 - **Patch releases**: As needed for critical bug fixes
 - **Major releases**: When significant breaking changes are required
@@ -141,6 +139,15 @@ Each tagged version will have a corresponding GitHub Release with:
 - Link to relevant CHANGELOG entries
 - Binary artifacts for supported platforms
 - SHA256 checksums for all artifacts
+- Keyless Sigstore bundles for every artifact and checksum manifest
+- An SPDX JSON SBOM plus repository-bound SBOM and build-provenance attestations
+- Authenticode-signed Windows payloads/MSI and signed, notarized macOS packages
+
+Release tags must be annotated canonical semantic versions, resolve to a commit
+reachable from `main`, and pass the protected `release` environment. Generic
+archives are rebuilt independently with the `go.mod` toolchain and compared
+byte for byte before signing. See
+[Release Artifact Verification](../deployment/release-artifact-verification.md).
 
 ## Build Information
 
@@ -149,8 +156,8 @@ Version information is embedded in binaries at build time:
 ```go
 // Set via ldflags during build
 -X github.com/cfgis/cfgms/pkg/version.Version=v0.7.0
--X github.com/cfgis/cfgms/pkg/version.GitCommit=$(git rev-parse --short HEAD)
--X github.com/cfgis/cfgms/pkg/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+-X github.com/cfgis/cfgms/pkg/version.GitCommit=$(git rev-parse HEAD)
+-X github.com/cfgis/cfgms/pkg/version.BuildDate=<UTC timestamp derived from the commit epoch>
 ```
 
 Query version information:
@@ -177,7 +184,7 @@ All configuration changes through CFGMS support rollback:
 
 - Git-based storage provides full history
 - Rollback manager supports previewing and executing rollbacks
-- See [Configuration Rollback](../architecture/configuration-management.md) for details
+- See [Configuration Rollback](../architecture/rollback-design.md) for details
 
 ## Related Documentation
 

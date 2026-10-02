@@ -12,13 +12,14 @@ import (
 	"github.com/cfgis/cfgms/features/rbac/continuous"
 	"github.com/cfgis/cfgms/features/rbac/memory"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// Issue #764: audit queue write errors (queue full / manager stopped) are now
+// Issue #764: audit write errors (caller cancellation / manager stopped) are
 // logged via slog.Warn at each call site instead of being discarded with
-// `_ = m.auditManager.RecordEvent(...)`. Audit recording remains best-effort —
-// failures never interrupt the caller.
+// `_ = m.auditManager.RecordEvent(...)`. The bounded audit queue applies
+// caller-context backpressure rather than shedding authorization evidence.
 
 // Manager provides a complete RBAC implementation with advanced features
 type Manager struct {
@@ -37,7 +38,6 @@ type Manager struct {
 
 	advancedEngine          *AdvancedAuthEngine
 	hierarchyEngine         *HierarchyEngine
-	delegationManager       *DelegationManager
 	templateManager         *TemplateManager
 	escalationPreventionMgr *EscalationPreventionManager
 }
@@ -97,16 +97,11 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 
 	// Initialize advanced components
 	advancedEngine := NewAdvancedAuthEngine(ephemeralStore, ephemeralStore, ephemeralStore, ephemeralStore)
-	delegationManager := NewDelegationManager(manager)                          // Pass manager for RBAC operations
 	templateManager := NewTemplateManager(manager)                              // Pass manager for template operations
 	escalationPreventionMgr := NewEscalationPreventionManager(manager, manager) // manager satisfies both RBACManager and RBACStoreAccessor
 
-	// Set circular references
-	advancedEngine.SetRBACManager(manager)
-
 	// Update manager with advanced components
 	manager.advancedEngine = advancedEngine
-	manager.delegationManager = delegationManager
 	manager.templateManager = templateManager
 	manager.escalationPreventionMgr = escalationPreventionMgr
 
@@ -115,7 +110,6 @@ func NewManagerWithStorage(auditStore business.AuditStore, clientTenantStore bus
 	advancedEngine.SetHierarchyEngine(hierarchyEngine)
 
 	// Wire the durable audit manager into the advanced engine
-	advancedEngine.SetDelegationManager(delegationManager)
 	advancedEngine.SetAuditManager(manager.auditManager)
 
 	return manager
@@ -401,7 +395,7 @@ func (m *Manager) CreateRole(ctx context.Context, role *common.Role) error {
 					Result(business.AuditResultError).
 					Error("RBAC_PARENT_ROLE_NOT_FOUND", fmt.Sprintf("parent role %s not found: %v", role.ParentRoleId, err)).
 					Detail("parent_role_id", role.ParentRoleId).
-					Severity(business.AuditSeverityCritical)
+					Severity(business.AuditSeverityHigh)
 				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 					slog.Warn("rbac: failed to record audit event", "error", auditErr)
 				}
@@ -644,7 +638,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 				Resource("role", id, roleName).
 				Result(business.AuditResultError).
 				Error("RBAC_DELETE_ROLE_FAILED", err.Error()).
-				Severity(business.AuditSeverityCritical)
+				Severity(business.AuditSeverityHigh)
 			if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 				slog.Warn("rbac: failed to record audit event", "error", auditErr)
 			}
@@ -668,7 +662,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 					Resource("role", id, roleName).
 					Result(business.AuditResultError).
 					Error("RBAC_DELETE_ROLE_PERSISTENCE_FAILED", persistErr.Error()).
-					Severity(business.AuditSeverityCritical)
+					Severity(business.AuditSeverityHigh)
 				if auditErr := m.auditManager.RecordEvent(ctx, event); auditErr != nil {
 					slog.Warn("rbac: failed to record audit event", "error", auditErr)
 				}
@@ -690,7 +684,7 @@ func (m *Manager) DeleteRole(ctx context.Context, id string) error {
 		event := audit.UserManagementEvent(tenantID, "system", id, "delete_role").
 			Resource("role", id, roleName).
 			Result(business.AuditResultSuccess).
-			Severity(business.AuditSeverityCritical) // Role deletion is critical
+			Severity(business.AuditSeverityHigh)
 
 		if deletedRole != nil {
 			event = event.Detail("deleted_permissions", len(deletedRole.PermissionIds)).
@@ -903,8 +897,8 @@ func (m *Manager) RevokeRole(ctx context.Context, subjectID, roleID, tenantID st
 		if invErr := m.cacheManager.InvalidateSubject(subjectID); invErr != nil {
 			cacheInvalidationFailed = true
 			slog.Warn("rbac: failed to invalidate subject cache after RevokeRole",
-				"subject_id", subjectID,
-				"error", invErr,
+				"subject_id", logging.SanitizeLogValue(subjectID),
+				"error", logging.SanitizeLogValue(invErr.Error()),
 			)
 		}
 	}
@@ -1179,26 +1173,6 @@ func (m *Manager) CheckPermissionWithContext(ctx context.Context, request *commo
 	return m.advancedEngine.CheckPermission(ctx, request)
 }
 
-// CheckConditionalPermission checks a conditional permission with full context evaluation
-func (m *Manager) CheckConditionalPermission(ctx context.Context, request *common.AccessRequest, conditionalPerm *common.ConditionalPermission, authContext *common.AuthorizationContext) (*common.AccessResponse, error) {
-	return m.advancedEngine.CheckConditionalPermission(ctx, request, conditionalPerm, authContext)
-}
-
-// CreateDelegation creates a new permission delegation
-func (m *Manager) CreateDelegation(ctx context.Context, req *DelegationRequest) (*common.PermissionDelegation, error) {
-	return m.delegationManager.CreateDelegation(ctx, req)
-}
-
-// RevokeDelegation revokes an existing permission delegation
-func (m *Manager) RevokeDelegation(ctx context.Context, delegationID string, revokerID string) error {
-	return m.delegationManager.RevokeDelegation(ctx, delegationID, revokerID)
-}
-
-// GetActiveDelegations returns active delegations for a delegatee
-func (m *Manager) GetActiveDelegations(ctx context.Context, delegateeID string, tenantID string) ([]*common.PermissionDelegation, error) {
-	return m.delegationManager.GetActiveDelegations(ctx, delegateeID, tenantID)
-}
-
 // CreateTemporaryPermission creates a temporary permission grant with conditions
 func (m *Manager) CreateTemporaryPermission(ctx context.Context, req *TemporaryPermissionRequest) (*common.ConditionalPermission, error) {
 	return m.advancedEngine.CreateTemporaryPermission(ctx, req)
@@ -1234,16 +1208,6 @@ func (m *Manager) ListTemplates(ctx context.Context, tenantID, category string) 
 // GetTemplatesByCategory returns templates grouped by category
 func (m *Manager) GetTemplatesByCategory(ctx context.Context, tenantID string) (map[string][]*common.PermissionTemplate, error) {
 	return m.templateManager.GetTemplatesByCategory(ctx, tenantID)
-}
-
-// GetDelegationStats returns delegation statistics for a tenant
-func (m *Manager) GetDelegationStats(ctx context.Context, tenantID string) (*DelegationStats, error) {
-	return m.delegationManager.GetDelegationStats(ctx, tenantID)
-}
-
-// CleanupExpiredDelegations removes expired delegations
-func (m *Manager) CleanupExpiredDelegations(ctx context.Context) error {
-	return m.delegationManager.CleanupExpiredDelegations(ctx)
 }
 
 // Privilege Escalation Prevention Methods

@@ -1,0 +1,373 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Copyright 2026 Jordan Ritz */
+
+/*
+ * Compliance summary layout (Story #3272).
+ * All colour and spacing references use CSS custom properties from
+ * docs/design/web-ui-design-tokens.css — no hardcoded values.
+ * Both light and dark themes are handled by the token layer alone.
+ */
+
+/* ── Page layout ──────────────────────────────────────────────────────── */
+
+.cs-content {
+  padding: var(--space-5) var(--space-6) 40px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.cs-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.cs-header h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.cs-header p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+}
+
+/* ── Panel ────────────────────────────────────────────────────────────── */
+
+.cs-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-3) var(--space-4);
+}
+
+.cs-panel h2 {
+  margin: 0 0 3px;
+  font-size: var(--text-base);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.cs-panel-sub {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+/* ── Hero section ─────────────────────────────────────────────────────── */
+
+.cs-hero-wrap {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.cs-hero-label {
+  display: block;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-faint);
+  margin-bottom: var(--space-1);
+}
+
+.cs-hero {
+  font-size: 52px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+.cs-hero-side {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 5px;
+}
+
+.cs-hero-note {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  max-width: 320px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── Status pill ──────────────────────────────────────────────────────── */
+
+.cs-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.cs-pill.ok {
+  color: var(--state-ok);
+  background: var(--state-ok-bg);
+  border-color: var(--state-ok);
+}
+
+.cs-pill.warn {
+  color: var(--state-warn);
+  background: var(--state-warn-bg);
+  border-color: var(--state-warn);
+}
+
+.cs-pill.crit {
+  color: var(--state-crit);
+  background: var(--state-crit-bg);
+  border-color: var(--state-crit);
+}
+
+.cs-pill.neutral {
+  color: var(--state-neutral);
+  background: var(--state-neutral-bg);
+  border-color: var(--state-neutral);
+}
+
+/* ── KPI tiles grid ───────────────────────────────────────────────────── */
+
+.cs-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: var(--space-3);
+}
+
+.cs-tile {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 13px var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cs-tile-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.cs-tile-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.cs-tile-value {
+  font-size: var(--text-2xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+  color: var(--text-primary);
+}
+
+.cs-tile-value.cs-val-warn {
+  color: var(--state-warn);
+}
+
+.cs-tile-value.cs-val-crit {
+  color: var(--state-crit);
+}
+
+.cs-tile-value.cs-val-neutral {
+  color: var(--state-neutral);
+}
+
+.cs-tile-sub {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* ── Table panel header ───────────────────────────────────────────────── */
+
+.cs-table-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+
+/* ── Legend ───────────────────────────────────────────────────────────── */
+
+.cs-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.cs-legend-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cs-swatch {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.cs-swatch.ok     { background: var(--state-ok); }
+.cs-swatch.warn   { background: var(--state-warn); }
+.cs-swatch.crit   { background: var(--state-crit); }
+.cs-swatch.neutral{ background: var(--state-neutral); }
+
+/* ── Sortable table ───────────────────────────────────────────────────── */
+
+.cs-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.cs-th {
+  text-align: left;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-faint);
+  font-weight: 600;
+  padding: 0 10px 7px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.cs-th-num {
+  text-align: right;
+}
+
+.cs-th:hover {
+  color: var(--accent);
+}
+
+.cs-sort-ind {
+  margin-left: 3px;
+  font-size: 10px;
+}
+
+.cs-tbl td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.cs-tbl tr:last-child td {
+  border-bottom: 0;
+}
+
+.cs-td-tenant {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+}
+
+.cs-td-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+/* ── Skeleton loading state ───────────────────────────────────────────── */
+
+.cs-skel {
+  display: block;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  animation: cs-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes cs-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ── Notice states ────────────────────────────────────────────────────── */
+
+.cs-notice {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.cs-notice p {
+  margin: 0;
+}
+
+.cs-notice.err {
+  border-style: solid;
+  border-color: var(--state-crit);
+  background: var(--state-crit-bg);
+  color: var(--state-crit);
+  text-align: left;
+  display: flex;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.cs-notice-body {
+  flex: 1;
+}
+
+.cs-notice-sub {
+  font-size: var(--text-sm);
+  opacity: 0.85;
+  margin: 2px 0 0;
+}
+
+.cs-notice-np {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  margin-top: 5px;
+}
+
+/* ── Retry button ─────────────────────────────────────────────────────── */
+
+.cs-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 7px var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  margin-top: var(--space-2);
+}
+
+.cs-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

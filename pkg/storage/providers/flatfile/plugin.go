@@ -53,10 +53,11 @@
 //
 // # Supported Stores
 //
-// This provider implements ConfigStore and AuditStore. All other store factory
-// methods (CreateRBACStore, CreateTenantStore,
-// CreateRegistrationTokenStore, CreateClientTenantStore) return ErrNotSupported,
-// as these belong to the business-data tier (SQLite, sub-story C).
+// This provider implements ConfigStore, AuditStore, StewardStore, and
+// IPTrustStore (Issue #1900). All other store factory methods (CreateRBACStore,
+// CreateTenantStore, CreateRegistrationTokenStore, CreateClientTenantStore)
+// return ErrNotSupported, as these belong to the business-data tier (SQLite,
+// sub-story C).
 package flatfile
 
 import (
@@ -81,6 +82,15 @@ var ErrImmutable = errors.New("flatfile: data is immutable and cannot be modifie
 // FlatFileProvider implements StorageProvider using the local filesystem.
 // It is automatically registered on import via init().
 type FlatFileProvider struct{}
+
+// Compile-time assertions. The optional store-creator extensions are wired
+// through a type assertion in the storage-manager factories, so a missing
+// method silently leaves the store nil instead of failing the build at the
+// call site (Issue #3755).
+var (
+	_ interfaces.StorageProvider   = (*FlatFileProvider)(nil)
+	_ interfaces.NonceStoreCreator = (*FlatFileProvider)(nil)
+)
 
 // Name returns the provider name used for registration and configuration.
 func (p *FlatFileProvider) Name() string {
@@ -113,6 +123,10 @@ func (p *FlatFileProvider) GetCapabilities() interfaces.ProviderCapabilities {
 		MaxAuditRetentionDays:  3650,             // 10 years; operator manages disk
 	}
 }
+
+// ClusterCapable returns true if this provider can serve as shared state across
+// multiple CFGMS controller nodes in cluster mode.
+func (p *FlatFileProvider) ClusterCapable() bool { return false }
 
 // Available returns true if the flat-file provider can operate on this system.
 // The flat-file provider only requires the OS filesystem and is always available.
@@ -243,10 +257,50 @@ func (p *FlatFileProvider) CreatePendingRegistrationStore(config map[string]inte
 	return nil, ErrNotSupported
 }
 
-// CreateIPTrustStore returns ErrNotSupported.
-// IP trust storage belongs in the business-data tier (Issue #1691).
-func (p *FlatFileProvider) CreateIPTrustStore(_ map[string]interface{}) (business.IPTrustStore, error) {
-	return nil, ErrNotSupported
+// CreateIPTrustStore creates a flat-file-backed IPTrustStore.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/ip-trust/ip_trust.json with atomic writes.
+func (p *FlatFileProvider) CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileIPTrustStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create ip trust store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateAlertStore creates a flat-file-backed AlertStore.
+// Config map must contain "root" (string): the root directory.
+// States are stored at <root>/alerts/alert_states.json with atomic writes.
+func (p *FlatFileProvider) CreateAlertStore(config map[string]interface{}) (business.AlertStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileAlertStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create alert store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
+// amendment to ADR-011). Implements interfaces.NonceStoreCreator.
+// Config map must contain "root" (string): the root directory.
+// Entries are stored at <root>/nonces/refresh_nonces.json with atomic writes.
+func (p *FlatFileProvider) CreateNonceStore(config map[string]interface{}) (business.NonceStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileNonceStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create nonce store: %w", err)
+	}
+	return store, nil
 }
 
 // init auto-registers the flat-file provider so that a blank import is sufficient.

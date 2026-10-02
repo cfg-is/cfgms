@@ -4,16 +4,22 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/api/proto/common"
+	controllerconfig "github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/rbac"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgmstesting "github.com/cfgis/cfgms/pkg/testing"
@@ -374,6 +380,27 @@ func TestManager_UpdateTenant_InvalidatesConfigCache(t *testing.T) {
 	assert.Equal(t, tenant.ID, inv.calls[0], "InvalidateTenantCache must receive the updated tenant ID")
 }
 
+func TestManager_InvalidateConfigCache_CallsRouter(t *testing.T) {
+	manager := newTestTenantManager(t)
+
+	inv := &recordingInvalidator{}
+	manager.WithConfigRouter(inv)
+
+	manager.InvalidateConfigCache("tenant-to-evict")
+
+	require.Len(t, inv.calls, 1, "InvalidateConfigCache must delegate to the wired router exactly once")
+	assert.Equal(t, "tenant-to-evict", inv.calls[0], "router must receive the tenant ID passed to InvalidateConfigCache")
+}
+
+func TestManager_InvalidateConfigCache_NoRouterWired_NoError(t *testing.T) {
+	// Manager with no router wired must not panic when InvalidateConfigCache is called.
+	manager := newTestTenantManager(t)
+
+	require.NotPanics(t, func() {
+		manager.InvalidateConfigCache("any-tenant")
+	}, "InvalidateConfigCache without a wired router must be a safe no-op")
+}
+
 func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
 	// Manager with no router wired must not panic on UpdateTenant.
 	manager := newTestTenantManager(t)
@@ -683,4 +710,1269 @@ func TestManager_CreateTenant_InvalidExplicitID_ReturnsError(t *testing.T) {
 	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "Team_Root"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid explicit tenant ID")
+}
+
+func TestManager_SuspendTenant(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "suspend-test"})
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status)
+
+	_, err = manager.SuspendTenant(ctx, "suspend-test")
+	require.NoError(t, err)
+
+	suspended, err := manager.GetTenant(ctx, "suspend-test")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, suspended.Status)
+}
+
+func TestManager_SuspendTenant_NotFound(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	_, err := manager.SuspendTenant(ctx, "nonexistent-tenant")
+	require.Error(t, err)
+}
+
+// TestManager_SuspendTenant_DefaultGuard verifies that SuspendTenant rejects the
+// "default" tenant ID, does not call the store, and leaves the tenant's status
+// unchanged — matching the guard DeleteTenant already enforces (Issue #3181).
+func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	// Create a tenant named "default" so any status change would be observable.
+	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "default"})
+	require.NoError(t, err)
+
+	_, suspendErr := manager.SuspendTenant(ctx, "default")
+	require.Error(t, suspendErr, "SuspendTenant must return an error for the default tenant")
+	require.ErrorIs(t, suspendErr, ErrCannotSuspendDefault)
+
+	// Status must remain Active — the guard must not have mutated the tenant.
+	td, err := manager.GetTenant(ctx, "default")
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, td.Status,
+		"default tenant status must be unchanged after a rejected suspend")
+}
+
+// --- slog capture helpers for observable error-branch coverage ---
+
+// capturedLogRecord is a single slog record captured during a test.
+type capturedLogRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+// captureHandler is a real slog.Handler (not a mock) that records every emitted
+// record so tests can assert on the fields the tenant Manager logs via the global
+// slog logger. The tenant Manager writes to slog directly (no injectable logger),
+// so tests install this handler as the default for the duration of the test.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedLogRecord
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := capturedLogRecord{level: r.Level, msg: r.Message, attrs: make(map[string]any)}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, rec)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// find returns the first captured record whose message equals msg, or nil.
+func (h *captureHandler) find(msg string) *capturedLogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.records {
+		if h.records[i].msg == msg {
+			return &h.records[i]
+		}
+	}
+	return nil
+}
+
+// captureSlog installs a capturing slog handler as the default logger for the
+// duration of the test and restores the previous default on cleanup.
+func captureSlog(t *testing.T) *captureHandler {
+	t.Helper()
+	h := &captureHandler{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return h
+}
+
+// failDeleteTenantStore wraps a real tenant Store but forces DeleteTenant to fail.
+// This is a real test double (not a mock framework): CreateTenant and every other
+// operation delegate to the embedded real store; only DeleteTenant returns the
+// injected error, exercising the rollback-failure branch in CreateTenant.
+type failDeleteTenantStore struct {
+	Store
+	delErr error
+}
+
+func (s *failDeleteTenantStore) DeleteTenant(_ context.Context, _ string) error {
+	return s.delErr
+}
+
+// failBulkRolesRBACStore wraps a real RBACStore but can be toggled to fail
+// StoreBulkRoles. It embeds the real store so initialization (which also calls
+// StoreBulkRoles for system roles) succeeds while fail is false; flipping fail to
+// true afterward makes CreateTenantDefaultRoles fail without touching any other path.
+type failBulkRolesRBACStore struct {
+	business.RBACStore
+	fail bool
+}
+
+func (s *failBulkRolesRBACStore) StoreBulkRoles(ctx context.Context, roles []*common.Role) error {
+	if s.fail {
+		return errors.New("simulated durable RBAC store failure")
+	}
+	return s.RBACStore.StoreBulkRoles(ctx, roles)
+}
+
+// TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant covers the double-failure
+// branch at manager.go:139 — CreateTenantDefaultRoles fails AND the rollback
+// store.DeleteTenant also fails, firing the slog.Error path that warns operators about
+// an orphaned tenant record. Without this, that production branch had no coverage.
+func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
+	storageManager := cfgmstesting.SetupTestStorage(t)
+	ctx := context.Background()
+
+	// Build a real RBAC manager whose durable store can be made to fail on demand.
+	failingRBACStore := &failBulkRolesRBACStore{RBACStore: storageManager.GetRBACStore()}
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		failingRBACStore,
+	)
+	require.NoError(t, rbacManager.Initialize(ctx))
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	// After successful initialization, arm the failure so tenant default-role
+	// creation fails, triggering the rollback path.
+	failingRBACStore.fail = true
+
+	// Wrap the real tenant store so the rollback DeleteTenant also fails.
+	rollbackErr := errors.New("simulated storage failure during rollback")
+	store := &failDeleteTenantStore{Store: storageManager.GetTenantStore(), delErr: rollbackErr}
+	manager := NewManager(store, rbacManager)
+
+	capture := captureSlog(t)
+
+	_, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Orphan-Tenant"})
+	require.Error(t, err, "CreateTenant must fail when RBAC role creation fails")
+	assert.Contains(t, err.Error(), "failed to create tenant RBAC roles",
+		"returned error must surface the RBAC failure to the caller")
+
+	rec := capture.find("tenant: failed to roll back tenant after RBAC setup failure; orphaned tenant record left in storage")
+	require.NotNil(t, rec, "slog.Error must fire when both RBAC setup and rollback fail")
+	assert.Equal(t, slog.LevelError, rec.level, "orphaned-tenant log must be at Error level")
+
+	tenantID, ok := rec.attrs["tenant_id"].(string)
+	require.True(t, ok, "log record must include a string tenant_id")
+	assert.NotEmpty(t, tenantID)
+
+	// The error is logged as a sanitized string, not a bare error value: the
+	// DeleteTenant failure text can embed operator-supplied tenant input, so it
+	// goes through logging.SanitizeLogValue before reaching slog (CWE-117).
+	rbErr, ok := rec.attrs["rollback_error"].(string)
+	require.True(t, ok, "log record must include the rollback error as a sanitized string")
+	assert.Equal(t, logging.SanitizeLogValue(rollbackErr.Error()), rbErr,
+		"rollback_error must be the sanitized DeleteTenant failure")
+
+	_, ok = rec.attrs["rbac_error"]
+	require.True(t, ok, "log record must include the originating RBAC error")
+}
+
+// TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog covers the log-injection
+// sanitization at manager.go:376 — a tenantID containing newline/carriage-return
+// characters must be stripped to underscores before reaching the slog.Warn call in the
+// recordConfigSourceEvent error path, and a clean value must pass through unchanged.
+func TestManager_RecordConfigSourceEvent_SanitizesTenantIDInLog(t *testing.T) {
+	const warnMsg = "tenant: failed to record config source audit event"
+
+	// A stopped audit manager makes RecordEvent fail synchronously (enqueue returns
+	// "audit manager is stopped"), driving recordConfigSourceEvent into its error path.
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	require.NoError(t, auditMgr.Stop(context.Background()))
+
+	manager := newTestTenantManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	t.Run("injected control chars are stripped", func(t *testing.T) {
+		capture := captureSlog(t)
+
+		manager.recordConfigSourceEvent(ctx, "tenant\n123\rinjected",
+			"https://example.com/repo.git", "config_source_updated")
+
+		rec := capture.find(warnMsg)
+		require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+		tenantID, ok := rec.attrs["tenant_id"].(string)
+		require.True(t, ok, "tenant_id must be a string in the log entry")
+		assert.NotContains(t, tenantID, "\n", "logged tenant_id must not contain raw newline")
+		assert.NotContains(t, tenantID, "\r", "logged tenant_id must not contain raw carriage-return")
+		assert.Equal(t, "tenant_123_injected", tenantID,
+			"newline and CR must be replaced with underscore before logging")
+
+		// The audit-store error text can carry caller-tainted input back out, so a
+		// bare `"error", err` beside a sanitized ID is still a go/log-injection
+		// finding (CWE-117). It must be sanitized as a string.
+		logErr, ok := rec.attrs["error"].(string)
+		require.True(t, ok, "log record must include the audit-store error as a sanitized string, not a bare error value")
+		assert.Equal(t, logging.SanitizeLogValue("audit manager is stopped"), logErr,
+			"error must be sanitized via logging.SanitizeLogValue before logging")
+	})
+
+	t.Run("clean value passes through unchanged", func(t *testing.T) {
+		capture := captureSlog(t)
+
+		manager.recordConfigSourceEvent(ctx, "clean-tenant-456",
+			"https://example.com/repo.git", "config_source_updated")
+
+		rec := capture.find(warnMsg)
+		require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+		tenantID, ok := rec.attrs["tenant_id"].(string)
+		require.True(t, ok, "tenant_id must be a string in the log entry")
+		assert.Equal(t, "clean-tenant-456", tenantID, "clean tenant_id must pass through unchanged")
+	})
+}
+
+// TestManager_RecordTenantLifecycleEvent_SanitizesLogFields covers the log-injection
+// sanitization in recordTenantLifecycleEvent's slog.Warn error path — both the
+// tenantID and the audit-store error must go through logging.SanitizeLogValue
+// before reaching slog (CWE-117), matching the pattern already used at
+// manager.go:148-152. A bare `"error", err` next to a sanitized ID is still a
+// go/log-injection finding because the error text can carry caller-tainted input.
+func TestManager_RecordTenantLifecycleEvent_SanitizesLogFields(t *testing.T) {
+	const warnMsg = "tenant: failed to record tenant lifecycle audit event"
+
+	// A stopped audit manager makes RecordEvent fail synchronously, driving
+	// recordTenantLifecycleEvent into its error path.
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	require.NoError(t, auditMgr.Stop(context.Background()))
+
+	manager := newTestTenantManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	capture := captureSlog(t)
+
+	manager.recordTenantLifecycleEvent(ctx, "tenant\n123\rinjected", "Some Tenant", "tenant_suspended")
+
+	rec := capture.find(warnMsg)
+	require.NotNil(t, rec, "slog.Warn must fire when the audit record cannot be persisted")
+
+	tenantID, ok := rec.attrs["tenant_id"].(string)
+	require.True(t, ok, "tenant_id must be a string in the log entry")
+	assert.NotContains(t, tenantID, "\n", "logged tenant_id must not contain raw newline")
+	assert.NotContains(t, tenantID, "\r", "logged tenant_id must not contain raw carriage-return")
+	assert.Equal(t, "tenant_123_injected", tenantID,
+		"newline and CR must be replaced with underscore before logging")
+
+	logErr, ok := rec.attrs["error"].(string)
+	require.True(t, ok, "log record must include the audit-store error as a sanitized string, not a bare error value")
+	assert.Equal(t, logging.SanitizeLogValue("audit manager is stopped"), logErr,
+		"error must be sanitized via logging.SanitizeLogValue before logging")
+}
+
+// --- config_source_credential tenant-ownership coverage ---
+
+// recordingMountPointValidator records every ConfigSourceInfo it is asked to
+// validate. It stands in for the credential-consuming sink: the real
+// DefaultMountPointValidator resolves CredentialRef against the secret store and
+// sends the value to the host in URL, so "this validator was never called" is the
+// evidence that a rejected reference is never dereferenced.
+type recordingMountPointValidator struct {
+	calls []*cfgpkg.ConfigSourceInfo
+}
+
+func (v *recordingMountPointValidator) ValidateMountPoint(_ context.Context, info *cfgpkg.ConfigSourceInfo, _ secretsiface.SecretStore) error {
+	v.calls = append(v.calls, info)
+	return nil
+}
+
+// TestManager_UpdateTenant_RejectsForeignCredentialRef proves a tenant cannot
+// point its config source at another tenant's secret. The scope check on the API
+// side only constrains which tenant row is mutated; without this check the
+// metadata written into that row can name any tenant's credential, and the
+// mount-point validator would then ship it to the caller-chosen git host.
+func TestManager_UpdateTenant_RejectsForeignCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	victim, err := manager.CreateTenant(ctx, &TenantRequest{ID: "victim-tenant", Name: "victim-tenant"})
+	require.NoError(t, err)
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "attacker-tenant", Name: "attacker-tenant"})
+	require.NoError(t, err)
+
+	validator := &recordingMountPointValidator{}
+	manager.WithMountPointValidator(validator, nil)
+
+	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
+		Name: attacker.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: victim.ID + "/git-token",
+		},
+	})
+	require.Error(t, err, "a tenant must not be able to reference another tenant's credential")
+	assert.Contains(t, err.Error(), "own namespace")
+	assert.Empty(t, validator.calls, "the foreign credential must be rejected before the mount point is validated")
+
+	// The rejected metadata must not have been persisted.
+	stored, err := manager.GetTenant(ctx, attacker.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+}
+
+// TestManager_UpdateTenant_RejectsForeignCredentialRefUnderNonGitType covers the
+// two-step variant: metadata is replaced wholesale, so a reference parked under a
+// non-git config_source_type would go live the moment the type flips to git.
+func TestManager_UpdateTenant_RejectsForeignCredentialRefUnderNonGitType(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "parking-tenant", Name: "parking-tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
+		Name: attacker.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "controller",
+			cfgpkg.MetaKeyConfigSourceCredential: "victim-tenant/git-token",
+		},
+	})
+	require.Error(t, err, "a foreign credential reference must be rejected regardless of config_source_type")
+	assert.Contains(t, err.Error(), "own namespace")
+}
+
+// TestManager_UpdateTenant_RejectsTraversingCredentialRef proves the ownership
+// prefix cannot be satisfied while the secret key escapes the tenant's namespace.
+func TestManager_UpdateTenant_RejectsTraversingCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "traversal-tenant", Name: "traversal-tenant"})
+	require.NoError(t, err)
+
+	for _, ref := range []string{
+		"traversal-tenant/../victim-tenant/git-token",
+		"traversal-tenant/..",
+		"traversal-tenant",
+		"/git-token",
+		"traversal-tenant/",
+	} {
+		_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+			Name: td.Name,
+			Metadata: map[string]string{
+				cfgpkg.MetaKeyConfigSourceType:       "git",
+				cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+				cfgpkg.MetaKeyConfigSourceCredential: ref,
+			},
+		})
+		require.Error(t, err, "credential reference %q must be rejected", ref)
+		assert.Contains(t, err.Error(), "invalid config source metadata")
+	}
+}
+
+// TestManager_UpdateTenant_AcceptsOwnCredentialRef verifies the legitimate case
+// still works: a tenant referencing a secret in its own namespace.
+func TestManager_UpdateTenant_AcceptsOwnCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "self-ref-tenant", Name: "self-ref-tenant"})
+	require.NoError(t, err)
+
+	validator := &recordingMountPointValidator{}
+	manager.WithMountPointValidator(validator, nil)
+
+	updated, err := manager.UpdateTenant(ctx, td.ID, &TenantRequest{
+		Name: td.Name,
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: td.ID + "/git-token",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "self-ref-tenant/git-token", updated.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+	require.Len(t, validator.calls, 1, "an in-namespace credential reference must still reach mount point validation")
+	assert.Equal(t, "self-ref-tenant/git-token", validator.calls[0].CredentialRef)
+}
+
+// TestManager_CreateTenant_RejectsForeignCredentialRef covers the create path,
+// which is equally reachable by a tenant-scoped principal provisioning a child.
+func TestManager_CreateTenant_RejectsForeignCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	_, err := manager.CreateTenant(ctx, &TenantRequest{
+		ID:   "child-tenant",
+		Name: "child-tenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: "victim-tenant/git-token",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "own namespace")
+
+	_, err = manager.GetTenant(ctx, "child-tenant")
+	require.Error(t, err, "the rejected tenant must not have been created")
+}
+
+// TestManager_CreateTenant_AcceptsOwnCredentialRef verifies a tenant created with
+// an explicit ID may reference a secret in its own namespace.
+func TestManager_CreateTenant_AcceptsOwnCredentialRef(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{
+		ID:   "own-cred-tenant",
+		Name: "own-cred-tenant",
+		Metadata: map[string]string{
+			cfgpkg.MetaKeyConfigSourceType:       "git",
+			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
+			cfgpkg.MetaKeyConfigSourceCredential: "own-cred-tenant/git-token",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "own-cred-tenant/git-token", td.Metadata[cfgpkg.MetaKeyConfigSourceCredential])
+}
+
+// --- Cascade suspend/restore tests (ADR-027 Decisions 1-2, Issue #3158) ---
+
+// buildSubtree creates a three-tier hierarchy: root → child → grandchild.
+// Returns IDs as (rootID, childID, grandchildID).
+func buildSubtree(t *testing.T, manager *Manager) (string, string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	root, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-root", Name: "cs-root"})
+	require.NoError(t, err)
+	child, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-child", Name: "cs-child", ParentID: root.ID})
+	require.NoError(t, err)
+	grand, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-grand", Name: "cs-grand", ParentID: child.ID})
+	require.NoError(t, err)
+	return root.ID, child.ID, grand.ID
+}
+
+// TestManager_SuspendTenant_DefaultProtected verifies the default-tenant guard is
+// preserved after the cascade rewrite.
+func TestManager_SuspendTenant_DefaultProtected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	_, err := manager.SuspendTenant(context.Background(), "default")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrCannotSuspendDefault)
+}
+
+// TestManager_SuspendTenant_CascadesSubtree verifies Decision 1: suspending the root
+// suspends the root (DirectlySuspended) and every descendant (CascadeSuspended).
+func TestManager_SuspendTenant_CascadesSubtree(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	result, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, rootID, result.Target)
+
+	// Target: DirectlySuspended, not cascade.
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, root.Status)
+	assert.True(t, root.DirectlySuspended)
+	assert.Nil(t, root.CascadeSuspendedFrom)
+
+	// Child: cascade-suspended from root.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+	assert.False(t, child.DirectlySuspended)
+	require.NotNil(t, child.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+
+	// Grandchild: cascade-suspended from root (the direct target, not its parent).
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status)
+	assert.False(t, grand.DirectlySuspended)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom)
+
+	assert.ElementsMatch(t, []string{childID, grandID}, result.NewlyCascadeSuspended)
+	assert.Empty(t, result.AlreadySuspended)
+}
+
+// TestManager_SuspendTenant_DualProvenance is a REQUIRED TEST (Issue #3158 AC):
+// a tenant that was already DirectlySuspended before an ancestor's cascade suspend
+// keeps both flags simultaneously.
+func TestManager_SuspendTenant_DualProvenance(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, _ := buildSubtree(t, manager)
+
+	// Independently suspend the child first.
+	_, err := manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.True(t, child.DirectlySuspended, "child must be directly suspended")
+	assert.Nil(t, child.CascadeSuspendedFrom, "no cascade yet")
+
+	// Now cascade-suspend from the root.
+	result, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// The grandchild's provenance was cs-child before the root cascade; the root is the
+	// outermost suspension now, so provenance must be re-pointed at it (a deeper value
+	// would let RestoreTenant(cs-child) reactivate it while the root is still suspended).
+	grand, err := manager.GetTenant(ctx, "cs-grand")
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom,
+		"the outermost suspended ancestor must own the cascade provenance")
+
+	// Child must now carry BOTH flags.
+	child, err = manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.True(t, child.DirectlySuspended, "DirectlySuspended must be preserved")
+	require.NotNil(t, child.CascadeSuspendedFrom, "CascadeSuspendedFrom must be set")
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+
+	// Result must report child as already-suspended, not newly-cascade-suspended.
+	assert.Contains(t, result.AlreadySuspended, childID)
+	assert.NotContains(t, result.NewlyCascadeSuspended, childID)
+}
+
+// TestManager_SuspendTenant_ProvenancePersistsAcrossRead is a REQUIRED TEST (Issue #3158 AC):
+// provenance fields must survive a store round-trip (not just be set on the in-memory struct).
+func TestManager_SuspendTenant_ProvenancePersistsAcrossRead(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, _ := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Re-read from storage — not from any in-memory cache.
+	root, err := manager.store.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.True(t, root.DirectlySuspended, "DirectlySuspended must persist in storage")
+
+	child, err := manager.store.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	require.NotNil(t, child.CascadeSuspendedFrom, "CascadeSuspendedFrom must persist in storage")
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+}
+
+// TestManager_RestoreTenant_LiftsCascadeOnly is a REQUIRED TEST (Issue #3158 AC):
+// restoring an ancestor must not restore a descendant that is independently suspended.
+func TestManager_RestoreTenant_LiftsCascadeOnly(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	// Independently suspend child, then cascade from root.
+	_, err := manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Restore root only.
+	restoreResult, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	// Root must be active again.
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, root.Status)
+	assert.False(t, root.DirectlySuspended)
+
+	// Child was independently suspended — must remain suspended.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status, "child independently suspended must stay suspended")
+	assert.True(t, child.DirectlySuspended, "DirectlySuspended must remain")
+	assert.Nil(t, child.CascadeSuspendedFrom, "cascade flag from root must be cleared")
+
+	// Grandchild: the root cascade is lifted, but its parent (the child) is still
+	// independently suspended, so the grandchild must stay suspended with its provenance
+	// re-pointed at that surviving suspension. Reactivating it here would leave it active
+	// underneath a suspended parent.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status,
+		"grandchild must not be reactivated while its parent remains suspended")
+	require.NotNil(t, grand.CascadeSuspendedFrom, "grandchild must carry the surviving suspension's provenance")
+	assert.Equal(t, childID, *grand.CascadeSuspendedFrom)
+	assert.False(t, grand.DirectlySuspended)
+
+	// Restore result must report both as still suspended, for different reasons.
+	assert.Contains(t, restoreResult.StillSuspended, childID)
+	assert.Contains(t, restoreResult.StillSuspended, grandID)
+	assert.NotContains(t, restoreResult.Restored, grandID,
+		"a tenant under a still-suspended ancestor must not be reported as restored")
+
+	// Restoring the child afterwards releases the grandchild — the re-pointed provenance
+	// must not strand it suspended forever.
+	secondRestore, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Contains(t, secondRestore.Restored, grandID)
+
+	grand, err = manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusActive, grand.Status)
+	assert.Nil(t, grand.CascadeSuspendedFrom)
+}
+
+// TestManager_RestoreTenant_NestedSuspendCannotEscapeOuterSuspension is a REQUIRED
+// security test: on hierarchy A -> B -> C, suspend(A) then suspend(B) then restore(B)
+// must leave C suspended. B is itself still cascade-suspended by A, so an operator
+// holding tenant:manage on B (legitimately, inside their own subtree) must not be able
+// to reactivate anything underneath the MSP-level suspension of A.
+func TestManager_RestoreTenant_NestedSuspendCannotEscapeOuterSuspension(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+
+	// Suspending the child must not steal the grandchild's provenance from the root.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom,
+		"the root's cascade provenance must survive a nested suspend of the child")
+
+	restoreResult, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+
+	// The child stays suspended: the root's cascade still contains it.
+	child, err := manager.GetTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, child.Status)
+	assert.False(t, child.DirectlySuspended, "the child's own suspension is lifted")
+	require.NotNil(t, child.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *child.CascadeSuspendedFrom)
+
+	// The grandchild must remain suspended and must not be reported as restored.
+	grand, err = manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	assert.Equal(t, business.TenantStatusSuspended, grand.Status,
+		"restoring a cascade-suspended tenant must not reactivate its subtree")
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, rootID, *grand.CascadeSuspendedFrom)
+	assert.NotContains(t, restoreResult.Restored, grandID)
+
+	// Only restoring the root — the tenant that imposed the containment — releases the
+	// whole subtree.
+	rootRestore, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{childID, grandID}, rootRestore.Restored)
+	for _, id := range []string{rootID, childID, grandID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active", id)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+		assert.False(t, td.DirectlySuspended)
+	}
+}
+
+// TestManager_RestoreTenant_DeepSubtreeHeldByIntermediateSuspension covers the other
+// ordering: suspend(B) then suspend(A) then restore(A). The child B keeps its own
+// DirectlySuspended flag, so the grandchild below it must stay suspended even though the
+// cascade it carried (from A) is genuinely lifted.
+func TestManager_RestoreTenant_DeepSubtreeHeldByIntermediateSuspension(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	// A fourth tier below the grandchild: containment must reach the whole subtree, not
+	// just the first level under the still-suspended ancestor.
+	greatGrand, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-great", Name: "cs-great", ParentID: grandID})
+	require.NoError(t, err)
+
+	_, err = manager.SuspendTenant(ctx, childID)
+	require.NoError(t, err)
+	_, err = manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	_, err = manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	root, err := manager.GetTenant(ctx, rootID)
+	require.NoError(t, err)
+	require.Equal(t, business.TenantStatusActive, root.Status)
+
+	for _, id := range []string{childID, grandID, greatGrand.ID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusSuspended, td.Status,
+			"tenant %s must stay suspended under the still-suspended child", id)
+	}
+
+	// Provenance below the surviving suspension points at it, so restoring the child
+	// releases the rest of the subtree.
+	grand, err := manager.GetTenant(ctx, grandID)
+	require.NoError(t, err)
+	require.NotNil(t, grand.CascadeSuspendedFrom)
+	assert.Equal(t, childID, *grand.CascadeSuspendedFrom)
+
+	restoreResult, err := manager.RestoreTenant(ctx, childID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{grandID, greatGrand.ID}, restoreResult.Restored)
+	for _, id := range []string{childID, grandID, greatGrand.ID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active", id)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+	}
+}
+
+// TestManager_RestoreTenant_ClearsAllDescendants verifies basic restore: after
+// a cascade suspend, restoring the root brings all descendants back to active.
+func TestManager_RestoreTenant_ClearsAllDescendants(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	rootID, childID, grandID := buildSubtree(t, manager)
+
+	_, err := manager.SuspendTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	restoreResult, err := manager.RestoreTenant(ctx, rootID)
+	require.NoError(t, err)
+
+	for _, id := range []string{rootID, childID, grandID} {
+		td, err := manager.GetTenant(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, business.TenantStatusActive, td.Status, "tenant %s must be active after restore", id)
+		assert.False(t, td.DirectlySuspended)
+		assert.Nil(t, td.CascadeSuspendedFrom)
+	}
+
+	assert.ElementsMatch(t, []string{childID, grandID}, restoreResult.Restored)
+	assert.Empty(t, restoreResult.StillSuspended)
+}
+
+// TestManager_SuspendTenant_CycleDetected is a REQUIRED TEST (Issue #3158 AC):
+// the cascade walk must return an error rather than looping forever if it encounters
+// a cycle (data corruption or a future code change relaxing the parent_id invariant).
+func TestManager_SuspendTenant_CycleDetected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	// Create A → B hierarchy.
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-a", Name: "cycle-a"})
+	require.NoError(t, err)
+	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-b", Name: "cycle-b", ParentID: a.ID})
+	require.NoError(t, err)
+
+	// Corrupt the hierarchy by setting A's parent to B (A→B, B→A via parent_id).
+	// The SQLite schema has no FK enforcement by default, so this is possible
+	// through the raw store interface.
+	a.ParentID = b.ID
+	require.NoError(t, manager.store.UpdateTenant(ctx, a))
+
+	// SuspendTenant must return an error, not loop forever.
+	_, err = manager.SuspendTenant(ctx, a.ID)
+	require.Error(t, err, "cycle in tenant hierarchy must cause an error, not an infinite loop")
+	assert.Contains(t, err.Error(), "cycle")
+}
+
+// TestManager_RestoreTenant_CycleDetected is a REQUIRED TEST (Issue #3158 AC):
+// the restore walk must also terminate with an error on a cycle.
+func TestManager_RestoreTenant_CycleDetected(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-a", Name: "rcycle-a"})
+	require.NoError(t, err)
+	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-b", Name: "rcycle-b", ParentID: a.ID})
+	require.NoError(t, err)
+
+	// Corrupt: A.ParentID = B
+	a.ParentID = b.ID
+	require.NoError(t, manager.store.UpdateTenant(ctx, a))
+
+	_, err = manager.RestoreTenant(ctx, a.ID)
+	require.Error(t, err, "cycle in tenant hierarchy must cause an error in RestoreTenant")
+	assert.Contains(t, err.Error(), "cycle")
+}
+
+// TestManager_SuspendRestore_ConcurrentAncestorSuspendVsDescendantRestore is a
+// [REQUIRED TEST] for Issue #4347: SuspendTenant and RestoreTenant each walk
+// the subtree with sequential read-then-write store calls and, before this
+// fix, no lock and no optimistic concurrency. A concurrent SuspendTenant on an
+// ancestor and RestoreTenant on an already-independently-suspended descendant
+// could interleave so the descendant's stale RestoreTenant write (read before
+// the ancestor's cascade was recorded) overwrites the ancestor's cascade
+// write, leaving the descendant Active even though its ancestor is suspended.
+//
+// This exercises real concurrency (goroutines + WaitGroup against a shared
+// Manager and real SQLite+flatfile storage), not a sequential simulation, and
+// repeats across independent tenant trees to make the race likely to surface
+// if the two calls are not actually serialized.
+func TestManager_SuspendRestore_ConcurrentAncestorSuspendVsDescendantRestore(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+
+	const iterations = 100
+	ancestorIDs := make([]string, iterations)
+	descendantIDs := make([]string, iterations)
+
+	for i := 0; i < iterations; i++ {
+		ancestorIDs[i] = fmt.Sprintf("race-ancestor-%d", i)
+		descendantIDs[i] = fmt.Sprintf("race-descendant-%d", i)
+
+		_, err := manager.CreateTenant(ctx, &TenantRequest{ID: ancestorIDs[i]})
+		require.NoError(t, err)
+		_, err = manager.CreateTenant(ctx, &TenantRequest{ID: descendantIDs[i], ParentID: ancestorIDs[i]})
+		require.NoError(t, err)
+
+		// The descendant starts independently suspended, so RestoreTenant has a
+		// real, in-flight write to make (clearing DirectlySuspended) concurrently
+		// with the ancestor's cascade write.
+		_, err = manager.SuspendTenant(ctx, descendantIDs[i])
+		require.NoError(t, err)
+	}
+
+	// All 2*iterations goroutines, across every independent tenant tree, are
+	// launched and released from one shared start gate together, rather than
+	// pair-by-pair, to maximize real OS-thread contention on the single-connection
+	// SQLite store and make any actual interleaving between the two operations'
+	// read-then-write calls likely to surface.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2 * iterations)
+	for i := 0; i < iterations; i++ {
+		ancestorID := ancestorIDs[i]
+		descendantID := descendantIDs[i]
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = manager.SuspendTenant(ctx, ancestorID)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = manager.RestoreTenant(ctx, descendantID)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < iterations; i++ {
+		ancestor, err := manager.GetTenant(ctx, ancestorIDs[i])
+		require.NoError(t, err)
+		descendant, err := manager.GetTenant(ctx, descendantIDs[i])
+		require.NoError(t, err)
+
+		if ancestor.Status == business.TenantStatusSuspended {
+			assert.Equal(t, business.TenantStatusSuspended, descendant.Status,
+				"iteration %d: descendant must not be Active once the ancestor's suspension is recorded", i)
+		}
+	}
+}
+
+// TestManager_SuspendRestore_AuditEvents verifies that both operations emit audit
+// events when an audit manager is wired, and that no panic occurs when it is not.
+func TestManager_SuspendRestore_AuditEvents(t *testing.T) {
+	manager := newTestTenantManager(t)
+	auditMgr := cfgmstesting.SetupTestAuditManager(t)
+	manager.WithAuditManager(auditMgr)
+	ctx := context.Background()
+
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "audit-tenant", Name: "audit-tenant"})
+	require.NoError(t, err)
+
+	_, err = manager.SuspendTenant(ctx, td.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	suspended, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"tenant_suspended"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, suspended, 1, "suspend must record a tenant_suspended audit event")
+
+	_, err = manager.RestoreTenant(ctx, td.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, auditMgr.Flush(ctx))
+
+	restored, err := auditMgr.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: td.ID,
+		Actions:  []string{"tenant_restored"},
+	})
+	require.NoError(t, err)
+	assert.Len(t, restored, 1, "restore must record a tenant_restored audit event")
+}
+
+// TestManager_SuspendTenant_NoAuditManager_NoPanic verifies that SuspendTenant and
+// RestoreTenant are safe no-ops at the audit layer when no audit manager is wired.
+func TestManager_SuspendTenant_NoAuditManager_NoPanic(t *testing.T) {
+	manager := newTestTenantManager(t)
+	ctx := context.Background()
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoAuditTenant"})
+	require.NoError(t, err)
+
+	assert.NotPanics(t, func() {
+		_, _ = manager.SuspendTenant(ctx, td.ID)
+		_, _ = manager.RestoreTenant(ctx, td.ID)
+	})
+}
+
+// TestValidateRealmQualifiedTenantID exercises the "<realm>/<id>" grammar
+// (Issue #3782): each half must independently satisfy the same k8s DNS-label
+// rules as validateExplicitTenantID, and there must be exactly one separator.
+func TestValidateRealmQualifiedTenantID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{"valid realm and id", "cell1/msp-a", false},
+		{"valid single-char halves", "a/b", false},
+		{"valid with hyphens and numbers", "cell-us-east-1/agent-test-123", false},
+		{"empty string", "", true},
+		{"no separator", "msp-a", true},
+		{"empty realm segment", "/msp-a", true},
+		{"empty id segment", "cell1/", true},
+		{"realm segment invalid k8s label (uppercase)", "Cell1/msp-a", true},
+		{"id segment invalid k8s label (underscore)", "cell1/msp_a", true},
+		{"realm segment leading hyphen", "-cell1/msp-a", true},
+		{"id segment trailing hyphen", "cell1/msp-a-", true},
+		{"two separators", "cell1/msp-a/extra", true},
+		{"trailing separator only", "cell1/msp-a/", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRealmQualifiedTenantID(tt.id)
+			if tt.wantErr {
+				assert.Error(t, err, "expected error for id=%q", tt.id)
+			} else {
+				assert.NoError(t, err, "expected no error for id=%q", tt.id)
+			}
+		})
+	}
+}
+
+// TestValidateRealmQualifiedTenantID_RejectsMultiSegmentHierarchicalPath guards
+// against resurrecting the ambiguity ADR-025 Amendment 1 (A1.1) found in the
+// dead strings.HasPrefix(id, tenant+"/") pattern, which implied slash-delimited
+// hierarchical paths like "root/msp-a/client-1". The realm-qualified grammar
+// must reject that shape outright rather than accepting the first two segments
+// and ignoring the rest.
+func TestValidateRealmQualifiedTenantID_RejectsMultiSegmentHierarchicalPath(t *testing.T) {
+	err := validateRealmQualifiedTenantID("root/msp-a/client-1")
+	require.Error(t, err, "realm-qualified grammar must reject multi-segment hierarchical paths")
+}
+
+// TestValidateExplicitTenantID_UnaffectedByRealmQualifiedGrammar is a
+// regression guard (Issue #3782): the existing unqualified single-DNS-label
+// validator must keep rejecting slash-containing values exactly as before —
+// only validateRealmQualifiedTenantID accepts the new "<realm>/<id>" shape.
+func TestValidateExplicitTenantID_UnaffectedByRealmQualifiedGrammar(t *testing.T) {
+	err := validateExplicitTenantID("cell1/msp-a")
+	require.Error(t, err, "unqualified validator must still reject a slash-containing ID")
+
+	// Spot-check the pre-existing table's core acceptances/rejections are unchanged.
+	assert.NoError(t, validateExplicitTenantID("team-root"))
+	assert.NoError(t, validateExplicitTenantID("agent-test-123"))
+	assert.Error(t, validateExplicitTenantID(""))
+	assert.Error(t, validateExplicitTenantID("Team-Root"))
+}
+
+// TestManager_QualifiedTenantID_EmptyRealm_ReturnsUnqualified verifies the
+// self-hosted default: no RealmID configured means QualifiedTenantID is a
+// passthrough.
+func TestManager_QualifiedTenantID_EmptyRealm_ReturnsUnqualified(t *testing.T) {
+	manager := newTestTenantManager(t)
+	require.Equal(t, "", manager.RealmID)
+	qualified, err := manager.QualifiedTenantID("msp-a")
+	require.NoError(t, err)
+	assert.Equal(t, "msp-a", qualified)
+}
+
+// TestManager_QualifiedTenantID_WithRealm_ReturnsQualified verifies that once
+// RealmID is configured, QualifiedTenantID formats "<realm>/<id>" on demand.
+func TestManager_QualifiedTenantID_WithRealm_ReturnsQualified(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.RealmID = "cell1"
+	qualified, err := manager.QualifiedTenantID("msp-a")
+	require.NoError(t, err)
+	assert.Equal(t, "cell1/msp-a", qualified)
+}
+
+// TestManager_QualifiedTenantID_RejectsMalformedInputs verifies the
+// construction-time invariant: QualifiedTenantID never returns a value that
+// validateRealmQualifiedTenantID would reject. A multi-segment realm such as
+// "root/msp-a" would otherwise yield "root/msp-a/client-1" — exactly the
+// ambiguous shape ADR-025 Amendment 1 (A1.1) eliminated.
+func TestManager_QualifiedTenantID_RejectsMalformedInputs(t *testing.T) {
+	tests := []struct {
+		name          string
+		realm         string
+		unqualifiedID string
+	}{
+		{"multi-segment realm", "root/msp-a", "client-1"},
+		{"uppercase realm", "Cell1", "msp-a"},
+		{"path traversal realm", "../..", "msp-a"},
+		{"over-length realm", strings.Repeat("a", 64), "msp-a"},
+		{"leading hyphen realm", "-cell1", "msp-a"},
+		{"empty unqualified id", "cell1", ""},
+		{"slash in unqualified id", "cell1", "msp-a/client-1"},
+		{"uppercase unqualified id", "cell1", "MSP-A"},
+		{"empty unqualified id with no realm", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := newTestTenantManager(t)
+			manager.RealmID = tt.realm
+
+			qualified, err := manager.QualifiedTenantID(tt.unqualifiedID)
+			require.Error(t, err, "expected error for realm=%q id=%q", tt.realm, tt.unqualifiedID)
+			assert.Empty(t, qualified, "no identity may be returned alongside an error")
+		})
+	}
+}
+
+// TestManager_QualifiedTenantID_OutputAlwaysSatisfiesGrammar closes the loop
+// between the constructor and the validator: whatever QualifiedTenantID
+// returns for a configured realm must pass validateRealmQualifiedTenantID.
+func TestManager_QualifiedTenantID_OutputAlwaysSatisfiesGrammar(t *testing.T) {
+	manager := newTestTenantManager(t)
+	manager.RealmID = "cell-us-east-1"
+
+	for _, id := range []string{"a", "msp-a", "agent-test-123", strings.Repeat("b", 63)} {
+		qualified, err := manager.QualifiedTenantID(id)
+		require.NoError(t, err, "id=%q", id)
+		require.NoError(t, validateRealmQualifiedTenantID(qualified), "qualified=%q", qualified)
+	}
+}
+
+// TestEnforceRealmGuard_ProductionClusterEmptyRealm_Refuses mirrors
+// enforceProductionGuard's TestProductionGuard_Reject coverage in
+// pkg/secrets/providers/openbao/provider_test.go: a SaaS production cluster
+// with no realm assigned must refuse to start.
+func TestEnforceRealmGuard_ProductionClusterEmptyRealm_Refuses(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "",
+	}
+	err := EnforceRealmGuard(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "realm")
+}
+
+// TestEnforceRealmGuard_ProductionClusterWithRealm_Starts verifies a SaaS
+// production cluster with a configured RealmID is never gated.
+func TestEnforceRealmGuard_ProductionClusterWithRealm_Starts(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "cell1",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+}
+
+// TestEnforceRealmGuard_SelfHostedNeverGated verifies that a self-hosted
+// deployment (ha.mode unset) is never gated in production, regardless of
+// RealmID — the guard only closes the SaaS-production (ha.mode: cluster) path.
+func TestEnforceRealmGuard_SelfHostedNeverGated(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "production")
+
+	cfg := &controllerconfig.Config{
+		HA:      nil,
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+
+	cfgSingle := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "single"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfgSingle))
+}
+
+// TestEnforceRealmGuard_NonProduction_NeverGated verifies the emptiness gate is
+// a no-op outside CFGMS_TELEMETRY_ENVIRONMENT=production, even for a cluster
+// deployment with no realm configured.
+func TestEnforceRealmGuard_NonProduction_NeverGated(t *testing.T) {
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
+}
+
+// TestEnforceRealmGuard_MalformedRealm_RefusesOnEveryDeploymentShape verifies
+// that a configured-but-malformed realm fails closed regardless of ha.mode or
+// CFGMS_TELEMETRY_ENVIRONMENT. RealmID is concatenated into a tenant identity
+// by QualifiedTenantID, so a value like "root/msp-a" must be rejected at
+// startup rather than silently producing an unparseable cross-cell identity.
+func TestEnforceRealmGuard_MalformedRealm_RefusesOnEveryDeploymentShape(t *testing.T) {
+	malformed := []struct {
+		name  string
+		realm string
+	}{
+		{"multi-segment hierarchical path", "root/msp-a"},
+		{"uppercase", "Cell1"},
+		{"path traversal", "../.."},
+		{"underscore", "cell_1"},
+		{"trailing hyphen", "cell1-"},
+		{"over 63 characters", strings.Repeat("a", 64)},
+		{"whitespace", "cell 1"},
+	}
+
+	shapes := []struct {
+		name string
+		ha   *controllerconfig.HAConfig
+	}{
+		{"self-hosted (no ha)", nil},
+		{"single node", &controllerconfig.HAConfig{Mode: "single"}},
+		{"cluster", &controllerconfig.HAConfig{Mode: "cluster"}},
+	}
+
+	for _, env := range []string{"", "production"} {
+		for _, shape := range shapes {
+			for _, m := range malformed {
+				t.Run(fmt.Sprintf("env=%s/%s/%s", env, shape.name, m.name), func(t *testing.T) {
+					t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", env)
+
+					cfg := &controllerconfig.Config{
+						HA:      shape.ha,
+						RealmID: m.realm,
+					}
+					err := EnforceRealmGuard(cfg)
+					require.Error(t, err, "malformed realm %q must fail closed", m.realm)
+					assert.Contains(t, err.Error(), "realm")
+				})
+			}
+		}
+	}
+}
+
+// TestEnforceRealmGuard_ValidRealm_AcceptedOnEveryDeploymentShape is the
+// counterpart: a well-formed single-DNS-label realm is never rejected.
+func TestEnforceRealmGuard_ValidRealm_AcceptedOnEveryDeploymentShape(t *testing.T) {
+	for _, realm := range []string{"a", "cell1", "cell-us-east-1", strings.Repeat("c", 63)} {
+		for _, mode := range []string{"", "single", "cluster"} {
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: mode},
+				RealmID: realm,
+			}
+			require.NoError(t, EnforceRealmGuard(cfg), "realm=%q mode=%q", realm, mode)
+		}
+	}
+}
+
+// TestEnforceRealmGuard_ProductionEnvNormalization_TreatedAsProduction is a
+// [REQUIRED TEST] for Issue #4347: CFGMS_TELEMETRY_ENVIRONMENT must be
+// normalised (trimmed and case-folded) before comparison, so a value
+// differing from "production" only by surrounding whitespace or
+// capitalisation is still treated as production rather than silently
+// disabling the realm guard. Verified indirectly: an empty RealmID on a
+// cluster deployment must still be rejected for each variant.
+func TestEnforceRealmGuard_ProductionEnvNormalization_TreatedAsProduction(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+	}{
+		{"surrounding whitespace", "  production  "},
+		{"different capitalisation", "PRODUCTION"},
+		{"whitespace and capitalisation", "\tProduction\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", tt.env)
+
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+				RealmID: "",
+			}
+			err := EnforceRealmGuard(cfg)
+			require.Error(t, err, "normalized production value %q must still require a realm", tt.env)
+			assert.Contains(t, err.Error(), "realm")
+
+			// The same normalized value must be accepted once a realm is configured —
+			// confirming the failure above is the realm-emptiness check, not the
+			// unrecognised-value guard misfiring on a formatting difference.
+			cfg.RealmID = "cell1"
+			require.NoError(t, EnforceRealmGuard(cfg), "env=%q", tt.env)
+		})
+	}
+}
+
+// TestEnforceRealmGuard_UnrecognisedEnvironment_ClusterMode_Errors is a
+// [REQUIRED TEST] for Issue #4347: an unrecognised CFGMS_TELEMETRY_ENVIRONMENT
+// value in cluster mode must be an error, not silently treated as
+// non-production (which would skip ADR-032 Decision 3's realm check on a
+// deployment that is, in fact, production but misconfigured).
+func TestEnforceRealmGuard_UnrecognisedEnvironment_ClusterMode_Errors(t *testing.T) {
+	for _, env := range []string{"prod", "PROD", "live", "productionn"} {
+		t.Run(env, func(t *testing.T) {
+			t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", env)
+
+			cfg := &controllerconfig.Config{
+				HA:      &controllerconfig.HAConfig{Mode: "cluster"},
+				RealmID: "cell1", // valid realm configured — must still fail closed
+			}
+			err := EnforceRealmGuard(cfg)
+			require.Error(t, err, "unrecognised env value %q must fail closed in cluster mode", env)
+			assert.Contains(t, err.Error(), "CFGMS_TELEMETRY_ENVIRONMENT")
+		})
+	}
+}
+
+// TestEnforceRealmGuard_UnrecognisedEnvironment_NonClusterMode_NeverGated
+// verifies the unrecognised-value guard is scoped to cluster mode, matching
+// TestEnforceRealmGuard_SelfHostedNeverGated's existing scope for the
+// emptiness check.
+func TestEnforceRealmGuard_UnrecognisedEnvironment_NonClusterMode_NeverGated(t *testing.T) {
+	t.Setenv("CFGMS_TELEMETRY_ENVIRONMENT", "prod")
+
+	cfg := &controllerconfig.Config{
+		HA:      &controllerconfig.HAConfig{Mode: "single"},
+		RealmID: "",
+	}
+	require.NoError(t, EnforceRealmGuard(cfg))
 }

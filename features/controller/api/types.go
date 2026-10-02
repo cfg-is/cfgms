@@ -7,6 +7,7 @@ import (
 
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
+	"github.com/cfgis/cfgms/features/controller/service"
 )
 
 // APIResponse represents a standard API response wrapper
@@ -31,12 +32,15 @@ type APIError struct {
 // StewardInfo represents steward information for API responses
 type StewardInfo struct {
 	ID          string            `json:"id"`
+	TenantID    string            `json:"tenant_id,omitempty"`
 	Status      string            `json:"status"`
 	LastSeen    time.Time         `json:"last_seen"`
 	Version     string            `json:"version"`
 	ConnectedAt time.Time         `json:"connected_at"`
 	Metrics     map[string]string `json:"metrics,omitempty"`
 	DNA         *DNAInfo          `json:"dna,omitempty"`
+	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2918).
+	Hidden bool `json:"hidden,omitempty"`
 	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
 	// 0 otherwise. Each steward holds at most one stream at a time, so this is
 	// a binary sentinel, not a real connection count.
@@ -46,12 +50,13 @@ type StewardInfo struct {
 
 // DNAInfo represents DNA information for API responses
 type DNAInfo struct {
-	Hostname     string            `json:"hostname"`
-	OS           string            `json:"os"`
-	Architecture string            `json:"architecture"`
-	ConfigHash   string            `json:"config_hash,omitempty"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
-	CollectedAt  time.Time         `json:"collected_at"`
+	Hostname     string             `json:"hostname"`
+	OS           string             `json:"os"`
+	Architecture string             `json:"architecture"`
+	ConfigHash   string             `json:"config_hash,omitempty"`
+	Attributes   map[string]string  `json:"attributes,omitempty"`
+	Fragments    []*common.Fragment `json:"fragments,omitempty"` // ADR-017 fragments (cluster:* and host:* fragment-shaped state)
+	CollectedAt  time.Time          `json:"collected_at"`
 }
 
 // ConfigurationInfo represents configuration information
@@ -167,6 +172,7 @@ type PermissionCheckResult struct {
 type APIKeyCreateRequest struct {
 	Name        string     `json:"name"`
 	Permissions []string   `json:"permissions"`
+	RoleID      string     `json:"role_id,omitempty"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id,omitempty"`
 }
@@ -206,10 +212,24 @@ type ReadinessStatus struct {
 }
 
 // ConfigPushResponse is returned by POST /api/v1/config/push on acceptance.
+// Deliveries references the trackable per-steward delivery record created for
+// this push (Issue #3757, ADR-031 Decision 2) — callers watch a write until it
+// lands via GET /api/v1/commands/{id} rather than trusting a bare "accepted".
+// Empty when the durable command store is not configured for this deployment.
 type ConfigPushResponse struct {
-	PushID   string    `json:"push_id"`
-	Status   string    `json:"status"`
-	QueuedAt time.Time `json:"queued_at"`
+	PushID     string                `json:"push_id"`
+	Status     string                `json:"status"`
+	QueuedAt   time.Time             `json:"queued_at"`
+	Deliveries []*ConfigPushDelivery `json:"deliveries,omitempty"`
+}
+
+// ConfigPushDelivery references one steward's durable delivery record for a
+// config push (Issue #3757). CommandID is the ID to pass to
+// GET /api/v1/commands/{id} to watch this specific delivery's lifecycle.
+type ConfigPushDelivery struct {
+	StewardID string `json:"steward_id"`
+	CommandID string `json:"command_id"`
+	Status    string `json:"status"`
 }
 
 // DeploymentSummary holds aggregate counts for a config deployment query.
@@ -246,6 +266,18 @@ type ConfigDeploymentsResponse struct {
 	PushHistory []PushSummary             `json:"push_history"`
 }
 
+// PushStatusResponse is returned by GET /api/v1/config/push/{id}.
+type PushStatusResponse struct {
+	PushID      string    `json:"push_id"`
+	ConfigID    string    `json:"config_id"`
+	TenantID    string    `json:"tenant_id"`
+	Version     string    `json:"version"`
+	Status      string    `json:"status"`
+	InitiatedBy string    `json:"initiated_by,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // Helper functions to convert protobuf messages to API types
 
 // DNAFromProto converts a protobuf DNA message to DNAInfo
@@ -254,17 +286,14 @@ func DNAFromProto(dna *common.DNA) *DNAInfo {
 		return nil
 	}
 
-	// Extract common attributes from the DNA attributes map
-	hostname := dna.Attributes["hostname"]
-	os := dna.Attributes["os"]
-	architecture := dna.Attributes["architecture"]
+	attrs := service.FlattenDNAFragments(dna.Fragments)
 
 	return &DNAInfo{
-		Hostname:     hostname,
-		OS:           os,
-		Architecture: architecture,
+		Hostname:     attrs["hostname"],
+		OS:           attrs["os"],
+		Architecture: attrs["architecture"],
 		ConfigHash:   dna.ConfigHash,
-		Attributes:   dna.Attributes,
+		Attributes:   attrs,
 		CollectedAt:  dna.LastUpdated.AsTime(),
 	}
 }

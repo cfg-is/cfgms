@@ -43,7 +43,11 @@ import (
 // testPublisher creates a new Ed25519 key pair and returns a trust store
 // seeded with the public key, plus a sign function that produces valid
 // BundleSignature bytes using the private key.
-func testPublisher(t *testing.T, name string) (store trust.TrustStore, sign func(contentHash string) []byte) {
+// The signature covers the canonical (contentHash, version, platform, arch) composite
+// (Issue #2834), so a signature minted for one release cannot be replayed as another.
+// platformArch optionally overrides the host's runtime.GOOS/GOARCH, which is what
+// almost every upgrade test dispatches.
+func testPublisher(t *testing.T, name string) (store trust.TrustStore, sign func(contentHash, version string, platformArch ...string) []byte) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
@@ -54,8 +58,14 @@ func testPublisher(t *testing.T, name string) (store trust.TrustStore, sign func
 		PublicKey: []byte(pub),
 		Algorithm: "ed25519",
 	}))
-	sign = func(contentHash string) []byte {
-		return ed25519.Sign(priv, []byte(contentHash))
+	sign = func(contentHash, version string, platformArch ...string) []byte {
+		platform, arch := runtime.GOOS, runtime.GOARCH
+		if len(platformArch) == 2 {
+			platform, arch = platformArch[0], platformArch[1]
+		}
+		msg, err := trust.StewardBinaryMessage(contentHash, version, platform, arch)
+		require.NoError(t, err)
+		return ed25519.Sign(priv, []byte(msg))
 	}
 	return ts, sign
 }
@@ -110,7 +120,7 @@ func TestHandlePushStewardBinary_RejectsInvalidSignature(t *testing.T) {
 
 	ts, sign := testPublisher(t, "cfgms")
 	// Tamper: sign the WRONG content hash.
-	tamperedSig := sign("wrong-content-hash-that-does-not-match")
+	tamperedSig := sign("wrong-content-hash-that-does-not-match", "v2.0.0")
 
 	// Use an HTTPS test server; inject its transport so the download proceeds.
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +174,7 @@ func TestHandlePushStewardBinary_RejectsDowngrade(t *testing.T) {
 
 	ts, sign := testPublisher(t, "cfgms")
 	// Use a valid signature so the rejection happens specifically at the version check.
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v0.1.0")
 
 	// Serve via HTTPS test server with injected transport.
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,8 +227,10 @@ func TestHandlePushStewardBinary_RejectsRevokedVersion(t *testing.T) {
 	content := []byte("revoked version binary")
 	sha256Hex := computeSHA256(content)
 
+	revokedVer := "v9.9.9"
+
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, revokedVer)
 
 	// Serve via HTTPS; the binary must be downloaded before revocation is checked.
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +254,6 @@ func TestHandlePushStewardBinary_RejectsRevokedVersion(t *testing.T) {
 	c.upgradeHTTPClient = srv.Client()
 	c.mu.Unlock()
 
-	revokedVer := "v9.9.9"
 	c.SetRevokedVersions([]string{"v1.0.0-bad", revokedVer, "v2.0.0-bad"})
 
 	cmd := &cpTypes.Command{
@@ -288,7 +299,7 @@ func TestHandlePushStewardBinary_RejectsOversizedBinary(t *testing.T) {
 	// Call downloadBinaryForUpgrade directly to test the size cap without
 	// going through the full handler (which requires https).
 	tmpPath := filepath.Join(certStoreDir, "oversized-test.bin")
-	_, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
+	_, _, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
 	require.Error(t, err, "oversized binary must be rejected")
 	assert.Contains(t, err.Error(), "MaxBinarySizeBytes",
 		"error message must mention MaxBinarySizeBytes")
@@ -308,7 +319,7 @@ func TestHandlePushStewardBinary_RejectsCrossHostDownloadURL(t *testing.T) {
 	sha256Hex := computeSHA256(content)
 
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v2.0.0")
 
 	certStoreDir := t.TempDir()
 	// Controller is at "controller.example.com"; download URL points elsewhere.
@@ -394,7 +405,7 @@ func TestHandlePushStewardBinary_TempFilePermissions(t *testing.T) {
 	require.NoError(t, os.MkdirAll(upgradesDir, 0o700))
 	tmpPath := filepath.Join(upgradesDir, "test-perm.bin")
 
-	_, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
+	_, _, _, err := c.downloadBinaryForUpgrade(context.Background(), srv.URL+"/binary", tmpPath)
 	require.NoError(t, err, "download must succeed for permissions test")
 
 	// Check directory permission.
@@ -411,10 +422,37 @@ func TestHandlePushStewardBinary_TempFilePermissions(t *testing.T) {
 
 	// Confirm the swap function received the binary path (integration check).
 	// We simulate the handler's launcher call here.
-	err = c.execLauncherSwap(context.Background(), "/fake/launcher", "v2.0.0", tmpPath)
+	err = c.execLauncherSwap(context.Background(), "/fake/launcher", "v2.0.0", tmpPath, false)
 	require.NoError(t, err)
 	assert.Equal(t, tmpPath, capturedBinPath,
 		"launcher swap must receive the downloaded binary path")
+}
+
+func TestExecLauncherSwapPropagatesDowngradeAuthorization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell argument-capture fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "args")
+	launcher := filepath.Join(dir, "launcher")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", capture)
+	require.NoError(t, os.WriteFile(launcher, []byte(script), 0o755))
+
+	c := &TransportClient{}
+	binaryPath := filepath.Join(dir, "candidate")
+	require.NoError(t, c.execLauncherSwap(
+		context.Background(), launcher, "v1.2.3", binaryPath, true,
+	))
+	got, err := os.ReadFile(capture)
+	require.NoError(t, err)
+	assert.Equal(t, "swap\n--allow-downgrade\nv1.2.3\n"+binaryPath+"\n", string(got))
+
+	require.NoError(t, c.execLauncherSwap(
+		context.Background(), launcher, "v2.0.0", binaryPath, false,
+	))
+	got, err = os.ReadFile(capture)
+	require.NoError(t, err)
+	assert.Equal(t, "swap\nv2.0.0\n"+binaryPath+"\n", string(got))
 }
 
 // TestHandlePushStewardBinary_RejectsNonHTTPS verifies that a download_url
@@ -423,7 +461,7 @@ func TestHandlePushStewardBinary_RejectsNonHTTPS(t *testing.T) {
 	content := []byte("test content")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v2.0.0")
 
 	certStoreDir := t.TempDir()
 	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
@@ -496,17 +534,52 @@ func TestVerifyBinarySignature_ValidKey(t *testing.T) {
 	sha256Hex := computeSHA256(content)
 
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v2.0.0")
 
 	certStoreDir := t.TempDir()
 	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
 
 	params := &pushStewardBinaryParams{
+		Version:         "v2.0.0",
+		Platform:        runtime.GOOS,
+		Arch:            runtime.GOARCH,
 		Publisher:       "cfgms",
 		BundleSignature: sig,
 	}
 	err := c.verifyBinarySignature(sha256Hex, params)
 	require.NoError(t, err, "valid signature must pass verification")
+}
+
+// TestVerifyBinarySignature_RejectsVersionBindingMismatch proves the steward rejects a
+// binary that carries a genuine publisher signature issued for DIFFERENT release
+// coordinates. This is the rollback defense (Issue #2834): without it, a compromised
+// controller could serve a legitimately signed older binary at a newer version's
+// coordinates and bypass the downgrade guard, since the version is controller-attested
+// rather than signed.
+func TestVerifyBinarySignature_RejectsVersionBindingMismatch(t *testing.T) {
+	content := []byte("valid binary content")
+	sha256Hex := computeSHA256(content)
+
+	ts, sign := testPublisher(t, "cfgms")
+	// Authentic signature, but minted for v1.0.0 on this platform.
+	sig := sign(sha256Hex, "v1.0.0")
+
+	certStoreDir := t.TempDir()
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+
+	cases := map[string]*pushStewardBinaryParams{
+		"version substituted":  {Version: "v2.0.0", Platform: runtime.GOOS, Arch: runtime.GOARCH},
+		"platform substituted": {Version: "v1.0.0", Platform: "plan9", Arch: runtime.GOARCH},
+		"arch substituted":     {Version: "v1.0.0", Platform: runtime.GOOS, Arch: "riscv64"},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			params.Publisher = "cfgms"
+			params.BundleSignature = sig
+			err := c.verifyBinarySignature(sha256Hex, params)
+			require.Error(t, err, "signature bound to different coordinates must be rejected")
+		})
+	}
 }
 
 // TestIsNewerVersion exercises the version comparison helper.
@@ -594,7 +667,7 @@ func TestUpgradeEventsEmitted(t *testing.T) {
 	sha256Hex := computeSHA256(content)
 
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.0.0")
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -664,8 +737,10 @@ func TestHandlePushStewardBinary_HappyPath(t *testing.T) {
 	content := []byte("a valid steward binary for the happy path test")
 	sha256Hex := computeSHA256(content)
 
+	const upgradeVer = "v99.1.0"
+
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, upgradeVer)
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -706,7 +781,6 @@ func TestHandlePushStewardBinary_HappyPath(t *testing.T) {
 	c.offlineQueue = queue
 	c.mu.Unlock()
 
-	const upgradeVer = "v99.1.0"
 	cmd := &cpTypes.Command{
 		ID:        "cmd-happy-path",
 		Type:      cpTypes.CommandPushStewardBinary,
@@ -786,7 +860,7 @@ func TestHandlePushStewardBinary_SuccessSchedulesGracefulShutdown(t *testing.T) 
 	content := []byte("a valid steward binary that auto-applies")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.2.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -834,7 +908,7 @@ func TestHandlePushStewardBinary_FailedSwapDoesNotScheduleShutdown(t *testing.T)
 	content := []byte("binary whose swap fails")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.3.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -874,7 +948,7 @@ func TestHandlePushStewardBinary_NilShutdownFuncIsSafe(t *testing.T) {
 	content := []byte("binary with no shutdown wired")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.4.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -897,6 +971,66 @@ func TestHandlePushStewardBinary_NilShutdownFuncIsSafe(t *testing.T) {
 	assert.False(t, scheduled, "with no shutdownFunc wired, nothing should be scheduled")
 }
 
+// TestHandlePushStewardBinary_DeferredSelfExitFiresWhenTriggerWired verifies the
+// #2602 race fix: a launcher-managed swap staged while shutdownFunc is still nil
+// — i.e. the pushed upgrade arrived in the window between command subscription
+// (Connect → SubscribeCommands) and the SetShutdownFunc wiring in main.go —
+// records a PENDING self-exit, and SetShutdownFunc fires the graceful shutdown as
+// soon as the trigger is wired. Without this, the staged (possibly broken) binary
+// would silently defer to an unbounded "next restart" and the launcher's
+// startup-window auto-rollback would never fire.
+func TestHandlePushStewardBinary_DeferredSelfExitFiresWhenTriggerWired(t *testing.T) {
+	content := []byte("binary staged before shutdown trigger wired")
+	sha256Hex := computeSHA256(content)
+	ts, sign := testPublisher(t, "cfgms")
+	sig := sign(sha256Hex, "v99.5.0")
+	srv := newUpgradeTestServer(t, content)
+
+	certStoreDir := t.TempDir()
+	fakeLauncher := filepath.Join(certStoreDir, "fake-launcher")
+	require.NoError(t, os.WriteFile(fakeLauncher, []byte("fake"), 0o755))
+
+	var (
+		shutdownCalled  bool
+		capturedTrigger func()
+	)
+	c := minimalClientForUpgradeTest(t, certStoreDir, "127.0.0.1", ts, noopSwap)
+	c.mu.Lock()
+	c.transportAddress = "127.0.0.1:4433"
+	c.upgradeAllowDowngrade = true
+	c.upgradeHTTPClient = srv.Client()
+	c.launcherPathOverride = fakeLauncher
+	c.shutdownFunc = nil // trigger not wired yet — the race window
+	c.upgradeShutdownGraceDelay = 250 * time.Millisecond
+	c.shutdownScheduleFunc = func(_ time.Duration, trigger func()) { capturedTrigger = trigger }
+	c.mu.Unlock()
+
+	// Stage the upgrade while shutdownFunc is nil.
+	cmd := upgradeTestCmd("cmd-deferred", "v99.5.0", srv.URL+"/", sha256Hex, sig)
+	require.NoError(t, c.handlePushStewardBinary(context.Background(), cmd))
+
+	// Nothing is scheduled yet, but the intent to self-exit is recorded.
+	assert.Nil(t, capturedTrigger, "self-exit must not be scheduled while the trigger is unwired")
+	c.mu.RLock()
+	pending := c.pendingUpgradeSelfExit
+	c.mu.RUnlock()
+	assert.True(t, pending, "a launcher-managed swap staged with no shutdownFunc must record a pending self-exit")
+
+	// Wire the trigger — this must fire the deferred self-exit.
+	c.SetShutdownFunc(context.Background(), func() { shutdownCalled = true })
+
+	require.NotNil(t, capturedTrigger, "SetShutdownFunc must schedule the deferred self-exit")
+	c.mu.RLock()
+	pendingAfter := c.pendingUpgradeSelfExit
+	c.mu.RUnlock()
+	assert.False(t, pendingAfter, "pending flag must be cleared once the deferred self-exit is fired")
+
+	// Firing the scheduled trigger (as the real grace-delay timer would) invokes
+	// the now-wired shutdown func, ending the process so the launcher re-execs.
+	capturedTrigger()
+	assert.True(t, shutdownCalled, "deferred trigger must invoke the wired shutdown func")
+}
+
 // TestHandlePushStewardBinary_LauncherManagedGatesSelfExit verifies the #2003
 // gate: after a SUCCESSFUL launcher swap, the steward schedules its graceful
 // self-exit ONLY when launcher-managed. A bare/standalone steward stages the
@@ -916,7 +1050,7 @@ func TestHandlePushStewardBinary_LauncherManagedGatesSelfExit(t *testing.T) {
 			content := []byte("launcher-managed gate steward binary " + tc.name)
 			sha256Hex := computeSHA256(content)
 			ts, sign := testPublisher(t, "cfgms")
-			sig := sign(sha256Hex)
+			sig := sign(sha256Hex, "v99.9.0")
 			srv := newUpgradeTestServer(t, content)
 
 			certStoreDir := t.TempDir()
@@ -987,7 +1121,7 @@ func TestPushStewardBinary_CompletionAckBeforeShutdown(t *testing.T) {
 	content := []byte("ordering test steward binary")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.5.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -1064,7 +1198,7 @@ func TestPushStewardBinary_DefaultTimerInvokesShutdown(t *testing.T) {
 	content := []byte("default timer path steward binary")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.6.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -1104,7 +1238,7 @@ func TestPushStewardBinary_DefaultTimerExitsOnContextCancel(t *testing.T) {
 	content := []byte("ctx cancel path steward binary")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.7.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()
@@ -1166,7 +1300,7 @@ func TestPushStewardBinary_FiresWhenCommandCtxCancelledImmediately(t *testing.T)
 	content := []byte("regression 2003 steward binary")
 	sha256Hex := computeSHA256(content)
 	ts, sign := testPublisher(t, "cfgms")
-	sig := sign(sha256Hex)
+	sig := sign(sha256Hex, "v99.8.0")
 	srv := newUpgradeTestServer(t, content)
 
 	certStoreDir := t.TempDir()

@@ -6,9 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"sync"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,60 +27,83 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
-	cpInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	cpmemory "github.com/cfgis/cfgms/pkg/controlplane/providers/memory"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
 )
 
-// testControlPlane is a minimal in-process ControlPlaneProvider for server-wiring tests.
-// sendCommandCh receives a struct{} each time SendCommand is called, allowing tests to
-// observe fanout delivery without requiring a real gRPC connection.
-type testControlPlane struct {
-	sendCommandCh chan struct{}
+// controlPlaneFixture wires a real in-process control plane for server-wiring tests:
+// a cpmemory.Provider in server mode (handed to the command publisher) plus one
+// client-mode provider per steward, connected over a shared bus. Commands travel
+// the same routing path a gRPC steward would take — server-side addressing,
+// per-steward delivery, connection state — so a delivery observed here proves the
+// command actually reached that steward rather than merely being handed to a fake.
+type controlPlaneFixture struct {
+	server *cpmemory.Provider
+
+	// delivered receives the steward ID of every steward that received a command.
+	delivered chan string
 }
 
-var _ cpInterfaces.ControlPlaneProvider = (*testControlPlane)(nil)
+// newControlPlaneFixture starts a server-mode provider and a connected client for
+// each steward ID, each recording received commands on the returned fixture.
+func newControlPlaneFixture(t *testing.T, stewardIDs ...string) *controlPlaneFixture {
+	t.Helper()
+	ctx := context.Background()
 
-func (p *testControlPlane) Name() string                                                 { return "test" }
-func (p *testControlPlane) IsConnected() bool                                            { return true }
-func (p *testControlPlane) Initialize(_ context.Context, _ map[string]interface{}) error { return nil }
-func (p *testControlPlane) Start(_ context.Context) error                                { return nil }
-func (p *testControlPlane) Stop(_ context.Context) error                                 { return nil }
-func (p *testControlPlane) Reconnect(_ context.Context) error                            { return nil }
-func (p *testControlPlane) SendCommand(_ context.Context, _ *cpTypes.SignedCommand) error {
-	select {
-	case p.sendCommandCh <- struct{}{}:
-	default:
+	bus := cpmemory.NewBus()
+	server := cpmemory.New(cpmemory.ModeServer)
+	require.NoError(t, server.Initialize(ctx, map[string]interface{}{"bus": bus}))
+	require.NoError(t, server.Start(ctx))
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, server.Stop(stopCtx))
+	})
+
+	fx := &controlPlaneFixture{
+		server:    server,
+		delivered: make(chan string, len(stewardIDs)+1),
 	}
-	return nil
-}
-func (p *testControlPlane) FanOutCommand(_ context.Context, _ *cpTypes.SignedCommand, ids []string) (*cpTypes.FanOutResult, error) {
-	return &cpTypes.FanOutResult{Succeeded: ids, Failed: map[string]error{}}, nil
-}
-func (p *testControlPlane) SubscribeCommands(_ context.Context, _ string, _ cpInterfaces.CommandHandler) error {
-	return nil
-}
-func (p *testControlPlane) PublishEvent(_ context.Context, _ *cpTypes.Event) error { return nil }
-func (p *testControlPlane) SubscribeEvents(_ context.Context, _ *cpTypes.EventFilter, _ cpInterfaces.EventHandler) error {
-	return nil
-}
-func (p *testControlPlane) SendHeartbeat(_ context.Context, _ *cpTypes.Heartbeat) error { return nil }
-func (p *testControlPlane) SubscribeHeartbeats(_ context.Context, _ cpInterfaces.HeartbeatHandler) error {
-	return nil
-}
-func (p *testControlPlane) GetStats(_ context.Context) (*cpTypes.ControlPlaneStats, error) {
-	return &cpTypes.ControlPlaneStats{}, nil
+
+	for _, id := range stewardIDs {
+		id := id
+		client := cpmemory.New(cpmemory.ModeClient)
+		require.NoError(t, client.Initialize(ctx, map[string]interface{}{
+			"bus":        bus,
+			"steward_id": id,
+		}))
+		require.NoError(t, client.Start(ctx))
+		require.NoError(t, client.SubscribeCommands(ctx, id, func(_ context.Context, _ *cpTypes.SignedCommand) error {
+			select {
+			case fx.delivered <- id:
+			default:
+			}
+			return nil
+		}))
+		t.Cleanup(func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, client.Stop(stopCtx))
+		})
+	}
+
+	return fx
 }
 
 func setupTestServer(t *testing.T) *Server {
 	// Isolate secrets storage per test. initializeSecretStore() defaults to a
 	// shared os.TempDir() path, which causes file-lock contention on Windows CI.
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	// Create test configuration
 	cfg := config.DefaultConfig()
+	cfg.ExternalURL = "https://localhost:8080"   // Required; DefaultConfig leaves this empty
 	cfg.Certificate.EnableCertManagement = false // Disable for testing
 
 	// Create test logger
@@ -131,6 +159,91 @@ func setupTestServer(t *testing.T) *Server {
 		nil,      // No command publisher for basic tests
 		nil,      // No push store for basic tests
 		nil,      // No blob store for basic tests
+		nil,      // Issue #4208: health alert manager
+		nil,      // Issue #4208: health trace manager
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Close(closeCtx); err != nil {
+			t.Errorf("server.Close: %v", err)
+		}
+	})
+
+	return server
+}
+
+// setupRouteTestServer creates a lightweight test server for route-walking and
+// route-dispatch tests that do not exercise permission checks.
+//
+// It deliberately skips rbacManager.Initialize() — loading the 32 default
+// permissions plus default roles into SQLite adds latency that is irrelevant
+// for tests that only verify routing. Under -race on a 2-vCPU CI runner those
+// SQLite writes are the bottleneck (same wall that Issue #2591 documented for
+// argon2id). Route tests require only that:
+//
+//	a) routes are registered (happens in setupRouter(), not Initialize), and
+//	b) requirePermission returns 401 for unauthenticated requests, which it
+//	   does as long as s.rbacService != nil — no permissions need to be loaded.
+func setupRouteTestServer(t *testing.T) *Server {
+	t.Helper()
+	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
+
+	cfg := config.DefaultConfig()
+	cfg.Certificate.EnableCertManagement = false
+	logger := logging.NewNoopLogger()
+
+	storageManager := pkgtesting.SetupTestStorage(t)
+
+	rbacManager := rbac.NewManagerWithStorage(
+		storageManager.GetAuditStore(),
+		storageManager.GetClientTenantStore(),
+		storageManager.GetRBACStore(),
+	)
+	// Do NOT call rbacManager.Initialize() here — route tests don't need
+	// default permissions loaded; they only need a non-nil rbacManager so
+	// requirePermission short-circuits with 401 (no principal in context).
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = rbacManager.Close(closeCtx)
+	})
+
+	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
+	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+
+	controllerService := service.NewControllerService(logger)
+	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
+	rbacService := service.NewRBACService(rbacManager)
+
+	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "controller")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
+
+	server, err := New(
+		cfg,
+		logger,
+		controllerService,
+		configService,
+		nil, // No cert provisioning for route tests
+		rbacService,
+		nil, // No cert manager for route tests
+		tenantManager,
+		rbacManager,
+		nil, // No system monitor
+		nil, // No HA manager
+		nil, // No registration token store
+		"",  // No signer cert serial
+		nil, // No health collector
+		auditMgr,
+		nil, // No command publisher
+		nil, // No push store
+		nil, // No blob store
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -302,10 +415,7 @@ func TestListStewards(t *testing.T) {
 func TestAPIKeyManagement(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral key for API key management (more secure for testing)
-	adminAPIKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list"})
-
-	// Test creating a new API key
+	// POST /api/v1/api-keys is Tier-3 (mTLS-only): use admin cert.
 	createReq := APIKeyCreateRequest{
 		Name:        "Test Key",
 		Permissions: []string{"steward:read"},
@@ -315,8 +425,7 @@ func TestAPIKeyManagement(t *testing.T) {
 	reqBody, err := json.Marshal(createReq)
 	require.NoError(t, err)
 
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -335,9 +444,10 @@ func TestAPIKeyManagement(t *testing.T) {
 	assert.Contains(t, keyData, "key") // Should include the actual key on creation
 	assert.Contains(t, keyData, "id")
 
-	// Test listing API keys
+	// Test listing API keys (GET /api/v1/api-keys is Tier-1)
+	listKey := NewTestKey(t, server, []string{"api-key:list"})
 	req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-	req.Header.Set("X-API-Key", adminAPIKey)
+	req.Header.Set("X-API-Key", listKey)
 	rec = httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
@@ -439,13 +549,8 @@ func TestConfigurationValidation(t *testing.T) {
 func TestErrorResponses(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Use ephemeral keys for error response testing (more secure)
-	apiKeyCreateKey := NewTestKey(t, server, []string{"api-key:create"})
-	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
-
-	// Test invalid JSON
-	req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
-	req.Header.Set("X-API-Key", apiKeyCreateKey)
+	// Test invalid JSON on POST /api/v1/api-keys (Tier-3: use admin cert to reach the handler).
+	req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader([]byte("invalid json")))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -458,7 +563,8 @@ func TestErrorResponses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "INVALID_JSON", errorResponse.Error.Code)
 
-	// Test not found
+	// Test not found on a Tier-1 endpoint (API key sufficient).
+	stewardReadKey := NewTestKey(t, server, []string{"steward:read"})
 	req = httptest.NewRequest("GET", "/api/v1/stewards/nonexistent", nil)
 	req.Header.Set("X-API-Key", stewardReadKey)
 	rec = httptest.NewRecorder()
@@ -478,6 +584,7 @@ func TestPermissionDenial(t *testing.T) {
 		method         string
 		permissions    []string
 		expectedStatus int
+		expectedCode   string
 		body           []byte
 	}{
 		{
@@ -486,13 +593,17 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "GET",
 			permissions:    []string{"api-key:read"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 		},
 		{
-			name:           "Insufficient permissions for API key creation",
+			// POST /api/v1/api-keys requires AssuranceStrong: API keys get INSUFFICIENT_PERMISSIONS
+			// because they are Machine-assurance (Issue #2780 replaces MTLS_REQUIRED gate).
+			name:           "API key cannot access strong-assurance endpoint (api-key creation)",
 			endpoint:       "/api/v1/api-keys",
 			method:         "POST",
-			permissions:    []string{"steward:list"}, // Wrong permission
+			permissions:    []string{"steward:list"},
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 			body:           []byte(`{"name":"Test","permissions":["test"],"tenant_id":"test"}`),
 		},
 		{
@@ -501,13 +612,13 @@ func TestPermissionDenial(t *testing.T) {
 			method:         "POST",
 			permissions:    []string{"steward:list"}, // Wrong permission
 			expectedStatus: http.StatusForbidden,
+			expectedCode:   "INSUFFICIENT_PERMISSIONS",
 			body:           []byte(`{"config":{},"version":"1.0.0"}`),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create key with insufficient permissions
 			insufficientKey := NewTestKey(t, server, tt.permissions)
 
 			var req *http.Request
@@ -528,7 +639,7 @@ func TestPermissionDenial(t *testing.T) {
 				var errorResponse ErrorResponse
 				err := json.Unmarshal(rec.Body.Bytes(), &errorResponse)
 				require.NoError(t, err)
-				assert.Contains(t, errorResponse.Error.Code, "INSUFFICIENT_PERMISSIONS")
+				assert.Equal(t, tt.expectedCode, errorResponse.Error.Code)
 			}
 		})
 	}
@@ -539,10 +650,14 @@ func TestActualAPIFunctionality(t *testing.T) {
 	server := setupTestServer(t)
 
 	t.Run("API Key CRUD operations work with proper permissions", func(t *testing.T) {
-		// Use proper admin permissions for full API key management
-		adminKey := NewTestKey(t, server, []string{"api-key:create", "api-key:list", "api-key:read", "api-key:delete"})
+		// POST/DELETE /api/v1/api-keys are Tier-3 (mTLS-only): use admin cert.
+		// GET /api/v1/api-keys and GET /api/v1/api-keys/{id} are Tier-1: API key suffices.
+		// Issue #4334: handleGetAPIKey now enforces tenant containment, so the reader
+		// key must share the created key's tenant — a cross-tenant read is exactly the
+		// gap this story closes and must return 404, not the key's details.
+		listReadKey := NewEphemeralTestKey(t, server, []string{"api-key:list", "api-key:read"}, "func-test-tenant", 5*time.Minute)
 
-		// 1. Create a new API key
+		// 1. Create a new API key (Tier-3: admin cert required).
 		createReq := APIKeyCreateRequest{
 			Name:        "Functional Test Key",
 			Permissions: []string{"steward:list"},
@@ -552,14 +667,13 @@ func TestActualAPIFunctionality(t *testing.T) {
 		reqBody, err := json.Marshal(createReq)
 		require.NoError(t, err)
 
-		req := httptest.NewRequest("POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
-		req.Header.Set("X-API-Key", adminKey)
+		req := makeAdminRequest(t, "POST", "/api/v1/api-keys", bytes.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with proper permissions")
+		assert.Equal(t, http.StatusCreated, rec.Code, "API key creation should succeed with admin cert")
 
 		var createResponse APIResponse
 		err = json.Unmarshal(rec.Body.Bytes(), &createResponse)
@@ -570,7 +684,7 @@ func TestActualAPIFunctionality(t *testing.T) {
 		createdKeyID := keyData["id"].(string)
 		actualKey := keyData["key"].(string)
 
-		// 2. Verify the created key actually works for its intended purpose
+		// 2. Verify the created key actually works for its intended purpose.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()
@@ -578,9 +692,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		server.router.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code, "New API key should work for steward:list")
 
-		// 3. List API keys should include the created key
+		// 3. List API keys should include the created key (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys", nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -594,9 +708,9 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.GreaterOrEqual(t, len(keys), 1, "Should have at least one key")
 
-		// 4. Get specific API key by ID
+		// 4. Get specific API key by ID (Tier-1).
 		req = httptest.NewRequest("GET", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		req.Header.Set("X-API-Key", listReadKey)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
@@ -610,16 +724,15 @@ func TestActualAPIFunctionality(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "Functional Test Key", keyDetails["name"])
 
-		// 5. Delete the API key
-		req = httptest.NewRequest("DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
-		req.Header.Set("X-API-Key", adminKey)
+		// 5. Delete the API key (Tier-3: admin cert required).
+		req = makeAdminRequest(t, "DELETE", "/api/v1/api-keys/"+createdKeyID, nil)
 		rec = httptest.NewRecorder()
 
 		server.router.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work")
+		assert.Equal(t, http.StatusOK, rec.Code, "API key deletion should work with admin cert")
 
-		// 6. Verify deleted key no longer works
+		// 6. Verify deleted key no longer works.
 		req = httptest.NewRequest("GET", "/api/v1/stewards", nil)
 		req.Header.Set("X-API-Key", actualKey)
 		rec = httptest.NewRecorder()
@@ -857,42 +970,13 @@ func TestEphemeralAPIKeys(t *testing.T) {
 	})
 }
 
-// capturingWarnLogger records Warn-level messages so tests can assert on security-relevant log output.
-type capturingWarnLogger struct {
-	logging.NoopLogger
-	mu      sync.Mutex
-	entries []string
-}
-
-func (l *capturingWarnLogger) Warn(msg string, _ ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = append(l.entries, msg)
-}
-
-func (l *capturingWarnLogger) WarnCtx(_ context.Context, msg string, kvs ...interface{}) {
-	l.Warn(msg, kvs...)
-}
-
-func (l *capturingWarnLogger) reset() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.entries = nil
-}
-
-func (l *capturingWarnLogger) warnMessages() []string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]string, len(l.entries))
-	copy(out, l.entries)
-	return out
-}
-
 // setupTestServerWithLogger creates a test server using the provided logger.
 // Use this when you need to capture log output for assertions.
 func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	// Isolate secrets storage per test (same reason as setupTestServer).
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
+
+	withDefaultEmbeddedSPA(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -930,6 +1014,8 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 		nil, // No command publisher for basic tests
 		nil, // No push store for basic tests
 		nil, // No blob store for basic tests
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -943,8 +1029,9 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 	return server
 }
 
-// TestTestEndpointAuthGate tests the CFGMS_ENABLE_TEST_ENDPOINTS env var gating
-// in authenticationMiddleware (middleware.go:114-134).
+// TestTestEndpointAuthGate verifies that runtime environment variables cannot
+// re-enable an authentication bypass in a production build. Test-only routes
+// are compile-time isolated behind the cfgms_test_endpoints build tag.
 func TestTestEndpointAuthGate(t *testing.T) {
 	t.Run("default behavior enforces auth when env var is unset", func(t *testing.T) {
 		server := setupTestServer(t)
@@ -973,9 +1060,27 @@ func TestTestEndpointAuthGate(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for QUIC endpoint when env var is unset")
 		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for status endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
+
+		// GET /api/v1/test/audit/count — Issue #2098: env var unset → auth required
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Should require auth for audit count endpoint when env var is unset")
+		assert.False(t, handlerCalled, "Handler should not be called without authentication")
 	})
 
-	t.Run("bypass works when CFGMS_ENABLE_TEST_ENDPOINTS is true", func(t *testing.T) {
+	t.Run("environment variable cannot enable bypass", func(t *testing.T) {
 		server := setupTestServer(t)
 
 		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
@@ -987,13 +1092,13 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		})
 		wrappedHandler := server.authenticationMiddleware(testHandler)
 
-		// PUT /api/v1/test/stewards/{id}/config — should bypass auth
+		// Test-looking paths still traverse ordinary authentication middleware.
 		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/config", nil)
 		rec := httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth when env var is set")
-		assert.True(t, handlerCalled, "Handler should be called (auth bypassed)")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 
 		// POST /api/v1/test/stewards/{id}/quic/connect — should bypass auth
 		handlerCalled = false
@@ -1001,44 +1106,26 @@ func TestTestEndpointAuthGate(t *testing.T) {
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code, "Should bypass auth for QUIC test endpoint")
-		assert.True(t, handlerCalled, "Handler should be called for QUIC test endpoint (auth bypassed)")
-	})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 
-	t.Run("warn log emitted on bypass", func(t *testing.T) {
-		capLogger := &capturingWarnLogger{}
-		server := setupTestServerWithLogger(t, capLogger)
-
-		t.Setenv("CFGMS_ENABLE_TEST_ENDPOINTS", "true")
-
-		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		wrappedHandler := server.authenticationMiddleware(testHandler)
-
-		// Clear any startup log messages before testing
-		capLogger.reset()
-
-		// Trigger bypass for config endpoint
-		req := httptest.NewRequest("PUT", "/api/v1/test/stewards/steward-abc/config", nil)
-		rec := httptest.NewRecorder()
-		wrappedHandler.ServeHTTP(rec, req)
-
-		assert.Equal(t, http.StatusOK, rec.Code)
-		warnMsgs := capLogger.warnMessages()
-		require.NotEmpty(t, warnMsgs, "Should emit warn log on auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
-
-		// Trigger bypass for QUIC endpoint
-		capLogger.reset()
-		req = httptest.NewRequest("POST", "/api/v1/test/stewards/steward-abc/quic/connect", nil)
+		// PUT /api/v1/test/stewards/{id}/status — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("PUT", "/api/v1/test/stewards/test-steward-1/status", nil)
 		rec = httptest.NewRecorder()
 		wrappedHandler.ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusOK, rec.Code)
-		warnMsgs = capLogger.warnMessages()
-		require.NotEmpty(t, warnMsgs, "Should emit warn log on QUIC auth bypass")
-		assert.Equal(t, "Test endpoint accessed with authentication bypass", warnMsgs[0])
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
+
+		// GET /api/v1/test/audit/count — Issue #2098: should bypass auth
+		handlerCalled = false
+		req = httptest.NewRequest("GET", "/api/v1/test/audit/count", nil)
+		rec = httptest.NewRecorder()
+		wrappedHandler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "Environment variable must not bypass auth")
+		assert.False(t, handlerCalled, "Handler must not be called without authentication")
 	})
 
 	t.Run("non-test endpoints still require auth when env var is set", func(t *testing.T) {
@@ -1141,9 +1228,16 @@ func TestTenantContextPropagation(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/api/v1/stewards/test-steward-1/config", bytes.NewReader(configBody))
 	req.Header.Set("X-API-Key", configWriteKey)
 	req.Header.Set("Content-Type", "application/json")
+	req = withVars(req, map[string]string{"id": "test-steward-1"})
 	rec := httptest.NewRecorder()
 
-	server.router.ServeHTTP(rec, req)
+	// Exercise authenticationMiddleware directly (not the full router) so this
+	// regression test stays focused on context propagation. Issue #3792 gates
+	// steward:write-config at AssuranceStrong via requirePermission, which an
+	// API-key principal (AssuranceMachine) can never satisfy — routing through
+	// the full router would 403 here for an unrelated reason.
+	handler := server.authenticationMiddleware(http.HandlerFunc(server.handleUpdateStewardConfig))
+	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, "Config write should succeed; body: %s", rec.Body.String())
 
@@ -1167,10 +1261,13 @@ func TestTenantContextPropagation(t *testing.T) {
 // (Issue #778): after removing the duplicate api.New() from controller.go, server.Server
 // is the sole owner of the api.Server instance and its Start/Stop lifecycle.
 func TestAPIServerStartStop(t *testing.T) {
-	// Use an ephemeral HTTP port so the test never conflicts with other tests or processes.
+	// Use an ephemeral HTTPS port so the test never conflicts with other tests or processes.
 	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
 
 	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = reservePrivateMetricsAddress(t)
+	server.cfg.Certificate.EnableCertManagement = true
+	server.certManager = newTLSTestCertManager(t)
 
 	err := server.Start()
 	require.NoError(t, err, "api.Server.Start() must return no error")
@@ -1179,6 +1276,104 @@ func TestAPIServerStartStop(t *testing.T) {
 	// cleanly even if ListenAndServe hasn't bound yet — no sleep required.
 	err = server.Stop()
 	assert.NoError(t, err, "api.Server.Stop() must return no error")
+}
+
+// reservePrivateMetricsAddress returns a loopback host:port that the caller can
+// hand to Server.Start. ValidatePrivateListenerAddress rejects port 0 ("a fixed
+// numeric port from 1 to 65535 is required"), so a test that needs a private
+// listener has to name a concrete port up front, which leaves the port unheld
+// between reservation and Start's bind.
+//
+// The candidate is drawn from BELOW the kernel's ephemeral range rather than
+// from inside it (net.Listen on ":0"). A port inside that range is also what the
+// kernel hands to every other listener and outbound connection on the host, so
+// with a package-parallel test run that window is routinely lost to an unrelated
+// connection — observed as "bind private Raft listener: listen tcp
+// 127.0.0.1:37571: bind: address already in use" with ip_local_port_range at
+// 32768-60999. Below the range, only something asking for that port by number
+// can take it, so the sole competitor is another caller of this helper — which
+// bind-probes first and holds a candidate for microseconds.
+func reservePrivateMetricsAddress(t *testing.T) string {
+	t.Helper()
+	low, high := nonEphemeralPortWindow()
+	for attempt := 0; attempt < 100; attempt++ {
+		port := low + rand.IntN(high-low+1)
+		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			continue // in use by another process — try another port
+		}
+		require.NoError(t, listener.Close())
+		return address
+	}
+	t.Fatalf("no free loopback port in %d-%d after 100 attempts", low, high)
+	return ""
+}
+
+// nonEphemeralPortWindow returns the inclusive port range reservePrivateMetricsAddress
+// draws from: high enough to avoid privileged and well-known ports, and entirely
+// below the lowest port the kernel will allocate on its own. On Linux the
+// ephemeral floor is read from /proc; if that is unavailable the default floor of
+// 32768 applies, which is at or below the floor used by Linux, macOS and Windows.
+func nonEphemeralPortWindow() (low, high int) {
+	high = 32767
+	if data, err := os.ReadFile("/proc/sys/net/ipv4/ip_local_port_range"); err == nil {
+		if fields := strings.Fields(string(data)); len(fields) == 2 {
+			if floor, convErr := strconv.Atoi(fields[0]); convErr == nil && floor > 20001 && floor-1 < high {
+				high = floor - 1
+			}
+		}
+	}
+	return 20000, high
+}
+
+func TestAPIServerStart_FailsClosedWithoutPrivateMetricsListener(t *testing.T) {
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = ""
+
+	err := server.Start()
+
+	require.ErrorContains(t, err, "invalid private metrics listener")
+	assert.Nil(t, server.httpServer, "public API must not bind when private metrics configuration is missing")
+	assert.Nil(t, server.metricsHTTPServer, "metrics server must not bind with missing configuration")
+}
+
+func TestAPIServerStart_RejectsUnsafePrivateMetricsListener(t *testing.T) {
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "0.0.0.0:9090"
+
+	err := server.Start()
+
+	require.ErrorContains(t, err, "invalid private metrics listener")
+	assert.Nil(t, server.httpServer, "public API must not bind when metrics configuration is unsafe")
+	assert.Nil(t, server.metricsHTTPServer, "metrics server must not bind to an unsafe address")
+}
+
+// TestAPIServerStart_FailsClosedWithoutTLS guards against the former plaintext
+// fallback: a missing certificate manager and absent legacy files must prevent
+// startup instead of calling ListenAndServe.
+func TestAPIServerStart_FailsClosedWithoutTLS(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "127.0.0.1:9090"
+	server.cfg.CertPath = t.TempDir()
+
+	err := server.Start()
+	require.ErrorContains(t, err, "refusing to start public API without valid TLS")
+	assert.Nil(t, server.httpServer, "no HTTP server may be published after TLS preflight fails")
+}
+
+func TestAPIServerStart_RejectsCertificateHostnameMismatch(t *testing.T) {
+	t.Setenv("CFGMS_HTTP_LISTEN_ADDR", "127.0.0.1:0")
+	server := setupTestServer(t)
+	server.cfg.MetricsListenAddr = "127.0.0.1:9090"
+	server.cfg.Certificate.EnableCertManagement = true
+	server.cfg.ExternalURL = "https://wrong-host.example:8080"
+	server.certManager = newTLSTestCertManager(t)
+
+	err := server.Start()
+	require.ErrorContains(t, err, "does not match external_url hostname")
+	assert.Nil(t, server.httpServer, "identity mismatch must fail before listener publication")
 }
 
 // TestServerClose_Idempotent verifies the Close contract: calling Close more than once
@@ -1241,30 +1436,31 @@ func TestTenantContextKeyType(t *testing.T) {
 	assert.Nil(t, oldVal, "old plain string 'tenant-id' must not match the typed ctxkeys.TenantID")
 }
 
-// TestServer_CertificateRevokeRouteDeregistered confirms the POST
-// /api/v1/certificates/{serial}/revoke route has been removed.
-// Must return 404 (no route) or 405 (route exists, wrong method) — NOT 501.
-func TestServer_CertificateRevokeRouteDeregistered(t *testing.T) {
+// TestServer_CertificateRevoke_RouteRegisteredAndGated confirms that POST
+// /api/v1/certificates/{serial}/revoke is registered and gated at AssuranceStrong
+// (Issue #3129). A Machine-assurance API key holding certificate:revoke receives
+// 403, not 404 — proving the route exists and the assurance gate fires correctly.
+func TestServer_CertificateRevoke_RouteRegisteredAndGated(t *testing.T) {
 	server := setupTestServer(t)
 
 	revokeKey := NewTestKey(t, server, []string{"certificate:revoke"})
 
-	req := httptest.NewRequest("POST", "/api/v1/certificates/any-serial/revoke", nil)
+	req := httptest.NewRequest("POST", "/api/v1/certificates/12345678901234567890/revoke", nil)
 	req.Header.Set("X-API-Key", revokeKey)
 	rec := httptest.NewRecorder()
 
 	server.router.ServeHTTP(rec, req)
 
-	assert.NotEqual(t, http.StatusNotImplemented, rec.Code,
-		"route must not return 501 — handler was deleted")
-	assert.True(t,
-		rec.Code == http.StatusNotFound || rec.Code == http.StatusMethodNotAllowed,
-		"deregistered revoke route must return 404 or 405, got %d", rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"AssuranceStrong-gated route must reject Machine-assurance API key with 403, not 404")
 }
 
 // TestServer_SetWorkflowHandler_PropagatesFleetQuery verifies that SetWorkflowHandler
 // propagates the server's fleet query to the workflow handler (Issue #609).
 // This exercises the integration path: server.fleetQuery → handler.fleetQuery.
+// ADR-031 Decision 3, Issue #3764: SetWorkflowHandler now propagates the single
+// cluster-safe-by-construction fleetQuery (retires the Issue #3495 clusterFleetQuery
+// split) so the workflow handler sees fleet-wide steward data.
 func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
 	server := setupTestServer(t)
 	// server.fleetQuery is always set by New() via fleet.NewMemoryQuery.
@@ -1276,7 +1472,7 @@ func TestServer_SetWorkflowHandler_PropagatesFleetQuery(t *testing.T) {
 	server.SetWorkflowHandler(handler)
 
 	assert.Equal(t, server.fleetQuery, handler.fleetQuery,
-		"SetWorkflowHandler must propagate the server fleet query to the handler")
+		"SetWorkflowHandler must propagate the fleet query to the handler")
 }
 
 // TestServer_SetWorkflowHandler_NilHandler_NoopSafe verifies that passing nil to
@@ -1333,11 +1529,11 @@ func TestServer_MonitoringStubRoutesDeregistered(t *testing.T) {
 }
 
 // setupServerWithPublisher creates a server with a real commands.Publisher backed by
-// the provided testControlPlane. Returns the server, configService, and controllerService
-// so tests can interact with them directly.
-func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
+// the fixture's in-process control plane. Returns the server, configService, and
+// controllerService so tests can interact with them directly.
+func setupServerWithPublisher(t *testing.T, fx *controlPlaneFixture) (*Server, *service.ConfigurationServiceV2, *service.ControllerService) {
 	t.Helper()
-	t.Setenv("CFGMS_SECRETS_REPO_PATH", t.TempDir())
+	setTestSecretsEnv(t)
 
 	cfg := config.DefaultConfig()
 	cfg.Certificate.EnableCertManagement = false
@@ -1367,12 +1563,14 @@ func setupServerWithPublisher(t *testing.T, cp *testControlPlane) (*Server, *ser
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = auditMgr.Stop(context.Background()) })
 
-	publisher, err := commands.New(&commands.Config{ControlPlane: cp, Logger: logger})
+	publisher, err := commands.New(&commands.Config{ControlPlane: fx.server, Logger: logger})
 	require.NoError(t, err)
 
 	server, err := New(
 		cfg, logger, controllerSvc, configSvc, nil, rbacSvc,
 		nil, tenantMgr, rbacMgr, nil, nil, nil, "", nil, auditMgr, publisher, nil, nil,
+		nil, // Issue #4208: health alert manager
+		nil, // Issue #4208: health trace manager
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -1392,8 +1590,7 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		return &stewardtypes.StewardConfig{
 			Steward: stewardtypes.StewardSettings{
 				ID:      id,
-				Mode:    stewardtypes.ModeController,
-				Logging: stewardtypes.LoggingConfig{Level: "info", Format: "text"},
+				Logging: stewardtypes.LoggingConfig{Level: "info"},
 				ErrorHandling: stewardtypes.ErrorHandlingConfig{
 					ModuleLoadFailure:  stewardtypes.ActionContinue,
 					ResourceFailure:    stewardtypes.ActionWarn,
@@ -1408,8 +1605,8 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 	}
 
 	t.Run("fanout dispatched to active steward of matching tenant", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+		fx := newControlPlaneFixture(t, "steward-1")
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		// Register an active steward in the same tenant used for SetConfiguration.
 		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
@@ -1417,18 +1614,19 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
-		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand.
+		// The goroutine inside the callback calls push.Fanout → TriggerConfigSync → SendCommand,
+		// which the connected steward receives over the in-process control plane.
 		select {
-		case <-cp.sendCommandCh:
-			// success: fanout reached the steward
+		case id := <-fx.delivered:
+			assert.Equal(t, "steward-1", id, "fanout must reach the tenant's steward")
 		case <-time.After(3 * time.Second):
 			t.Fatal("save=deploy fanout did not deliver to active steward within timeout")
 		}
 	})
 
 	t.Run("fanout skipped for steward of different tenant", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		_, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+		fx := newControlPlaneFixture(t, "steward-b")
+		_, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		// Register a steward in tenant-b; SetConfiguration is for tenant-a.
 		require.NoError(t, controllerSvc.RegisterSteward("steward-b", "tenant-b", "", "active"))
@@ -1436,37 +1634,52 @@ func TestNew_FanoutCallbackWired(t *testing.T) {
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
-		// No steward in tenant-a → fanout sends to nobody → SendCommand never called.
+		// No steward in tenant-a → fanout targets nobody → the connected tenant-b
+		// steward must receive nothing.
 		select {
-		case <-cp.sendCommandCh:
-			t.Fatal("cross-tenant fanout must not occur: SendCommand was called for a different tenant's steward")
+		case id := <-fx.delivered:
+			t.Fatalf("cross-tenant fanout must not occur: steward %s received a command", id)
 		case <-time.After(200 * time.Millisecond):
 			// success: no cross-tenant fanout
 		}
 	})
 
-	t.Run("leader check: follower skips fanout", func(t *testing.T) {
-		cp := &testControlPlane{sendCommandCh: make(chan struct{}, 1)}
-		server, configSvc, controllerSvc := setupServerWithPublisher(t, cp)
+	// [REQUIRED TEST] Issue #3761, ADR-031 Decision 1: the save=deploy fanout callback
+	// registered in New() used to return early when the node held no lease-backed
+	// leadership (the former server.go-level HasLeadership() gate), silently dropping the
+	// distribution of a config the node had just accepted and persisted. Any-node service
+	// means every cluster node fans out the writes it serves — only the node that received
+	// this specific SetConfiguration invokes its own callback instance, so there is no
+	// duplicate fan-out to suppress. Exercised against a real, deliberately
+	// non-authoritative *ha.Manager (ClusterMode, no lease ever acquired).
+	t.Run("non-authoritative node still performs fanout", func(t *testing.T) {
+		fx := newControlPlaneFixture(t, "steward-1")
+		server, configSvc, controllerSvc := setupServerWithPublisher(t, fx)
 
 		require.NoError(t, controllerSvc.RegisterSteward("steward-1", "tenant-a", "", "active"))
 
-		// Override the leader check to report this node as a follower.
-		server.pushLeaderStatus = &stubLeaderStatus{leader: false}
+		// Real HA manager in the state a partitioned/follower controller is in:
+		// HasLeadership() reports false for the whole of this subtest.
+		haMgr := newNonAuthoritativeHAManager(t)
+		server.haManager = haMgr
+		require.False(t, haMgr.HasLeadership(),
+			"precondition: serving node must hold no lease-backed leadership")
 
 		err := configSvc.SetConfiguration(context.Background(), "tenant-a", "steward-1", minimalStewardCfg("steward-1"))
 		require.NoError(t, err)
 
 		select {
-		case <-cp.sendCommandCh:
-			t.Fatal("follower node must not perform fanout")
-		case <-time.After(200 * time.Millisecond):
-			// success: fanout suppressed on follower
+		case id := <-fx.delivered:
+			assert.Equal(t, "steward-1", id,
+				"fanout must reach the tenant's steward regardless of leadership")
+		case <-time.After(3 * time.Second):
+			t.Fatal("save=deploy fanout must fire on a non-authoritative node")
 		}
+
+		assert.False(t, haMgr.HasLeadership(),
+			"node must still hold no leadership after serving the write")
 	})
 }
-
-// stubLeaderStatus is defined in handlers_push_test.go (shared across api package tests).
 
 // TestSeedTestAPIKeys verifies the env-gated test API key seeding block in New(),
 // including the installer key path added for Issue #1709 (PR #1831).
@@ -1522,7 +1735,7 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			"installer key permissions must allow upload+read+delete on installer artifacts and steward listing for the E2E flow")
 	})
 
-	t.Run("gate on, east/central/west loop: keys seeded with default tenant and steward permissions", func(t *testing.T) {
+	t.Run("gate on, east/central/west loop: keys seeded in the HA steward tenant with steward permissions", func(t *testing.T) {
 		t.Setenv("CFGMS_SEED_TEST_API_KEYS", "1")
 		t.Setenv("CFGMS_API_KEY_EAST", "east-key")
 		t.Setenv("CFGMS_API_KEY_CENTRAL", "central-key")
@@ -1535,11 +1748,451 @@ func TestSeedTestAPIKeys(t *testing.T) {
 			keyInfo, exists := server.apiKeys[k]
 			server.mu.RUnlock()
 			require.True(t, exists, "loop key %s must be seeded", k)
-			require.Equal(t, "default", keyInfo.TenantID, "loop keys use TenantID=default")
+			require.Equal(t, "test-tenant-integration", keyInfo.TenantID,
+				"loop keys must be scoped to the tenant the HA stewards register into; "+
+					"steward lookups are tenant-scoped, so a key in any other tenant reads "+
+					"STEWARD_NOT_FOUND for a steward that registered successfully")
 			require.ElementsMatch(t,
-				[]string{"steward:read", "steward:auth-refresh", "workflow:execute", "workflow:read"},
+				[]string{
+					"steward:read", "steward:read-dna", "steward:auth-refresh",
+					"config:push",
+					"workflow:execute", "workflow:read",
+					// Read-only HA grants so test/integration/ha can observe the
+					// cluster it starts; every HA route is permission-gated.
+					"ha:read-status", "ha:read-cluster", "ha:read-leader", "ha:read-nodes",
+				},
 				keyInfo.Permissions,
 				"loop key %s must NOT have installer permissions (regression guard for Issue #1709)", k)
+			require.NotContains(t, keyInfo.Permissions, "installer:upload",
+				"loop key %s must NOT have installer permissions (Issue #1709)", k)
 		}
 	})
+}
+
+// TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials verifies that Tier-0 routes
+// registered on the base router (not the api subrouter) are reachable without any
+// authentication credentials (Issue #2224).
+func TestSetupRouter_Tier0Routes_AccessibleWithoutCredentials(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/health", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"Tier-0 route GET /api/v1/health must return 200 with no auth credentials")
+}
+
+// TestSetupRouter_Tier1Routes_RequireAuthentication verifies that Tier-1 routes on the
+// api subrouter reject unauthenticated callers with HTTP 401 (Issue #2224). The
+// requireTier(TierAny) middleware added to the api subrouter is pass-through (tier < 3),
+// so authentication is enforced by authenticationMiddleware, not requireTier — this test
+// confirms the full middleware chain rejects anonymous callers as expected.
+func TestSetupRouter_Tier1Routes_RequireAuthentication(t *testing.T) {
+	server := setupTestServer(t)
+
+	req := httptest.NewRequest("GET", "/api/v1/stewards", nil)
+	rec := httptest.NewRecorder()
+
+	server.router.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"Tier-1 route GET /api/v1/stewards must return 401 with no auth credentials")
+}
+
+// errListSecretStore wraps a real SecretStore and forces ListSecrets to return an error.
+// Used by TestStartupScan_ContinuesOnListError to exercise the error path in
+// scanAPIKeysForPrivilegedAccess without mocking unrelated store operations.
+type errListSecretStore struct {
+	secretsif.SecretStore
+	listErr error
+}
+
+func (s *errListSecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	return nil, s.listErr
+}
+
+// TestStartupScan_ContinuesOnListError verifies that scanAPIKeysForPrivilegedAccess emits
+// a Warn and returns the error when ListSecrets fails, and that the caller (New()) treats
+// this as non-fatal — confirmed by the server being fully constructed in every other test
+// whose setup calls New() with the scan wired in (Issue #2226).
+func TestStartupScan_ContinuesOnListError(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear entries from server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Replace the secret store with one whose ListSecrets always fails.
+	listErr := fmt.Errorf("simulated store failure")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	err := server.scanAPIKeysForPrivilegedAccess(context.Background())
+	assert.ErrorIs(t, err, listErr, "scan must return the ListSecrets error to the caller")
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn when ListSecrets fails")
+}
+
+// TestStartupScan_WarnsOnPrivilegedAPIKey verifies that scanAPIKeysForPrivilegedAccess
+// emits a Warn entry containing key_id and overlapping_permissions when a stored API key
+// holds at least one strong-assurance permission (Issue #2226, updated Issue #2780).
+func TestStartupScan_WarnsOnPrivilegedAPIKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction (scan ran against empty store).
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds the strong-assurance permission "api-key:create".
+	const keyID = "test-privileged-key-id"
+	const tenantID = "default"
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-privileged-test-key",
+		Value:     "hash-privileged-test-key",
+		TenantID:  tenantID,
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:read,api-key:create",
+		},
+	})
+	require.NoError(t, err, "seeding privileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn entry for a key with strong-assurance permissions")
+	assert.Equal(t, keyID, capLog.kvValue("key_id"),
+		"Warn entry must include the key_id of the over-privileged key")
+	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
+	assert.Contains(t, overlapping, "api-key:create",
+		"overlapping_permissions must name the strong-assurance permission held by the key")
+}
+
+// TestF4_StartupScan_WarnsOnClusterDrainNode is the F4 required test (Issue #2780).
+// It verifies that the startup scan fires for an API key holding "cluster:drain-node",
+// a permission added to permissionAssurance in Issue #2780 (not part of the former
+// Tier-3 set). The scan must flag it because its Min > AssuranceMachine.
+func TestF4_StartupScan_WarnsOnClusterDrainNode(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	const keyID = "test-cluster-drain-key-id"
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-cluster-drain-key",
+		Value:     "hash-cluster-drain-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:read,cluster:drain-node",
+		},
+	})
+	require.NoError(t, err, "seeding cluster:drain-node key must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"),
+		"scan must emit a Warn entry for a key holding cluster:drain-node (Min: AssuranceStrong)")
+	assert.Equal(t, keyID, capLog.kvValue("key_id"),
+		"Warn entry must include the key_id of the over-privileged key")
+	overlapping, _ := capLog.kvValue("overlapping_permissions").(string)
+	assert.Contains(t, overlapping, "cluster:drain-node",
+		"overlapping_permissions must name cluster:drain-node as the violating permission")
+}
+
+// TestStartupScan_NoWarnForUnprivilegedKey verifies that scanAPIKeysForPrivilegedAccess
+// does not emit a strong-assurance over-privilege warning when the stored API key only
+// holds non-strong-assurance permissions (Issue #2226, updated Issue #2780).
+func TestStartupScan_NoWarnForUnprivilegedKey(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear any entries accumulated during server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	// Seed a key that holds only the non-Tier-3 permission "steward:read".
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "hash-unprivileged-test-key",
+		Value:     "hash-unprivileged-test-key",
+		TenantID:  "default",
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            "test-unprivileged-key-id",
+			"permissions":                   "steward:read",
+		},
+	})
+	require.NoError(t, err, "seeding unprivileged key into secret store must succeed")
+
+	err = server.scanAPIKeysForPrivilegedAccess(context.Background())
+	require.NoError(t, err)
+
+	// No Warn entry whose overlapping_permissions field is populated — the key is clean.
+	assert.Nil(t, capLog.kvValue("overlapping_permissions"),
+		"scan must not emit an overlapping_permissions warning for a key with no Tier-3 permissions")
+}
+
+// ---- scanAccountsForStalePermissions tests (Issue #3574) ----
+//
+// The web-account rename (web-account:* -> account:*) is a deliberate hard break: a grant
+// stored under an old ID matches nothing isKnownPermission honours. The startup scan is the
+// signal that makes that break observable to an operator, so it needs the same coverage as
+// scanAPIKeysForPrivilegedAccess: the store-failure path, the warn path and the clean path.
+
+// seedAccountSecret writes a web-account record straight through the central secrets seam
+// with the same metadata shape persistAccount uses, so the scan reads a real stored account
+// rather than a substituted store.
+func seedAccountSecret(t *testing.T, server *Server, username, tenantID, permissions string) {
+	t.Helper()
+	err := server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key:       "account-" + username,
+		Value:     "argon2id$stored-password-hash-" + username,
+		TenantID:  tenantID,
+		CreatedBy: "test",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: accountSecretType,
+			"id":                            "id-" + username,
+			"username":                      username,
+			"permissions":                   permissions,
+		},
+	})
+	require.NoError(t, err, "seeding web account %q into secret store must succeed", username)
+}
+
+// TestStartupScan_Accounts_ContinuesOnListError verifies that
+// scanAccountsForStalePermissions emits a Warn and returns the ListSecrets error to its
+// caller rather than panicking. New() treats the returned error as non-fatal.
+func TestStartupScan_Accounts_ContinuesOnListError(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	// Clear entries from server construction.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	listErr := fmt.Errorf("secret store unavailable")
+	server.secretStore = &errListSecretStore{SecretStore: server.secretStore, listErr: listErr}
+
+	err := server.scanAccountsForStalePermissions(context.Background())
+	assert.ErrorIs(t, err, listErr, "scan must return the ListSecrets error to the caller")
+	assert.True(t, capLog.hasLevel("WARN"), "scan must emit a Warn when ListSecrets fails")
+}
+
+// TestStartupScan_WarnsOnStaleAccountPermission verifies that an account holding a
+// pre-rename "web-account:*" grant produces a Warn naming the username, tenant and the
+// unrecognised permission IDs (Issue #3574).
+func TestStartupScan_WarnsOnStaleAccountPermission(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	const username = "stale-perms-admin"
+	const tenantID = "default"
+	// account:list is current; web-account:delete and web-account:update are the stale IDs.
+	seedAccountSecret(t, server, username, tenantID, "account:list,web-account:delete,web-account:update")
+
+	// Clear entries accumulated during construction and seeding.
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	err := server.scanAccountsForStalePermissions(context.Background())
+	require.NoError(t, err)
+
+	assert.True(t, capLog.hasLevel("WARN"),
+		"scan must emit a Warn entry for an account holding unrecognized permission IDs")
+	assert.Equal(t, username, capLog.kvValue("username"),
+		"Warn entry must name the account whose grants are stale")
+	assert.Equal(t, tenantID, capLog.kvValue("tenant_id"),
+		"Warn entry must name the tenant the stale account belongs to")
+	stale, _ := capLog.kvValue("stale_permissions").(string)
+	assert.Contains(t, stale, "web-account:delete",
+		"stale_permissions must name every unrecognized grant")
+	assert.Contains(t, stale, "web-account:update",
+		"stale_permissions must name every unrecognized grant")
+	assert.NotContains(t, stale, "account:list",
+		"stale_permissions must not include grants isKnownPermission still recognizes")
+}
+
+// TestStartupScan_NoWarnForRenamedAccountPermissions verifies the clean path: an account
+// whose grants are the renamed "account:*" IDs produces no stale-permission warning.
+func TestStartupScan_NoWarnForRenamedAccountPermissions(t *testing.T) {
+	capLog := &auditCapturingLogger{}
+	server := setupTestServerWithLogger(t, capLog)
+
+	seedAccountSecret(t, server, "renamed-perms-admin", "default",
+		"account:list,account:create,account:get,account:update,account:delete,account:revoke-enrollment-link")
+
+	capLog.mu.Lock()
+	capLog.entries = nil
+	capLog.mu.Unlock()
+
+	err := server.scanAccountsForStalePermissions(context.Background())
+	require.NoError(t, err)
+
+	assert.Nil(t, capLog.kvValue("stale_permissions"),
+		"scan must not warn for an account holding only permission IDs isKnownPermission recognizes")
+}
+
+// ---- SPA handler tests (Issue #2494) ----
+//
+// These exercise routing, headers and caching, which require a servable SPA to
+// be embedded. The tracked web/dist/index.html is a placeholder the controller
+// deliberately refuses to serve (Issue #3043), so each test substitutes a
+// synthetic build via withEmbeddedSPA before constructing the server. The
+// placeholder-refusal path itself is covered in spa_test.go.
+
+func TestSPARootServe(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Content-Type"), "text/html")
+	assert.Contains(t, rr.Body.String(), "<html")
+}
+
+func TestSPADeepLinkFallback(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+	// A path that does not exist as a file in the embedded FS should fall back to index.html.
+	req := httptest.NewRequest(http.MethodGet, "/app/dashboard/fleet", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Content-Type"), "text/html")
+	// The SPA fallback must serve the placeholder index.html, not a 404 page.
+	assert.Contains(t, rr.Body.String(), "<html")
+}
+
+func TestSPAAPIPathNonInterference(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+
+	// Existing API route must continue to work unchanged.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	// A non-existent API path must return a non-200 status (API 404 must not be masked).
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/this-path-does-not-exist", nil)
+	rr2 := httptest.NewRecorder()
+	server.router.ServeHTTP(rr2, req2)
+	assert.NotEqual(t, http.StatusOK, rr2.Code,
+		"SPA fallback must not mask API 404s: /api/* path returned 200")
+	assert.NotContains(t, rr2.Body.String(), "<html",
+		"SPA index.html must not be served for unmatched /api/* paths")
+}
+
+func TestSPARaftPathNonInterference(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+
+	// Non-existent /raft/* path must not be masked by SPA fallback.
+	req := httptest.NewRequest(http.MethodGet, "/raft/nonexistent", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+	assert.NotEqual(t, http.StatusOK, rr.Code,
+		"SPA fallback must not mask /raft/* paths: returned 200")
+}
+
+func TestSPASecurityHeaders(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+
+	// Security headers must be present on: root (index.html), fallback (unknown path).
+	paths := []string{"/", "/app/dashboard"}
+	for _, urlPath := range paths {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			csp := rr.Header().Get("Content-Security-Policy")
+			assert.NotEmpty(t, csp, "CSP header missing on %s", urlPath)
+			assert.Contains(t, csp, "default-src 'self'", "CSP default-src wrong on %s", urlPath)
+			assert.Contains(t, csp, "frame-ancestors 'none'", "CSP frame-ancestors wrong on %s", urlPath)
+			assert.Contains(t, csp, "base-uri 'none'", "CSP base-uri wrong on %s", urlPath)
+			assert.Contains(t, csp, "form-action 'self'", "CSP form-action wrong on %s", urlPath)
+			assert.Contains(t, csp, "object-src 'none'", "CSP object-src wrong on %s", urlPath)
+
+			assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"),
+				"X-Content-Type-Options missing on %s", urlPath)
+			assert.NotEmpty(t, rr.Header().Get("Referrer-Policy"),
+				"Referrer-Policy missing on %s", urlPath)
+		})
+	}
+}
+
+func TestSPAIndexNoStore(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+
+	// index.html (root and fallback) must be served no-store so browsers always
+	// fetch the latest shell and pick up new hashed asset references.
+	for _, urlPath := range []string{"/", "/deep/link/path"} {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+			assert.Equal(t, "no-store", rr.Header().Get("Cache-Control"),
+				"index.html must be no-store on path %s", urlPath)
+		})
+	}
+}
+
+func TestSPAPathTraversal(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+
+	// Path traversal attempts must never leak file content from outside the embedded FS.
+	traversalPaths := []string{
+		"/../go.mod",
+		"/..%2f..%2f",
+		"/%2e%2e/go.mod",
+	}
+	for _, urlPath := range traversalPaths {
+		t.Run(urlPath, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, urlPath, nil)
+			rr := httptest.NewRecorder()
+			server.router.ServeHTTP(rr, req)
+
+			body := rr.Body.String()
+			assert.NotContains(t, body, "module github.com/cfgis/cfgms",
+				"path traversal leaked go.mod content for path: %s", urlPath)
+			assert.NotContains(t, body, "go 1.",
+				"path traversal leaked go.mod content for path: %s", urlPath)
+		})
+	}
+}
+
+func TestSPAHeadRequest(t *testing.T) {
+	withEmbeddedSPA(t, testEmbeddedAssetsWithBuild())
+	server := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodHead, "/", nil)
+	rr := httptest.NewRecorder()
+	server.router.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	// HEAD must return headers but no body.
+	assert.Empty(t, rr.Body.String())
+	assert.NotEmpty(t, rr.Header().Get("Content-Security-Policy"))
 }

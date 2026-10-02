@@ -3,67 +3,389 @@ name: Test Suite Validation
 on:
   pull_request:
     branches: [ main, develop ]
-    # CONSERVATIVE: Only skip for pure documentation changes
-    # If PR contains ANY code changes, this will still run
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'              # Root-level markdown only (README.md, CONTRIBUTING.md)
-      - '.claude/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
+    # No paths-ignore (Issue #4174). This workflow owns the `unit-tests`
+    # required context for every PR, docs-only included — see the `changes`
+    # job below. Before #4174, a paths-ignore here meant this workflow (and
+    # its needs:-delayed unit-tests aggregator) never ran on a docs-only PR,
+    # so documentation.yml's flat unit-tests stub was the only poster there.
+    # On a MIXED PR (code + a path documentation.yml also matches — e.g. a
+    # `.github/workflows/*.yml` or root `*.md` file), that stub still ran
+    # immediately and posted green before the real aggregator existed,
+    # because paths-ignore only excludes a PR when EVERY changed file
+    # matches — one non-ignored `.go` file was enough to keep this workflow
+    # (and the aggregator) running for real, but did nothing to stop
+    # documentation.yml's unconditional stub from posting the same context
+    # first. Removing the path filter and deciding per-PR via `changes`
+    # closes that gap: this workflow is now the only workflow that can ever
+    # post `unit-tests`, on every PR shape.
   merge_group:
   push:
     branches:
       - main  # Run on main for release validation
       # NOTE: Removed develop - tests already run on PR before merge (no redundant post-merge testing)
   workflow_dispatch:
-    inputs:
-      test_level:
-        description: 'Test level to run'
-        required: true
-        default: 'fast'
-        type: choice
-        options:
-        - fast
-        - all
-        - full
+
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  GO_VERSION: '1.26.4'
+  GO_VERSION: '1.27.1'
+
+# Deny by default at the workflow level; each job re-grants only what it needs.
+# Without this, jobs inherit the repository default token scope (Scorecard
+# TokenPermissions).
+permissions: {}
 
 jobs:
+  # Change detection (Issue #4174): decides whether a pull_request actually
+  # touches code, so the five unit-tests-* legs below can skip on a docs-only
+  # PR without a workflow-level paths-ignore (which would have made this
+  # workflow — and its unit-tests aggregator — invisible on that PR, handing
+  # the required `unit-tests` context to documentation.yml's stub instead).
+  # Only runs for pull_request; the legs' own `if:` already runs
+  # unconditionally for push-to-main / workflow_dispatch, so `changes` is
+  # skipped there and its (empty) output is simply not consulted.
+  changes:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      no_python_ok: ${{ steps.no-python.outputs.ok }}
+      groups: ${{ steps.tooling-groups.outputs.groups }}
+    steps:
+      # The classifier derives which doc paths code reads from the tree, so it
+      # needs the PR's files on disk (Issue #4215). fetch-depth: 0 (rather than
+      # the default shallow depth-1 checkout) is needed below too: the tooling
+      # suite-group classifier (Issue #4304) delegates to
+      # scripts/lib/detect-tooling-changed.sh, which diffs the PR's base ref
+      # with git -- a shallow checkout would leave that base commit
+      # unreachable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # Issue #4303: fails the build if a .py file is tracked under the core
+      # product / shipped path set (cmd/, pkg/, features/, api/, web/,
+      # test/). Runs here — unconditionally, on every pull_request, outside
+      # any suite group — so no tooling-tree gating elsewhere in this repo
+      # can ever cause it to be skipped, and it needs no Go toolchain in a
+      # job that doesn't otherwise use one. Fails closed: any non-zero exit
+      # (including exit 2, "could not scan") resolves to ok=false.
+      - name: Check no Python under core product paths
+        id: no-python
+        run: |
+          set +e
+          bash ./scripts/check-no-python-in-core.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Detect non-documentation changes
+        id: filter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # The PR payload's own file count, used below to prove the API list
+          # is complete. Not capped the way GET /pulls/{n}/files is.
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+
+          # THIS GATE MUST FAIL CLOSED. `code=false` makes the aggregator below
+          # post a PASSING `unit-tests` — the required context — with zero tests
+          # run, and `unit-tests` is PR-real (the queue only posts a stub), so a
+          # wrong `false` here means the fast suite never runs for that PR
+          # anywhere. That is the false-green class CLAUDE.md "Stub exclusivity"
+          # exists to prevent, reachable through this job's INPUT rather than
+          # through a duplicate poster. Every defect in the input therefore
+          # resolves to `code=true` (run the real legs): a needlessly-run suite
+          # on a docs-only PR costs runner minutes, a wrongly-skipped one ships
+          # untested code.
+          api_status=0
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --paginate --jq '.[].filename' > changed_files.txt || api_status=$?
+
+          listed=$(wc -l < changed_files.txt)
+          echo "PR #${PR_NUMBER}: API listed ${listed} file(s); PR payload reports ${PR_CHANGED_FILES:-<unset>}"
+          cat changed_files.txt
+
+          # Defect 1: the API call itself failed (network, rate limit, token).
+          if [ "$api_status" -ne 0 ]; then
+            echo "::warning::gh api exited ${api_status} listing PR files — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 2: an empty or unusable list. Before this check an absent
+          # file list was indistinguishable from a genuine docs-only PR,
+          # because "no line outside the docs regex" is vacuously true for
+          # empty input.
+          if [ "$listed" -eq 0 ]; then
+            echo "::warning::PR file list came back empty — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defect 3: an incomplete list. GET /pulls/{n}/files returns at most
+          # 3000 files no matter how far --paginate walks, so on a larger PR
+          # any code file past the cap is invisible to the regex below. The
+          # count in the PR payload is not capped, so a mismatch detects both
+          # that truncation and any partial page.
+          if ! [ "${PR_CHANGED_FILES:-}" -eq "${PR_CHANGED_FILES:-}" ] 2>/dev/null; then
+            echo "::warning::PR payload carried no usable changed_files count — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$listed" -ne "$PR_CHANGED_FILES" ]; then
+            echo "::warning::listed ${listed} file(s) but the PR reports ${PR_CHANGED_FILES} (API cap or partial response) — assuming code changes and running the full suite"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Classification lives in a script so it can be tested (Issue #4215).
+          # Besides the documentation path set, it treats as CODE any doc path
+          # that code reads -- derived from the checkout on every run -- because
+          # PR #4201 changed only docs/security-review/methodology.md, a harness
+          # input, was skipped as docs-only, and left develop red. The script
+          # fails closed itself; a missing script or a crash without a verdict
+          # line fails closed here.
+          verdict=""
+          if [ -x .github/scripts/classify-docs-only.sh ]; then
+            .github/scripts/classify-docs-only.sh changed_files.txt . > classify.log 2>&1 || true
+            cat classify.log
+            verdict=$(tail -1 classify.log)
+          fi
+          case "$verdict" in
+            code=true|code=false) echo "$verdict" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::classifier produced no verdict — assuming code changes and running the full suite"
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # Decides which of unit-tests-scripts's four suite groups (core,
+      # security-review, claude-tooling, devinfra) this PR's diff needs
+      # (Issue #4304, Epic #4296). `core` always runs regardless of this
+      # output -- unit-tests-scripts's own `if:` above (needs.changes.outputs.
+      # code) is untouched by this story and still gates whether the job runs
+      # at all. This step only narrows what runs *inside* it. Reuses
+      # changed_files.txt from the step above instead of a second `gh api`
+      # call; delegates the actual git-diff classification to
+      # scripts/lib/detect-tooling-changed.sh via the base ref GitHub already
+      # gives this job, so the algorithm has one implementation shared with
+      # local `make test` (Issue #4302).
+      - name: Classify tooling suite groups
+        id: tooling-groups
+        run: |
+          set -euo pipefail
+
+          # THIS GATE MUST FAIL CLOSED, the same direction as the docs-only
+          # classifier above: every defect resolves to every suite group, so
+          # unit-tests-scripts running an unneeded suite costs runner
+          # minutes, never ships untested tooling.
+          verdict=""
+          if [ -x .github/scripts/classify-tooling-changed.sh ]; then
+            .github/scripts/classify-tooling-changed.sh changed_files.txt \
+              "${{ github.event.pull_request.base.sha }}" . > tooling.log 2>&1 || true
+            cat tooling.log
+            verdict=$(tail -1 tooling.log)
+          fi
+          case "$verdict" in
+            groups=*) echo "$verdict" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::tooling classifier produced no verdict — assuming every suite group is affected"
+              echo "groups=core,security-review,claude-tooling,devinfra" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   # Fast unit tests - runs on every push/PR
-  unit-tests:
+  #
+  # Split into 5 group legs + an aggregator (Issue #4151), each its own runner.
+  # Before this split, `unit-tests` ran `make test` as a single job: it measured
+  # 11-14 min for months, then grew to 15m04s and started getting killed by the
+  # 15-min cap (every step green, job reported "cancelled" — run 35371727977).
+  # A same-job shell-level split (PR #4155's first attempt: extract
+  # features/controller/api into its own sequential `make` step, still one
+  # runner) measured NO improvement (run 35391321900, 15m21s, slower than
+  # before): `go test ./...` already parallelizes across packages up to
+  # GOMAXPROCS (4 on this runner size), so reordering work within one runner's
+  # CPU budget doesn't reduce wall time for a CPU-bound `-race` suite. Separate
+  # runners are separate CPU budgets, which is what actually buys margin.
+  #
+  # Group boundaries and the CFGMS_API_TEST_SHARDS internal sharding are
+  # explained on test-go-group-* / test-framework-api-sharded in the Makefile.
+  # The aggregator below re-creates the single `unit-tests` required-context
+  # name so branch protection and `integration-tests`'s `needs: unit-tests`
+  # need no change (AC4).
+  #
+  # runs-on routing (#2337, #2501, epic #565): always ubuntu-latest for all
+  # events. Measured 2026-07-09: GitHub-hosted queue ~6s vs self-hosted
+  # 193–433s under merge-queue burst; hosted exec ~15% faster (511s vs 610s).
+  # Moving unit-tests to hosted frees self-hosted pool capacity for
+  # integration-tests where self-hosted exec is 2–3.5× faster than hosted.
+  # PR-REAL (#2595): unit tests are fast, cheap, and deterministic on the diff
+  # itself — real per-PR feedback matters more than re-validating against the
+  # merge commit. The merge queue gets a lightweight stub (below); docs-only
+  # PR *queue entries* are covered by unit-tests-queue-stub.yml. Docs-only PRs
+  # themselves are covered by the `changes` job (Issue #4174) short-circuiting
+  # the aggregator below — this workflow is no longer paths-ignored for docs,
+  # so it (and only it) always posts `unit-tests` on the PR side.
+  #
+  # Each leg needs `changes` and requires `always()` so a PR-side skip (via
+  # `needs.changes.outputs.code == 'false'`) doesn't get treated as an
+  # unsatisfied dependency by the default needs-gate — same reasoning as
+  # `integration-tests`'s `needs: unit-tests` below.
+
+  unit-tests-controller-core:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/go/pkg/mod
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
       continue-on-error: true
-    
+
     - name: Install dependencies
       run: go mod download
-    
-    - name: Run Fast Unit Tests
+
+    - name: Run controller-core group (server, initialization)
       env:
         CFGMS_TEST_INTEGRATION: "0"
-      run: make test
-    
+      run: make test-go-group-controller-core
+
+  unit-tests-heavy-providers:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run heavy-providers group (cert, controlplane/grpc, steward/client, storage/sqlite)
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-heavy-providers
+
+  unit-tests-rest:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Stdlib completeness gate (ADR-016 clause 6)
+      run: make check-stdlib-completeness
+
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      shell: bash
+      run: .github/scripts/resource-sampler.sh start "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}"
+
+    - name: Run remaining framework packages + module smoke tests
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-go-group-rest
+
     - name: Upload test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: unit-test-results
@@ -72,40 +394,284 @@ jobs:
           test-results.xml
         retention-days: 5
 
-  # Integration tests - runs on PRs to develop/main, workflow_dispatch, or push to main
-  integration-tests:
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      shell: bash
+      run: .github/scripts/resource-sampler.sh report "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}" "resource-samples-unit-tests-rest.txt"
+
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      with:
+        name: resource-samples-unit-tests-rest
+        path: resource-samples-unit-tests-rest.txt
+        retention-days: 30
+
+  unit-tests-api:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    needs: unit-tests
+    timeout-minutes: 15
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
         go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ~/go/pkg/mod
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
         key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-modules-
       continue-on-error: true
-    
+
     - name: Install dependencies
       run: go mod download
-    
-    - name: Run Fast Comprehensive Tests
-      run: make test-fast
-    
-    - name: Run Production Critical Tests
-      run: make test-production-critical
-    
+
+    - name: Run features/controller/api (sharded)
+      env:
+        CFGMS_TEST_INTEGRATION: "0"
+      run: make test-framework-api-sharded
+
+  unit-tests-scripts:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: changes
+    if: always() && ((github.event_name == 'pull_request' && needs.changes.outputs.code == 'true') || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    # dnsmasq-allowlist_test.sh and init-firewall_test.sh (Issue #4163) run a
+    # real, unprivileged dnsmasq against the actual allowlist files -- the
+    # same binary init-firewall.sh drives in production, just off port 53.
+    # ubuntu-latest ships dig (dnsutils) but not dnsmasq; unpinned apt install,
+    # matching .devcontainer/Dockerfile's own system-package convention (no
+    # per-package version pins there either).
+    - name: Install dnsmasq
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dnsmasq
+
+    - name: Run shell-script test suite
+      # Narrows test-scripts.sh to the suite groups the `changes` job's
+      # tooling classifier said this diff touches (Issue #4304, Epic #4296):
+      # `core` always runs; security-review/claude-tooling/devinfra only run
+      # when their tree changed. On push/workflow_dispatch, `changes` doesn't
+      # run and this is empty -- test-scripts.sh's own --group-omitted default
+      # is "run everything," so an empty value here degrades safely to the
+      # pre-#4304 behavior with no extra guard needed.
+      env:
+        CFGMS_TEST_SCRIPTS_GROUPS: ${{ needs.changes.outputs.groups }}
+      run: make test-scripts
+
+  # Aggregator: re-creates the single `unit-tests` required-context name so
+  # branch protection and integration-tests's `needs: unit-tests` are
+  # unaffected by the group split (AC4). `if: always()` is required, not
+  # cosmetic — without it, a failed (or, on a docs-only PR, skipped) leg would
+  # make the default needs-gate SKIP this job rather than run it, and CLAUDE.md
+  # "Stub exclusivity" established that a skipped run satisfies a required
+  # status check. This job explicitly checks every leg's result and fails
+  # closed instead — except on a docs-only PR (Issue #4174), where the legs
+  # were deliberately skipped by the `changes` gate above and a skip there is
+  # the correct, checked outcome rather than a failure to paper over.
+  #
+  # This aggregator is `needs:`-delayed, so its check run does not exist until
+  # the slowest leg finishes (or, on a docs-only PR, until `changes` resolves).
+  # That makes it exactly the shape CLAUDE.md "Stub exclusivity" warns about:
+  # any other job in THIS file named `unit-tests` would post a `skipped` run at
+  # the start of every pull_request run -- an event-gated `if:` still posts a
+  # skipped run -- and a skipped run satisfies the required check before the
+  # tests finish. The queue-side stub therefore lives in
+  # unit-tests-queue-stub.yml, which has no pull_request trigger at all, and
+  # documentation.yml no longer defines a `unit-tests` job at all (#4174) —
+  # this aggregator is the only PR-side poster of the context, docs-only PRs
+  # included.
+  unit-tests:
+    permissions: {}
+    runs-on: ubuntu-latest
+    needs:
+      - changes
+      - unit-tests-controller-core
+      - unit-tests-heavy-providers
+      - unit-tests-rest
+      - unit-tests-api
+      - unit-tests-scripts
+    if: always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    steps:
+      - name: Aggregate group results
+        run: |
+          echo "changes.code:     ${{ needs.changes.outputs.code }}"
+          echo "changes.no_python_ok: ${{ needs.changes.outputs.no_python_ok }}"
+          echo "controller-core:  ${{ needs.unit-tests-controller-core.result }}"
+          echo "heavy-providers:  ${{ needs.unit-tests-heavy-providers.result }}"
+          echo "rest:             ${{ needs.unit-tests-rest.result }}"
+          echo "api-sharded:      ${{ needs.unit-tests-api.result }}"
+          echo "scripts:          ${{ needs.unit-tests-scripts.result }}"
+
+          # Issue #4303: `changes` only runs on pull_request, so on a
+          # push-to-main or workflow_dispatch run (where it never executes)
+          # `no_python_ok` is empty and would otherwise read as `!= 'true'`
+          # below — nested inside the pull_request check so those runs are
+          # unaffected.
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.no_python_ok }}" != "true" ]; then
+            echo "❌ core product (cmd/, pkg/, features/, api/, web/, test/) contains a tracked .py file"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ needs.changes.outputs.code }}" = "false" ]; then
+            echo "✅ docs-only PR — no code changes, legs intentionally skipped"
+            exit 0
+          fi
+
+          if [ "${{ needs.unit-tests-controller-core.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-heavy-providers.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-rest.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-api.result }}" != "success" ] || \
+             [ "${{ needs.unit-tests-scripts.result }}" != "success" ]; then
+            echo "❌ one or more unit-tests groups did not succeed"
+            exit 1
+          fi
+          echo "✅ all unit-tests groups succeeded"
+
+  # The merge-queue stub for the `unit-tests` required context lives in
+  # unit-tests-queue-stub.yml, which triggers ONLY on merge_group. It must not
+  # come back here: any job in this file named `unit-tests` other than the
+  # aggregator above posts a `skipped` run on every pull_request, and a skipped
+  # run satisfies the required check before the `needs:`-delayed aggregator
+  # exists. See that file's header and CLAUDE.md "Stub exclusivity".
+
+  # Integration tests - QUEUE-REAL (#2595): the real `make test-production-critical`
+  # run is queue-only (merge_group) and on push to main/workflow_dispatch — NOT on
+  # pull_request. This also fixes a live bug: the prior condition never matched
+  # `merge_group`, so the required `integration-tests` context was silently
+  # skipping (and passing) on every merge-queue entry — production-critical tests
+  # were never actually validated against a real merge commit. The PR-time stub
+  # (below) posts the required context on code PRs; docs-only PRs are covered by
+  # documentation.yml's own stub instead. Before #4174 that split was drawn by
+  # this whole workflow being paths-ignored for docs; the path filter is gone
+  # now (this file also owns `unit-tests`, which no longer tolerates one), so
+  # the PR-time stub below reuses the `changes` job's code/docs-only verdict
+  # to reproduce the same split without a workflow-level path filter.
+  #
+  # runs-on routing (#2337 routed this to self-hosted; reverted 2026-08-01):
+  # self-hosted Linux execution measured 2-3.5x faster than hosted
+  # (2026-07-09), but the runner pool's capacity couldn't keep pace with
+  # merge-queue volume — all self-hosted runners went offline and blocked
+  # the merge queue for 8+ hours (PRs #2896, #3155, #3157, #3159 stuck
+  # queued). Reverted to unconditional ubuntu-latest, matching unit-tests
+  # (#2501) and the Windows native-build move (#2559): this repo no longer
+  # depends on self-hosted CI runner uptime.
+  integration-tests:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # always() is required here: unit-tests is intentionally skipped on
+    # merge_group (PR-real design above), and GitHub's default implicit
+    # `needs` gate treats "skipped" as not-satisfied — without always(), this
+    # job would itself silently skip on merge_group despite its own event
+    # condition matching, recreating the exact bug this split was meant to fix.
+    if: always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group' || github.ref == 'refs/heads/main')
+    needs: unit-tests
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234): this workflow triggers on pull_request and
+    # merge_group, and this step used to be a combined actions/cache
+    # restore+save on both — a PR- or queue-ref-scoped save is unreadable to
+    # any other PR/run and was evicting the develop-scoped Linux-go-modules
+    # entry at the 10 GB cache ceiling (`push: branches: [main]` is this
+    # workflow's only develop-adjacent trigger, and main isn't develop
+    # either). The develop-scoped writer (develop-sanity.yml) is the only
+    # save path now.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+      continue-on-error: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Start Linux resource sampler (self-hosted only, best-effort)
+      if: github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
+      continue-on-error: true
+      shell: bash
+      run: .github/scripts/resource-sampler.sh start "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}"
+
+    # Only what no other job runs (Issue #4220). `make test-production-critical`
+    # ran ./test/unit/... and ./test/integration/... with -short, but:
+    #   - ./test/unit/... is in the PR's unit-tests-rest leg and the queue's
+    #     Linux native-build shard 2 (test-go-group-rest).
+    #   - ./test/integration/<sub-packages> run, without -short and against
+    #     Docker, in production-gates.yml's Controller Integration Tests (Linux).
+    # That job deliberately excludes the root ./test/integration package and
+    # ./test/integration/ha, and the unit legs exclude all of test/integration.
+    # Measured with -short on 2026-09-24: the root package runs 18 tests (2 skip)
+    # and ha runs 1 (16 skip) that execute in no other CI job — so they run here.
+    - name: Run the test/integration packages no other job runs
+      run: go test -v -race -short -timeout=15m ./test/integration ./test/integration/ha
+
     - name: Upload integration test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: integration-test-results
@@ -114,157 +680,49 @@ jobs:
           integration-results.xml
         retention-days: 5
 
-  # Cross-feature integration tests - chunked for efficiency
-  cross-feature-tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: github.event.inputs.test_level == 'all' || github.event.inputs.test_level == 'full'
-    needs: integration-tests
-    strategy:
-      matrix:
-        test-chunk: [
-          "workflow-config",
-          "dna-drift", 
-          "template-rollback",
-          "terminal-audit",
-          "multi-tenant-saas"
-        ]
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
+    - name: Report resource profile (self-hosted only, best-effort)
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Cross-Feature Tests - ${{ matrix.test-chunk }}
-      run: |
-        case "${{ matrix.test-chunk }}" in
-          "workflow-config")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestWorkflowConfigurationIntegration"
-            ;;
-          "dna-drift")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestDNADriftWorkflowIntegration"
-            ;;
-          "template-rollback")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTemplateRollbackIntegration"
-            ;;
-          "terminal-audit")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestTerminalAuditIntegration"
-            ;;
-          "multi-tenant-saas")
-            go test -v -race -timeout=25m ./test/e2e/... -run "TestE2EScenarios/TestMultiTenantSaaSIntegration"
-            ;;
-        esac
+      shell: bash
+      run: .github/scripts/resource-sampler.sh report "${RUNNER_TEMP}/resource-sampler-${GITHUB_JOB}" "resource-samples-integration-tests.txt"
 
-  # Production readiness tests - chunked and run only for full validation
-  production-readiness:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    if: github.event.inputs.test_level == 'full' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
-    needs: integration-tests
-    strategy:
-      matrix:
-        readiness-test: [
-          "load-testing",
-          "performance-benchmarks",
-          "security-audit",
-          "disaster-recovery",
-          "monitoring-integration"
-        ]
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
+    - name: Upload resource samples (self-hosted only)
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      if: always() && github.event_name != 'workflow_dispatch' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true)
       continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Production Readiness Test - ${{ matrix.readiness-test }}
-      run: |
-        case "${{ matrix.readiness-test }}" in
-          "load-testing")
-            make test-load-testing
-            ;;
-          "performance-benchmarks")
-            make test-performance-benchmarks
-            ;;
-          "security-audit")
-            make test-security-audit
-            ;;
-          "disaster-recovery")
-            make test-disaster-recovery
-            ;;
-          "monitoring-integration")
-            make test-monitoring-integration
-            ;;
-        esac
-    
-    - name: Upload production test results
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      if: always()
       with:
-        name: production-test-results-${{ matrix.readiness-test }}
-        path: |
-          production-test-results.xml
-          production-coverage.out
+        name: resource-samples-integration-tests
+        path: resource-samples-integration-tests.txt
         retention-days: 30
 
-  # Synthetic monitoring validation - separate job for ongoing validation
-  synthetic-monitoring:
+  # PR-time stub for the `integration-tests` required context (#2595). The real
+  # run is queue-only (job above) — it validates the test/integration packages no other job runs
+  # against the merge commit rather than paying for it twice per PR.
+  #
+  # Gated on `needs.changes.outputs.code == 'true'` (Issue #4174) to preserve
+  # pre-#4174 behavior now that this workflow's paths-ignore is gone: on a
+  # docs-only PR this stub stays skipped, exactly as it was skipped by the
+  # workflow-level path filter before, so documentation.yml's own
+  # `integration-tests` stub remains the sole PR-side poster there. Without
+  # this gate, this job would newly fire on every docs-only PR too (harmless —
+  # it is a flat, non-`needs:`-delayed job racing another flat stub, not the
+  # needs-delayed hazard `unit-tests` had — but a needless second poster of a
+  # context that used to have exactly one).
+  integration-tests-pr-stub:
+    name: integration-tests
+    permissions: {}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    if: github.event.inputs.test_level == 'full'
-    needs: production-readiness
+    needs: changes
+    if: always() && github.event_name == 'pull_request' && needs.changes.outputs.code == 'true'
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
-    
-    - name: Cache Go modules
-      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-modules-
-      continue-on-error: true
-    
-    - name: Install dependencies
-      run: go mod download
-    
-    - name: Run Synthetic Monitoring Tests
-      run: make test-synthetic-monitoring
+      - name: PR-time stub (real run happens in the merge queue)
+        run: |
+          echo "integration-tests: real production-critical suite runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative run validates the merge commit."
 
   # Test summary and validation
   test-summary:
+    permissions: {}
     runs-on: ubuntu-latest
     needs: [unit-tests, integration-tests]
     if: always()
@@ -282,16 +740,16 @@ jobs:
         
         if [[ "${{ needs.integration-tests.result }}" == "success" ]]; then
           echo "✅ **Integration Tests**: Passed" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.integration-tests.result }}" == "skipped" ]]; then
+          echo "⏭️ **Integration Tests**: Deferred to merge queue (#2595)" >> $GITHUB_STEP_SUMMARY
         else
-          echo "❌ **Integration Tests**: Failed or Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "❌ **Integration Tests**: Failed" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Testing Strategy" >> $GITHUB_STEP_SUMMARY
         echo "- **Fast Tests**: Unit tests run on every push (< 15 minutes)" >> $GITHUB_STEP_SUMMARY
         echo "- **Integration Tests**: Run on main/develop branches (< 25 minutes)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Cross-Feature Tests**: Run on workflow dispatch 'all' level" >> $GITHUB_STEP_SUMMARY
-        echo "- **Production Tests**: Run on workflow dispatch 'full' level or main pushes" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### Manual Testing Commands" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY

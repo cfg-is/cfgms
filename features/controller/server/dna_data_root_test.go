@@ -82,6 +82,28 @@ func TestResolveDNADataRoot_AbsoluteDataDirHonored(t *testing.T) {
 	}
 }
 
+// TestResolveDNADataRoot_POSIXAbsoluteDataDirHonoredOnEveryPlatform is the Issue #3460
+// regression: a controller.cfg is a reviewed, hand-authored artefact using POSIX paths
+// (the canonical example ships `data_dir: "/var/lib/cfgms"` right next to `cert_path`)
+// and is parsed on every platform the controller builds for. filepath.IsAbs answers for
+// the running platform only — on Windows a path needs a volume name, so
+// filepath.IsAbs("/var/lib/cfgms") is false — which silently discarded the operator's
+// declared absolute DataDir and re-derived it from Storage instead. A leading slash must
+// be honored as rooted regardless of GOOS, exactly as config.IsRootedPath already
+// guarantees for cert_path.
+func TestResolveDNADataRoot_POSIXAbsoluteDataDirHonoredOnEveryPlatform(t *testing.T) {
+	cfg := &config.Config{
+		DataDir: "/var/lib/cfgms",
+		Storage: &config.StorageConfig{SQLitePath: filepath.Join(t.TempDir(), "cfgms.db")},
+	}
+
+	got := resolveDNADataRoot(cfg)
+
+	if got != "/var/lib/cfgms" {
+		t.Fatalf("resolveDNADataRoot = %q, want %q (a POSIX-rooted DataDir must be honored on every platform, not re-derived from Storage)", got, "/var/lib/cfgms")
+	}
+}
+
 // TestResolveDNADataRoot_NoStorageStillAbsolute is the degenerate last-resort:
 // no storage configured and a relative/empty DataDir must still yield an
 // absolute path rather than silently landing in an arbitrary CWD. The exact

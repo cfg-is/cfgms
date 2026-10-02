@@ -143,12 +143,13 @@ func (s *InMemoryRollbackStore) cloneOperation(op *RollbackOperation) *RollbackO
 
 	// Deep clone the operation
 	clone := &RollbackOperation{
-		ID:          op.ID,
-		Request:     op.Request,
-		Status:      op.Status,
-		InitiatedBy: op.InitiatedBy,
-		InitiatedAt: op.InitiatedAt,
-		Progress:    op.Progress,
+		ID:             op.ID,
+		Request:        op.Request,
+		Status:         op.Status,
+		InitiatedBy:    op.InitiatedBy,
+		InitiatedAt:    op.InitiatedAt,
+		Progress:       op.Progress,
+		TargetTenantID: op.TargetTenantID,
 	}
 
 	if op.CompletedAt != nil {

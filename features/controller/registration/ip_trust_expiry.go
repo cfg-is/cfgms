@@ -7,6 +7,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/cfgis/cfgms/pkg/lease"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -33,17 +34,26 @@ type IPTrustExpiryConfig struct {
 
 	// Logger is used for diagnostic output.
 	Logger logging.Logger
+
+	// LeaseJob claims the cluster-singleton lease this sweep runs behind (ADR-031
+	// Decision 4). A zero-value LeaseJob (nil Manager) runs every cycle
+	// unconditionally — the correct behavior for a single-node deployment.
+	// Callers construct this via ha.Manager.NewBackgroundLoopLease, which is
+	// nil-receiver-safe.
+	LeaseJob lease.SingletonJob
 }
 
 // IPTrustExpiryJob revokes trusted IP ranges that have been dark (no registrations
 // and no healthy stewards) for longer than DarkWindow. Pre-seeded entries are always
-// exempt from auto-revocation (Issue #1697).
+// exempt from auto-revocation (Issue #1697). In a multi-node cluster, only the node
+// holding LeaseJob's lease runs a given sweep cycle (ADR-031 Decision 4).
 type IPTrustExpiryJob struct {
 	store         business.IPTrustStore
 	tenants       business.TenantStore
 	darkWindow    time.Duration
 	checkInterval time.Duration
 	logger        logging.Logger
+	leaseJob      lease.SingletonJob
 	cancel        context.CancelFunc
 }
 
@@ -63,6 +73,7 @@ func NewIPTrustExpiryJob(cfg IPTrustExpiryConfig) *IPTrustExpiryJob {
 		darkWindow:    darkWindow,
 		checkInterval: checkInterval,
 		logger:        cfg.Logger,
+		leaseJob:      cfg.LeaseJob,
 	}
 }
 
@@ -94,7 +105,7 @@ func (j *IPTrustExpiryJob) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			j.expireStaleEntries(ctx)
+			j.leaseJob.RunIfLeader(ctx, j.expireStaleEntries)
 		}
 	}
 }

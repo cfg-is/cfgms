@@ -254,7 +254,6 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "windows"
 		installerArch = "amd64"
-		noBundle = true
 
 		fileContent := strings.Repeat("x", 1024)
 		f, err := os.CreateTemp(t.TempDir(), "installer-*.exe")
@@ -307,7 +306,6 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "linux"
 		installerArch = "amd64"
-		noBundle = true
 
 		f, err := os.CreateTemp(t.TempDir(), "installer-*.bin")
 		require.NoError(t, err)
@@ -344,7 +342,6 @@ func TestInstallerUpload(t *testing.T) {
 
 		installerPlatform = "darwin"
 		installerArch = "arm64"
-		noBundle = true
 
 		dir := t.TempDir()
 		installerPath := filepath.Join(dir, "cfgms-steward-darwin-arm64.pkg")
@@ -507,7 +504,6 @@ func TestPublishCLI_SuccessfulPublish(t *testing.T) {
 	installerArch = "amd64"
 	publishBinary = binaryPath
 	publishSignature = sigPath
-	noBundle = true
 
 	var receivedPath string
 	var receivedSigHeader string
@@ -582,7 +578,6 @@ func TestPublishCLI_DuplicateReturns409(t *testing.T) {
 	installerArch = "amd64"
 	publishBinary = binaryPath
 	publishSignature = sigPath
-	noBundle = true
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

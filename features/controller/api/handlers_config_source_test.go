@@ -12,11 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/tenant"
 	cfgpkg "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 )
 
@@ -81,6 +83,38 @@ func TestConnectionTest_RBACGateFiresBeforeOutbound(t *testing.T) {
 		"validator must not be called when RBAC denies access (no outbound connection)")
 }
 
+// TestConnectionTest_CrossTenantRefused is the [REQUIRED TEST] for Issue #4335: a
+// caller scoped to one tenant must be refused (404, same as a genuinely unknown
+// tenant) when testing another tenant's config source, and an unset tenant scope
+// (the plumbing-bug signature) must be refused rather than treated as unrestricted.
+// Calls the handler directly (bypassing the router/requirePermission gate) so this
+// specifically exercises the handler-local ctxkeys.TenantScope check, not the
+// separate middleware-level isolation boundary.
+func TestConnectionTest_CrossTenantRefused(t *testing.T) {
+	server, tenantID := setupConfigSourceTestServer(t)
+	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
+
+	t.Run("cross_tenant_scope_refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/"+tenantID+"/config-source/test",
+			bytes.NewBufferString("{}"))
+		req = mux.SetURLVars(req, map[string]string{"id": tenantID})
+		ctx := context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("other-tenant"))
+		rec := httptest.NewRecorder()
+		server.handleConfigSourceTest(rec, req.WithContext(ctx))
+		assert.Equal(t, http.StatusNotFound, rec.Code, "cross-tenant caller must be refused: %s", rec.Body.String())
+	})
+
+	t.Run("unset_scope_refused", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/"+tenantID+"/config-source/test",
+			bytes.NewBufferString("{}"))
+		req = mux.SetURLVars(req, map[string]string{"id": tenantID})
+		// Deliberately no ctxkeys.TenantScopeKey in context.
+		rec := httptest.NewRecorder()
+		server.handleConfigSourceTest(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "an unset tenant scope must be refused: %s", rec.Body.String())
+	})
+}
+
 // TestConnectionTest_RateLimitReturns429 verifies that after configTestMaxPerTenant
 // requests within the window, subsequent requests return HTTP 429.
 func TestConnectionTest_RateLimitReturns429(t *testing.T) {
@@ -88,13 +122,13 @@ func TestConnectionTest_RateLimitReturns429(t *testing.T) {
 
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
 
 	// Exhaust the per-tenant rate limit.
 	for i := 0; i < configTestMaxPerTenant; i++ {
-		req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-		req.Header.Set("X-API-Key", apiKey)
+		req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 		w := httptest.NewRecorder()
 		server.router.ServeHTTP(w, req)
 		code := w.Code
@@ -103,8 +137,7 @@ func TestConnectionTest_RateLimitReturns429(t *testing.T) {
 	}
 
 	// The next request must be rate-limited.
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -118,13 +151,11 @@ func TestConnectionTest_ActorFromContextOnly(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
-
-	// Attempt to inject a fake actor via the request body (must be ignored).
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	body := `{"actor": "injected-actor", "user": "attacker"}`
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 
 	server.router.ServeHTTP(w, req)
@@ -144,11 +175,10 @@ func TestConnectionTest_Returns200WhenReachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysSucceedValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -167,11 +197,10 @@ func TestConnectionTest_Returns200WhenUnreachable(t *testing.T) {
 	server, tenantID := setupConfigSourceTestServer(t)
 	server.SetMountPointValidator(&alwaysFailValidator{}, nil)
 
-	apiKey := NewTestKey(t, server, []string{"tenant:manage"})
+	// tenant:manage requires AssuranceStrong — use an mTLS admin cert rather than an
+	// API key (AssuranceMachine, which is below the floor added in Issue #3181).
 	url := fmt.Sprintf("/api/v1/tenants/%s/config-source/test", tenantID)
-
-	req := httptest.NewRequest(http.MethodPost, url, bytes.NewBufferString("{}"))
-	req.Header.Set("X-API-Key", apiKey)
+	req := makeAdminRequest(t, http.MethodPost, url, bytes.NewBufferString("{}"))
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 

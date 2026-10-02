@@ -48,7 +48,25 @@ const (
 	// Params: version (string), download_url (string), sha256 (string),
 	// platform (string), arch (string), publisher (string), bundle_signature ([]byte base64).
 	CommandPushStewardBinary CommandType = "push_steward_binary"
+
+	// CommandOpenTerminal instructs the steward to dial the controller's Terminal RPC
+	// and bridge the stream to a local PTY for an interactive admin session. (Issue #2760)
+	// Params: session_id (string), shell (string), cols (int32), rows (int32).
+	CommandOpenTerminal CommandType = "open_terminal"
+
+	// CommandObserveModules pushes the controller's resolved observe-module set to the steward
+	// in response to an EventObserveSweepRequest. (Issue #3104, ADR-024 Amendment 1 §3)
+	// Params: "modules" (JSON array of ObserveModuleSpec: {name, kind}).
+	CommandObserveModules CommandType = "observe_modules"
 )
+
+// ObserveModuleSpec identifies a module+kind pair resolved by the controller for
+// Tier-2 whole-domain observation (Issue #3104, ADR-024 Amendment 1 §3).
+// Carried in CommandObserveModules params as a JSON array under "modules".
+type ObserveModuleSpec struct {
+	Name string `json:"name"` // module name (e.g. "hyperv")
+	Kind string `json:"kind"` // ownership kind for fragment assembly (e.g. "hyperv")
+}
 
 // Command represents a command sent from controller to steward.
 //
@@ -72,6 +90,16 @@ type Command struct {
 
 	// Params contains command-specific parameters
 	Params map[string]interface{} `json:"params,omitempty"`
+
+	// Term is the Raft term at which this command was published (#3390, ADR-029 Decision 5).
+	// Zero means the term was not stamped: either the controller predates fencing, or the
+	// command was emitted by a path that bypasses commands.Publisher (see the controller
+	// operating model's "Outbound Command Contract" section for the exact list).
+	// Enforcement on the steward side is added in #3436.
+	//
+	// Not covered by the command signature — transport-trusted only. See
+	// commandSigningPayload for the trade-off and the tampering hazards it leaves open.
+	Term uint64 `json:"term,omitempty"`
 }
 
 // EventType defines the type of event being reported.
@@ -135,6 +163,12 @@ const (
 	// auto-rolled-back to the previous version after the new binary failed its
 	// startup window. (Epic #1930, Issue #1943)
 	EventStewardUpgradeRolledBack EventType = "steward.upgrade.rolled_back"
+
+	// EventObserveSweepRequest initiates a Tier-2 whole-domain observe sweep. The steward
+	// sends this event carrying its baseline DNA; the controller resolves the observe-module
+	// set and responds with CommandObserveModules. (Issue #3104, ADR-024 Amendment 1 §3)
+	// Details keys: "baseline_dna" (map[string]string JSON).
+	EventObserveSweepRequest EventType = "observe_sweep_request"
 )
 
 // Event represents an event published from steward to controller.
@@ -214,6 +248,13 @@ type Heartbeat struct {
 	// Empty for older stewards that do not support hash-based sync.
 	DNAHash string `json:"dna_hash,omitempty"`
 
+	// DNAAggregateRoot is the Merkle-style aggregate root over the steward's current
+	// fragment manifest (ADR-017 §6). Non-empty when the steward supports the
+	// partial-sync protocol. The controller compares this to its stored root and
+	// sends SYNC_DNA with fragment_ids on mismatch (ADR-017 §7).
+	// Empty for stewards without a fragment-capable collector.
+	DNAAggregateRoot string `json:"dna_aggregate_root,omitempty"`
+
 	// ActiveSessions is the number of active control-channel streams the steward holds.
 	// Value is 1 when connected, 0 otherwise.
 	ActiveSessions int32 `json:"active_sessions,omitempty"`
@@ -245,6 +286,36 @@ type Response struct {
 
 	// Details contains response-specific data
 	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// ApplyOutcomeRecord captures the result of applying a single resource during
+// a configuration push (ADR-022 §6, Issue #3375).
+//
+// One record is emitted per resource in the execution report. The record rides
+// Event.Details["apply_outcomes"] alongside the existing "modules" key; it is
+// never a replacement for the per-module ModuleStatus aggregation.
+type ApplyOutcomeRecord struct {
+	// ResourceID is the steward-local resource identifier (e.g. "vm:myvm").
+	// Controller-side EID resolution prefixes host:<peerHostAuthority>/ to produce
+	// the fleet-global address — the steward never performs that step.
+	ResourceID string `json:"resource_id"`
+
+	// ModuleName is the module that managed this resource.
+	ModuleName string `json:"module_name"`
+
+	// Status is the outcome classification: "applied", "partial", "retry_exhausted",
+	// or "failed". "retry_exhausted" (Issue #3803) is a known, already-explained gate —
+	// a bounded auto-retry used up its attempt budget and needs an operator — distinct
+	// from "failed", which is an unclassified convergence failure.
+	// Derived from the executor's ResourceStatus at the controller side.
+	Status string `json:"status"`
+
+	// Error contains the per-resource error detail when Status is "failed" or
+	// "retry_exhausted". Empty on success.
+	Error string `json:"error,omitempty"`
+
+	// Timestamp is when this resource's execution completed.
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // ModuleStatus represents the execution status of a single module.
@@ -288,6 +359,10 @@ type ConfigStatusReport struct {
 	// Modules contains per-module execution status
 	Modules map[string]ModuleStatus `json:"modules"`
 
+	// ApplyOutcomes contains per-resource apply-outcome records (ADR-022 §6, Issue #3375).
+	// One entry per executed resource; rides Event.Details["apply_outcomes"] on the wire.
+	ApplyOutcomes []ApplyOutcomeRecord `json:"apply_outcomes,omitempty"`
+
 	// Timestamp when the report was created
 	Timestamp time.Time `json:"timestamp"`
 
@@ -318,6 +393,29 @@ type SignedCommand struct {
 // commandSigningPayload is the stable canonical form used when signing/verifying commands.
 // Using map[string]string for Params avoids mutations from JSON-decoding proto string values,
 // and UTC normalisation avoids timezone-dependent JSON output.
+//
+// Command.Term is deliberately NOT a field here (#3390). The term is therefore
+// transport-trusted only — authenticated by the mTLS control channel, not by the
+// command signature. This is a recorded trade-off, not an oversight:
+//
+//   - Including Term would change the signing bytes for every non-zero-term command,
+//     so every steward predating #3436 (which computes signing bytes without the field)
+//     would fail verification on every command the moment a controller started stamping
+//     terms — a fleet-wide outage during a rolling upgrade. #3390's constraint is an
+//     additive, wire-compatible field with no steward-visible behaviour change.
+//   - Consequence, which #3436/#3437 must design around: any party able to modify a
+//     command between the signer and the steward — a future Outpost proxy cache, an
+//     mTLS-terminating hop, a non-leader controller node — can rewrite Term without
+//     invalidating the signature. Two concrete hazards: raising Term defeats the fence,
+//     and setting Term to MaxUint64 poisons the steward's high-water mark, wedging its
+//     command channel permanently once #3437 persists that mark across restarts.
+//   - Closing this requires the term to be covered by the signature behind a negotiated
+//     signing-payload version, so that a steward advertises which payload version it can
+//     verify before the controller signs with it. That negotiation does not exist yet and
+//     is out of scope for #3390; it is a prerequisite for treating the term as
+//     tamper-evident rather than merely transport-trusted.
+//
+// See docs/architecture/controller-operating-model.md — "Outbound Command Contract".
 type commandSigningPayload struct {
 	ID        string            `json:"id"`
 	Type      CommandType       `json:"type"`
@@ -358,6 +456,10 @@ func InterfaceParamsToStringMap(m map[string]interface{}) map[string]string {
 // InterfaceParamsToStringMap(cmd.Params) on the originating side. Using this canonical
 // form ensures that both the signer (controller) and verifier (steward) produce identical
 // bytes regardless of JSON-decode type coercions and timezone differences.
+//
+// The returned bytes do not cover cmd.Term — the fencing term is transport-trusted, not
+// signature-authenticated. See commandSigningPayload for the reasoning and the hazards
+// that #3436/#3437 must design around.
 func CommandSigningBytes(cmd *Command, rawParams map[string]string) ([]byte, error) {
 	payload := commandSigningPayload{
 		ID:        cmd.ID,

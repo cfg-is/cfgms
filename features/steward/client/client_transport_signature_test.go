@@ -73,9 +73,8 @@ func newSigningCA(t *testing.T) (ca *cfgcert.CA, signer signature.Signer, certPE
 	require.NoError(t, err)
 	require.NoError(t, ca.Initialize(nil))
 
-	cert, err := ca.GenerateServerCertificate(&cfgcert.ServerCertConfig{
+	cert, err := ca.GenerateSigningCertificate(&cfgcert.SigningCertConfig{
 		CommonName:   "controller-signing-test",
-		DNSNames:     []string{"localhost"},
 		ValidityDays: 1,
 		KeySize:      2048,
 	})
@@ -164,10 +163,9 @@ func TestGetConfiguration_TamperedData_ReturnsDataLoss(t *testing.T) {
 		"tampered data must return codes.DataLoss, got: %v", err)
 }
 
-// TestGetConfiguration_SkipsVerification_WhenNoCert verifies that GetConfiguration
-// succeeds (skips verification) when no signing certificate is configured on the
-// client — backward-compatible with controllers that do not sign.
-func TestGetConfiguration_SkipsVerification_WhenNoCert(t *testing.T) {
+// TestGetConfiguration_RejectsWhenNoCert verifies that a missing trust anchor
+// cannot silently disable signature verification.
+func TestGetConfiguration_RejectsWhenNoCert(t *testing.T) {
 	_, signer, _ := newSigningCA(t)
 
 	payload := []byte("config payload — no cert configured")
@@ -179,15 +177,14 @@ func TestGetConfiguration_SkipsVerification_WhenNoCert(t *testing.T) {
 		logger:           newTestLogger(t),
 	}
 
-	gotData, _, err := tc.GetConfiguration(context.Background(), nil)
-	require.NoError(t, err, "missing cert must skip verification (not fail)")
-	assert.Equal(t, payload, gotData)
+	_, _, err := tc.GetConfiguration(context.Background(), nil)
+	require.Error(t, err)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
-// TestGetConfiguration_SkipsVerification_WhenEmptySignature verifies that
-// GetConfiguration succeeds without error when the ConfigTransfer carries no
-// signature — backward-compatible with unsigned controller deployments.
-func TestGetConfiguration_SkipsVerification_WhenEmptySignature(t *testing.T) {
+// TestGetConfiguration_RejectsEmptySignature verifies unsigned transfers fail
+// before their contents can be parsed or applied.
+func TestGetConfiguration_RejectsEmptySignature(t *testing.T) {
 	_, _, certPEM := newSigningCA(t)
 
 	// Transfer with verifier cert configured but no Signature.
@@ -203,7 +200,7 @@ func TestGetConfiguration_SkipsVerification_WhenEmptySignature(t *testing.T) {
 		logger:           newTestLogger(t),
 	}
 
-	gotData, _, err := tc.GetConfiguration(context.Background(), nil)
-	require.NoError(t, err, "empty signature must skip verification (not fail)")
-	assert.Equal(t, transfer.Data, gotData)
+	_, _, err := tc.GetConfiguration(context.Background(), nil)
+	require.Error(t, err)
+	assert.Equal(t, codes.DataLoss, status.Code(err))
 }

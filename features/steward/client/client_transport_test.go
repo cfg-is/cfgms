@@ -6,6 +6,8 @@ package client
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -61,17 +63,41 @@ func (l *kvCapturingLogger) allEntries() []kvLogEntry {
 // entries captured before Connect fails must use logging.RedactedID output only.
 // Issue #981: steward_id from controller registration must be redacted at Info level.
 func TestConnect_StewardIDRedactedInLogs(t *testing.T) {
+	// A real certManager gives createTLSConfig valid material to work with
+	// (Issue #4318 made the no-material case a fatal, early error), so Connect
+	// proceeds far enough to emit the steward_id log line before failing on
+	// the unreachable transport address below.
+	mgr, err := cert.NewManager(&cert.ManagerConfig{
+		StoragePath: t.TempDir(),
+		CAConfig: &cert.CAConfig{
+			Organization: "Test Org",
+			Country:      "US",
+			ValidityDays: 365,
+		},
+	})
+	require.NoError(t, err)
+	_, err = mgr.GenerateClientCertificate(&cert.ClientCertConfig{
+		CommonName:   "steward-test-abc123xyz",
+		ValidityDays: 365,
+	})
+	require.NoError(t, err)
+
 	cap := &kvCapturingLogger{}
 	c := &TransportClient{
 		stewardID:        "steward-test-abc123xyz",
 		transportAddress: "localhost:0", // unreachable; Connect will fail before fully connecting
+		certManager:      mgr,
 		logger:           cap,
 		heartbeatStop:    make(chan struct{}),
 		convergenceStop:  make(chan struct{}),
 		convergeInterval: 30 * time.Minute,
 	}
 
-	ctx := context.Background()
+	// dialInitial (pkg/controlplane/providers/grpc) retries the dial until the
+	// context is done rather than failing fast, so a bounded context is required
+	// here or the unreachable address would retry indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	// Connect is expected to fail (no real controller). The log entries captured
 	// before the failure are what we validate.
 	_ = c.Connect(ctx)
@@ -286,4 +312,136 @@ func TestStartConvergenceLoop_IntervalChangeResetsTicker(t *testing.T) {
 
 	assert.True(t, fired,
 		"convergence loop must reset its ticker on a converge_interval change and fire a scheduled convergence within 5s")
+}
+
+// TestCreateTLSConfig_NoCertMaterialConfigured_Fails verifies that createTLSConfig
+// never returns a nil TLS config with a nil error (Issue #4318). With no certificate
+// manager, an empty certificate path, and none of the three TLS environment variables
+// set, the environment-variable fallback path has no certificate material at all —
+// this must be a fatal, descriptive error, not a silent nil,nil that lets the caller
+// connect without mutual TLS.
+func TestCreateTLSConfig_NoCertMaterialConfigured_Fails(t *testing.T) {
+	// Ensure none of the fallback env vars are set, regardless of the ambient
+	// process environment. t.Setenv restores the prior value after the test.
+	t.Setenv("CFGMS_TLS_CERT_PATH", "")
+	t.Setenv("CFGMS_TLS_KEY_PATH", "")
+	t.Setenv("CFGMS_TLS_CA_PATH", "")
+
+	c := &TransportClient{
+		logger: logging.NewLogger("info"),
+	}
+
+	tlsCfg, err := c.createTLSConfig()
+
+	require.Error(t, err, "createTLSConfig must fail when no certificate material is configured")
+	assert.Nil(t, tlsCfg, "createTLSConfig must not return a config alongside an error")
+}
+
+// TestCreateTLSConfig_EnvVarMissingIndividually_Fails verifies that the
+// environment-variable fallback treats each of the three required variables as
+// individually mandatory: missing any single one is a fatal error, never a
+// fallthrough to a nil, nil TLS config (Issue #4318).
+func TestCreateTLSConfig_EnvVarMissingIndividually_Fails(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "client.crt")
+	keyFile := filepath.Join(dir, "client.key")
+	caFile := filepath.Join(dir, "ca.crt")
+
+	// Content is irrelevant for this test: every case below fails before the
+	// file is ever read, because the missing variable is caught first.
+	for _, f := range []string{certFile, keyFile, caFile} {
+		require.NoError(t, os.WriteFile(f, []byte("not-a-real-cert"), 0o600))
+	}
+
+	cases := []struct {
+		name    string
+		cert    string
+		key     string
+		ca      string
+		missing string
+	}{
+		{name: "missing cert path", cert: "", key: keyFile, ca: caFile, missing: "CFGMS_TLS_CERT_PATH"},
+		{name: "missing key path", cert: certFile, key: "", ca: caFile, missing: "CFGMS_TLS_KEY_PATH"},
+		{name: "missing ca path", cert: certFile, key: keyFile, ca: "", missing: "CFGMS_TLS_CA_PATH"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CFGMS_TLS_CERT_PATH", tc.cert)
+			t.Setenv("CFGMS_TLS_KEY_PATH", tc.key)
+			t.Setenv("CFGMS_TLS_CA_PATH", tc.ca)
+
+			c := &TransportClient{
+				logger: logging.NewLogger("info"),
+			}
+
+			tlsCfg, err := c.createTLSConfig()
+
+			require.Error(t, err, "createTLSConfig must fail when %s is missing", tc.missing)
+			assert.Nil(t, tlsCfg, "createTLSConfig must not return a config alongside an error")
+			assert.Contains(t, err.Error(), tc.missing,
+				"error must name the missing environment variable")
+		})
+	}
+}
+
+// TestConnect_NoCertMaterialConfigured_FailsToConnect verifies the full acceptance
+// scenario for Issue #4318: a steward with no certificate manager, an empty
+// certificate path, and no TLS environment variables set must fail to connect
+// rather than silently establishing a cleartext (non-mTLS) control-plane connection.
+func TestConnect_NoCertMaterialConfigured_FailsToConnect(t *testing.T) {
+	t.Setenv("CFGMS_TLS_CERT_PATH", "")
+	t.Setenv("CFGMS_TLS_KEY_PATH", "")
+	t.Setenv("CFGMS_TLS_CA_PATH", "")
+
+	c := &TransportClient{
+		stewardID:        "steward-no-tls-material-test",
+		transportAddress: "localhost:0",
+		logger:           logging.NewLogger("info"),
+		heartbeatStop:    make(chan struct{}),
+		convergenceStop:  make(chan struct{}),
+		convergeInterval: 30 * time.Minute,
+	}
+
+	ctx := context.Background()
+	err := c.Connect(ctx)
+
+	require.Error(t, err, "Connect must fail when no TLS certificate material is configured")
+	assert.Contains(t, err.Error(), "TLS config",
+		"Connect must fail on the missing TLS material itself, not on a downstream network error")
+
+	c.mu.RLock()
+	connected := c.connected
+	c.mu.RUnlock()
+	assert.False(t, connected, "Connect must not mark the client connected without mutual TLS")
+}
+
+// TestConnect_FatalOnTLSConfigFailure verifies that a createTLSConfig failure causes
+// Connect to return the underlying error immediately rather than swallowing it and
+// continuing with a nil TLS config (Issue #1662).
+//
+// A TransportClient with certPath set to an empty temp directory causes createTLSConfig
+// to fail when it cannot read ca.crt. Connect must return that error; the misleading
+// downstream "client mode requires 'tls_config'" error must never be reached.
+func TestConnect_FatalOnTLSConfigFailure(t *testing.T) {
+	// certPath points to a real dir with no cert files — triggers the disk path
+	// in createTLSConfig, which fails on the missing ca.crt read.
+	dir := t.TempDir()
+
+	c := &TransportClient{
+		stewardID:        "steward-tls-fail-test",
+		transportAddress: "localhost:0",
+		certPath:         dir,
+		logger:           logging.NewLogger("info"),
+		heartbeatStop:    make(chan struct{}),
+		convergenceStop:  make(chan struct{}),
+		convergeInterval: 30 * time.Minute,
+	}
+
+	ctx := context.Background()
+	err := c.Connect(ctx)
+
+	require.Error(t, err, "Connect must return an error when createTLSConfig fails")
+	assert.Contains(t, err.Error(), "failed to create TLS config",
+		"Connect error must wrap the createTLSConfig failure, not obscure it with a downstream provider error")
 }

@@ -52,7 +52,7 @@ func SavePersistedState(path string, ps PersistedState) error {
 	if path == "" {
 		return errors.New("cutover: state path must not be empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(ps, "", "  ")

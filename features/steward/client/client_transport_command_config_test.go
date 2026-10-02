@@ -105,8 +105,12 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 	}
 
 	t.Run("require_signed_adhoc true rejects unsigned ad-hoc command", func(t *testing.T) {
+		caPEM, err := newTestCA(t).GetCACertificate()
+		require.NoError(t, err)
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
+			CACertPEM:     string(caPEM),
+			PublicBeta:    true,
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
 				Policy:             stewardconfig.ScriptSigningPolicyRequired,
 				RequireSignedAdhoc: true,
@@ -124,7 +128,12 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 			"unsigned ad-hoc command must be rejected when require_signed_adhoc is wired true")
 	})
 
-	t.Run("require_signed_adhoc false accepts unsigned ad-hoc command", func(t *testing.T) {
+	t.Run("require_signed_adhoc false still rejects unsigned ad-hoc command", func(t *testing.T) {
+		// Issue #3694: inline (ad-hoc) operator-signature verification is now
+		// mandatory and unconditional — require_signed_adhoc no longer gates it.
+		// Before #3694 this configuration let an unsigned ad-hoc command through;
+		// it is now the ONLY gate an inline command passes through, so it can no
+		// longer be configured off.
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
@@ -139,31 +148,55 @@ func TestSetupCommandHandler_EnforcesRequireSignedAdhoc(t *testing.T) {
 		require.NoError(t, err)
 		t.Cleanup(handler.Wait)
 
-		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-accept"))
-		assert.NotErrorIs(t, err, commands.ErrUnauthenticatedCommand,
-			"unsigned ad-hoc command must pass signature preflight when require_signed_adhoc is false")
+		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-reject-2"))
+		require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand,
+			"unsigned ad-hoc command must still be rejected even when require_signed_adhoc is false")
 	})
 
-	t.Run("invalid controller CA PEM degrades gracefully and still enforces", func(t *testing.T) {
-		// An unparseable CACertPEM leaves controllerCARoots nil — setupCommandHandler
-		// must not fail, and require_signed_adhoc enforcement must still be active.
+	t.Run("public-beta rejects require_signed_adhoc false", func(t *testing.T) {
+		caPEM, err := newTestCA(t).GetCACertificate()
+		require.NoError(t, err)
+		c, err := NewTransportClient(&TransportConfig{
+			ControllerURL: "localhost:4433",
+			CACertPEM:     string(caPEM),
+			PublicBeta:    true,
+			ScriptSigning: stewardconfig.ScriptSigningConfig{
+				Policy:             stewardconfig.ScriptSigningPolicyOptional,
+				RequireSignedAdhoc: false,
+			},
+			Logger: newTestLogger(t),
+		})
+		require.ErrorContains(t, err, "require_signed_adhoc")
+		require.Nil(t, c)
+	})
+
+	t.Run("invalid controller CA PEM fails closed", func(t *testing.T) {
 		c, err := NewTransportClient(&TransportConfig{
 			ControllerURL: "localhost:4433",
 			CACertPEM:     "-----BEGIN CERTIFICATE-----\nnot-valid-base64\n-----END CERTIFICATE-----",
+			PublicBeta:    true,
 			ScriptSigning: stewardconfig.ScriptSigningConfig{
 				Policy:             stewardconfig.ScriptSigningPolicyRequired,
 				RequireSignedAdhoc: true,
 			},
 			Logger: newTestLogger(t),
 		})
-		require.NoError(t, err)
+		require.Error(t, err, "public-beta startup must fail before connecting without controller CA roots")
+		require.ErrorContains(t, err, "valid controller signing roots")
+		require.Nil(t, c)
+	})
 
-		handler, err := c.setupCommandHandler(context.Background(), stewardID)
-		require.NoError(t, err, "setupCommandHandler must tolerate an unparseable controller CA PEM")
-		t.Cleanup(handler.Wait)
-
-		err = handler.HandleCommand(context.Background(), unsignedExecuteScript("sig-wired-badca"))
-		require.ErrorIs(t, err, commands.ErrUnauthenticatedCommand,
-			"require_signed_adhoc enforcement must remain active even when CA roots cannot be built")
+	t.Run("missing controller CA PEM fails closed", func(t *testing.T) {
+		c, err := NewTransportClient(&TransportConfig{
+			ControllerURL: "localhost:4433",
+			PublicBeta:    true,
+			ScriptSigning: stewardconfig.ScriptSigningConfig{
+				Policy:             stewardconfig.ScriptSigningPolicyRequired,
+				RequireSignedAdhoc: true,
+			},
+			Logger: newTestLogger(t),
+		})
+		require.ErrorContains(t, err, "valid controller signing roots")
+		require.Nil(t, c)
 	})
 }

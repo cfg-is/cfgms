@@ -20,9 +20,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/features/controller/fleet"
 	cpTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -76,11 +76,10 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global (cross-tenant) scope with an empty tenant
-	// (middleware.go:173); an empty tenant yields an unscoped fleet search and the
+	// An empty callerTenantID (mTLS admin) yields an unscoped fleet search; the
 	// per-tenant isolation filter below is skipped for admins. Only a NON-admin caller
 	// with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -92,7 +91,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	var req dispatchUpgradeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to decode dispatch upgrade body", "error", err)
+		s.logger.Warn("Failed to decode dispatch upgrade body", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid request body", "INVALID_BODY")
 		return
 	}
@@ -122,40 +121,40 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse selector and apply tenant scope.
-	filter, err := fleet.ParseTargetSelector(req.Selector)
+	// Parse selector and apply tenant subtree scope.
+	filter, parsedTenantPath, err := selector.Parse(req.Selector)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"Invalid selector: "+err.Error(),
 			"INVALID_SELECTOR")
 		return
 	}
-	filter.TenantID = callerTenantID
+
+	// Scope to the caller's subtree. An explicit selector prefix must be within
+	// the caller's subtree; absent prefix defaults to callerTenantID and all
+	// descendants. An empty callerTenantID (mTLS admin) is unrestricted.
+	if parsedTenantPath != "" {
+		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			return
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if callerTenantID != "" {
+		filter.TenantSubtree = callerTenantID
+	}
 
 	// Resolve matching stewards.
 	stewards, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
-		s.logger.Error("Fleet query failed during upgrade dispatch", "error", err)
+		s.logger.Error("Fleet query failed during upgrade dispatch", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Fleet query failed", "FLEET_QUERY_ERROR")
 		return
 	}
 
-	// Enforce tenant isolation for scoped (non-admin) callers: drop stewards from other
-	// tenants, return 403 if none remain. Admin mTLS principals (empty tenant) have global
-	// scope and act on every matched steward (Issue #1999).
-	var tenantStewards []fleet.StewardResult
-	if principal.IsAdmin {
-		tenantStewards = stewards
-	} else {
-		for _, st := range stewards {
-			if st.TenantID == callerTenantID {
-				tenantStewards = append(tenantStewards, st)
-			}
-		}
-	}
-	if len(tenantStewards) == 0 {
+	if len(stewards) == 0 {
 		s.writeErrorResponse(w, http.StatusForbidden,
-			"No stewards in caller tenant match the given selector",
+			"No stewards match the given selector within the caller's tenant scope",
 			"CROSS_TENANT")
 		return
 	}
@@ -170,7 +169,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 				"BINARY_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve steward binary", "error", err)
+		s.logger.Error("Failed to retrieve steward binary", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve binary", "GET_BINARY_ERROR")
 		return
 	}
@@ -179,7 +178,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	blobContent, err := io.ReadAll(rc)
 	_ = rc.Close()
 	if err != nil {
-		s.logger.Error("Failed to read steward binary for SHA-256 recompute", "error", err)
+		s.logger.Error("Failed to read steward binary for SHA-256 recompute", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read binary", "READ_BINARY_ERROR")
 		return
 	}
@@ -202,7 +201,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	if sigBase64 != "" {
 		bundleSig, err = base64.RawURLEncoding.DecodeString(sigBase64)
 		if err != nil {
-			s.logger.Error("Failed to decode bundle signature from blob label", "error", err)
+			s.logger.Error("Failed to decode bundle signature from blob label", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decode signature", "SIGNATURE_DECODE_ERROR")
 			return
 		}
@@ -216,7 +215,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	var created []createdRecord
 
-	for _, st := range tenantStewards {
+	for _, st := range stewards {
 		// Check for non-terminal upgrade records for this steward.
 		existing, listErr := s.upgradeStore.ListUpgradesBySteward(r.Context(), st.ID)
 		if listErr != nil {
@@ -244,12 +243,12 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Record tenant: scoped callers are bound to their own tenant (== steward tenant by
-		// the isolation filter above). Admins (empty tenant) attribute each record to the
-		// target steward's tenant so per-tenant status/rollback isolation keeps working
+		// the isolation filter above). Admin callers (empty tenant) attribute each record to
+		// the target steward's tenant so per-tenant status/rollback isolation keeps working
 		// (Issue #1999).
 		recordTenantID := callerTenantID
 		authMethod := "api_key"
-		if principal.IsAdmin {
+		if callerTenantID == "" {
 			recordTenantID = st.TenantID
 			authMethod = "mtls_admin"
 		}
@@ -278,7 +277,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		if createErr := s.upgradeStore.CreateUpgrade(r.Context(), record); createErr != nil {
 			s.logger.Error("Failed to create upgrade record",
-				"error", createErr,
+				"error", logging.SanitizeLogValue(createErr.Error()),
 				"steward_id", logging.SanitizeLogValue(st.ID))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record upgrade", "CREATE_RECORD_ERROR")
 			return
@@ -317,6 +316,8 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		createdSnapshot := created
+		// #nosec G118 -- persisted upgrade commands intentionally outlive the
+		// HTTP request; each publisher call has a fixed two-minute deadline.
 		go func() {
 			for _, entry := range createdSnapshot {
 				upgradeID := entry.upgradeID
@@ -360,7 +361,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 					onTimeout,
 				); pubErr != nil {
 					s.logger.Error("Failed to dispatch CommandPushStewardBinary",
-						"error", pubErr,
+						"error", logging.SanitizeLogValue(pubErr.Error()),
 						"steward_id", logging.SanitizeLogValue(stewardID),
 						"upgrade_id", upgradeID)
 					_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), upgradeID,
@@ -392,10 +393,9 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
-	// and may view any tenant's record; only a NON-admin caller with no tenant is a
-	// genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	// An empty callerTenantID (mTLS admin) has unrestricted access; only a NON-admin
+	// caller with no tenant is a genuine auth failure (Issue #1999, same pattern as #1990).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -413,16 +413,18 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Error("Failed to retrieve upgrade record",
-			"error", err,
+			"error", logging.SanitizeLogValue(err.Error()),
 			"upgrade_id", logging.SanitizeLogValue(upgradeID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
 
-	// Tenant isolation: scoped (non-admin) callers can only view records in their own
-	// tenant; admin mTLS principals have global access (Issue #1999).
-	if !principal.IsAdmin && record.TenantID != callerTenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+	// Tenant isolation: callers scoped to a tenant can only view records within their
+	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
+	// (Issue #4091) — mirrors the genuine not-found response above.
+	if !isWithinTenantScope(callerTenantID, record.TenantID) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}
 
@@ -446,10 +448,9 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Admin mTLS principals carry global scope with an empty tenant (middleware.go:173)
-	// and may roll back any tenant's record; only a NON-admin caller with no tenant is a
-	// genuine auth failure (Issue #1999, same pattern as #1990).
-	principal, callerTenantID, ok := s.authRunAccess(w, r)
+	// An empty callerTenantID (mTLS admin) has unrestricted rollback access; only a
+	// NON-admin caller with no tenant is a genuine auth failure (Issue #1999).
+	_, callerTenantID, ok := s.authRunAccess(w, r)
 	if !ok {
 		return
 	}
@@ -468,21 +469,24 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve upgrade record for rollback", "error", err)
+		s.logger.Error("Failed to retrieve upgrade record for rollback", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve upgrade record", "GET_RECORD_ERROR")
 		return
 	}
-	// Tenant isolation: scoped (non-admin) callers can only roll back records in their own
-	// tenant; admin mTLS principals have global access (Issue #1999).
-	if !principal.IsAdmin && original.TenantID != callerTenantID {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access denied", "FORBIDDEN")
+	// Tenant isolation: callers scoped to a tenant can only roll back records within their
+	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
+	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
+	// (Issue #4091) — mirrors the genuine not-found response above.
+	if !isWithinTenantScope(callerTenantID, original.TenantID) {
+		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for
-	// admins (global scope) and to the caller's tenant for scoped callers (== original tenant
-	// by the isolation check above), so per-tenant status/listing stays consistent (Issue #1999).
+	// admin callers (empty tenant) and to the caller's tenant for tenant-scoped callers
+	// (== original tenant by the isolation check above), so per-tenant status/listing
+	// stays consistent (Issue #1999).
 	effectiveTenantID := callerTenantID
-	if principal.IsAdmin {
+	if callerTenantID == "" {
 		effectiveTenantID = original.TenantID
 	}
 	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
@@ -516,7 +520,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 				"BINARY_NOT_FOUND")
 			return
 		}
-		s.logger.Error("Failed to retrieve rollback binary", "error", err)
+		s.logger.Error("Failed to retrieve rollback binary", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to retrieve binary", "GET_BINARY_ERROR")
 		return
 	}
@@ -524,7 +528,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	blobContent, err := io.ReadAll(rc)
 	_ = rc.Close()
 	if err != nil {
-		s.logger.Error("Failed to read rollback binary for SHA-256 recompute", "error", err)
+		s.logger.Error("Failed to read rollback binary for SHA-256 recompute", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to read binary", "READ_BINARY_ERROR")
 		return
 	}
@@ -545,7 +549,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	if sigBase64 != "" {
 		bundleSig, err = base64.RawURLEncoding.DecodeString(sigBase64)
 		if err != nil {
-			s.logger.Error("Failed to decode bundle signature for rollback", "error", err)
+			s.logger.Error("Failed to decode bundle signature for rollback", "error", logging.SanitizeLogValue(err.Error()))
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to decode signature", "SIGNATURE_DECODE_ERROR")
 			return
 		}
@@ -559,7 +563,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rollbackAuthMethod := "api_key"
-	if principal.IsAdmin {
+	if callerTenantID == "" {
 		rollbackAuthMethod = "mtls_admin"
 	}
 	rollbackUpgradeID := uuid.New().String()
@@ -586,7 +590,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 	if createErr := s.upgradeStore.CreateUpgrade(r.Context(), record); createErr != nil {
 		s.logger.Error("Failed to create rollback upgrade record",
-			"error", createErr,
+			"error", logging.SanitizeLogValue(createErr.Error()),
 			"steward_id", logging.SanitizeLogValue(original.StewardID))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to record rollback upgrade", "CREATE_RECORD_ERROR")
 		return
@@ -614,6 +618,8 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 			"bundle_signature": base64.StdEncoding.EncodeToString(bundleSig),
 		}
 		stewardID := original.StewardID
+		// #nosec G118 -- persisted rollback dispatch intentionally outlives the
+		// HTTP request; the publisher call has a fixed two-minute deadline.
 		go func() {
 			onComplete := func(event *cpTypes.Event) {
 				switch event.Type {
@@ -654,7 +660,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 				onTimeout,
 			); pubErr != nil {
 				s.logger.Error("Failed to dispatch rollback CommandPushStewardBinary",
-					"error", pubErr,
+					"error", logging.SanitizeLogValue(pubErr.Error()),
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"rollback_upgrade_id", rollbackUpgradeID)
 				_ = s.upgradeStore.UpdateUpgradeStatus(context.Background(), rollbackUpgradeID,

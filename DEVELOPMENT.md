@@ -40,8 +40,12 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **Docker** - For integration tests and local deployment
 - **golangci-lint** - Code linting
+
+  Install it from source at the pinned tag, so the Go it is built with matches the
+  `toolchain` directive in `go.mod`. A prebuilt release archive is built with
+  whatever Go upstream used and refuses to run once `go.mod` targets a newer one.
   ```bash
-  curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2
+  go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
   ```
 
 - **entr** - For watch mode during development
@@ -60,8 +64,28 @@ This guide provides instructions for setting up a local CFGMS development enviro
 
 - **gosec** - Security scanning
   ```bash
-  go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+  go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
   ```
+
+- **Serena MCP server** - Semantic code navigation/editing for Claude Code. The
+  server config ships with the repo in `.mcp.json` (project scope), but the
+  runtime is per-machine: install [`uv`](https://docs.astral.sh/uv/), then
+  approve the server on first interactive `claude` launch.
+  ```bash
+  # Install uv (provides uvx, which fetches/runs Serena on demand)
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # Install the Go language server Serena drives for this repo. It must be on
+  # PATH (go install drops it in $(go env GOPATH)/bin) BEFORE Serena starts;
+  # Serena does not install it for you and silently disables symbol tools if
+  # it is missing.
+  go install golang.org/x/tools/gopls@latest
+
+  # Confirm Claude Code sees the project-scoped server, then approve it
+  claude mcp list   # shows: serena ... (pending approval until you run `claude`)
+  ```
+  No manual `claude mcp add` is needed — `.mcp.json` is committed (it pins
+  `--project .` so the repo auto-activates on launch).
 
 ### System Requirements
 

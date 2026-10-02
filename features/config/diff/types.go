@@ -680,6 +680,13 @@ type ApprovalRequest struct {
 	// Requester is who requested the approval
 	Requester string `json:"requester"`
 
+	// TenantID is the tenant scope the requesting principal was authorized under
+	// at creation time (Issue #4340). Empty when the requester held root scope
+	// (or no explicit scope), in which case no tenant boundary is enforced on
+	// approval decisions for this request. Used by AddApproval to refuse a
+	// decision from a principal outside this tenant's subtree.
+	TenantID string `json:"tenant_id,omitempty"`
+
 	// RequiredApprovers are who needs to approve
 	RequiredApprovers []string `json:"required_approvers"`
 
@@ -715,6 +722,11 @@ type ApprovalStatus struct {
 type Approval struct {
 	// Approver is who provided the approval
 	Approver string `json:"approver"`
+
+	// Principal is the authenticated caller (from context) who recorded this
+	// approval (Issue #4340) — distinct from Approver, which identifies which
+	// required-approver slot this decision fills.
+	Principal string `json:"principal,omitempty"`
 
 	// Decision is the approval decision
 	Decision string `json:"decision"`

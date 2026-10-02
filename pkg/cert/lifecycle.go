@@ -10,12 +10,14 @@
 package cert
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 )
 
 const signingCursorFileName = "signing-cursor.json"
@@ -24,7 +26,7 @@ const signingCursorFileName = "signing-cursor.json"
 // rotation is requested while a previous rotation's overlap window is still
 // open. Callers (e.g. the REST handler) can use errors.Is to map this to a
 // 409 Conflict rather than a generic 500.
-var ErrSigningRotationInProgress = errors.New("signing rotation already in progress")
+var ErrSigningRotationInProgress = certinterfaces.ErrSigningRotationInProgress
 
 // SigningCertLifecycleState describes the lifecycle phase of a config-signing certificate.
 type SigningCertLifecycleState int
@@ -41,21 +43,7 @@ const (
 // SigningCertCursor is the on-disk JSON state for the config-signing rotation.
 // It is written atomically to {basePath}/signing-cursor.json.
 // A missing file means no rotation has been initiated.
-type SigningCertCursor struct {
-	// CurrentSerial is the serial of the active signing certificate.
-	CurrentSerial string `json:"current_serial"`
-	// RotatingSerial is the serial of the previous signer still accepted during
-	// the overlap window. Empty when no rotation is in progress.
-	RotatingSerial string `json:"rotating_serial,omitempty"`
-	// OverlapWindowDays is the number of days RotatingSerial remains accepted
-	// after the rotation. Set at rotate-time (B2a); B1 reads it.
-	OverlapWindowDays int `json:"overlap_window_days"`
-	// RotatedAt is the wall-clock time when the last rotation occurred.
-	RotatedAt time.Time `json:"rotated_at"`
-	// RetiredAt records when RotatingSerial was retired (overlap window closed).
-	// Nil while the overlap window is still open or when no rotation has occurred.
-	RetiredAt *time.Time `json:"retired_at,omitempty"`
-}
+type SigningCertCursor = certinterfaces.SigningCertCursor
 
 // loadSigningCursor reads the cursor file from basePath.
 // Returns (nil, nil) when the file does not exist — no rotation in progress.
@@ -142,4 +130,61 @@ func transitionSigningCursor(store *FileStore, basePath string, newSerial string
 	}
 
 	return saveSigningCursor(basePath, next)
+}
+
+// fileSigningCursorStore is the node-local, file-backed SigningCursorStore
+// implementation, adapting the package-private load/save/transition
+// functions above to certinterfaces.SigningCursorStore.
+type fileSigningCursorStore struct {
+	store    *FileStore
+	basePath string
+}
+
+// NewFileSigningCursorStore returns the node-local, file-backed
+// SigningCursorStore implementation: a JSON file at
+// basePath/signing-cursor.json, preserving the exact on-disk layout this
+// package has always used. This is pkg/cert's default for single-node
+// deployments (Issue #3852 AC2); a clustered controller overrides it via
+// ManagerConfig.SigningCursorStore.
+func NewFileSigningCursorStore(basePath string) (certinterfaces.SigningCursorStore, error) {
+	store, err := NewFileStore(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize signing cursor store: %w", err)
+	}
+	return &fileSigningCursorStore{store: store, basePath: basePath}, nil
+}
+
+// LoadCursor implements certinterfaces.SigningCursorStore.LoadCursor. ctx is
+// unused: all I/O here is local-file, matching the rest of pkg/cert's
+// Manager API, which predates context propagation.
+func (f *fileSigningCursorStore) LoadCursor(_ context.Context) (*SigningCertCursor, error) {
+	return loadSigningCursor(f.basePath)
+}
+
+// TransitionCursor implements certinterfaces.SigningCursorStore.TransitionCursor.
+// When force is true, RotatingSerial is cleared first so the guard inside
+// transitionSigningCursor sees no rotation in progress — the same two-step
+// sequence Manager.rotateSigningCertificate performed inline before this
+// store existed. The clear-then-transition pair is not atomic as a whole (an
+// interleaving caller could observe the cleared state before the new
+// transition lands), but force-rotation is a rare, operator-initiated
+// recovery action; losing that race means a retry, not a correctness issue,
+// and this matches today's file-backed behavior exactly.
+func (f *fileSigningCursorStore) TransitionCursor(_ context.Context, newSerial string, overlapDays int, force bool) (*SigningCertCursor, error) {
+	if force {
+		f.store.mu.Lock()
+		cursor, err := loadSigningCursor(f.basePath)
+		if err == nil && cursor != nil && cursor.RotatingSerial != "" {
+			cursor.RotatingSerial = ""
+			err = saveSigningCursor(f.basePath, cursor)
+		}
+		f.store.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("clear signing cursor for force rotate: %w", err)
+		}
+	}
+	if err := transitionSigningCursor(f.store, f.basePath, newSerial, overlapDays); err != nil {
+		return nil, err
+	}
+	return loadSigningCursor(f.basePath)
 }

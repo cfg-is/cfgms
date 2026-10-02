@@ -12,9 +12,7 @@ observe convergence and drift correction — end to end on fresh Linux VMs.
 - Drift observable via controller logs and metrics
 
 > **This walkthrough is the spec** that the docker fleet test (Epic #1501) validates
-> on every PR. Commands marked `[GAP: ...]` represent planned functionality that is
-> not yet implemented; REST API fallbacks are provided to demonstrate the underlying
-> capability today.
+> on every PR. Steps are shown as `cfg` commands or REST API calls.
 
 ## How this differs from the single-controller walkthrough
 
@@ -96,6 +94,7 @@ verify these fields:
 | `certificate.server.dns_names` | All hostnames stewards use to reach the controller |
 | `certificate.server.ip_addresses` | All IPs stewards use to reach the controller |
 | `transport.listen_addr` | `"0.0.0.0:4433"` (all interfaces, not just localhost) |
+| `webauthn.rp_id` / `webauthn.rp_origins` | Optional — required only for browser passkey login. `rp_id` must be the public hostname admins use to reach the controller (e.g. `ctrl.mylab.local`); `rp_origins` must list every `https://` origin they log in from. See the [single-controller walkthrough's WebAuthn section](../single-controller/walkthrough.md#browser-passkey-login-optional). |
 
 > **Storage note**: If `controller.cfg` still has `storage.provider: "git"`, replace the
 > `storage:` block before running `--init` — the git provider has been removed. Use:
@@ -115,6 +114,27 @@ Once the single-controller walkthrough's Step 4 checklist passes, continue here.
 `cfgms-controller --init` writes an admin credential bundle to
 `/etc/cfgms/admin.bundle.yaml` on the controller. This file contains everything
 the `cfg` CLI needs to authenticate to the controller REST API via mTLS.
+
+This bundle is the one-time bootstrap exception: a fresh controller has no
+account yet for anyone to log in against, so `--init` generates this
+certificate's keypair itself and hands you both halves — the one CFGMS
+credential whose private key the controller ever holds. It cannot approve a
+credential enrolment or renew itself, and is unable to
+authorise code execution on a managed endpoint
+(see [ADR-021 Amendment 5](../../architecture/decisions/021-identity-assurance-levels.md)). The ordinary
+way to obtain every credential after this first one is `cfg login`, a browser
+passkey assertion, not another bundle.
+
+> `cfg login` (`cmd/cfg/cmd/login.go`) lodges a login request with the controller,
+> opens the approval URL in a browser, and stores the minted session token in the
+> OS keychain. The bundle path below is the one-time bootstrap for the first
+> operator only.
+
+> Signer verification on both the steward (`features/steward/commands/execute_script.go`)
+> and the controller (`features/controller/api/handlers_runs.go`) requires the
+> payload-signing marker (`cert.HasPayloadSigningMarker`); an admin-marked bundle
+> certificate alone cannot authorise code execution on an endpoint (Issue #3696).
+> Protect and transfer every bundle file accordingly.
 
 Copy the bundle from the controller to your workstation:
 
@@ -269,14 +289,19 @@ tar -C /tmp/cfgms-install -xzf cfgms-steward-linux-amd64.tar.gz
 
 ### 4c — Install on Linux (`install.sh`)
 
-The install package includes `build/linux/install.sh`. Copy it alongside the extracted
-archive and run it with the CA fingerprint from `installer/ca.fingerprint`:
+The install package includes `build/linux/install.sh`. The preferred installation for
+self-hosted controllers uses **install-pinned** trust: the controller URL and CA cert are
+provided at install time, so the binary does not need to be rebuilt per controller
+(ADR-013 §3, Issue #1517).
 
 ```bash
 FINGERPRINT="$(cat /tmp/cfgms-install/installer/ca.fingerprint)"
+CA_CERT="/tmp/cfgms-install/installer/ca.crt"
 
 sudo bash install.sh \
   --regtoken <REGISTRATION_TOKEN> \
+  --controller-url https://<CONTROLLER_IP>:9080 \
+  --controller-ca "$CA_CERT" \
   --fingerprint "$FINGERPRINT"
 ```
 
@@ -284,19 +309,29 @@ The script:
 1. Verifies the CA cert fingerprint matches the supplied value (aborts on mismatch)
 2. Copies the steward binary to `/usr/local/bin/cfgms-steward`
 3. Writes the CA cert to `/etc/cfgms/controller-ca.crt`
-4. Registers the systemd service and starts it
+4. Registers the systemd service with `--controller-url` embedded in the unit file and starts it
 
-> **CA fingerprint**: `install.sh` computes the fingerprint from `ca.crt` and compares it
+> **CA fingerprint**: `install.sh` computes the fingerprint from the cert and compares it
 > against the value you provide. Retrieve the fingerprint at any time from the controller:
 > `cfg controller info --url=https://<IP>:9080 | grep fingerprint`
 
 > **Non-interactive install** (CI, RMM scripts): pass `--fingerprint` to skip the
 > interactive confirmation prompt.
 
+> **Compile-baked URL** (alternative): if the binary was built with
+> `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080`, you can omit
+> `--controller-url` and `--controller-ca`. The URL is baked in and trusted as strongly
+> as the signed binary itself. Install-pinned is preferred when distributing the same
+> binary to multiple controllers.
+
+> **TOFU (lab only)**: omit `--controller-ca` to use trust-on-first-use semantics. The CA
+> from the first registration response is pinned and immutable thereafter. Only use TOFU in
+> lab environments where the initial registration is known to be untampered.
+
 ### 4d — Install on Windows (MSI via RMM — `msiexec /qn`)
 
 Download the Windows MSI install package from the controller and deploy it silently via
-your RMM (NinjaOne, Datto, ConnectWise, etc.):
+your RMM tool:
 
 ```bash
 # Download the Windows package (contains the MSI + CA cert)
@@ -321,7 +356,7 @@ msiexec /qn /i C:\cfgms-install\cfgms-steward-amd64.msi `
 curl -O https://<CONTROLLER_IP>:9080/api/v1/installer/download/darwin/amd64
 ```
 
-Distribute the `.pkg` through your MDM (Jamf, Kandji, Mosyle, etc.) or install manually:
+Distribute the `.pkg` through your MDM tool or install manually:
 
 ```bash
 sudo installer -pkg cfgms-steward-darwin-amd64.pkg -target /
@@ -371,6 +406,12 @@ Configuration executor initialized  tenant_id=default
 >   trusted_proxies:
 >     - "10.0.0.0/8"
 > ```
+>
+> Configure every proxy hop in that list and configure the edge proxy to append
+> the address it actually observed (or replace any client-supplied header). The
+> controller evaluates the chain right-to-left and uses the first untrusted hop;
+> malformed chains fall back to the TCP peer. The same source identity protects
+> anonymous installer and steward-binary download budgets.
 >
 > When `trusted_proxies` is empty (the default), `X-Forwarded-For` is never
 > trusted — this prevents an attacker from spoofing a trusted source IP.
@@ -450,13 +491,16 @@ cfg steward status <STEWARD_ID> --json
 
 ### Controller-side visibility
 
-The controller's transport metrics show connected steward count:
+Product metrics are available only on the controller's private listener. Run
+this on the controller host (or through an authenticated host-local tunnel):
 
 ```bash
-cfg controller metrics --url=https://<CONTROLLER_IP>:9080
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9090/api/v1/monitoring/metrics
 ```
 
-Look for `Connected Stewards: 2` in the Transport section.
+The same metrics path on `https://<CONTROLLER_IP>:9080` must return `404`.
 
 ---
 
@@ -525,10 +569,10 @@ Expected response (`202 Accepted`):
 }
 ```
 
-> **[GAP: save=deploy auto-distribution not yet wired to ConfigStore — see issue #1525]**
-> In the target architecture, saving a config to the controller automatically triggers
-> distribution to matched stewards. Today, an explicit `POST /api/v1/config/push` is
-> required after each config upload.
+> Saving a config to the controller triggers distribution automatically: a successful
+> ConfigStore write in `ConfigurationServiceV2.SetConfiguration` invokes the fanout
+> callback registered by the API server (Issue #1521). `POST /api/v1/config/push` remains
+> available for an explicit re-push.
 
 ---
 
@@ -567,9 +611,9 @@ cat /etc/myapp/config.yaml
 
 ### Controller-side confirmation
 
-> **[GAP: `cfg config deployments <id>` not yet implemented — see issue #1526]**
-> This command will show applied/pending/failed counts and per-steward status.
-> Until #1526 lands, observe convergence via steward logs (above) and the REST API.
+> `cfg config deployments <config-id>` shows applied / pending / failed / halted
+> aggregate counts and per-steward deployment status; `--json` emits the raw response.
+> The config-id is the `config_id` used in the push payload (`cfg config list` enumerates them).
 
 Poll steward status to confirm `last_seen` advances with each heartbeat:
 
@@ -624,18 +668,12 @@ cat /etc/myapp/config.yaml
 # Should show the desired state from the fleet config, not the manual edit
 ```
 
-> **[GAP: apply/monitor mode toggle not yet implemented — see issue #1524]**
-> The desired-state design includes a `drift_mode` field that switches a steward between
-> `apply` (converge changes) and `monitor` (report drift without correcting it). Today
-> the steward always applies changes when drift is detected regardless of any mode
-> setting. The current `steward.mode` field in the cfg controls connectivity mode
-> (`standalone` vs `controller`), not drift behavior.
+> The `drift_mode` cfg field (`stewardtypes.DriftMode`) switches a steward between
+> `apply` (converge changes) and `monitor` (report drift without correcting it). It is
+> set from controller-delivered cfg, never from the local `steward.cfg`.
 >
-> **[GAP: modules.Monitor() not implemented by any steward module — see issue #1590]**
-> The `Monitor` interface in `features/modules/module.go` defines real-time
-> change-detection for modules that support it. As of the #1511 audit, no steward module
-> implements this interface. All modules use the polling-based convergence loop
-> (`Get → Compare → Set`). Real-time drift notification via `Monitor()` is aspirational.
+> All steward modules detect drift through the polling-based convergence loop
+> (`Get → Compare → Set`).
 
 ---
 
@@ -670,7 +708,9 @@ On the endpoint being decommissioned:
 sudo cfgms-steward uninstall --purge
 ```
 
-The steward's registration record remains in the controller. There is no `DELETE /api/v1/stewards/{id}` endpoint today — steward record deletion is not yet implemented.
+The steward's registration record remains in the controller until it is decommissioned
+with `cfg steward decommission <selector>`, which calls `DELETE /api/v1/stewards/{id}`
+(`handleDecommissionSteward`, gated at strong assurance by the `steward:decommission` policy).
 
 ### Certificate renewal
 
@@ -678,8 +718,11 @@ Steward mTLS certificates are renewed automatically when they approach expiry �
 controller issues a new cert on the next heartbeat before the old one expires. No manual
 intervention is needed for routine renewal.
 
-Admin operator bundle certificates (in `admin.bundle.yaml`) are valid for 365 days. To
-renew an admin bundle:
+Admin operator bundle certificates (in `admin.bundle.yaml`) are valid for 365 days and
+cannot renew themselves — self-renewal is a user-presence-gated action, and a bootstrap
+bundle has no account to obtain user presence through (ADR-021 Amendment 5). Renewal is
+therefore always this manual re-issue-and-revoke procedure, run by an operator holding a
+separate, already-valid credential:
 
 ```bash
 # Issue a new bundle for the operator
@@ -728,7 +771,7 @@ sudo journalctl -u cfgms-steward -f
 | `cfg controller status` returns cert error | Bundle CA does not match controller CA | Re-copy `admin.bundle.yaml` from controller |
 | Steward registration fails: `x509: certificate signed by unknown authority` | `CFGMS_HTTP_CA_CERT_PATH` not set or wrong path | Set env var to the controller's CA cert (`/var/lib/cfgms/certs/ca/ca.crt` on controller) |
 | Steward registration fails: `token expired` or `token not found` | Token expired or already used | `cfg token create` to issue a new token |
-| Steward registration fails: `controller URL not set` | Binary not built with `STEWARD_CONTROLLER_URL` | `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
+| Steward registration fails: `controller URL not set` | Neither `--controller-url` nor compile-baked URL set | Pass `--controller-url` to `install.sh`, or rebuild with `make build-steward STEWARD_CONTROLLER_URL=https://<IP>:9080` |
 | `Connected Stewards: 0` in controller metrics | Stewards registered but not connecting on 4433/UDP | Check firewall — port 4433 must be open for UDP |
 | `curl` REST API call returns `401` | No valid auth credentials | Extract cert/key from admin bundle; see Phase 5 |
 | Convergence not running | Steward is in standalone mode (no regtoken path) | Verify service is using `--regtoken` not `--config` |
@@ -741,8 +784,10 @@ sudo journalctl -u cfgms-steward -f
 # Controller health
 cfg controller status --url=https://<CONTROLLER_IP>:9080
 
-# Controller transport metrics (shows connected steward count)
-cfg controller metrics --url=https://<CONTROLLER_IP>:9080
+# Controller metrics (run on controller; private listener)
+curl --fail --cacert /var/lib/cfgms/certs/ca/ca.crt \
+  -H "X-API-Key: ${CFGMS_MONITORING_API_KEY}" \
+  https://localhost:9090/api/v1/monitoring/metrics
 
 # Controller logs
 sudo journalctl -u cfgms-controller -n 50 --no-pager
@@ -759,25 +804,19 @@ cfg token list --tenant-id=default
 
 ---
 
-## Known Gaps
-
-The table below collects all `[GAP: ...]` markers from this walkthrough for easy reference:
-
-| Gap | Issue | Phase affected |
-|-----|-------|----------------|
-| `cfg config deployments <id>` not implemented | [#1526](https://github.com/cfg-is/cfgms/issues/1526) | Phase 7 |
-| save=deploy auto-distribution not wired | [#1525](https://github.com/cfg-is/cfgms/issues/1525) | Phase 6 |
-| apply/monitor mode toggle not implemented | [#1524](https://github.com/cfg-is/cfgms/issues/1524) | Phase 8 |
-| `modules.Monitor()` not implemented by any module | [#1590](https://github.com/cfg-is/cfgms/issues/1590) | Phase 8 |
-| Multi-controller / failover not supported | [#1517](https://github.com/cfg-is/cfgms/issues/1517) | Phase 4 |
-
----
-
 ## Next Steps
 
+- **Register a browser passkey**: `cfg webauthn register` cannot complete a browser
+  ceremony from the CLI (a loopback-served ceremony can never satisfy a configured
+  relying party — see [ADR-021 Amendment
+  4](../../architecture/decisions/021-identity-assurance-levels.md#amendment-4-2026-08-28-relying-party-is-configuration-has-no-default-and-wiring-it-exposed-a-cli-relay-regression)).
+  Instead, run `cfg account create --username <admin-username>` to mint a single-use
+  enrollment magic link, then open that link in a browser to register the first passkey
+  for browser-based controller login (ADR-021 Amendment 1 self-enrollment). The admin
+  mTLS certificate (from `bootstrap-admin`) remains your CLI credential either way.
 - **Role configs**: See [Role Config Recipes](../../examples/role-configs/README.md) for
   ready-to-use fleet configs for web servers, database servers, domain controllers, and more.
 - **Docker fleet test**: Epic #1501 will validate this walkthrough against a docker-based
   fleet on every PR.
 - **Controller cluster**: When you need high availability, see
-  [Controller Cluster](../controller-cluster/walkthrough.md) *(planned)*.
+  [Controller Cluster](../controller-cluster/walkthrough.md).

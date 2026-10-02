@@ -45,6 +45,13 @@ func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsifac
 func (s *testSecretStore) StoreSecret(_ context.Context, _ *secretsiface.SecretRequest) error {
 	return nil
 }
+func (s *testSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsiface.SecretRequest) (int, bool, error) {
+	if s.secrets == nil {
+		s.secrets = make(map[string]string)
+	}
+	s.secrets[req.Key] = req.Value
+	return 1, true, nil
+}
 func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsiface.SecretFilter) ([]*secretsiface.SecretMetadata, error) {
 	return nil, nil

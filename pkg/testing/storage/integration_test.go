@@ -1,8 +1,8 @@
 //go:build integration
+// +build integration
 
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// +build integration
 
 // Package storage provides comprehensive integration testing for storage providers
 // Tests storage providers against real backends for Epic 6 validation

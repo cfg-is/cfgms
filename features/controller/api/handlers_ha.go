@@ -8,6 +8,8 @@ import (
 	"net/http"
 
 	"github.com/cfgis/cfgms/pkg/ha"
+	"github.com/cfgis/cfgms/pkg/logging"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
 // HAStatusResponse represents the response for HA status endpoint
@@ -16,6 +18,11 @@ type HAStatusResponse struct {
 	IsLeader bool   `json:"is_leader"`
 	Mode     string `json:"mode"`
 	Health   string `json:"health"`
+	// AbsentCapabilities lists declared-optional storage capabilities that are
+	// absent in this deployment. An empty slice means all declared capabilities
+	// are present. Each entry names the capability, the subsystem that declared
+	// it, the functional consequence of the absence, and the running provider.
+	AbsentCapabilities []interfaces.AbsentCapability `json:"absent_capabilities,omitempty"`
 }
 
 // HAClusterResponse represents the response for HA cluster endpoint
@@ -54,7 +61,7 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		nodeID = localNode.ID
 	}
 
-	isLeader := haManager.IsLeader()
+	isLeader := haManager.HasLeadership()
 	mode := haManager.GetDeploymentMode().String()
 	health := "healthy"
 
@@ -64,11 +71,16 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		health = healthStatus.Overall.String()
 	}
 
+	s.mu.RLock()
+	absentCaps := s.absentCapabilities
+	s.mu.RUnlock()
+
 	response := HAStatusResponse{
-		NodeID:   nodeID,
-		IsLeader: isLeader,
-		Mode:     mode,
-		Health:   health,
+		NodeID:             nodeID,
+		IsLeader:           isLeader,
+		Mode:               mode,
+		Health:             health,
+		AbsentCapabilities: absentCaps,
 	}
 
 	s.respondJSON(w, http.StatusOK, response)
@@ -195,7 +207,7 @@ func (s *Server) respondJSON(w http.ResponseWriter, status int, data interface{}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(data); err != nil {
-		s.logger.Error("Failed to encode JSON response", "error", err)
+		s.logger.Error("Failed to encode JSON response", "error", logging.SanitizeLogValue(err.Error()))
 	}
 }
 
@@ -205,43 +217,6 @@ func (s *Server) respondError(w http.ResponseWriter, status int, message string)
 	w.WriteHeader(status)
 	response := map[string]string{"error": message}
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		s.logger.Error("Failed to encode error response", "error", err)
+		s.logger.Error("Failed to encode error response", "error", logging.SanitizeLogValue(err.Error()))
 	}
-}
-
-// handleRaftMessage handles POST /raft/message - receives Raft messages from peers
-func (s *Server) handleRaftMessage(w http.ResponseWriter, r *http.Request) {
-	haManager := s.getHAManager()
-	if haManager == nil {
-		http.Error(w, "HA manager not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Get Raft transport from HA manager
-	transport := haManager.GetRaftTransport()
-	if transport == nil {
-		http.Error(w, "Raft transport not available", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Delegate to transport handler
-	transport.HandleMessage(w, r)
-}
-
-// handleRaftStatus handles GET /raft/status - returns Raft cluster status
-func (s *Server) handleRaftStatus(w http.ResponseWriter, r *http.Request) {
-	haManager := s.getHAManager()
-	if haManager == nil {
-		s.respondError(w, http.StatusServiceUnavailable, "HA manager not available")
-		return
-	}
-
-	transport := haManager.GetRaftTransport()
-	if transport == nil {
-		s.respondError(w, http.StatusServiceUnavailable, "Raft transport not available")
-		return
-	}
-
-	// Delegate to transport handler
-	transport.HandleStatus(w, r)
 }

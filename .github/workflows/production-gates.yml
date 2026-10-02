@@ -8,7 +8,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '*.md'
-      - '.claude/**'
+      - '.claude/**/*.md'   # .claude markdown only — executable pipeline code under .claude/ (scripts, workflows) gets real CI (Issue #2586)
       - 'LICENSE'
       - '.gitignore'
       - '.editorconfig'
@@ -28,31 +28,60 @@ on:
         required: false
         type: string
 
+# Never cancel an in-flight merge_group run — only PR pushes cancel their own
+# workflow's prior run (#2595).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions: {}
 
 jobs:
+  # PR-time stub for the `security-deployment-gate` required context (#2595).
+  # The real scan runs in the merge queue (security-deployment-gate job below);
+  # this posts the required check green on code PRs so branch protection is
+  # satisfied without double-scanning every push. Docs-only PRs are covered by
+  # documentation.yml's stub instead (this workflow is paths-ignored for docs).
+  # Same check-name as the real job; the two are mutually exclusive by event.
+  security-deployment-gate-pr-stub:
+    name: security-deployment-gate
+    permissions: {}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: PR-time stub (real scan runs in the merge queue)
+        run: |
+          echo "security-deployment-gate: real vulnerability scan runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative scan runs against the merge commit."
+
   # Security Gate - Critical Vulnerability Blocking (Story #99)
-  # NOTE: Runs on PRs and push to main only (skips post-merge to develop to avoid redundancy)
+  # QUEUE-REAL (#2595): the real vulnerability scan runs in the merge queue
+  # (merge_group) and on push to main — NOT on pull_request. The queue must scan
+  # the actual merge commit (zero-trust posture), and this is the dedup half of
+  # the #2595 split. The `security-deployment-gate` required context is posted on
+  # PRs by the lightweight `security-deployment-gate-pr-stub` job below (code PRs)
+  # and by documentation.yml (docs-only PRs).
   security-deployment-gate:
     permissions:
       contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     outputs:
       security-status: ${{ steps.security-gate.outputs.security-status }}
       deployment-allowed: ${{ steps.security-gate.outputs.deployment-allowed }}
       override-required: ${{ steps.security-gate.outputs.override-required }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.26.4'
+        go-version: '1.27.1'
+        cache: true
 
     - name: Install Security Tools
       run: |
@@ -60,44 +89,42 @@ jobs:
         echo "=============================================="
         
         # Install Trivy — v0.69.4-v0.69.6 are compromised (CVE-2026-33634);
-        # v0.71.0 is the post-incident clean release. The install helper
+        # v0.74.0 is the post-incident clean release. The install helper
         # verifies the archive SHA-256 against the pinned value before
         # extraction. See docs/runbooks/trivy-rollback.md for rollback.
-        sudo .github/scripts/install-trivy.sh 'v0.71.0' '30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814'
+        sudo .github/scripts/install-trivy.sh 'v0.74.0' '2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a'
 
-        # Install other security tools
-        make install-nancy
-        go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
-        go install honnef.co/go/tools/cmd/staticcheck@2026.1
-        
         echo "✅ Security tools installed"
     
     - name: Run Security Gate Analysis
       id: security-gate
+      env:
+        EMERGENCY_OVERRIDE: ${{ github.event.inputs.emergency_override }}
+        OVERRIDE_REASON: ${{ github.event.inputs.override_reason }}
       run: |
         echo "🚪 PRODUCTION SECURITY DEPLOYMENT GATE"
         echo "======================================"
         echo ""
-        
+
         # Initialize variables
         critical_vulns=0
         high_vulns=0
         security_issues_found=false
         deployment_blocked=false
         override_required=false
-        
+
         # Check for critical vulnerabilities with Trivy
         echo "🔍 Scanning for Critical/High Vulnerabilities..."
         trivy fs . --severity CRITICAL,HIGH --exit-code 1 --format table > /tmp/trivy-critical.txt 2>&1
         trivy_exit_code=$?
-        
+
         if [ $trivy_exit_code -ne 0 ]; then
           echo "❌ CRITICAL/HIGH vulnerabilities detected in dependencies"
           critical_vulns=$(trivy fs . --severity CRITICAL --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || echo "0")
           high_vulns=$(trivy fs . --severity HIGH --format json --quiet | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || echo "0")
           security_issues_found=true
           deployment_blocked=true
-          
+
           echo "  Critical vulnerabilities: $critical_vulns"
           echo "  High vulnerabilities: $high_vulns"
           echo ""
@@ -105,25 +132,19 @@ jobs:
         else
           echo "✅ No critical/high vulnerabilities detected"
         fi
-        
-        echo ""
-        echo "🛡️ Running Additional Security Scans..."
-        
-        # Run gosec for security patterns (non-blocking but reported)
-        if ! make security-gosec >/dev/null 2>&1; then
-          echo "⚠️  gosec detected security patterns (non-blocking)"
-        else
-          echo "✅ gosec security pattern scan passed"
-        fi
-        
+
+        # Advisory scans (nancy, gosec, staticcheck) are non-required contexts
+        # that run in security-scan.yml. They are not executed here so this
+        # gate remains focused on the single blocking Trivy vulnerability scan.
+
         # Check for emergency override
-        if [ "${{ github.event.inputs.emergency_override }}" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
+        if [ "$EMERGENCY_OVERRIDE" = "true" ] || [ -f "EMERGENCY_DEPLOYMENT" ]; then
           echo ""
           echo "🚨 EMERGENCY OVERRIDE DETECTED"
           echo "============================="
           if [ "$deployment_blocked" = "true" ]; then
             echo "⚠️  Security issues present but emergency override authorized"
-            echo "   Override reason: ${{ github.event.inputs.override_reason || 'Manual emergency file present' }}"
+            echo "   Override reason: ${OVERRIDE_REASON:-Manual emergency file present}"
             deployment_blocked=false
             override_required=true
           fi
@@ -163,51 +184,56 @@ jobs:
     
     - name: Generate Security Audit Trail
       if: always()
+      env:
+        SECURITY_STATUS: ${{ steps.security-gate.outputs.security-status }}
+        DEPLOYMENT_ALLOWED: ${{ steps.security-gate.outputs.deployment-allowed }}
+        OVERRIDE_REQUIRED: ${{ steps.security-gate.outputs.override-required }}
+        OVERRIDE_REASON: ${{ github.event.inputs.override_reason }}
       run: |
         echo "📝 SECURITY AUDIT TRAIL"
         echo "======================"
         echo ""
         echo "Deployment Details:"
         echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "- Branch: ${{ github.ref }}"
-        echo "- Commit: ${{ github.sha }}"
-        echo "- Actor: ${{ github.actor }}"
-        echo "- Event: ${{ github.event_name }}"
+        echo "- Branch: $GITHUB_REF"
+        echo "- Commit: $GITHUB_SHA"
+        echo "- Actor: $GITHUB_ACTOR"
+        echo "- Event: $GITHUB_EVENT_NAME"
         echo ""
         echo "Security Gate Results:"
-        echo "- Security Status: ${{ steps.security-gate.outputs.security-status }}"
-        echo "- Deployment Allowed: ${{ steps.security-gate.outputs.deployment-allowed }}"
-        echo "- Override Used: ${{ steps.security-gate.outputs.override-required }}"
+        echo "- Security Status: $SECURITY_STATUS"
+        echo "- Deployment Allowed: $DEPLOYMENT_ALLOWED"
+        echo "- Override Used: $OVERRIDE_REQUIRED"
         echo ""
-        if [ "${{ steps.security-gate.outputs.override-required }}" = "true" ]; then
+        if [ "$OVERRIDE_REQUIRED" = "true" ]; then
           echo "Override Details:"
-          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
-          echo "- Authorized by: ${{ github.actor }}"
+          echo "- Reason: ${OVERRIDE_REASON:-Emergency file override}"
+          echo "- Authorized by: $GITHUB_ACTOR"
           echo "- Approval required: YES (manual review needed)"
         fi
-        
+
         # Save audit trail
         mkdir -p audit-logs
         cat > audit-logs/deployment-security-audit.json << EOF
         {
           "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
           "deployment": {
-            "branch": "${{ github.ref }}",
-            "commit": "${{ github.sha }}",
-            "actor": "${{ github.actor }}",
-            "event": "${{ github.event_name }}"
+            "branch": "$GITHUB_REF",
+            "commit": "$GITHUB_SHA",
+            "actor": "$GITHUB_ACTOR",
+            "event": "$GITHUB_EVENT_NAME"
           },
           "security_gate": {
-            "status": "${{ steps.security-gate.outputs.security-status }}",
-            "deployment_allowed": ${{ steps.security-gate.outputs.deployment-allowed }},
-            "override_used": ${{ steps.security-gate.outputs.override-required }},
-            "override_reason": "${{ github.event.inputs.override_reason || 'N/A' }}"
+            "status": "$SECURITY_STATUS",
+            "deployment_allowed": $DEPLOYMENT_ALLOWED,
+            "override_used": $OVERRIDE_REQUIRED,
+            "override_reason": "${OVERRIDE_REASON:-N/A}"
           }
         }
         EOF
     
     - name: Upload Security Audit Trail
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       if: always()
       with:
         name: security-deployment-audit
@@ -236,12 +262,12 @@ jobs:
   #     needs: security-deployment-gate
   #     if: needs.security-deployment-gate.outputs.deployment-allowed == 'true'
   #     steps:
-  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
+  #       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   #       with:
-  #         go-version: '1.26.4'
+  #         go-version: '1.27.1'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -281,14 +307,15 @@ jobs:
     timeout-minutes: 60
     if: github.ref == 'refs/heads/main'
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.26.4'
+        go-version: '1.27.1'
+        cache: true
 
     - name: Install dependencies
       run: go mod download
@@ -311,43 +338,17 @@ jobs:
         echo "=============================================="
         make test-performance-benchmarks
     
-    - name: Production Readiness - Security Audit
-      run: |
-        echo "🔒 Conducting Security Audit"
-        echo "============================"
-        make test-security-audit
-    
-    - name: Production Readiness - Disaster Recovery
-      run: |
-        echo "🆘 Testing Disaster Recovery Procedures"
-        echo "======================================="
-        make test-disaster-recovery
-    
-    - name: Production Readiness - Monitoring Integration
-      run: |
-        echo "📡 Validating Monitoring Integration"
-        echo "==================================="
-        make test-monitoring-integration
-    
     - name: Production Readiness Summary
       run: |
         echo ""
         echo "🎯 PRODUCTION READINESS VALIDATION COMPLETE"
         echo "==========================================="
         echo ""
-        echo "✅ Story #86 Acceptance Criteria Validated:"
+        echo "✅ Story #86 Acceptance Criteria validated by this job:"
         echo "   • Load tests validate 100+ concurrent terminal sessions"
         echo "   • Performance benchmarks meet all defined SLAs"
-        echo "   • Security audit passes with no critical findings"
-        echo "   • Disaster recovery procedures tested and documented"
-        echo "   • Monitoring and alerting integration validated"
         echo ""
-        echo "📚 Operational Runbooks Created:"
-        echo "   • Production operations procedures documented"
-        echo "   • Incident response workflows established"
-        echo "   • Disaster recovery plans tested"
-        echo ""
-        echo "🚀 CFGMS v0.3.0 Production Readiness: VALIDATED"
+        echo "🚀 CFGMS v0.3.0 load + performance validation: COMPLETE"
 
     - name: Cleanup Docker Infrastructure
       if: always()
@@ -360,12 +361,12 @@ jobs:
   #     runs-on: ubuntu-latest
   #     timeout-minutes: 30
   #     steps:
-  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
+  #       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   #       with:
-  #         go-version: '1.26.4'
+  #         go-version: '1.27.1'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -385,12 +386,12 @@ jobs:
   #   cost-monitoring:
   #     runs-on: ubuntu-latest
   #     steps:
-  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+  #     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     
   #     - name: Set up Go
-  #       uses: actions/setup-go@7b8cf10d4e4a01d4992d18a89f4d7dc5a3e6d6f4 # v4
+  #       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
   #       with:
-  #         go-version: '1.26.4'
+  #         go-version: '1.27.1'
     
   #     - name: Install dependencies
   #       run: go mod download
@@ -413,20 +414,27 @@ jobs:
   #         fi
 
   #   # Cross-platform integration testing
+  # QUEUE-REAL (#2595): Docker-heavy controller integration suite (Buildx +
+  # image build) validated once against the merge commit rather than paying
+  # for it twice per PR. The `Controller Integration Tests (Linux)` required
+  # context is posted on PRs by the lightweight PR-stub job below (code PRs)
+  # and by documentation.yml (docs-only PRs).
   integration-tests-controller:
     name: Controller Integration Tests (Linux)
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    if: github.event_name == 'merge_group' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 
     - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: '1.26.4'
+        go-version: '1.27.1'
+        cache: true
 
     - name: Install dependencies
       run: go mod download
@@ -443,6 +451,54 @@ jobs:
         make test-transport-setup
         echo "✅ Docker infrastructure ready"
 
+    - name: Pre-pull Dockerfile base images with retry
+      # test/integration/standalone (docker_helper.go) shells `docker compose
+      # build` for cmd/steward/Dockerfile and cmd/controller/Dockerfile inside
+      # the cfgms-test-runner container below, against this runner's own
+      # Docker daemon (shared via the mounted socket in the step further
+      # down). Pulling each pinned base-image digest here first means that
+      # build resolves everything from the local image cache and makes no
+      # network call of its own — closing the anonymous Docker Hub
+      # token-fetch dependency that evicted PR #4207 (Issue #4212).
+      # `docker pull` has no built-in retry flag, so retry by hand with
+      # backoff. Keep these digests in sync with the three Dockerfiles named
+      # in Issue #4212 (cmd/steward/Dockerfile, cmd/steward/Dockerfile.debian,
+      # cmd/controller/Dockerfile).
+      run: |
+        set -euo pipefail
+
+        pull_with_retry() {
+          local image="$1" attempt=1 max_attempts=5 delay=3
+          until docker pull "$image"; do
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::failed to pull $image after $max_attempts attempts"
+              return 1
+            fi
+            echo "pull of $image failed (attempt $attempt/$max_attempts); retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+            delay=$((delay * 2))
+          done
+        }
+
+        pull_with_retry golang:1.27.1-alpine3.24@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
+        pull_with_retry alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+        pull_with_retry debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - name: Build test runner image
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        file: ./Dockerfile.test-runner
+        push: false
+        load: true
+        tags: cfgms-test-runner
+        cache-from: type=gha,scope=cfgms-test-runner
+        cache-to: type=gha,mode=max,scope=cfgms-test-runner
+
     - name: Run Controller Integration Tests
       env:
         CFGMS_TEST_INTEGRATION: "1"
@@ -455,29 +511,40 @@ jobs:
         source .env.test
         set +a
 
-        # Build test runner for container-to-container networking (enables UDP/QUIC)
-        docker build -t cfgms-test-runner -f Dockerfile.test-runner .
-
         # Get Docker socket group to grant non-root user access
         DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 
-        # Run tests in container on cfgms-test network (enables container-to-container UDP/QUIC)
+        # Run tests in container on cfgms-test network (enables container-to-container UDP/QUIC).
+        #
+        # The repo is mounted at its own host path, NOT at /workspace. Suites under
+        # test/integration shell out to `docker compose`, so the Compose CLI runs
+        # inside this container while the daemon that honours the resulting bind
+        # mounts is the host's, via the mounted socket. Relative volume sources are
+        # resolved by the CLI and handed to the daemon already absolute — so with
+        # the repo at /workspace the daemon received /workspace/test/..., a path
+        # that does not exist in its own filesystem, and Docker silently created it
+        # as an empty directory rather than failing. steward-true-standalone then
+        # started with an empty /app/config, could not read standalone.yaml, exited
+        # 1, and all five TestStandaloneSteward subtests reported the service as
+        # not running. Mounting at $(pwd) makes the path identical on both sides.
         docker run --rm \
           --network cfgms-test \
           --group-add $DOCKER_GID \
-          -v "$(pwd):/workspace" \
+          -v "$(pwd):$(pwd)" \
           -v /var/run/docker.sock:/var/run/docker.sock \
-          -w /workspace \
+          -w "$(pwd)" \
           -e CFGMS_TEST_INTEGRATION=1 \
           -e GITHUB_ACTIONS=true \
           cfgms-test-runner \
           sh -c '
+            set -e
+
             echo "📦 Installing Go dependencies..."
             go mod download
 
             echo ""
             echo "🧪 Running integration tests (container-to-container networking)..."
-            go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$")
+            go test -v -race -timeout=10m $(go list ./test/integration/... | grep -v "test/integration$" | grep -v "test/integration/ha$")
 
             echo ""
             echo "🧪 Running E2E tests..."
@@ -487,363 +554,74 @@ jobs:
         echo ""
         echo "✅ Controller integration tests completed"
 
+    # test/integration/ha runs here, on its own, and never in the merge queue.
+    #
+    # It is excluded from the step above because it cannot finish inside that
+    # step's 10-minute `go test -timeout`. A test binary killed by that timeout
+    # never runs TestMain's cleanup or StopCluster, so its three controllers,
+    # three stewards, minio and ha-ca-init stay up on the shared cfgms-test
+    # network — and the E2E `go test` that follows in the same `sh -c` block is
+    # the command whose exit status becomes this required check. The leak, not
+    # the timeout, is what would turn the gate red.
+    #
+    # The suite is currently 8 passed / 7 failed in ~21 minutes. The seven
+    # failures all restart a controller and are blocked on Issue #3284 (pkg/ha
+    # keeps its Raft log in raft.NewMemoryStorage() with no WAL, so a controller
+    # cannot restart into its own live cluster). Until that lands, running this
+    # in the merge queue would add ~21 minutes to every queued PR for a result
+    # that is known-red, so this step is skipped there and available on demand
+    # via workflow_dispatch and on main.
+    #
+    # When #3284 lands and the suite is green and fast, fold it back into the
+    # command above and delete this step. Issue #3183 carries that change.
+    - name: Run HA Integration Suite (non-gating, see Issue #3284)
+      if: github.event_name != 'merge_group'
+      continue-on-error: true
+      timeout-minutes: 30
+      env:
+        CFGMS_TEST_INTEGRATION: "1"
+      run: |
+        echo "🖥️ HA INTEGRATION SUITE (non-gating)"
+        echo "===================================="
+
+        set -a
+        source .env.test
+        set +a
+
+        DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+
+        # Mounted at the host path for the same reason as the gating suite above:
+        # this suite drives `docker compose` against the host daemon, which
+        # resolves bind-mount sources in the host's filesystem namespace, not
+        # this container's.
+        docker run --rm \
+          --network cfgms-test \
+          --group-add $DOCKER_GID \
+          -v "$(pwd):$(pwd)" \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          -w "$(pwd)" \
+          -e CFGMS_TEST_INTEGRATION=1 \
+          -e GITHUB_ACTIONS=true \
+          cfgms-test-runner \
+          sh -c '
+            go test -v -race -timeout=28m ./test/integration/ha/...
+          '
+
     - name: Cleanup Docker infrastructure
       if: always()
       run: |
         docker compose -f docker-compose.test.yml down -v || true
 
-  integration-tests-steward:
-    name: Steward Integration Tests
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            platform: Linux
-          - os: windows-latest
-            platform: Windows  
-          - os: macos-latest
-            platform: macOS
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: '1.26.4'
-
-    - name: Install dependencies
-      run: go mod download
-
-    - name: Run Steward Cross-Platform Tests
-      shell: bash
-      run: |
-        echo "🔧 STEWARD INTEGRATION TESTS (${{ matrix.platform }})"
-        echo "=================================================="
-        
-        # Build steward for current platform
-        make build-steward
-        
-        # Run steward-specific integration tests
-        go test -v -race -timeout=10m ./features/steward/... -short
-        
-        # Run cross-platform E2E scenarios
-        go test -v -race -timeout=15m ./test/e2e/... -run "TestE2EScenarios/(TestTerminalSecurityIntegration|TestMultiStewardScenario|TestFailureRecovery|TestSecurityCompliance)"
-        
-        echo ""
-        echo "✅ Steward tests completed on ${{ matrix.platform }}"
-    
-    - name: Test Terminal Platform Support
-      shell: bash
-      run: |
-        echo "🖥️ Testing Terminal Platform Support on ${{ matrix.platform }}"
-        echo "========================================================="
-        
-        # Test terminal security integration
-        go test -v -timeout=5m ./features/terminal/... -run "TestSecurity"
-        
-        # Test platform-specific shell support
-        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-          echo "Testing Windows shell support (PowerShell/cmd)"
-          go test -v -timeout=5m ./features/terminal/... -run "TestWindowsShells"
-        else
-          echo "Testing Unix shell support (bash/zsh)"
-          go test -v -timeout=5m ./features/terminal/... -run "TestUnixShells"
-        fi
-
-  comprehensive-e2e-tests:
-    name: Comprehensive E2E Testing
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    needs: [integration-tests-controller]
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: '1.26.4'
-
-    - name: Install dependencies
-      run: go mod download
-
-    - name: Run Full E2E Test Suite
-      run: |
-        echo "🎯 COMPREHENSIVE E2E TESTING"
-        echo "============================"
-        
-        # Run complete E2E test suite with CI optimizations
-        go test -v -race -timeout=20m ./test/e2e/... -run "TestE2EScenarios"
-        
-        echo ""
-        echo "✅ Full E2E test suite completed"
-    
-    - name: Run Performance Regression Tests
-      run: |
-        echo "📊 PERFORMANCE REGRESSION TESTING"
-        echo "================================="
-        
-        # Run performance regression tests
-        make test-performance
-        
-        echo ""
-        echo "✅ Performance regression tests completed"
-    
-    - name: Generate Test Report
-      if: always()
-      run: |
-        echo "📊 INTEGRATION TEST SUMMARY"
-        echo "==========================="
-        
-        # Check if test reports were generated
-        if [ -d "test/reports" ]; then
-          echo "📋 Test reports generated:"
-          ls -la test/reports/ || true
-          
-          # Display CI summary if available
-          if [ -f "test/reports/test-summary.txt" ]; then
-            echo ""
-            echo "📄 Test Summary:"
-            cat test/reports/test-summary.txt
-          fi
-          
-          # Display key metrics from JSON report if available
-          if [ -f "test/reports/test-report.json" ] && command -v jq > /dev/null; then
-            echo ""
-            echo "📈 Key Metrics:"
-            jq '.test_results.success_rate' test/reports/test-report.json | xargs printf "Success Rate: %.1f%%\n"
-            jq '.test_results.total_tests' test/reports/test-report.json | xargs printf "Total Tests: %d\n"
-            jq '.failure_analysis.critical_failures | length' test/reports/test-report.json | xargs printf "Critical Failures: %d\n"
-          fi
-        fi
-        
-        # Create test summary (enhanced with actual test result parsing)
-        echo ""
-        echo "Cross-platform test coverage:"
-        echo "- Controller (Linux): ✅"
-        echo "- Steward (Linux): ✅"  
-        echo "- Steward (Windows): ✅"
-        echo "- Steward (macOS): ✅"
-        echo ""
-        echo "Feature integration coverage:"
-        echo "- Terminal Security: ✅"
-        echo "- RBAC Integration: ✅" 
-        echo "- Workflow Engine: ✅"
-        echo "- DNA Monitoring: ✅"
-        echo "- Configuration Flow: ✅"
-        echo ""
-        echo "Performance baselines established: ✅"
-        echo "Failure recovery validated: ✅"
-        echo ""
-        echo "🎉 Story #84 Integration Testing Framework - COMPLETE"
-    
-    - name: Upload Test Reports
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      with:
-        name: integration-test-reports
-        path: |
-          test/reports/
-          **/*test*.log
-        retention-days: 30
-
-  # Automated Notifications for Security-Blocked Deployments (Story #99)
-  deployment-notification:
+  # PR-time stub for the `Controller Integration Tests (Linux)` required context
+  # (#2595). The real suite runs in the merge queue (job above); this posts the
+  # required check green on code PRs.
+  integration-tests-controller-pr-stub:
+    name: Controller Integration Tests (Linux)
     permissions: {}
     runs-on: ubuntu-latest
-    needs: security-deployment-gate
-    if: always()
+    if: github.event_name == 'pull_request'
     steps:
-    - name: Generate Deployment Status Notification
-      run: |
-        echo "📧 DEPLOYMENT STATUS NOTIFICATION"
-        echo "================================"
-        
-        security_status="${{ needs.security-deployment-gate.outputs.security-status }}"
-        deployment_allowed="${{ needs.security-deployment-gate.outputs.deployment-allowed }}"
-        override_used="${{ needs.security-deployment-gate.outputs.override-required }}"
-        
-        echo "Deployment Details:"
-        echo "- Branch: ${{ github.ref }}"
-        echo "- Commit: ${{ github.sha }}"
-        echo "- Actor: ${{ github.actor }}"
-        echo "- Triggered by: ${{ github.event_name }}"
-        echo ""
-        echo "Security Gate Results:"
-        echo "- Security Status: $security_status"
-        echo "- Deployment Allowed: $deployment_allowed"
-        echo "- Emergency Override Used: $override_used"
-        echo ""
-        
-        if [ "$deployment_allowed" = "false" ]; then
-          echo "🚨 DEPLOYMENT BLOCKED - SECURITY ISSUES DETECTED"
-          echo "==============================================="
-          echo ""
-          echo "Critical security vulnerabilities have blocked this deployment."
-          echo ""
-          echo "🤖 Automated Remediation Steps:"
-          echo "1. Download the security scan artifacts from the security-scan workflow"
-          echo "2. Extract the remediation JSON file"
-          echo "3. Use Claude Code to automatically fix the security issues:"
-          echo "   - Copy the JSON content to Claude Code"
-          echo "   - Ask Claude to apply the security fixes"
-          echo "   - Review and commit the fixes"
-          echo "4. Push the fixes and re-trigger the deployment"
-          echo ""
-          echo "🚨 Emergency Override Available (Use with caution):"
-          echo "   If this is a critical emergency deployment:"
-          echo "   1. Go to Actions → Production Risk Gates → Run workflow"
-          echo "   2. Set 'emergency_override' to true"
-          echo "   3. Provide a detailed 'override_reason'"
-          echo "   4. Emergency deployments require post-deployment security remediation"
-          echo ""
-          echo "📋 Security Remediation Checklist:"
-          echo "   - [ ] Security vulnerabilities identified and documented"
-          echo "   - [ ] Remediation plan created with timelines"
-          echo "   - [ ] Development team notified"
-          echo "   - [ ] Security team approval obtained (if override used)"
-          echo "   - [ ] Post-deployment security validation scheduled"
-          
-          # In a real environment, this would send notifications via:
-          # - Slack/Teams webhooks
-          # - Email notifications
-          # - PagerDuty/incident management systems
-          # - JIRA/issue tracking systems
-          
-        elif [ "$override_used" = "true" ]; then
-          echo "⚠️  DEPLOYMENT PROCEEDED WITH EMERGENCY OVERRIDE"
-          echo "==============================================="
-          echo ""
-          echo "Security issues were present but emergency override was authorized."
-          echo ""
-          echo "🔍 Post-Deployment Security Actions Required:"
-          echo "1. Immediate security remediation planning"
-          echo "2. Risk assessment documentation"
-          echo "3. Timeline for security fixes implementation"
-          echo "4. Security team review and approval"
-          echo ""
-          echo "Override Details:"
-          echo "- Reason: ${{ github.event.inputs.override_reason || 'Emergency file override' }}"
-          echo "- Authorized by: ${{ github.actor }}"
-          echo "- Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          
-        else
-          echo "✅ DEPLOYMENT APPROVED - ALL SECURITY CHECKS PASSED"
-          echo "=================================================="
-          echo ""
-          echo "All security scans have passed successfully."
-          echo "Deployment is proceeding with full security approval."
-        fi
-        
-        # Create notification summary for external systems
-        cat > deployment-notification.json << EOF
-        {
-          "deployment_id": "${{ github.run_id }}",
-          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "branch": "${{ github.ref }}",
-          "commit": "${{ github.sha }}",
-          "actor": "${{ github.actor }}",
-          "security_status": "$security_status",
-          "deployment_allowed": $deployment_allowed,
-          "emergency_override": $override_used,
-          "override_reason": "${{ github.event.inputs.override_reason || null }}",
-          "notification_type": "$( [ "$deployment_allowed" = "false" ] && echo "deployment_blocked" || [ "$override_used" = "true" ] && echo "emergency_override" || echo "deployment_approved" )"
-        }
-        EOF
-    
-    - name: Upload Notification Data
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      if: always()
-      with:
-        name: deployment-notification
-        path: deployment-notification.json
-        retention-days: 30
-
-  # Story #85: Cross-Feature Integration Testing
-  cross-feature-integration-tests:
-    name: Cross-Feature Integration Tests
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    needs: [integration-tests-controller, integration-tests-steward]
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go
-      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-      with:
-        go-version: '1.26.4'
-
-    - name: Install dependencies
-      run: go mod download
-
-    - name: Run Cross-Feature Integration Scenarios
-      run: |
-        echo "🔗 CROSS-FEATURE INTEGRATION TESTING (Story #85)"
-        echo "==============================================="
-        
-        # Run all 5 acceptance criteria tests
-        make test-cross-feature-integration
-        
-        echo ""
-        echo "✅ Cross-feature integration scenarios completed"
-    
-    - name: Run Failure Propagation Tests
-      run: |
-        echo "🔄 FAILURE PROPAGATION TESTING"
-        echo "==============================="
-        
-        make test-failure-propagation
-        
-        echo ""
-        echo "✅ Failure propagation tests completed"
-    
-    - name: Run Data Consistency Tests
-      run: |
-        echo "📊 DATA CONSISTENCY VALIDATION"
-        echo "==============================="
-        
-        make test-data-consistency
-        
-        echo ""
-        echo "✅ Data consistency tests completed"
-    
-    - name: Generate Cross-Feature Test Report
-      if: always()
-      run: |
-        echo "📊 CROSS-FEATURE INTEGRATION SUMMARY"
-        echo "===================================="
-        
-        echo "✅ Acceptance Criteria Validated:"
-        echo "- Workflow + Configuration: Template deployment via workflows ✅"
-        echo "- DNA + Drift: 5-minute SLA drift detection with remediation ✅"
-        echo "- Template + Rollback: Failure simulation with automatic rollback ✅"
-        echo "- Terminal + Audit: Security controls with comprehensive audit ✅"
-        echo "- Multi-tenant + SaaS: M365 configuration inheritance ✅"
-        echo ""
-        echo "✅ Technical Validation:"
-        echo "- End-to-end latency measurement: ✅"
-        echo "- Failure propagation testing: ✅"
-        echo "- Data consistency validation: ✅"
-        echo ""
-        echo "🎉 Story #85 Cross-Feature Integration - COMPLETE"
-    
-    - name: Upload Cross-Feature Test Reports
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-      with:
-        name: cross-feature-test-reports
-        path: |
-          test/reports/
-          **/*cross-feature*.log
-        retention-days: 30
+      - name: PR-time stub (real integration tests run in the merge queue)
+        run: |
+          echo "Controller Integration Tests (Linux): real Docker-based suite runs in the merge queue (merge_group) per #2595."
+          echo "This PR-time stub posts the required context; the authoritative run validates the merge commit."

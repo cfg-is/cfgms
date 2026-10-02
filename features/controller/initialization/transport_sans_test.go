@@ -77,6 +77,67 @@ func TestTransportCertSANs_InternalAndServerMerge(t *testing.T) {
 	assert.Contains(t, ipAddresses, "10.0.0.2")
 }
 
+func TestTransportCertSANs_ConfigExternalAddressHostname(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+
+	cfg := &config.Config{
+		Transport: &config.TransportConfig{
+			ExternalAddress: "controller.example.com",
+		},
+	}
+
+	dnsNames, ipAddresses := TransportCertSANs(cfg)
+	assert.Contains(t, dnsNames, "controller.example.com", "config external_address hostname must appear in DNS SANs")
+	assert.NotContains(t, ipAddresses, "controller.example.com", "hostname must not appear in IP SANs")
+}
+
+func TestTransportCertSANs_ConfigExternalAddressIP(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "")
+
+	cfg := &config.Config{
+		Transport: &config.TransportConfig{
+			ExternalAddress: "203.0.113.42",
+		},
+	}
+
+	dnsNames, ipAddresses := TransportCertSANs(cfg)
+	assert.Contains(t, ipAddresses, "203.0.113.42", "config external_address IP must appear in IP SANs")
+	assert.NotContains(t, dnsNames, "203.0.113.42", "IP-literal must not appear in DNS SANs")
+}
+
+func TestTransportCertSANs_EnvVarAndConfigBothAdded(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "env-controller.example.com")
+
+	cfg := &config.Config{
+		Transport: &config.TransportConfig{
+			ExternalAddress: "cfg-controller.example.com",
+		},
+	}
+
+	dnsNames, _ := TransportCertSANs(cfg)
+	assert.Contains(t, dnsNames, "env-controller.example.com", "env var hostname must appear in DNS SANs")
+	assert.Contains(t, dnsNames, "cfg-controller.example.com", "config external_address hostname must appear in DNS SANs")
+}
+
+func TestTransportCertSANs_NoDuplicatesWhenEnvAndConfigMatch(t *testing.T) {
+	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "shared-controller.example.com")
+
+	cfg := &config.Config{
+		Transport: &config.TransportConfig{
+			ExternalAddress: "shared-controller.example.com",
+		},
+	}
+
+	dnsNames, _ := TransportCertSANs(cfg)
+	count := 0
+	for _, n := range dnsNames {
+		if n == "shared-controller.example.com" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "same value from env and config must be de-duped to a single SAN entry")
+}
+
 func TestTransportCertSANs_DedupesAndPreservesOrder(t *testing.T) {
 	t.Setenv("CFGMS_EXTERNAL_HOSTNAME", "localhost")
 

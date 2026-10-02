@@ -53,6 +53,8 @@ A match outside of a `// Deferred: tracked in #NNN — <summary>` annotation is 
 
 The following scenarios describe expected reviewer behavior. They are not executable tests — agent prompts have no integration-test harness — but they are the contract a future change to the reviewer's verification model must preserve.
 
+**Note:** the scenarios below cite `features/rbac/jit/access_manager.go` because that is the file the original #1380/#1381 failures happened against. Issue #4328 deleted `features/rbac/jit` as unreachable dead code (zero production callers; a capability map was recorded on Issue #4330 first). The file paths, line numbers, and function bodies quoted here no longer exist in the tree — they are retained as historical illustrations of the verification pattern (unchanged-stub detection, banned-phrase scanning), which is unaffected by the deletion.
+
 ### Scenario 1 — Unchanged named stub (the #1380 failure mode)
 
 **Setup**

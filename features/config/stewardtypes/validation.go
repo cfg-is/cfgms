@@ -5,7 +5,10 @@ package stewardtypes
 
 import (
 	"fmt"
+	"strings"
 	"time"
+
+	maintenanceschedule "github.com/cfgis/cfgms/pkg/maintenance/schedule"
 )
 
 // scriptSigningPolicyLevel returns the numeric strictness level of a signing policy.
@@ -48,6 +51,13 @@ func ValidateScriptSigningConfig(cfg ScriptSigningConfig) error {
 		if key.Thumbprint == "" && key.PublicKeyRef == "" {
 			return fmt.Errorf("script_signing trusted_keys[%d] (%q): must provide thumbprint or public_key_ref", i, key.Name)
 		}
+		// PublicKeyRef is reserved for a future secrets-provider reference; validated
+		// here (rather than left to the consumer that eventually resolves it) so a
+		// value that could escape a permitted base directory or tenant subtree is
+		// rejected at config-write time (Issue #4340).
+		if err := validateNoPathTraversal(key.PublicKeyRef); err != nil {
+			return fmt.Errorf("script_signing trusted_keys[%d] (%q): public_key_ref %w", i, key.Name, err)
+		}
 	}
 
 	if cfg.RequireSignedAdhoc && (cfg.Policy == ScriptSigningPolicyNone || cfg.Policy == "") {
@@ -57,17 +67,30 @@ func ValidateScriptSigningConfig(cfg ScriptSigningConfig) error {
 	return nil
 }
 
+// validateNoPathTraversal rejects a reference string that could escape a
+// permitted base directory when later resolved as a path or secret-store key:
+// an absolute path, or any "/"-separated segment that is empty, ".", or "..".
+// An empty ref is not this function's concern (callers decide whether empty is
+// valid) and always passes.
+func validateNoPathTraversal(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "\\") {
+		return fmt.Errorf("must not be an absolute path: %q", ref)
+	}
+	for _, seg := range strings.FieldsFunc(ref, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == "." || seg == ".." {
+			return fmt.Errorf("must not contain '.' or '..' path segments: %q", ref)
+		}
+	}
+	return nil
+}
+
 // ValidateConfiguration checks if the configuration is valid.
 func ValidateConfiguration(config StewardConfig) error {
 	if config.Steward.ID == "" {
 		return fmt.Errorf("steward ID is required")
-	}
-
-	switch config.Steward.Mode {
-	case ModeStandalone, ModeController:
-		// valid
-	default:
-		return fmt.Errorf("invalid operation mode: %s", config.Steward.Mode)
 	}
 
 	if config.Steward.Logging.Level != "" {
@@ -94,12 +117,32 @@ func ValidateConfiguration(config StewardConfig) error {
 		}
 	}
 
+	if config.Steward.DNARefreshInterval != "" {
+		d, err := time.ParseDuration(config.Steward.DNARefreshInterval)
+		if err != nil {
+			return fmt.Errorf("invalid dna_refresh_interval %q: must be a valid duration (e.g. \"30m\", \"15m\", \"1h\")", config.Steward.DNARefreshInterval)
+		}
+		if d <= 0 {
+			return fmt.Errorf("dna_refresh_interval must be positive, got %q", config.Steward.DNARefreshInterval)
+		}
+	}
+
+	if config.Steward.ObserveSweepN != nil && *config.Steward.ObserveSweepN < 0 {
+		return fmt.Errorf("observe_sweep_n must be 0 (disabled) or a positive cycle count, got %d", *config.Steward.ObserveSweepN)
+	}
+
 	if err := ValidateScriptSigningConfig(config.Steward.ScriptSigning); err != nil {
 		return fmt.Errorf("script_signing configuration invalid: %w", err)
 	}
 
 	if err := ValidateModuleTrustConfig(config.Steward.ModuleTrust); err != nil {
 		return fmt.Errorf("module_trust configuration invalid: %w", err)
+	}
+
+	if config.Steward.RebootWindow != nil {
+		if err := maintenanceschedule.Validate(config.Steward.RebootWindow); err != nil {
+			return fmt.Errorf("reboot_window configuration invalid: %w", err)
+		}
 	}
 
 	resourceNames := make(map[string]bool)
@@ -125,12 +168,33 @@ func ValidateConfiguration(config StewardConfig) error {
 // ValidateModuleTrustConfig validates a ModuleTrustConfig for internal consistency.
 func ValidateModuleTrustConfig(cfg ModuleTrustConfig) error {
 	switch cfg.Mode {
-	case ModuleTrustModeStrict, ModuleTrustModeController, ModuleTrustModeBypass, "":
+	case ModuleTrustModeStrict, ModuleTrustModeController, "":
 		// valid; empty defaults to "controller" at runtime
+	case ModuleTrustModeBypass:
+		if !moduleTrustBypassBuildAllowed {
+			return fmt.Errorf("module_trust mode %q is unavailable in a release build", cfg.Mode)
+		}
 	default:
 		return fmt.Errorf("invalid module_trust mode %q: must be strict, controller, or bypass", cfg.Mode)
 	}
 	return nil
+}
+
+// ModuleTrustModeLevel returns the numeric strictness level of a module trust
+// mode. Higher values are more restrictive. An empty mode defaults to
+// "controller" strictness, matching its runtime default. Returns -1 for
+// unknown values. Mirrors scriptSigningPolicyLevel's ordering scheme so both
+// steward security-posture settings compare the same way (Issue #4324).
+func ModuleTrustModeLevel(mode ModuleTrustMode) int {
+	switch mode {
+	case ModuleTrustModeBypass:
+		return 0
+	case ModuleTrustModeController, "":
+		return 1
+	case ModuleTrustModeStrict:
+		return 2
+	}
+	return -1
 }
 
 // MergeScriptSigningConfig merges a parent ScriptSigningConfig into a child, applying inheritance rules.
@@ -190,6 +254,38 @@ func GetConvergeInterval(cfg StewardConfig) time.Duration {
 		return 30 * time.Minute
 	}
 	return d
+}
+
+// GetDNARefreshInterval returns the parsed DNA refresh interval.
+// Falls back to 30 minutes if the field is empty or unparseable.
+func GetDNARefreshInterval(cfg StewardConfig) time.Duration {
+	if cfg.Steward.DNARefreshInterval == "" {
+		return 30 * time.Minute
+	}
+	d, err := time.ParseDuration(cfg.Steward.DNARefreshInterval)
+	if err != nil || d <= 0 {
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// DefaultObserveSweepN is the Tier-2 whole-domain observe sweep cadence applied
+// when observe_sweep_n is not set: the sweep runs on every 10th convergence tick
+// (Issue #3104, ADR-024 Amendment 1 §3).
+const DefaultObserveSweepN = 10
+
+// GetObserveSweepN returns the Tier-2 observe sweep cadence in convergence cycles.
+// An unset observe_sweep_n yields DefaultObserveSweepN; an explicit 0 disables the
+// sweep. Negative values are rejected by ValidateConfiguration and treated as
+// disabled here so an unvalidated config can never produce a negative cadence.
+func GetObserveSweepN(cfg StewardConfig) int {
+	if cfg.Steward.ObserveSweepN == nil {
+		return DefaultObserveSweepN
+	}
+	if n := *cfg.Steward.ObserveSweepN; n > 0 {
+		return n
+	}
+	return 0
 }
 
 // GetConfiguredModules returns a deduplicated list of module names required by the configuration.

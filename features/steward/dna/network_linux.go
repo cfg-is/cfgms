@@ -83,6 +83,8 @@ func parseLinuxHexIP(hexStr string) string {
 	}
 	// /proc/net/route stores addresses in host byte order (little-endian on x86/x64).
 	// The first byte of the uint32 (least significant) is the first octet.
+	// #nosec G115 -- ParseUint's 32-bit limit and the four fixed shifts prove
+	// each conversion intentionally selects one byte of the kernel wire value.
 	return net.IPv4(byte(n), byte(n>>8), byte(n>>16), byte(n>>24)).String()
 }
 

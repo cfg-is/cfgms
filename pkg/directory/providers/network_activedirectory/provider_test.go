@@ -527,6 +527,60 @@ func TestActiveDirectoryProviderErrors(t *testing.T) {
 	})
 }
 
+// TestDelimiterInjection_GetUserGetGroupGetOU is the Issue #4448 [REQUIRED
+// TEST] for the three operations.go composition sites: a caller-supplied
+// value containing the reserved resourceID delimiter must not cause the
+// steward to be asked about a different object than the caller named. It
+// asserts on the composed resourceID reaching GetModuleState (via the
+// request-count side effect of executeADQuery), so it needs no live AD
+// server. These cases fail against the pre-fix code (no validation existed)
+// and pass after it.
+func TestDelimiterInjection_GetUserGetGroupGetOU(t *testing.T) {
+	ctx := context.Background()
+
+	setup := func(t *testing.T) *ActiveDirectoryProvider {
+		t.Helper()
+		client := NewMockStewardClient()
+		client.AddSteward(StewardInfo{
+			ID:        "steward-dc01",
+			Hostname:  "dc01.example.com",
+			Modules:   []string{"activedirectory"},
+			IsHealthy: true,
+			LastSeen:  time.Now(),
+		})
+		provider := NewActiveDirectoryProvider(client, logging.NewNoopLogger())
+		require.NoError(t, provider.Connect(ctx, interfaces.ProviderConfig{
+			ServerAddress: "example.com",
+			AuthMethod:    interfaces.AuthMethodLDAP,
+		}))
+		return provider
+	}
+
+	t.Run("GetUser", func(t *testing.T) {
+		provider := setup(t)
+		_, err := provider.GetUser(ctx, "alice:bob")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved resourceID delimiter")
+		assert.Equal(t, int64(0), provider.GetRequestCount(), "GetModuleState must not be called with a truncated id")
+	})
+
+	t.Run("GetGroup", func(t *testing.T) {
+		provider := setup(t)
+		_, err := provider.GetGroup(ctx, "alice:bob")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved resourceID delimiter")
+		assert.Equal(t, int64(0), provider.GetRequestCount(), "GetModuleState must not be called with a truncated id")
+	})
+
+	t.Run("GetOU", func(t *testing.T) {
+		provider := setup(t)
+		_, err := provider.GetOU(ctx, "alice:bob")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reserved resourceID delimiter")
+		assert.Equal(t, int64(0), provider.GetRequestCount(), "GetModuleState must not be called with a truncated id")
+	})
+}
+
 func TestNewFromRegistry_WithRegistry_ReturnsConfiguredProvider(t *testing.T) {
 	globalRegistryMu.Lock()
 	orig := globalRegistry

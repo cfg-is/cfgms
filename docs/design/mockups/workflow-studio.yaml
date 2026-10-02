@@ -1,0 +1,4 @@
+file: workflow-studio.html
+order: 9
+status: **Reference**
+what: The Workflow Studio surface (Epic #2859) — a browse/run/schedule **overlay** drawer over the workflow list, and a full-screen **flowchart builder**: typed nodes, parallel branches + fan-in joins, node palette, live run-state overlay, collapsible scheduler drawer, and an indent-guided YAML mirror. Renders directly (no iframe harness) with its own **View / Run-state / Theme** toggles; both themes.

@@ -200,6 +200,13 @@ type RollbackPreview struct {
 
 	// RiskAssessment for this rollback
 	RiskAssessment RiskAssessment `json:"risk_assessment"`
+
+	// TargetTenantID is the tenant that owns the target, as resolved from the
+	// TargetTenantResolver (the controller's steward registry) at preview time.
+	// It bounds preview/execute to the requesting caller's tenant scope and is
+	// carried onto the resulting operation (Issue #4340). Empty only when the
+	// resolver does not know the target and the caller is root-scoped.
+	TargetTenantID string `json:"target_tenant_id,omitempty"`
 }
 
 // ConfigurationChange represents a single configuration change
@@ -323,6 +330,13 @@ type RollbackOperation struct {
 
 	// AuditTrail of all actions
 	AuditTrail []AuditEntry `json:"audit_trail"`
+
+	// TargetTenantID is the tenant this operation's target belonged to when the
+	// operation was created, captured from the preview. GetRollbackStatus and
+	// CancelRollback re-resolve the target's tenant live and fall back to this
+	// recorded value when the target has since left the registry, so a rollback
+	// cannot be read or cancelled from outside the target's tenant (Issue #4340).
+	TargetTenantID string `json:"target_tenant_id,omitempty"`
 }
 
 // RollbackProgress tracks progress of a rollback
@@ -448,6 +462,24 @@ type RollbackManager interface {
 	ListRollbackHistory(ctx context.Context, targetType TargetType, targetID string, limit int) ([]RollbackOperation, error)
 }
 
+// TargetTenantResolver resolves the tenant that owns a rollback target
+// (Issue #4340). It is declared here, at the point of use, so the rollback
+// feature does not depend on the controller packages that hold the registry.
+//
+// The controller's steward registry is the authority for device/steward
+// ownership and satisfies this interface; the same registry answers the reports
+// API's DeviceTenantResolver, so both features enforce their tenant boundary
+// against one source of truth rather than against data carried on the request or
+// on Git history.
+//
+// known is false when the target is not present in the registry, or when the
+// target kind has no ownership authority (a group, client or MSP-wide target).
+// Callers treat an unknown target as outside every tenant — never as unowned —
+// so enforcement fails closed.
+type TargetTenantResolver interface {
+	TenantForTarget(ctx context.Context, targetType TargetType, targetID string) (tenantID string, known bool)
+}
+
 // RollbackValidator validates rollback safety
 type RollbackValidator interface {
 	// ValidateRollback checks if rollback is safe
@@ -555,5 +587,24 @@ var (
 	ErrRollbackPermissionDenied = &RollbackError{
 		Code:    "ROLLBACK_PERMISSION_DENIED",
 		Message: "Permission denied for rollback operation",
+	}
+
+	// ErrRollbackOutsideTenantScope is returned when the requesting caller's tenant
+	// scope does not contain the rollback target's tenant, or when the target's
+	// owning tenant cannot be resolved at all (Issue #4340). The two cases share
+	// one error deliberately: distinguishing them would tell a scoped caller
+	// whether another tenant's steward exists.
+	ErrRollbackOutsideTenantScope = &RollbackError{
+		Code:    "ROLLBACK_PERMISSION_DENIED",
+		Message: "target is outside the caller's authorized tenant scope",
+	}
+
+	// ErrRollbackTenantUnverifiable is returned when no TargetTenantResolver is
+	// wired, so target ownership cannot be established for a caller that is not
+	// root-scoped (Issue #4340). A deployment that forgot to wire the registry
+	// refuses scoped rollback requests rather than serving them unchecked.
+	ErrRollbackTenantUnverifiable = &RollbackError{
+		Code:    "ROLLBACK_TENANT_UNVERIFIABLE",
+		Message: "target tenant ownership cannot be verified",
 	}
 )

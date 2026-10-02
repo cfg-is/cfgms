@@ -15,7 +15,7 @@ import (
 
 func TestWorkflowConditionalLogic(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger, nil)
+	engine := NewEngine(nil, logger, nil, nil, nil, nil, nil)
 
 	tests := []struct {
 		name      string
@@ -351,7 +351,7 @@ func TestWorkflowConditionalLogic(t *testing.T) {
 
 func TestWorkflowExpressionConditions(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger, nil)
+	engine := NewEngine(nil, logger, nil, nil, nil, nil, nil)
 
 	tests := []struct {
 		name       string
@@ -464,7 +464,7 @@ func TestWorkflowExpressionConditions(t *testing.T) {
 
 func TestWorkflowConditionalExecution(t *testing.T) {
 	logger := logging.NewLogger("info")
-	engine := NewEngine(nil, logger, nil)
+	engine := NewEngine(nil, logger, nil, nil, nil, nil, nil)
 
 	workflow := Workflow{
 		Name: "conditional-test",
@@ -515,6 +515,6 @@ func TestWorkflowConditionalExecution(t *testing.T) {
 	waitForWorkflowCompletion(t, execution, 2*time.Second)
 
 	assert.Equal(t, StatusCompleted, execution.GetStatus())
-	assert.True(t, execution.HasStepResult("conditional-step"))
-	assert.True(t, execution.HasStepResult("inner-step"))
+	assert.True(t, execution.HasStepResult("s0"), "conditional-step result keyed by structural ID s0")
+	assert.True(t, execution.HasStepResult("s0.s0"), "inner-step result keyed by structural ID s0.s0")
 }

@@ -120,6 +120,30 @@ updates:
 
     target-branch: "develop"
 
+  # npm dependency updates for the web SPA (web/)
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+
+    open-pull-requests-limit: 10
+
+    reviewers:
+      - "cfg-is/maintainers"
+
+    labels:
+      - "dependencies"
+      - "npm"
+      - "automated"
+
+    commit-message:
+      prefix: "deps-web"
+
+    target-branch: "develop"
+
   # Docker base image updates
   - package-ecosystem: "docker"
     directory: "/"

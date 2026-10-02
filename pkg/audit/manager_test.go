@@ -5,6 +5,7 @@ package audit_test
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -39,18 +40,25 @@ func (s *testSecretStore) StoreSecret(_ context.Context, req *secretsInterfaces.
 	if s.storeErr != nil {
 		return s.storeErr
 	}
-	s.secrets[req.Key] = req.Value
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
 	return nil
 }
 
 func (s *testSecretStore) GetSecret(_ context.Context, key string) (*secretsInterfaces.Secret, error) {
 	v, ok := s.secrets[key]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, secretsInterfaces.ErrSecretNotFound
 	}
 	return &secretsInterfaces.Secret{Key: key, Value: v}, nil
 }
 
+func (s *testSecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsInterfaces.SecretRequest) (int, bool, error) {
+	if s.storeErr != nil {
+		return 0, false, s.storeErr
+	}
+	s.secrets[req.TenantID+"/"+req.Key] = req.Value
+	return 1, true, nil
+}
 func (s *testSecretStore) DeleteSecret(_ context.Context, _ string) error { return nil }
 func (s *testSecretStore) ListSecrets(_ context.Context, _ *secretsInterfaces.SecretFilter) ([]*secretsInterfaces.SecretMetadata, error) {
 	return nil, nil
@@ -101,14 +109,14 @@ func newTestManager(t *testing.T, source string) *audit.Manager {
 }
 
 // slowAuditStore wraps a real business.AuditStore and injects a configurable
-// per-write delay so we can prove that Flush actually waits for the drain
+// per-entry delay so we can prove that Flush actually waits for the drain
 // goroutine to finish writing pending entries rather than returning
 // prematurely. No mocks — every method delegates to the real backing store.
 type slowAuditStore struct {
 	inner business.AuditStore
 	delay time.Duration
-	// writes counts successful calls to StoreAuditEntry so tests can assert the
-	// drain completed N writes before Flush returned.
+	// writes counts successfully persisted entries so tests can assert the
+	// drain completed N entries before Flush returned.
 	writes atomic.Int64
 }
 
@@ -130,7 +138,14 @@ func (s *slowAuditStore) ListAuditEntries(ctx context.Context, filter *business.
 	return s.inner.ListAuditEntries(ctx, filter)
 }
 func (s *slowAuditStore) StoreAuditBatch(ctx context.Context, entries []*business.AuditEntry) error {
-	return s.inner.StoreAuditBatch(ctx, entries)
+	if s.delay > 0 {
+		time.Sleep(s.delay * time.Duration(len(entries)))
+	}
+	err := s.inner.StoreAuditBatch(ctx, entries)
+	if err == nil {
+		s.writes.Add(int64(len(entries)))
+	}
+	return err
 }
 func (s *slowAuditStore) GetAuditsByUser(ctx context.Context, userID string, tr *business.TimeRange) ([]*business.AuditEntry, error) {
 	return s.inner.GetAuditsByUser(ctx, userID, tr)
@@ -159,7 +174,312 @@ func (s *slowAuditStore) PurgeAuditEntries(ctx context.Context, before time.Time
 func (s *slowAuditStore) GetLastAuditEntry(ctx context.Context, tenantID string) (*business.AuditEntry, error) {
 	return s.inner.GetLastAuditEntry(ctx, tenantID)
 }
+func (s *slowAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	err := s.inner.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+	if err == nil {
+		s.writes.Add(1)
+	}
+	return err
+}
 func (s *slowAuditStore) Close() error { return s.inner.Close() }
+
+// assignmentSpyAuditStore wraps a real business.AuditStore (embedded, so every
+// method except AppendChainedEntry passes straight through) and records, for
+// each AppendChainedEntry call, whether the manager handed it an entry with
+// SequenceNumber/PreviousChecksum/Checksum already populated. Not a mock — a
+// real backing store with one method intercepted for observation.
+type assignmentSpyAuditStore struct {
+	business.AuditStore
+	mu            sync.Mutex
+	sawUnassigned []bool
+}
+
+func (s *assignmentSpyAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	s.mu.Lock()
+	s.sawUnassigned = append(s.sawUnassigned,
+		entry.SequenceNumber == 0 && entry.PreviousChecksum == "" && entry.Checksum == "")
+	s.mu.Unlock()
+	return s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+}
+
+func (s *assignmentSpyAuditStore) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sawUnassigned)
+}
+
+func (s *assignmentSpyAuditStore) allUnassigned() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.sawUnassigned {
+		if !v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestManager_DelegatesSequenceAssignmentToStore proves the drain loop hands
+// AppendChainedEntry an entry with SequenceNumber, PreviousChecksum, and
+// Checksum still unset — it does not compute head.sequence+1 itself (the
+// pre-#3754 approach that assumed no concurrent writer could interleave, false
+// the moment more than one controller node runs against one database; ADR-031
+// Decision 1). All three fields end up correctly populated afterward because
+// the store (backed here by a real flat-file AuditStore) assigns them.
+func TestManager_DelegatesSequenceAssignmentToStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	spy := &assignmentSpyAuditStore{AuditStore: storageManager.GetAuditStore()}
+
+	manager, err := audit.NewManager(spy, "delegation-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("delegation-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("delegation_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	require.Equal(t, 3, spy.callCount(), "drain loop must call AppendChainedEntry once per entry")
+	assert.True(t, spy.allUnassigned(),
+		"manager must not pre-assign SequenceNumber/PreviousChecksum/Checksum before calling AppendChainedEntry")
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "delegation-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	for i, e := range entries {
+		assert.Equal(t, uint64(i+1), e.SequenceNumber, "store must assign sequence numbers 1..3")
+		assert.NotEmpty(t, e.Checksum, "store's computeChecksum callback must populate Checksum")
+	}
+}
+
+// failingAppendAuditStore wraps a real business.AuditStore (embedded, so every
+// other method passes straight through to durable storage) and fails
+// AppendChainedEntry for entries whose ResourceID is in failFor. Not a mock —
+// the surviving entries are appended to a real store, so the chain that remains
+// after an injected failure is the chain the store actually persisted.
+//
+// gate, when non-nil, blocks the first AppendChainedEntry call until it is
+// closed and signals gateEntered when the call arrives. That parks the drain
+// goroutine inside a write so a test can enqueue a known set of entries and
+// have collectBatch pick all of them up as one batch — which is what makes
+// "the rest of the batch is still attempted" an assertion about batch
+// semantics rather than about goroutine timing.
+type failingAppendAuditStore struct {
+	business.AuditStore
+
+	failFor     map[string]error
+	gate        chan struct{}
+	gateEntered chan struct{}
+	gateOnce    sync.Once
+
+	mu        sync.Mutex
+	attempted []string
+}
+
+func (s *failingAppendAuditStore) holdFirstCall() {
+	if s.gate == nil {
+		return
+	}
+	s.gateOnce.Do(func() {
+		close(s.gateEntered)
+		<-s.gate
+	})
+}
+
+func (s *failingAppendAuditStore) AppendChainedEntry(ctx context.Context, tenantID string, entry *business.AuditEntry, computeChecksum func(entry *business.AuditEntry) string) error {
+	s.holdFirstCall()
+
+	s.mu.Lock()
+	s.attempted = append(s.attempted, entry.ResourceID)
+	s.mu.Unlock()
+
+	if err, ok := s.failFor[entry.ResourceID]; ok {
+		return err
+	}
+	return s.AuditStore.AppendChainedEntry(ctx, tenantID, entry, computeChecksum)
+}
+
+func (s *failingAppendAuditStore) attemptedResourceIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.attempted...)
+}
+
+// TestManager_WriteBatch_ContinuesAfterAppendFailure covers writeBatch's
+// failure handling as rewritten for Issue #4098 (AC9): a failing
+// AppendChainedEntry is retried with bounded backoff, and only once retries
+// are exhausted is the entry counted as permanently lost. This replaces the
+// pre-#4098 assertion that "the drop is visible in the logs — it cannot be
+// returned to the caller" — that silence is exactly the defect AC9 closes.
+// It asserts:
+//
+//  1. the failing entry is retried maxAppendAttempts times before being
+//     abandoned, and every later entry in the same batch is still attempted
+//     afterward — the loop does not stop at the first error;
+//  2. the durable chain that survives is gap-free and internally consistent
+//     (sequence 1..N with correct PreviousChecksum linkage, VerifyChain clean),
+//     because the store — not the manager — assigns sequence numbers, so a
+//     lost entry consumes no sequence number;
+//  3. the loss is surfaced to a caller: Flush returns an error naming the
+//     lost-entry count, since RecordEvent already enqueued the entry
+//     asynchronously and its original caller has no other way to learn it
+//     never reached durable storage.
+func TestManager_WriteBatch_ContinuesAfterAppendFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	const (
+		chainTenant  = "append-failure-tenant"
+		warmupTenant = "append-failure-warmup-tenant"
+		failedRes    = "res-2"
+	)
+	injectedErr := errors.New("injected append failure")
+
+	store := &failingAppendAuditStore{
+		AuditStore:  storageManager.GetAuditStore(),
+		failFor:     map[string]error{failedRes: injectedErr},
+		gate:        make(chan struct{}),
+		gateEntered: make(chan struct{}),
+	}
+
+	manager, err := audit.NewManager(store, "append-failure-test")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+
+	ctx := context.Background()
+	record := func(tenant, resourceID string) {
+		t.Helper()
+		require.NoError(t, manager.RecordEvent(ctx, audit.NewEventBuilder().
+			Tenant(tenant).
+			Type(business.AuditEventConfiguration).
+			Action("append_failure_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", resourceID, "").
+			Severity(business.AuditSeverityMedium)))
+	}
+
+	// Park the drain goroutine inside the warm-up entry's write (separate tenant,
+	// so it has its own chain and does not perturb the chain under assertion).
+	record(warmupTenant, "warmup")
+	select {
+	case <-store.gateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drain goroutine never entered AppendChainedEntry for the warm-up entry")
+	}
+
+	// With the drain goroutine blocked, these five queue up and are collected as
+	// a single batch; res-2 (the middle one) fails on every attempt.
+	want := []string{"res-0", "res-1", "res-2", "res-3", "res-4"}
+	for _, resourceID := range want {
+		record(chainTenant, resourceID)
+	}
+	close(store.gate)
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	flushErr := manager.Flush(flushCtx)
+
+	// (a) The failing entry is retried, and later entries are still attempted.
+	wantAttempts := []string{"warmup", "res-0", "res-1", "res-2", "res-2", "res-2", "res-3", "res-4"}
+	assert.Equal(t, wantAttempts, store.attemptedResourceIDs(),
+		"a failed append must be retried up to maxAppendAttempts, and must not stop writeBatch from attempting the rest of the batch")
+
+	// (b) The surviving chain is gap-free and consistent; the permanently
+	// failed entry is absent from durable storage with no sequence number
+	// burned for it.
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{TenantID: chainTenant, Order: "asc"})
+	require.NoError(t, err)
+	require.Len(t, entries, len(want)-1, "the permanently failed entry must not be persisted")
+
+	gotResources := make([]string, 0, len(entries))
+	for i, e := range entries {
+		gotResources = append(gotResources, e.ResourceID)
+		assert.Equal(t, uint64(i+1), e.SequenceNumber, "surviving chain must be gap-free")
+		assert.Equal(t, chainTenant, e.TenantID)
+	}
+	assert.Equal(t, []string{"res-0", "res-1", "res-3", "res-4"}, gotResources)
+	assert.Empty(t, manager.VerifyChain(entries),
+		"chain must remain verifiable after an entry is permanently dropped by a store failure")
+
+	// (c) The loss is surfaced through Flush, not just logged.
+	require.Error(t, flushErr, "Flush must report an error once an entry is permanently lost")
+	assert.Contains(t, flushErr.Error(), "1", "Flush error must name the number of lost entries")
+}
+
+// TestManager_LostEntriesReportedByFlushAndStop proves the AC9 contract of
+// Issue #4098: once append retries are exhausted for an entry, the loss is
+// counted cumulatively on the manager and reported by both Flush and Stop —
+// including a second call to Stop, since the count is never cleared on read.
+func TestManager_LostEntriesReportedByFlushAndStop(t *testing.T) {
+	tmpDir := t.TempDir()
+	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storageManager.Close() })
+
+	injectedErr := errors.New("permanent injected failure")
+	store := &failingAppendAuditStore{
+		AuditStore: storageManager.GetAuditStore(),
+		failFor:    map[string]error{"doomed": injectedErr},
+	}
+
+	manager, err := audit.NewManager(store, "lost-entries-test")
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, manager.RecordEvent(ctx, audit.NewEventBuilder().
+		Tenant("lost-entries-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("doomed_action").
+		User("user1", business.AuditUserTypeHuman).
+		Resource("resource", "doomed", "").
+		Severity(business.AuditSeverityMedium)))
+
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	flushErr := manager.Flush(flushCtx)
+	require.Error(t, flushErr, "Flush must report the permanently lost entry")
+	assert.Contains(t, flushErr.Error(), "1")
+
+	stopCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	stopErr := manager.Stop(stopCtx)
+	require.Error(t, stopErr, "Stop must report the permanently lost entry")
+	assert.Contains(t, stopErr.Error(), "1")
+
+	// A second Stop is idempotent for shutdown but must still surface the same
+	// cumulative loss — the count is never cleared on read.
+	secondStopErr := manager.Stop(stopCtx)
+	require.Error(t, secondStopErr, "a second Stop call must still report the lost entry")
+	assert.Contains(t, secondStopErr.Error(), "1")
+}
 
 // flushOrFail drains the async queue and fails the test if Flush returns an error.
 // Tests that query the store after RecordEvent MUST call flushOrFail first
@@ -408,6 +728,40 @@ func TestAuditEventBuilder(t *testing.T) {
 	assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 }
 
+// TestAuditEventBuilder_NeutralizesRequestDerivedFields guards Issue #4073: build()
+// used to copy UserAgent, Path, IPAddress, Method and ResourceName straight onto the
+// persisted entry with no treatment at all — only Details, Changes and ErrorMessage
+// were redacted. Those five fields carry raw HTTP request data (header, URL path,
+// caller-supplied resource name) into a durable audit record, so a control character
+// (e.g. a newline smuggled in a User-Agent header) would land in storage unneutralized.
+// This must fail if that neutralization is ever reverted.
+func TestAuditEventBuilder_NeutralizesRequestDerivedFields(t *testing.T) {
+	const ctrl = "before\nafter\rend"
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventAuthentication).
+		Action("login").
+		User("test-user", business.AuditUserTypeHuman).
+		Resource("session", "session123", ctrl).
+		Result(business.AuditResultSuccess).
+		Request("req123", ctrl, ctrl, ctrl, ctrl)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	for name, got := range map[string]string{
+		"Method":       entry.Method,
+		"Path":         entry.Path,
+		"IPAddress":    entry.IPAddress,
+		"UserAgent":    entry.UserAgent,
+		"ResourceName": entry.ResourceName,
+	} {
+		if strings.ContainsAny(got, "\n\r") {
+			t.Errorf("entry.%s retained a raw control character: %q", name, got)
+		}
+	}
+}
+
 // TestPredefinedEventBuilders tests predefined event builder functions
 func TestPredefinedEventBuilders(t *testing.T) {
 	t.Run("AuthenticationEvent", func(t *testing.T) {
@@ -423,7 +777,8 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "session", entry.ResourceType)
 		assert.Equal(t, "user1", entry.ResourceID)
 		assert.Equal(t, business.AuditResultSuccess, entry.Result)
-		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
+		// Success is Low — routine authentication; failures/denials are High (Issue #2964).
+		assert.Equal(t, business.AuditSeverityLow, entry.Severity)
 	})
 
 	t.Run("AuthorizationEvent", func(t *testing.T) {
@@ -438,6 +793,7 @@ func TestPredefinedEventBuilders(t *testing.T) {
 		assert.Equal(t, "config", entry.ResourceType)
 		assert.Equal(t, "config1", entry.ResourceID)
 		assert.Equal(t, business.AuditResultDenied, entry.Result)
+		// Denied is High — ordinary access denial (Issue #2964).
 		assert.Equal(t, business.AuditSeverityHigh, entry.Severity)
 	})
 
@@ -588,8 +944,10 @@ func TestRedactMap_CaseInsensitive(t *testing.T) {
 	assert.Equal(t, "alice", entry.Details["Username"], "Username should not be redacted")
 }
 
-// TestRedactMap_NonStringOnSensitiveKey verifies that non-string values under sensitive keys
-// pass through unredacted (only string values are replaced).
+// TestRedactMap_NonStringOnSensitiveKey verifies that non-string values under
+// sensitive keys are redacted regardless of Go type (Issue #4098, AC4). This
+// replaces the pre-#4098 assertion that non-string values passed through
+// unredacted — that was the defect, not the intended behaviour.
 func TestRedactMap_NonStringOnSensitiveKey(t *testing.T) {
 	event := audit.NewEventBuilder().
 		Tenant("test-tenant").
@@ -605,10 +963,313 @@ func TestRedactMap_NonStringOnSensitiveKey(t *testing.T) {
 	entry := &business.AuditEntry{}
 	audit.BuildEntry(event, entry)
 
-	// Non-string values pass through — only string values are candidates for redaction.
-	assert.Equal(t, 12345, entry.Details["password"], "integer under sensitive key must pass through")
-	assert.Equal(t, true, entry.Details["token_count"], "bool under sensitive key must pass through")
-	assert.Equal(t, 3.14, entry.Details["auth_level"], "float under sensitive key must pass through")
+	assert.Equal(t, "[REDACTED]", entry.Details["password"], "integer under sensitive key must be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["token_count"], "bool under sensitive key must be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["auth_level"], "float under sensitive key must be redacted")
+}
+
+// TestRedactMap_NestedSensitiveKeyRedactsStructuredValue verifies that a
+// sensitive key redacts its value outright even when the value is a
+// structured (non-string) type — a nested secret cannot survive by hiding
+// inside a map (Issue #4098, AC4).
+func TestRedactMap_NestedSensitiveKeyRedactsStructuredValue(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("credentials", map[string]interface{}{"password": "x"}).
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "[REDACTED]", entry.Details["credentials"],
+		"a sensitive-keyed structured value must be redacted outright")
+	assert.NotContains(t, fmt.Sprintf("%v", entry.Details["credentials"]), "x",
+		"the nested secret must not survive in any form")
+}
+
+// TestRedactMap_RecursesIntoNestedMapUnderBenignKey verifies that redactMap
+// descends into a nested map[string]interface{} stored under a non-sensitive
+// key, so a sensitive key nested under a benign one is still redacted
+// (Issue #4098, item 3).
+func TestRedactMap_RecursesIntoNestedMapUnderBenignKey(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("metadata", map[string]interface{}{
+			"password": "hunter2",
+			"note":     "ok",
+		}).
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	nested, ok := entry.Details["metadata"].(map[string]interface{})
+	require.True(t, ok, "a non-sensitive outer key must preserve the nested map structure")
+	assert.Equal(t, "[REDACTED]", nested["password"], "a sensitive key nested under a benign key must be redacted")
+	assert.Equal(t, "ok", nested["note"], "a non-sensitive nested key must be preserved")
+}
+
+// TestRedactMap_RecursesIntoSliceElements verifies that redactMap descends
+// into []interface{} values, redacting sensitive keys found in nested maps
+// held inside a slice (Issue #4098, AC4).
+func TestRedactMap_RecursesIntoSliceElements(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("accounts", []interface{}{
+			map[string]interface{}{"password": "hunter2", "username": "alice"},
+		}).
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	list, ok := entry.Details["accounts"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, list, 1)
+	item, ok := list[0].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "[REDACTED]", item["password"], "sensitive key nested inside a slice element must be redacted")
+	assert.Equal(t, "alice", item["username"], "non-sensitive nested key must be preserved")
+}
+
+// TestRedactMap_MissingKeySpellingsAreMatched verifies that "passwd" and
+// "privateKey" — spellings missing from the pre-#4098 deny-list — are
+// redacted in Details (Issue #4098, AC5).
+func TestRedactMap_MissingKeySpellingsAreMatched(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("passwd", "hunter2").
+		Detail("privateKey", "-----BEGIN KEY-----").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "[REDACTED]", entry.Details["passwd"], "passwd must be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["privateKey"], "privateKey must be redacted")
+}
+
+// TestRedactErrorMessage_MissingKeySpellingsAreMatched verifies that "passwd"
+// and "privateKey" are also redacted via the ErrorMessage pattern, not just
+// in Details — the two code paths must use the same key set (Issue #4098, AC5).
+func TestRedactErrorMessage_MissingKeySpellingsAreMatched(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("t").
+		Type(business.AuditEventAuthentication).
+		Action("login").
+		User("u", business.AuditUserTypeHuman).
+		Resource("session", "u", "").
+		Error("E", "login failed: passwd=hunter2, privateKey=abc123").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.NotContains(t, entry.ErrorMessage, "hunter2")
+	assert.NotContains(t, entry.ErrorMessage, "abc123")
+	assert.Contains(t, entry.ErrorMessage, "passwd=[REDACTED]")
+	assert.Contains(t, entry.ErrorMessage, "privateKey=[REDACTED]")
+}
+
+// TestRedactMap_ScansFreeFormStringValueForEmbeddedSecret verifies that a
+// string value under a non-sensitive key is scanned for an embedded
+// key=value secret, the same way ErrorMessage already is (Issue #4098, AC6).
+func TestRedactMap_ScansFreeFormStringValueForEmbeddedSecret(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("debug_info", "request included token=abc123 for retry").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	result, ok := entry.Details["debug_info"].(string)
+	require.True(t, ok)
+	assert.NotContains(t, result, "abc123", "embedded secret in a free-form value must be redacted")
+	assert.Contains(t, result, "token=[REDACTED]")
+}
+
+// TestRedactErrorMessage_WidenedSeparatorsAndNoTruncation verifies that the
+// ErrorMessage pattern matches key=value, key: value, and "key":"value" —
+// not just the original key=value shape (Issue #4098, AC7).
+func TestRedactErrorMessage_WidenedSeparatorsAndNoTruncation(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		secret string
+	}{
+		{"equals separator", "token=abc123secret", "abc123secret"},
+		{"colon separator", "token: abc123secret", "abc123secret"},
+		{"json shaped", `"token":"abc123secret"`, "abc123secret"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := audit.RedactString(tt.input)
+			assert.NotContains(t, got, tt.secret)
+			assert.Contains(t, got, "[REDACTED]")
+		})
+	}
+}
+
+// TestRedactErrorMessage_ValueWithSpaceNotTruncated verifies that a value
+// containing a space is redacted in its entirety, not truncated at the first
+// space (Issue #4098, AC7).
+func TestRedactErrorMessage_ValueWithSpaceNotTruncated(t *testing.T) {
+	got := audit.RedactString("token=abc 123 xyz, other=val")
+	assert.NotContains(t, got, "abc")
+	assert.NotContains(t, got, "123")
+	assert.NotContains(t, got, "xyz")
+	assert.Contains(t, got, "other=val")
+	assert.Contains(t, got, "[REDACTED]")
+}
+
+// TestRedactMap_AuthDoesNotOverMatchAttributionKeys verifies that "auth" no
+// longer redacts attribution keys like "author" and "authorized_by", while
+// still redacting genuinely auth-related keys like "auth_token"
+// (Issue #4098, AC8).
+func TestRedactMap_AuthDoesNotOverMatchAttributionKeys(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("author", "alice").
+		Detail("authorized_by", "bob").
+		Detail("auth_token", "secret-token-value").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "alice", entry.Details["author"], "author is attribution data and must not be redacted")
+	assert.Equal(t, "bob", entry.Details["authorized_by"], "authorized_by is attribution data and must not be redacted")
+	assert.Equal(t, "[REDACTED]", entry.Details["auth_token"], "auth_token remains sensitive")
+}
+
+// TestRedactMap_AuthorizationKeysRemainRedacted pins the credential-bearing side
+// of the "auth" deny-list term: exempting attribution keys must never stop
+// "Authorization", "authentication" and friends from being redacted. A
+// token-boundary regexp ("auth" not followed by a letter) silently broke exactly
+// these keys, writing bearer/basic credentials into the durable audit store in
+// cleartext. Every case here was redacted before Issue #4098 item 7 and must
+// stay redacted after it.
+func TestRedactMap_AuthorizationKeysRemainRedacted(t *testing.T) {
+	credentialKeys := []string{
+		"Authorization",
+		"authorization",
+		"AUTHORIZATION",
+		"authentication",
+		"AuthHeader",
+		"auth",
+		"x-auth",
+		"auth_token",
+		"proxy-authorization",
+		"authorized",
+	}
+
+	for _, key := range credentialKeys {
+		t.Run(key, func(t *testing.T) {
+			const credential = "Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature"
+			event := audit.NewEventBuilder().
+				Tenant("test-tenant").
+				Type(business.AuditEventConfiguration).
+				Action("action").
+				User("user", business.AuditUserTypeHuman).
+				Resource("res", "id", "").
+				Detail(key, credential).
+				Severity(business.AuditSeverityMedium)
+
+			entry := &business.AuditEntry{}
+			audit.BuildEntry(event, entry)
+
+			assert.Equal(t, "[REDACTED]", entry.Details[key], "%q carries a credential and must be redacted", key)
+		})
+	}
+}
+
+// TestRedactMap_NestedAuthorizationHeaderRedacted verifies the credential is
+// redacted when it arrives inside a nested header map — the shape audit entries
+// actually carry HTTP request context in (for example RequestHeaders in
+// features/workflow/debug_types.go).
+func TestRedactMap_NestedAuthorizationHeaderRedacted(t *testing.T) {
+	const credential = "Basic YWRtaW46aHVudGVyMg=="
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("headers", map[string]interface{}{
+			"Authorization": credential,
+			"Content-Type":  "application/json",
+			"nested": map[string]interface{}{
+				"authorization": credential,
+			},
+		}).
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	headers, ok := entry.Details["headers"].(map[string]interface{})
+	require.True(t, ok, "headers must survive redaction as a map")
+	assert.Equal(t, "[REDACTED]", headers["Authorization"])
+	assert.Equal(t, "application/json", headers["Content-Type"], "non-sensitive headers pass through")
+
+	nested, ok := headers["nested"].(map[string]interface{})
+	require.True(t, ok, "nested map must be descended into")
+	assert.Equal(t, "[REDACTED]", nested["authorization"])
+
+	serialized, err := json.Marshal(entry.Details)
+	require.NoError(t, err)
+	assert.NotContains(t, string(serialized), "YWRtaW46aHVudGVyMg==", "no credential may reach the durable store")
+}
+
+// TestRedactMap_AttributionKeySpellings verifies the attribution allow-list is
+// matched on the whole key after separators are stripped, so "authorized_by",
+// "Authorized-By" and "authorizedBy" are all treated as attribution, while a
+// key that merely starts with an attribution word is still redacted.
+func TestRedactMap_AttributionKeySpellings(t *testing.T) {
+	event := audit.NewEventBuilder().
+		Tenant("test-tenant").
+		Type(business.AuditEventConfiguration).
+		Action("action").
+		User("user", business.AuditUserTypeHuman).
+		Resource("res", "id", "").
+		Detail("Authorized-By", "alice").
+		Detail("authorizedBy", "bob").
+		Detail("authored_by", "carol").
+		Detail("author_token", "secret-token-value").
+		Severity(business.AuditSeverityMedium)
+
+	entry := &business.AuditEntry{}
+	audit.BuildEntry(event, entry)
+
+	assert.Equal(t, "alice", entry.Details["Authorized-By"])
+	assert.Equal(t, "bob", entry.Details["authorizedBy"])
+	assert.Equal(t, "carol", entry.Details["authored_by"])
+	assert.Equal(t, "[REDACTED]", entry.Details["author_token"], "the token deny-list term still applies to an attribution-prefixed key")
 }
 
 // TestRedactErrorMessage verifies that error messages containing key=value
@@ -796,6 +1457,327 @@ func TestRecordEvent_RedactsErrorMessage(t *testing.T) {
 	assert.Contains(t, entries[0].ErrorMessage, "username=alice", "non-sensitive key=value must be preserved")
 }
 
+// TestGenerateChecksum_CoversAllFieldsExceptChecksum proves AC1 of Issue #4098:
+// generateChecksum must cover all 27 of AuditEntry's fields except Checksum
+// itself. The pre-#4098 formula covered 11 fields (ID, TenantID, Timestamp,
+// EventType, Action, UserID, ResourceType, ResourceID, Result, SequenceNumber,
+// PreviousChecksum); this test mutates each of the sixteen previously-omitted
+// fields individually and asserts the checksum changes for every one of them,
+// via VerifyChain reporting a checksum-mismatch break.
+func TestGenerateChecksum_CoversAllFieldsExceptChecksum(t *testing.T) {
+	manager := newTestManager(t, "checksum-coverage")
+
+	base := &business.AuditEntry{
+		ID:           "id-1",
+		TenantID:     "tenant-1",
+		Timestamp:    time.Now().UTC(),
+		EventType:    business.AuditEventConfiguration,
+		Action:       "action",
+		UserID:       "user-1",
+		UserType:     business.AuditUserTypeHuman,
+		SessionID:    "session-1",
+		ResourceType: "resource",
+		ResourceID:   "res-1",
+		ResourceName: "Resource One",
+		Result:       business.AuditResultSuccess,
+		ErrorCode:    "E1",
+		ErrorMessage: "boom",
+		RequestID:    "req-1",
+		IPAddress:    "10.0.0.1",
+		UserAgent:    "agent/1.0",
+		Method:       "POST",
+		Path:         "/api/x",
+		Details:      map[string]interface{}{"k": "v"},
+		Changes: &business.AuditChanges{
+			Before: map[string]interface{}{"a": "1"},
+			After:  map[string]interface{}{"a": "2"},
+			Fields: []string{"a"},
+		},
+		Tags:             []string{"tag1"},
+		Severity:         business.AuditSeverityMedium,
+		Source:           "test",
+		Version:          "1.0",
+		SequenceNumber:   1,
+		PreviousChecksum: "prevchecksum",
+	}
+	base.Checksum = audit.GenerateChecksum(manager, base)
+
+	mutations := map[string]func(e *business.AuditEntry){
+		"UserType":     func(e *business.AuditEntry) { e.UserType = business.AuditUserTypeSystem },
+		"SessionID":    func(e *business.AuditEntry) { e.SessionID = "different-session" },
+		"ResourceName": func(e *business.AuditEntry) { e.ResourceName = "different-name" },
+		"ErrorCode":    func(e *business.AuditEntry) { e.ErrorCode = "E2" },
+		"ErrorMessage": func(e *business.AuditEntry) { e.ErrorMessage = "different-message" },
+		"RequestID":    func(e *business.AuditEntry) { e.RequestID = "different-request" },
+		"IPAddress":    func(e *business.AuditEntry) { e.IPAddress = "10.0.0.2" },
+		"UserAgent":    func(e *business.AuditEntry) { e.UserAgent = "different-agent" },
+		"Method":       func(e *business.AuditEntry) { e.Method = "GET" },
+		"Path":         func(e *business.AuditEntry) { e.Path = "/different" },
+		"Details":      func(e *business.AuditEntry) { e.Details = map[string]interface{}{"k": "different"} },
+		"Changes": func(e *business.AuditEntry) {
+			e.Changes = &business.AuditChanges{
+				Before: map[string]interface{}{"a": "9"},
+				After:  map[string]interface{}{"a": "2"},
+				Fields: []string{"a"},
+			}
+		},
+		"Tags":     func(e *business.AuditEntry) { e.Tags = []string{"different-tag"} },
+		"Severity": func(e *business.AuditEntry) { e.Severity = business.AuditSeverityHigh },
+		"Source":   func(e *business.AuditEntry) { e.Source = "different-source" },
+		"Version":  func(e *business.AuditEntry) { e.Version = "2.0" },
+	}
+	require.Len(t, mutations, 16, "test must cover all sixteen previously-omitted fields")
+
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			mutated := *base
+			mutate(&mutated)
+			// mutated.Checksum still reflects the ORIGINAL (pre-mutation) value —
+			// VerifyChain must recompute and detect the mismatch.
+			breaks := manager.VerifyChain([]*business.AuditEntry{&mutated})
+			require.NotEmpty(t, breaks, "mutating %s must produce a chain break", name)
+
+			found := false
+			for _, b := range breaks {
+				if strings.Contains(b.Reason, "checksum mismatch") {
+					found = true
+				}
+			}
+			assert.True(t, found, "mutating %s must produce a checksum-mismatch break", name)
+		})
+	}
+}
+
+// TestGenerateChecksum_FieldFramingIsUnambiguous proves that the checksum's
+// hash input is injective: no two distinct field assignments produce the same
+// bytes, so the boundary between adjacent fields cannot be shifted without
+// breaking the checksum.
+//
+// The vector this locks down: the hash input used to be the 27 field values
+// joined by a bare "|". That encoding is not injective — a value that itself
+// contains "|" lets content move across a field boundary for free, e.g.
+// strings.Join([]string{"Mozilla|/etc/passwd", "/x"}, "|") equals
+// strings.Join([]string{"Mozilla", "/etc/passwd|/x"}, "|"). UserAgent, Path,
+// ResourceName and ErrorMessage are attacker-influenced and
+// logging.SanitizeLogValue strips only control characters, so "|" reaches the
+// stored entry intact. An attacker who plants one and later gains write access
+// to the audit store — the exact adversary ADR-004 claims to detect — could
+// re-partition content across two adjacent fields and the recomputed HMAC
+// would still verify. Length-prefix framing removes the ambiguity.
+func TestGenerateChecksum_FieldFramingIsUnambiguous(t *testing.T) {
+	manager := newTestManager(t, "checksum-framing")
+
+	newEntry := func() *business.AuditEntry {
+		return &business.AuditEntry{
+			ID:               "id-1",
+			TenantID:         "tenant-1",
+			Timestamp:        time.Unix(1700000000, 0).UTC(),
+			EventType:        business.AuditEventConfiguration,
+			Action:           "action",
+			UserID:           "user-1",
+			UserType:         business.AuditUserTypeHuman,
+			ResourceType:     "resource",
+			ResourceID:       "res-1",
+			Result:           business.AuditResultSuccess,
+			Severity:         business.AuditSeverityMedium,
+			Source:           "test",
+			Version:          "1.0",
+			SequenceNumber:   1,
+			PreviousChecksum: "prevchecksum",
+		}
+	}
+
+	shifts := []struct {
+		name string
+		a    func(e *business.AuditEntry)
+		b    func(e *business.AuditEntry)
+	}{
+		{
+			name: "UserAgentIntoMethod",
+			a: func(e *business.AuditEntry) {
+				e.UserAgent, e.Method = "Mozilla|/etc/passwd", "GET"
+			},
+			b: func(e *business.AuditEntry) {
+				e.UserAgent, e.Method = "Mozilla", "/etc/passwd|GET"
+			},
+		},
+		{
+			name: "ResourceIDIntoResourceName",
+			a:    func(e *business.AuditEntry) { e.ResourceID, e.ResourceName = "res|spoofed", "name" },
+			b:    func(e *business.AuditEntry) { e.ResourceID, e.ResourceName = "res", "spoofed|name" },
+		},
+		{
+			name: "ErrorCodeIntoErrorMessage",
+			a:    func(e *business.AuditEntry) { e.ErrorCode, e.ErrorMessage = "E1|denied", "boom" },
+			b:    func(e *business.AuditEntry) { e.ErrorCode, e.ErrorMessage = "E1", "denied|boom" },
+		},
+		{
+			name: "MethodIntoPath",
+			a:    func(e *business.AuditEntry) { e.Method, e.Path = "GET|/admin", "/x" },
+			b:    func(e *business.AuditEntry) { e.Method, e.Path = "GET", "/admin|/x" },
+		},
+		{
+			name: "TagsElementBoundary",
+			a:    func(e *business.AuditEntry) { e.Tags = []string{"a,b"} },
+			b:    func(e *business.AuditEntry) { e.Tags = []string{"a", "b"} },
+		},
+		{
+			name: "TagsIntoFollowingField",
+			a:    func(e *business.AuditEntry) { e.Tags, e.Severity = []string{"t"}, "medium" },
+			b:    func(e *business.AuditEntry) { e.Tags, e.Severity = []string{"t", "medium"}, "" },
+		},
+		{
+			name: "FramingLookalikeValues",
+			a:    func(e *business.AuditEntry) { e.UserAgent, e.Path = "7:agent/1", "" },
+			b:    func(e *business.AuditEntry) { e.UserAgent, e.Path = "", "7:agent/1" },
+		},
+	}
+
+	for _, shift := range shifts {
+		t.Run(shift.name, func(t *testing.T) {
+			entryA, entryB := newEntry(), newEntry()
+			shift.a(entryA)
+			shift.b(entryB)
+
+			checksumA := audit.GenerateChecksum(manager, entryA)
+			checksumB := audit.GenerateChecksum(manager, entryB)
+			assert.NotEqual(t, checksumA, checksumB,
+				"distinct field assignments must not share a checksum: the field boundary was shifted without breaking the hash")
+
+			// The mismatch must also be observable through the public API: an
+			// attacker swapping entryA's fields for entryB's while keeping
+			// entryA's checksum is reported as tampering.
+			entryB.Checksum = checksumA
+			breaks := manager.VerifyChain([]*business.AuditEntry{entryB})
+			require.NotEmpty(t, breaks, "re-partitioned entry carrying the original checksum must break the chain")
+
+			found := false
+			for _, b := range breaks {
+				if strings.Contains(b.Reason, "checksum mismatch") {
+					found = true
+				}
+			}
+			assert.True(t, found, "the break must be a checksum mismatch")
+		})
+	}
+}
+
+// TestGenerateChecksum_IsStableForIdenticalEntries guards the other half of the
+// framing property: framing must not make the checksum depend on anything but
+// the field values themselves, so two independently constructed entries with
+// identical fields — including delimiter-bearing ones — still agree.
+func TestGenerateChecksum_IsStableForIdenticalEntries(t *testing.T) {
+	manager := newTestManager(t, "checksum-stable")
+
+	build := func() *business.AuditEntry {
+		return &business.AuditEntry{
+			ID:               "id-1",
+			TenantID:         "tenant-1",
+			Timestamp:        time.Unix(1700000000, 0).UTC(),
+			EventType:        business.AuditEventConfiguration,
+			Action:           "action",
+			UserID:           "user-1",
+			UserType:         business.AuditUserTypeHuman,
+			ResourceType:     "resource",
+			ResourceID:       "res-1",
+			Result:           business.AuditResultSuccess,
+			UserAgent:        "Mozilla|/etc/passwd",
+			Path:             "/x|/y",
+			Tags:             []string{"a,b", "c"},
+			Severity:         business.AuditSeverityMedium,
+			Source:           "test",
+			Version:          "1.0",
+			SequenceNumber:   1,
+			PreviousChecksum: "prevchecksum",
+		}
+	}
+
+	assert.Equal(t, audit.GenerateChecksum(manager, build()), audit.GenerateChecksum(manager, build()),
+		"identical entries must produce identical checksums")
+}
+
+// TestVerifyChain_PreChangeChecksumFormulaIsRejected proves AC2 of Issue #4098:
+// the checksum widening is a hard break, not a migration. An entry
+// checksummed under the pre-#4098 11-field formula must be reported as a
+// mismatch by VerifyChain — there is no version field, dual-verification
+// path, or silent acceptance of the old formula.
+func TestVerifyChain_PreChangeChecksumFormulaIsRejected(t *testing.T) {
+	manager := newTestManager(t, "hard-break")
+
+	entry := &business.AuditEntry{
+		ID:               "id-1",
+		TenantID:         "tenant-1",
+		Timestamp:        time.Now().UTC(),
+		EventType:        business.AuditEventConfiguration,
+		Action:           "action",
+		UserID:           "user-1",
+		UserType:         business.AuditUserTypeHuman,
+		ResourceType:     "resource",
+		ResourceID:       "res-1",
+		Result:           business.AuditResultSuccess,
+		Source:           "test",
+		Version:          "1.0",
+		SequenceNumber:   1,
+		PreviousChecksum: "",
+	}
+
+	// The pre-#4098 formula: HMAC-SHA256 over 11 fields only.
+	oldHashInput := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s|%d|%s",
+		entry.ID, entry.TenantID, entry.Timestamp.Unix(), entry.EventType, entry.Action,
+		entry.UserID, entry.ResourceType, entry.ResourceID, entry.Result,
+		entry.SequenceNumber, entry.PreviousChecksum)
+	entry.Checksum = audit.GenerateChecksumWithFormat(manager, oldHashInput)
+
+	breaks := manager.VerifyChain([]*business.AuditEntry{entry})
+	require.NotEmpty(t, breaks, "a pre-#4098 checksum must be reported as a mismatch, not silently accepted")
+
+	found := false
+	for _, b := range breaks {
+		if strings.Contains(b.Reason, "checksum mismatch") {
+			found = true
+		}
+	}
+	assert.True(t, found, "the break must be a checksum mismatch, proving the old formula is rejected outright")
+}
+
+// TestVerifyChain_SequenceZeroEntryIsRejected proves AC3 of Issue #4098: an
+// entry with SequenceNumber == 0 is reported as a ChainBreak rather than
+// silently skipped. Pre-fix, VerifyChain skipped such entries before any
+// check ran, so this test fails on revert.
+func TestVerifyChain_SequenceZeroEntryIsRejected(t *testing.T) {
+	manager := newTestManager(t, "seq-zero")
+
+	entry := &business.AuditEntry{
+		ID:           "legacy-1",
+		TenantID:     "legacy-tenant",
+		Timestamp:    time.Now().UTC(),
+		EventType:    business.AuditEventConfiguration,
+		Action:       "legacy_action",
+		UserID:       "user-1",
+		ResourceType: "resource",
+		ResourceID:   "res-1",
+		Result:       business.AuditResultSuccess,
+		Source:       "test",
+		Version:      "1.0",
+		// SequenceNumber intentionally left at zero.
+	}
+	entry.Checksum = audit.GenerateChecksum(manager, entry)
+
+	// Tamper with a field after computing the checksum.
+	entry.Action = "tampered_action"
+
+	breaks := manager.VerifyChain([]*business.AuditEntry{entry})
+	require.NotEmpty(t, breaks, "a SequenceNumber==0 entry must be reported as a break, not silently skipped")
+
+	foundMissingSeq := false
+	for _, b := range breaks {
+		if b.SequenceNumber == 0 && strings.Contains(b.Reason, "sequence number missing") {
+			foundMissingSeq = true
+		}
+	}
+	assert.True(t, foundMissingSeq, "the break must explicitly name the missing sequence number as the reason")
+}
+
 // TestManager_IntegrityVerification tests audit integrity verification and
 // asserts that chain fields are populated on stored entries.
 func TestManager_IntegrityVerification(t *testing.T) {
@@ -929,6 +1911,14 @@ func TestChain_PreviousChecksumLinked(t *testing.T) {
 			"entry[%d].PreviousChecksum must equal entry[%d].Checksum", i, i-1)
 	}
 }
+
+// TestVerifyChain_DetectsTampering, TestVerifyChain_DetectsPreviousChecksumMismatch,
+// and TestVerifyChain_DetectsDeletion together prove one half of the ADR-004
+// adversary bound (Issue #3727): an actor who alters, reorders, or deletes
+// entries WITHOUT recomputing the chain fields using the manager's HMAC key —
+// i.e. an actor who does not hold the key — is caught by VerifyChain. See
+// TestVerifyChain_KeyHolderCanForgeConsistentChain below for the other half:
+// an actor who does hold the key is not caught.
 
 // TestVerifyChain_DetectsTampering records 3 entries, then tampers with the
 // middle entry's Action field in-memory and verifies VerifyChain reports a
@@ -1098,6 +2088,74 @@ func TestVerifyChain_DetectsDeletion(t *testing.T) {
 	assert.True(t, foundGap, "ChainBreak must report a sequence gap for the entry after the deletion")
 }
 
+// TestVerifyChain_KeyHolderCanForgeConsistentChain proves the ADR-004 adversary
+// bound (Issue #3727): an actor who holds the chain's HMAC key can rewrite entry
+// content and recompute SequenceNumber, PreviousChecksum, and Checksum for every
+// entry in order — exactly as writeBatch does for legitimate writes — producing a
+// chain VerifyChain reports as fully consistent, despite every entry's content
+// differing from what was originally recorded.
+//
+// This models a host-compromised controller: WithSecretsStore loads the HMAC key
+// from the controller's own secrets store, so the controller process itself is
+// this "key holder" whenever a secrets store is wired — the production
+// configuration, not a hypothetical. The manager under test stands in for that
+// actor because it already holds the same key that produced the original chain.
+//
+// This is not a defect in VerifyChain; it demonstrates the documented bound of a
+// keyed hash chain and is why the audit trail is not a compensating control
+// against a compromised controller (see ADR-021's qualification).
+func TestVerifyChain_KeyHolderCanForgeConsistentChain(t *testing.T) {
+	manager := newTestManager(t, "chain-test")
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		event := audit.NewEventBuilder().
+			Tenant("forge-tenant").
+			Type(business.AuditEventConfiguration).
+			Action("original_action").
+			User("user1", business.AuditUserTypeHuman).
+			Resource("resource", fmt.Sprintf("res-%d", i), "").
+			Severity(business.AuditSeverityMedium)
+		require.NoError(t, manager.RecordEvent(ctx, event))
+	}
+	flushOrFail(t, manager)
+
+	entries, err := manager.QueryEntries(ctx, &business.AuditFilter{
+		TenantID: "forge-tenant",
+		Order:    "asc",
+	})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	originalActions := make([]string, len(entries))
+	for i, e := range entries {
+		originalActions[i] = e.Action
+	}
+
+	// The key holder rewrites every entry's content and recomputes the chain
+	// fields in sequence order — the same recompute writeBatch performs for a
+	// legitimate write, available to anyone who holds m.hmacKey.
+	forged := make([]*business.AuditEntry, len(entries))
+	var prevChecksum string
+	for i, e := range entries {
+		f := *e
+		f.Action = fmt.Sprintf("forged_action_%d", i)
+		f.PreviousChecksum = prevChecksum
+		f.Checksum = audit.GenerateChecksum(manager, &f)
+		prevChecksum = f.Checksum
+		forged[i] = &f
+	}
+
+	breaks := manager.VerifyChain(forged)
+	assert.Empty(t, breaks,
+		"an actor holding the HMAC key can recompute a fully consistent chain over rewritten content — VerifyChain must not report this as broken")
+
+	for i, f := range forged {
+		assert.NotEqual(t, originalActions[i], f.Action,
+			"forged entry content must differ from what was originally recorded, proving the chain is consistent but false")
+	}
+}
+
 // TestManager_Flush verifies that after RecordEvent returns successfully and
 // Flush completes, every recorded entry is present in the store. This is the
 // contract that shutdown guarantees rely on.
@@ -1262,6 +2320,7 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 	const perWriter = 50
 
 	var wg sync.WaitGroup
+	recordErrs := make(chan error, writers*perWriter)
 	wg.Add(writers)
 	for w := 0; w < writers; w++ {
 		go func(writerID int) {
@@ -1274,10 +2333,9 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 					User("concurrent-user", business.AuditUserTypeHuman).
 					Resource("res", fmt.Sprintf("w%d-%d", writerID, i), "").
 					Severity(business.AuditSeverityLow)
-				// Errors are acceptable here only when the queue is full — the
-				// test does not assert every write succeeds, only that the
-				// combination of RecordEvent + Flush does not deadlock or race.
-				_ = manager.RecordEvent(ctx, event)
+				if err := manager.RecordEvent(ctx, event); err != nil {
+					recordErrs <- err
+				}
 			}
 		}(w)
 	}
@@ -1295,6 +2353,10 @@ func TestManager_ConcurrentRecordAndFlush(t *testing.T) {
 	}()
 
 	wg.Wait()
+	close(recordErrs)
+	for err := range recordErrs {
+		require.NoError(t, err, "background-context audit writes must not be shed under load")
+	}
 	<-flushDone
 
 	// Final flush drains everything and must succeed.
@@ -1436,9 +2498,9 @@ func TestWithSecretsStore_GeneratesAndPersistsKey(t *testing.T) {
 	assert.Empty(t, breaks, "chain must be intact when using a generated and persisted HMAC key")
 }
 
-// TestWithSecretsStore_StoreFailureFallsBack verifies that when StoreSecret
-// fails, the Manager still starts and uses a generated in-process key.
-func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
+// TestWithSecretsStore_StoreFailureFailsClosed verifies that an unavailable
+// durable key backend prevents the Manager from starting with an ephemeral key.
+func TestWithSecretsStore_StoreFailureFailsClosed(t *testing.T) {
 	tmpDir := t.TempDir()
 	storageManager, err := interfaces.CreateOSSStorageManager(tmpDir+"/flatfile", tmpDir+"/cfgms.db")
 	require.NoError(t, err)
@@ -1447,30 +2509,145 @@ func TestWithSecretsStore_StoreFailureFallsBack(t *testing.T) {
 	ss := newTestSecretStore()
 	ss.storeErr = errors.New("backend unavailable")
 
-	m, err := audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
-	require.NoError(t, err, "Manager must start even when StoreSecret fails")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = m.Stop(ctx)
-	})
+	_, err = audit.NewManager(storageManager.GetAuditStore(), "test-src", audit.WithSecretsStore(ss))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "persist audit HMAC key")
+}
 
-	// Record an entry and confirm the chain is verifiable — proving the fallback key is functional.
-	ctx := context.Background()
-	event := audit.NewEventBuilder().
-		Tenant("hmac-fallback-tenant").
-		Type(business.AuditEventConfiguration).
-		Action("fallback_action").
-		User("user1", business.AuditUserTypeHuman).
-		Resource("resource", "res-1", "").
-		Severity(business.AuditSeverityMedium)
-	require.NoError(t, m.RecordEvent(ctx, event))
-	flushOrFail(t, m)
+// TestConvenienceBuilderSeverity verifies that the predefined convenience constructors
+// emit calibrated severity at the source (Issue #2964).
+// The table covers all four tiers and all four AuditResult variants so that a future
+// unconditional hardcode would be caught by at least one row.
+func TestConvenienceBuilderSeverity(t *testing.T) {
+	cases := []struct {
+		name    string
+		builder *audit.AuditEventBuilder
+		want    business.AuditSeverity
+	}{
+		// AuthenticationEvent — success must be Low (routine login/registration path)
+		{
+			name:    "AuthenticationEvent/success → Low",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow,
+		},
+		// AuthenticationEvent — failure/denied must be High (ordinary auth failure)
+		{
+			name:    "AuthenticationEvent/failure → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.failure", business.AuditResultFailure),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthenticationEvent/denied → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.lockout", business.AuditResultDenied),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthenticationEvent/error → High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.error", business.AuditResultError),
+			want:    business.AuditSeverityHigh,
+		},
+		// AuthenticationEvent — Critical override: call sites for compromise indicators
+		// (revoked device, invalid PoP, session hijack) must be able to override.
+		{
+			name: "AuthenticationEvent/success + Critical override",
+			builder: audit.AuthenticationEvent("t", "u", "steward_registered", business.AuditResultSuccess).
+				Severity(business.AuditSeverityCritical),
+			want: business.AuditSeverityCritical,
+		},
+		// AuthorizationEvent — success must be Low (routine check_permission granted)
+		{
+			name:    "AuthorizationEvent/success → Low",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow,
+		},
+		// AuthorizationEvent — denied must be High (ordinary access denial)
+		{
+			name:    "AuthorizationEvent/denied → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "write", "check_permission", business.AuditResultDenied),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthorizationEvent/failure → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "admin", "check_permission", business.AuditResultFailure),
+			want:    business.AuditSeverityHigh,
+		},
+		{
+			name:    "AuthorizationEvent/error → High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "admin", "check_permission", business.AuditResultError),
+			want:    business.AuditSeverityHigh,
+		},
+		// AuthorizationEvent — sensitive management actions must override to High
+		{
+			name: "AuthorizationEvent/grant_permission success + High override",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "write", "grant_permission", business.AuditResultSuccess).
+				Severity(business.AuditSeverityHigh),
+			want: business.AuditSeverityHigh,
+		},
+		// UserManagementEvent — always High (sensitive admin actions)
+		{
+			name:    "UserManagementEvent/success stays High",
+			builder: audit.UserManagementEvent("t", "admin", "user1", "create_user"),
+			want:    business.AuditSeverityHigh,
+		},
+		// ConfigurationEvent — Medium baseline
+		{
+			name:    "ConfigurationEvent stays Medium",
+			builder: audit.ConfigurationEvent("t", "admin", "config", "cfg1", "settings", "update"),
+			want:    business.AuditSeverityMedium,
+		},
+		// SystemEvent — Low (routine system lifecycle)
+		{
+			name:    "SystemEvent stays Low",
+			builder: audit.SystemEvent("t", "controller_start", "started"),
+			want:    business.AuditSeverityLow,
+		},
+		// Regression guard: routine success must NOT be High or Critical
+		{
+			name:    "AuthenticationEvent/success not High",
+			builder: audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow, // definitively not High
+		},
+		{
+			name:    "AuthorizationEvent/success not High",
+			builder: audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess),
+			want:    business.AuditSeverityLow, // definitively not High
+		},
+	}
 
-	entries, err := m.QueryEntries(ctx, &business.AuditFilter{TenantID: "hmac-fallback-tenant"})
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry business.AuditEntry
+			audit.BuildEntry(tc.builder, &entry)
+			assert.Equal(t, tc.want, entry.Severity,
+				"expected severity %q but got %q for %s", tc.want, entry.Severity, tc.name)
+		})
+	}
+}
 
-	breaks := m.VerifyChain(entries)
-	assert.Empty(t, breaks, "chain must be intact even with an in-process fallback HMAC key")
+// TestConvenienceBuilderSeverityNotHighOnSuccess verifies the key regression guard:
+// routine authentication and authorization successes must never emit High or Critical severity.
+// This is the canonical regression test for Issue #2964.
+func TestConvenienceBuilderSeverityNotHighOnSuccess(t *testing.T) {
+	successes := []struct {
+		name    string
+		builder *audit.AuditEventBuilder
+	}{
+		{"web.login.success", audit.AuthenticationEvent("t", "u", "web.login.success", business.AuditResultSuccess)},
+		{"web.logout", audit.AuthenticationEvent("t", "u", "web.logout", business.AuditResultSuccess)},
+		{"steward_registered", audit.AuthenticationEvent("t", "s", "steward_registered", business.AuditResultSuccess)},
+		{"check_permission granted", audit.AuthorizationEvent("t", "u", "permission", "read", "check_permission", business.AuditResultSuccess)},
+		{"jit_access_request", audit.AuthorizationEvent("t", "u", "jit_access", "req1", "request", business.AuditResultSuccess)},
+		{"jit_access_expired", audit.AuthorizationEvent("t", "u", "jit_access", "grant1", "expired", business.AuditResultSuccess)},
+	}
+
+	for _, tc := range successes {
+		t.Run(tc.name, func(t *testing.T) {
+			var entry business.AuditEntry
+			audit.BuildEntry(tc.builder, &entry)
+			if entry.Severity == business.AuditSeverityHigh || entry.Severity == business.AuditSeverityCritical {
+				t.Errorf("routine success %q emits severity %q — must be Low or Medium (Issue #2964 regression)",
+					tc.name, entry.Severity)
+			}
+		})
+	}
 }
