@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // DatabaseSchemas manages database schema creation and migrations
@@ -274,13 +276,6 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_source ON audit_entries(source);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_entries_tenant_event_timestamp ON audit_entries(tenant_id, event_type, timestamp);",
 
-		// Chain integrity defense-in-depth (Issue #3754): guarantees at the
-		// database level that no tenant ever has two entries sharing a
-		// SequenceNumber, even if a bug in AppendChainedEntry's locking were to
-		// slip past it. Partial so pre-chain legacy rows (sequence_number = 0,
-		// see VerifyChain) remain unconstrained — many such rows share tenant_id.
-		"CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_entries_tenant_sequence_unique ON audit_entries(tenant_id, sequence_number) WHERE sequence_number > 0;",
-
 		// Time-based partitioning support (for future sharding) - temporarily disabled
 		// Complex date functions in indexes require careful IMMUTABLE handling
 		// "CREATE INDEX IF NOT EXISTS idx_audit_entries_daily_partition ON audit_entries(tenant_id, date_trunc('day', timestamp));",
@@ -292,6 +287,58 @@ func (s DatabaseSchemas) CreateAuditEntriesTable(ctx context.Context, db *sql.DB
 		}
 	}
 
+	return ensureAuditSequenceUniqueIndex(ctx, db)
+}
+
+// auditSequenceUniqueIndex is the chain-integrity defense-in-depth index
+// (Issue #3754): it guarantees at the database level that no tenant ever has
+// two entries sharing a SequenceNumber, even if a bug in AppendChainedEntry's
+// locking were to slip past it. Partial so pre-chain legacy rows
+// (sequence_number = 0, see VerifyChain) remain unconstrained — many such rows
+// share tenant_id.
+const auditSequenceUniqueIndex = "idx_audit_entries_tenant_sequence_unique"
+
+// ensureAuditSequenceUniqueIndex creates auditSequenceUniqueIndex unless rows
+// written before Issue #3754 already collide on (tenant_id, sequence_number).
+// Those rows predate database-serialized sequence assignment, when concurrent
+// writers could compute the same MAX+1. Building the index over them fails with
+// 23505 and would stop the controller from starting (Issue #4499), so the index
+// is skipped and the collision count logged instead. The rows are left as they
+// are: the audit log is tamper-evident and is never rewritten here, and
+// VerifyChain still reports the fork.
+func ensureAuditSequenceUniqueIndex(ctx context.Context, db *sql.DB) error {
+	var exists bool
+	if err := db.QueryRowContext(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1)",
+		auditSequenceUniqueIndex).Scan(&exists); err != nil {
+		return fmt.Errorf("failed to check for index %s: %w", auditSequenceUniqueIndex, err)
+	}
+	if exists {
+		return nil
+	}
+
+	var duplicateGroups int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM (
+			SELECT 1 FROM audit_entries
+			WHERE sequence_number > 0
+			GROUP BY tenant_id, sequence_number
+			HAVING COUNT(*) > 1
+		) duplicates`).Scan(&duplicateGroups); err != nil {
+		return fmt.Errorf("failed to check audit_entries for duplicate sequence numbers: %w", err)
+	}
+	if duplicateGroups > 0 {
+		logging.ForComponent("storage_database").Warn(
+			"audit_entries holds duplicate sequence numbers written before Issue #3754; skipping unique index",
+			"index", auditSequenceUniqueIndex,
+			"duplicate_groups", duplicateGroups)
+		return nil
+	}
+
+	if _, err := db.ExecContext(ctx, "CREATE UNIQUE INDEX IF NOT EXISTS "+auditSequenceUniqueIndex+
+		" ON audit_entries(tenant_id, sequence_number) WHERE sequence_number > 0;"); err != nil {
+		return fmt.Errorf("failed to create index: %w", err)
+	}
 	return nil
 }
 
@@ -1497,6 +1544,13 @@ func (s DatabaseSchemas) CreateCommandRecordsTable(ctx context.Context, db *sql.
 		);`
 	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("failed to create command_records table: %w", err)
+	}
+	// CREATE TABLE IF NOT EXISTS leaves a pre-#3757 table without the delivery
+	// columns, and idx_command_records_steward_delivery below references one of
+	// them. Add them first, or index creation fails and the controller cannot
+	// start after upgrading (Issue #4499).
+	if err := s.BackfillCommandRecordsDeliveryStatus(ctx, db); err != nil {
+		return err
 	}
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_command_records_tenant_id  ON command_records(tenant_id);",
