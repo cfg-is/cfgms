@@ -263,9 +263,9 @@ func (p *Publisher) HandleEventUpdate(ctx context.Context, event *controlplaneTy
 
 	// Log event
 	p.logger.Info("Received event from steward",
-		"steward_id", event.StewardID,
-		"event_type", event.Type,
-		"command_id", event.CommandID)
+		"steward_id", logging.SanitizeLogValue(event.StewardID),
+		"event_type", logging.SanitizeLogValue(string(event.Type)),
+		"command_id", logging.SanitizeLogValue(event.CommandID))
 
 	return nil
 }
@@ -282,7 +282,7 @@ func (p *Publisher) handleCommandTimeout(commandID string) {
 	if exists {
 		p.logger.Warn("Command timed out",
 			"command_id", commandID,
-			"steward_id", pending.StewardID,
+			"steward_id", logging.SanitizeLogValue(pending.StewardID),
 			"type", pending.Type,
 			"timeout", pending.Timeout)
 
@@ -350,7 +350,7 @@ func (p *Publisher) TriggerConfigSync(ctx context.Context, stewardID string) (st
 	}
 
 	p.logger.Info("Triggered config sync",
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"command_id", commandID)
 
 	return commandID, nil
@@ -364,7 +364,7 @@ func (p *Publisher) TriggerDNASync(ctx context.Context, stewardID string) (strin
 	}
 
 	p.logger.Info("Triggered DNA sync",
-		"steward_id", stewardID,
+		"steward_id", logging.SanitizeLogValue(stewardID),
 		"command_id", commandID)
 
 	return commandID, nil
