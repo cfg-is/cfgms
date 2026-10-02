@@ -186,7 +186,10 @@ func (r *ProviderRegistry) ExecuteOperation(ctx context.Context, config *APIConf
 
 	// Refresh authentication token if needed
 	if err := provider.RefreshToken(ctx, config); err != nil {
-		r.logger.Warn("Failed to refresh token", "provider", logging.SanitizeLogValue(config.Provider), "error", logging.SanitizeLogValue(err.Error()))
+		// The error text is deliberately not logged: RefreshToken operates on the
+		// credential-bearing APIConfig, and a provider's error could echo token
+		// material. Log a fixed category only.
+		r.logger.Warn("Failed to refresh token", "provider", logging.SanitizeLogValue(config.Provider), "reason", "refresh_failed")
 		// Continue with existing token - some providers may not need refresh
 	}
 
