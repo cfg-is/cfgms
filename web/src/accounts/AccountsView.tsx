@@ -110,7 +110,8 @@ function EnrollmentLinkPanel({
 }) {
   const [copied, setCopied] = useState(false)
   const [copyError, setCopyError] = useState<string | null>(null)
-  const enrollLink = `${window.location.origin}/enroll?token=${rawToken}`
+  // Must match the router's /enroll/:token route (App.tsx) — Issue #4505.
+  const enrollLink = `${window.location.origin}/enroll/${rawToken}`
 
   async function handleCopy() {
     setCopyError(null)

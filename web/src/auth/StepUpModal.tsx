@@ -28,7 +28,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { StepUpRequest } from '../api/client.ts'
+import { unwrapEnvelope, type StepUpRequest } from '../api/client.ts'
 import './StepUpModal.css'
 
 // ── CSRF cookie helper (session token only; pre-session is for login) ────────
@@ -222,7 +222,7 @@ export default function StepUpModal({
           return
         }
 
-        const opts = (await resp.json()) as PresenceOptions
+        const opts = unwrapEnvelope<PresenceOptions>(await resp.json())
         if (aborted) return
         optsRef.current = opts
         setPhase('waiting')
@@ -289,7 +289,7 @@ export default function StepUpModal({
 
       if (request.presenceRequired) {
         // Presence path: attach the single-use token minted by presence/finish.
-        const presenceData = (await finishResp.json()) as { presence_token: string }
+        const presenceData = unwrapEnvelope<{ presence_token: string }>(await finishResp.json())
         retryHeaders.set('X-Presence-Token', presenceData.presence_token)
       } else {
         // Elevation path: the session cookie is now Strong — no extra header needed.
