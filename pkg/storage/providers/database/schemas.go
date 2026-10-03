@@ -1455,7 +1455,14 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		// This partial unique index is the backstop that makes the winner deterministic.
 		// device_id is NOT NULL DEFAULT '' and empty means "not asserted", so rows with
 		// no device_id are excluded rather than colliding with each other.
-		"CREATE UNIQUE INDEX IF NOT EXISTS uq_steward_records_tenant_device ON steward_records(tenant_id, device_id) WHERE device_id <> '';",
+		// Issue #4534: a deregistered (decommissioned) record no longer reserves its
+		// device_id, so the machine can enroll again; it keeps the device_id for
+		// history matching. Revoked records still reserve it. The index is renamed
+		// so existing databases replace the old predicate; the new name keeps the
+		// old one as a prefix, which is what RegisterSteward's conflict detection
+		// matches on.
+		"DROP INDEX IF EXISTS uq_steward_records_tenant_device;",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uq_steward_records_tenant_device_active ON steward_records(tenant_id, device_id) WHERE device_id <> '' AND status <> 'deregistered';",
 		"CREATE INDEX IF NOT EXISTS idx_steward_records_last_seen   ON steward_records(last_seen);",
 	}
 	for _, idx := range indexes {
