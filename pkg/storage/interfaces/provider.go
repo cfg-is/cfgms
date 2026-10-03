@@ -1237,6 +1237,8 @@ func (sm *StorageManager) Close() error {
 		sm.certRevocationStore,
 		sm.signingCursorStore,
 		sm.rateCounterStore,
+		sm.scriptRunStore,
+		sm.executionQueueStore,
 	}
 	var firstErr error
 	for _, s := range slots {
