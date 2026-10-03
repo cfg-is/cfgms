@@ -16,11 +16,11 @@ This section summarises the key operational facts derived from that validation.
 
 ### Cluster topology
 
-| Node | Role | `internal_listen_addr` | REST API |
-|---|---|---|---|
-| `ctrl-node-01` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `:9080` |
-| `ctrl-node-02` | cluster member | `<node-private-ip>:9443` | `:9080` |
-| `ctrl-node-03` | cluster member | `<node-private-ip>:9443` | `:9080` |
+| Node | Role | `internal_listen_addr` | `internal_delivery_listen_addr` | REST API |
+|---|---|---|---|---|
+| `ctrl-node-01` | cluster member (original Tier-1 controller) | `<node-private-ip>:9443` | `<node-private-ip>:9444` | `:9080` |
+| `ctrl-node-02` | cluster member | `<node-private-ip>:9443` | `<node-private-ip>:9444` | `:9080` |
+| `ctrl-node-03` | cluster member | `<node-private-ip>:9443` | `<node-private-ip>:9444` | `:9080` |
 
 All three nodes connect to a **shared PostgreSQL backend** and a **shared S3-compatible
 blob store** (MinIO or equivalent). No data replication is done via Raft — Raft owns
@@ -46,6 +46,15 @@ are the critical per-node values:
 The `CFGMS_SECRETS_KEY_FILE` and `CFGMS_SESSION_HMAC_KEY_FILE` values **must be identical
 across all nodes** — they encrypt/authenticate shared rows in the cluster Postgres backend.
 Independently generated per-node values produce ciphertext-authentication failures.
+
+### Cross-node command delivery
+
+Set `internal_delivery_listen_addr` on every node (`ha-cluster-node-bootstrap.sh` renders
+it, `--delivery-port`, default `9444`). It is the private mTLS listener that lets a node
+hand a command to the node holding the target steward's session (ADR-031 Decision 3).
+Peers are dialled on this node's port, so the port must be the same on every node.
+Without it a node reaches only the stewards connected to itself, and logs a startup
+warning saying so.
 
 ### mTLS peer identity
 

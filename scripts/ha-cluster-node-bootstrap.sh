@@ -94,6 +94,7 @@
 #   --vault-address URL      OpenBao server URL for the cluster CA (required)
 #   --vault-key-path PATH    OpenBao KV v2 path "tenantID/key-name" for the cluster CA (required)
 #   --raft-port PORT         Internal transport port used in --cluster-nodes (default: 9443)
+#   --delivery-port PORT     Internal delivery gRPC port; must match on every node (default: 9444)
 #   --version TAG            Release tag to install (default: latest tagged release)
 #   --binary-path PATH       Local binary path instead of downloading (air-gapped)
 #   --allow-host-key         Seal credentials to this node's disk-resident host key
@@ -129,6 +130,7 @@ S3_BUCKET="cfgms-installer-blobs"
 VAULT_ADDRESS=""
 VAULT_KEY_PATH=""
 RAFT_PORT="9443"
+DELIVERY_PORT="9444"
 VERSION_FLAG=""
 BINARY_PATH=""
 SKIP_SMOKE=false
@@ -160,6 +162,8 @@ while [[ $# -gt 0 ]]; do
         --vault-key-path)   VAULT_KEY_PATH="$2"; shift 2 ;;
         --raft-port=*)      RAFT_PORT="${1#*=}"; shift ;;
         --raft-port)        RAFT_PORT="$2"; shift 2 ;;
+        --delivery-port=*)  DELIVERY_PORT="${1#*=}"; shift ;;
+        --delivery-port)    DELIVERY_PORT="$2"; shift 2 ;;
         --version=*)        VERSION_FLAG="${1#*=}"; shift ;;
         --version)          VERSION_FLAG="$2"; shift 2 ;;
         --binary-path=*)    BINARY_PATH="${1#*=}"; shift ;;
@@ -619,6 +623,12 @@ data_dir: "/var/lib/cfgms"
 # — see the RAFT_LISTEN_HOST comment above). Peers dial this node at
 # <this node's --node-id>:${RAFT_PORT}, matching the port here.
 internal_listen_addr: "${RAFT_LISTEN_HOST}:${RAFT_PORT}"
+
+# Private mTLS gRPC listener for controller-to-controller command delivery
+# (ADR-031 Decision 3). Without it a node delivers only to stewards connected to
+# itself (Issue #4512). Same private-IP rule as internal_listen_addr; peers are
+# dialled at their cluster address on THIS port, so it must match on every node.
+internal_delivery_listen_addr: "${RAFT_LISTEN_HOST}:${DELIVERY_PORT}"
 
 ha:
   mode: cluster
