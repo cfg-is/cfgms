@@ -79,6 +79,12 @@ func newClientFromBundle(bundleFilePath, apiURL string, tlsInsecure bool, server
 		}
 	}
 
+	// The bundle is the only CLI credential that carries AssuranceStrong, so it is
+	// the one that must be able to answer a presence challenge: without the relay a
+	// Strong + presence route (e.g. signing-credential:request) is unreachable from
+	// any CLI credential (Issue #4508). The closure runs only after NewAPIClient
+	// returns, so client is always set.
+	var client *APIClient
 	cfg := &APIClientConfig{
 		BaseURL:       baseURL,
 		ClientCertPEM: []byte(b.CertPEM),
@@ -86,9 +92,13 @@ func newClientFromBundle(bundleFilePath, apiURL string, tlsInsecure bool, server
 		CACertPEM:     []byte(b.CAPEM),
 		ServerName:    resolvedServerName,
 		TLSInsecure:   tlsInsecure,
+		OnStepUpRequired: func(wwwAuthenticate, method, path string, bodyBytes []byte) (string, error) {
+			return defaultStepUpHandler(client)(wwwAuthenticate, method, path, bodyBytes)
+		},
 	}
 
-	return NewAPIClient(cfg)
+	client, err = NewAPIClient(cfg)
+	return client, err
 }
 
 // resolveBundleClient walks the admin bundle lookup chain and returns an mTLS-capable
