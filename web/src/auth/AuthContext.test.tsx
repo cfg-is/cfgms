@@ -17,6 +17,11 @@ function jsonResponse(
   })
 }
 
+/** Wraps a payload in the controller's response envelope (Server.writeResponse) — Issue #4505. */
+function envelope(data: unknown): { data: unknown; timestamp: string } {
+  return { data, timestamp: '2026-10-02T00:00:00Z' }
+}
+
 // ── WebAuthn test helpers ────────────────────────────────────────────────────
 
 const MOCK_PASSKEY_BEGIN_OPTIONS = {
@@ -96,7 +101,7 @@ function mockPasskeyLoginEndpoints(finishStatus: number, finishBody: unknown = {
       return Promise.resolve(jsonResponse(204))
     }
     if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-      return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+      return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
     }
     if (url.endsWith('/api/v1/web/passkey/login/finish')) {
       return Promise.resolve(jsonResponse(finishStatus, finishBody))
@@ -197,7 +202,7 @@ describe('AuthProvider state transitions', () => {
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
       }
       return Promise.resolve(jsonResponse(200))
     })
@@ -304,7 +309,7 @@ describe('AuthProvider — step-up (Story #2786)', () => {
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
       }
       if (url.endsWith('/api/v1/web/passkey/login/finish')) {
         return Promise.resolve(
@@ -314,7 +319,7 @@ describe('AuthProvider — step-up (Story #2786)', () => {
         )
       }
       if (url.includes('presence/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       }
       // The API call that triggers step-up.
       return Promise.resolve(
@@ -400,7 +405,7 @@ describe('AuthProvider — step-up (Story #2786)', () => {
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
       }
       if (url.endsWith('/api/v1/web/passkey/login/finish')) {
         return Promise.resolve(
@@ -410,7 +415,7 @@ describe('AuthProvider — step-up (Story #2786)', () => {
         )
       }
       if (url.includes('presence/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_BEGIN_OPTIONS)))
       }
       return Promise.resolve(
         jsonResponse(401, { error: 'step_up_required' }, {
@@ -515,7 +520,7 @@ describe('RequireAuth route guard', () => {
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
       }
       return Promise.resolve(jsonResponse(200))
     })
@@ -612,7 +617,7 @@ describe('AuthProvider — session probe (Story #2933)', () => {
         return Promise.resolve(jsonResponse(204))
       }
       if (url.endsWith('/api/v1/web/passkey/login/begin')) {
-        return Promise.resolve(jsonResponse(200, MOCK_PASSKEY_BEGIN_OPTIONS))
+        return Promise.resolve(jsonResponse(200, envelope(MOCK_PASSKEY_BEGIN_OPTIONS)))
       }
       return Promise.resolve(jsonResponse(200))
     })
