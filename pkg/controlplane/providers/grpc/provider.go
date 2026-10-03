@@ -93,11 +93,14 @@ type Provider struct {
 	tlsConfig       *tls.Config
 	keepalivePeriod time.Duration // 0 = use QUIC default (25s)
 	idleTimeout     time.Duration // 0 = use QUIC default (90s)
-	maxConnections  int
-	stewardID       string
-	tenantID        string
-	logger          logging.Logger
-	startTime       time.Time
+	// initialConnectTimeout bounds dialInitial's retries (Issue #4532). 0 retries
+	// until p.ctx is done (Issue #3849). It never bounds the established session.
+	initialConnectTimeout time.Duration
+	maxConnections        int
+	stewardID             string
+	tenantID              string
+	logger                logging.Logger
+	startTime             time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
 	backoffOverride *backoff
@@ -216,6 +219,8 @@ func (p *Provider) Registry() registry.Registry {
 //   - "keepalive_period": time.Duration - QUIC keepalive interval (optional, default 25s)
 //   - "idle_timeout": time.Duration - QUIC idle timeout (optional, default 90s)
 //   - "on_state_change": func(ConnectionState) - Connection state change callback (optional, client mode only)
+//   - "initial_connect_timeout": time.Duration - Client mode: stop retrying the initial dial after
+//     this long and return the last error (optional; 0 retries until the provider's context ends)
 //
 // Server mode additional keys:
 //   - "grpc_server": *grpc.Server - Externally-created gRPC server (optional; when provided,
@@ -252,6 +257,12 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 	}
 	if it, ok := config["idle_timeout"].(time.Duration); ok {
 		p.idleTimeout = it
+	}
+	if ict, ok := config["initial_connect_timeout"].(time.Duration); ok {
+		if ict < 0 {
+			return fmt.Errorf("initial_connect_timeout must not be negative")
+		}
+		p.initialConnectTimeout = ict
 	}
 	if max, ok := config["max_connections"].(int); ok {
 		if max < 1 {
@@ -456,8 +467,19 @@ func (p *Provider) startClient() error {
 // initial connect deterministic under load: as long as the caller does not
 // impose its own deadline, the dial keeps trying until the peer is reachable
 // (Issue #3849).
+//
+// When initialConnectTimeout is set, retrying stops once it has elapsed and the
+// last error is returned (Issue #4532). That budget covers only this initial
+// connect, never the session p.ctx governs: a steward reconnecting with a
+// stored identity uses it to give up on an unreachable controller and fall
+// back to registration, which retrying against an undeadlined context would
+// prevent forever.
 func (p *Provider) dialInitial() error {
 	b := defaultBackoff()
+	var deadline time.Time
+	if p.initialConnectTimeout > 0 {
+		deadline = time.Now().Add(p.initialConnectTimeout)
+	}
 	for {
 		err := p.dialAndOpenStream()
 		if err == nil {
@@ -470,7 +492,18 @@ func (p *Provider) dialInitial() error {
 		default:
 		}
 
-		timer := time.NewTimer(b.next())
+		wait := b.next()
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("initial connect gave up after %s: %w", p.initialConnectTimeout, err)
+			}
+			if wait > remaining {
+				wait = remaining
+			}
+		}
+
+		timer := time.NewTimer(wait)
 		select {
 		case <-p.ctx.Done():
 			timer.Stop()
