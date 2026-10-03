@@ -1544,6 +1544,14 @@ func connectWithApprovedRegistration(
 // HTTP registration (first run or manually cleared identity).
 // Returns (nil, err) when a stored identity exists but reconnect fails — caller
 // should log the error and fall back to HTTP registration.
+// storedIdentityConnectBudget bounds the stored-identity reconnect's initial
+// dial (Issue #4532). Past it, registerAndConnect falls back to registering with
+// the configured token; if the controller is merely down, that fails too and the
+// connect loop retries the stored identity after its backoff, so a healthy
+// steward never re-registers needlessly. Three of gRPC's 20s per-attempt
+// connect ceilings.
+const storedIdentityConnectBudget = 60 * time.Second
+
 func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, runtimeCfg stewardconfig.StewardConfig, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil {
@@ -1636,6 +1644,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
 		PublicBeta:                      publicBeta,
 		CertStoreDir:                    certStoreDir,
+		InitialConnectTimeout:           storedIdentityConnectBudget,
 		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:              dnaRefreshIntervalReconnect,

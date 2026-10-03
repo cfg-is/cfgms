@@ -715,3 +715,69 @@ func TestClientStop_DuringInitialDialDoesNotDeadlock(t *testing.T) {
 		t.Fatal("client.Start did not return after Stop cancelled its context")
 	}
 }
+
+// TestClientStart_InitialConnectTimeoutGivesUp guards Issue #4532: a steward
+// reconnecting with a stored identity must be able to give up on an
+// unreachable controller and fall back to registration. With
+// initial_connect_timeout set, Start returns the last dial error once the
+// budget has elapsed instead of retrying until the (undeadlined) context ends.
+func TestClientStart_InitialConnectTimeoutGivesUp(t *testing.T) {
+	_, clientTLS := newTestTLSConfigs(t, "steward-connect-budget-test")
+	addr := reserveUnusedUDPAddr(t)
+
+	client := New(ModeClient)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":                    "client",
+		"addr":                    addr,
+		"tls_config":              clientTLS,
+		"steward_id":              "steward-connect-budget-test",
+		"initial_connect_timeout": time.Second,
+	}))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+
+	startErr := make(chan error, 1)
+	go func() { startErr <- client.Start(context.Background()) }()
+
+	select {
+	case err := <-startErr:
+		require.Error(t, err, "nothing is listening, so the initial connect must fail")
+		assert.Contains(t, err.Error(), "initial connect gave up")
+	case <-time.After(30 * time.Second):
+		t.Fatal("client.Start kept retrying past initial_connect_timeout")
+	}
+}
+
+// TestClientStart_InitialConnectTimeoutDoesNotBoundSession guards the other
+// half of Issue #4532: the budget applies to the initial dial only. A session
+// established within it must outlive it.
+func TestClientStart_InitialConnectTimeoutDoesNotBoundSession(t *testing.T) {
+	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-budget-session-test")
+	addr := reserveUnusedUDPAddr(t)
+
+	reg := registry.NewRegistry()
+	server := New(ModeServer)
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       addr,
+		"tls_config": serverTLS,
+		"registry":   reg,
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	client := New(ModeClient)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":                    "client",
+		"addr":                    addr,
+		"tls_config":              clientTLS,
+		"steward_id":              "steward-budget-session-test",
+		"initial_connect_timeout": 500 * time.Millisecond,
+	}))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+	require.NoError(t, client.Start(context.Background()))
+
+	time.Sleep(1500 * time.Millisecond) // three times the budget
+	assert.True(t, client.IsConnected(), "the established session must survive past initial_connect_timeout")
+	_, ok := reg.Get("steward-budget-session-test")
+	assert.True(t, ok, "the steward must still be registered on the server")
+}
