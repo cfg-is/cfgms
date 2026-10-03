@@ -65,6 +65,7 @@ type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
 	signer             signature.Signer // optional; when nil commands are sent unsigned
+	termSource         TermSource       // optional; when nil commands carry term 0
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -125,6 +126,11 @@ type GrantManager interface {
 }
 
 // Config holds Dispatcher configuration.
+// TermSource provides the current fencing term for outbound commands.
+type TermSource interface {
+	GetTerm() uint64
+}
+
 type Config struct {
 	Queue        *script.ExecutionQueue
 	ControlPlane controlplaneInterfaces.ControlPlaneProvider
@@ -136,6 +142,12 @@ type Config struct {
 	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
 	// execute_script delivery. Public-beta deployments must set this true.
 	RequireSignedAdhoc bool
+	// TermSource stamps the current fencing term onto every execute_script
+	// command, as the command publisher does for all other commands (#3390).
+	// Stewards that have seen a stamped command reject term 0 (ADR-029
+	// Decision 6), so a cluster without it can never run ad-hoc scripts
+	// (Issue #4510). Nil sends term 0 (single-server behaviour).
+	TermSource TermSource
 	// PollInterval is how often the background loop polls all devices.
 	// Defaults to 30 s when zero.
 	PollInterval time.Duration
@@ -178,6 +190,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		queue:               cfg.Queue,
 		controlPlane:        cfg.ControlPlane,
 		signer:              cfg.Signer,
+		termSource:          cfg.TermSource,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		pollInterval:        interval,
 		logger:              cfg.Logger,
@@ -501,6 +514,15 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// no second execution is dispatched while the first is running.
 }
 
+// currentTerm returns the fencing term from the configured TermSource, or 0 when
+// none is set.
+func (d *Dispatcher) currentTerm() uint64 {
+	if d.termSource == nil {
+		return 0
+	}
+	return d.termSource.GetTerm()
+}
+
 // sendCommand builds and transmits a CommandExecuteScript via the control plane.
 func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *script.QueuedExecution, prepared *script.PreparedExecution) error {
 	content := prepared.ScriptContent
@@ -576,6 +598,7 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		StewardID: deviceID,
 		Timestamp: time.Now(),
 		Params:    params,
+		Term:      d.currentTerm(),
 	}
 
 	signed := &controlplaneTypes.SignedCommand{Command: *cmd}
