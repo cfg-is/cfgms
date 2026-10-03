@@ -315,6 +315,11 @@ else
     elif ! grep -Eq '^internal_listen_addr: "[0-9.]+:9443"$' "$CFG_FILE"; then
         fail "test3: controller.cfg internal_listen_addr is not a fixed IP:port"
         PASS_THIS=false
+    # Issue #4512: without internal_delivery_listen_addr a cluster node delivers
+    # only to stewards connected to itself. Same fixed-IP rule, default port 9444.
+    elif ! grep -Eq '^internal_delivery_listen_addr: "[0-9.]+:9444"$' "$CFG_FILE"; then
+        fail "test3: controller.cfg missing internal_delivery_listen_addr as a fixed IP:9444"
+        PASS_THIS=false
     fi
 
     # Secret placeholders, never literal secret values, in the committed-shape config
