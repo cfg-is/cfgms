@@ -645,7 +645,9 @@ func TestCA_CertificateValidityPeriods(t *testing.T) {
 			x509Cert, err := ParseCertificateFromPEM(cert.CertificatePEM)
 			require.NoError(t, err)
 
-			expectedDuration := time.Duration(tt.validityDays) * 24 * time.Hour
+			// Validity runs ValidityDays from issuance; NotBefore additionally
+			// reaches clockSkewAllowance into the past (Issue #4536).
+			expectedDuration := time.Duration(tt.validityDays)*24*time.Hour + clockSkewAllowance
 			actualDuration := x509Cert.NotAfter.Sub(x509Cert.NotBefore)
 
 			// Allow some tolerance for processing time (1 minute)
