@@ -1331,7 +1331,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			ControlPlane:       dispatchControlPlane,
 			Signer:             commandSigner,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
-			Logger:             logger,
+			// Issue #4510: same term source as the command publisher below, so
+			// execute_script passes the steward fence like every other command.
+			TermSource: haManager,
+			Logger:     logger,
 		})
 		if dispatcherErr != nil {
 			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)
