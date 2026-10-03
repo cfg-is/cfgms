@@ -571,18 +571,31 @@ func (m *Manager) WaitForLeadership(ctx context.Context) bool {
 // BlueGreenMode (neither has lease-backed authority — see usesLeaseAuthority),
 // when no lease store has been wired, and whenever this node does not currently
 // hold cached local authority.
+//
+// The token is offset by LeaseTermFloor. Before ADR-031 the fencing token was
+// the Raft term, and every steward persists the highest term it has seen
+// (ADR-029 Decision 6). A lease token restarts at 1 when the cfgms_leases table
+// is created, so without the offset an upgraded cluster stamps terms below the
+// fleet's ratchet and every steward rejects every command — push-upgrade
+// included — until it is re-enrolled by hand (Issue #4502). Raft terms never
+// approached 2^32; lease-derived terms all lie above it, so the two domains
+// cannot interleave and the term stays monotonic across the upgrade.
 func (m *Manager) GetTerm() uint64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if m.leaseManager != nil {
 		if token, ok := m.leaseManager.HasLocalAuthority(clusterLeadershipLeaseName, m.nodeInfo.ID); ok {
-			return token
+			return LeaseTermFloor + token
 		}
 	}
 
 	return 0
 }
+
+// LeaseTermFloor offsets lease fencing tokens into a term domain above every
+// Raft term a pre-ADR-031 cluster issued. See GetTerm.
+const LeaseTermFloor uint64 = 1 << 32
 
 // NewBackgroundLoopLease constructs a lease.SingletonJob for the cluster-
 // singleton background loop named name (ADR-031 Decision 4: leadership shrinks

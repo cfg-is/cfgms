@@ -6,6 +6,7 @@ package ha
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -739,7 +740,7 @@ func TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires(t *testing.T) {
 
 	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
 	require.NoError(t, err)
-	assert.Equal(t, token, state.Token, "GetTerm must equal the lease store's own current token")
+	assert.Equal(t, LeaseTermFloor+state.Token, token, "GetTerm must equal the lease store's own current token offset by LeaseTermFloor")
 	assert.Equal(t, "lease-hasleader-test", state.HolderID)
 
 	// Manager.Stop aggregates component shutdown errors, so it is asserted rather
@@ -752,6 +753,34 @@ func TestManager_HasLeadership_ClusterMode_LeaseBackedAndExpires(t *testing.T) {
 	assert.Eventually(t, func() bool { return !manager.HasLeadership() },
 		2*time.Second, 5*time.Millisecond,
 		"HasLeadership must become false once the cached lease authority window lapses without renewal")
+}
+
+// TestManager_GetTerm_ExceedsPreLeaseRaftTerms reproduces the cluster-upgrade
+// fence lockout: a steward that served a pre-ADR-031 cluster has persisted that
+// cluster's Raft term as its fence ratchet, and a freshly created lease starts at
+// token 1. GetTerm must still stamp a term above every Raft term, or the steward
+// rejects every command after the controller is upgraded.
+func TestManager_GetTerm_ExceedsPreLeaseRaftTerms(t *testing.T) {
+	store := newTestLeaseStore(t)
+	manager := newLeaseBackedClusterManager(t, "lease-term-floor-test", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, manager.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, manager.Stop(context.Background())) })
+
+	require.Eventually(t, manager.HasLeadership, 5*time.Second, 5*time.Millisecond)
+
+	state, err := store.GetLease(context.Background(), clusterLeadershipLeaseName)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), state.Token, "a freshly created lease starts at token 1")
+
+	// 21 is the Raft term the lab cluster had reached before upgrading; no Raft
+	// term ever approached 2^32.
+	const preUpgradeRaftTerm uint64 = 21
+	term := manager.GetTerm()
+	assert.Greater(t, term, preUpgradeRaftTerm)
+	assert.Greater(t, term, uint64(math.MaxUint32), "lease-derived terms must lie above the whole Raft term domain")
 }
 
 // TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder is the REQUIRED
@@ -792,7 +821,7 @@ func TestManager_HasLeadership_MultiNode_AgreesWithLeaseCurrentHolder(t *testing
 		if err != nil || !state.Valid {
 			return false
 		}
-		return state.HolderID == leaderID && state.Token == leader.GetTerm()
+		return state.HolderID == leaderID && LeaseTermFloor+state.Token == leader.GetTerm()
 	}, 5*time.Second, 5*time.Millisecond,
 		"exactly one manager must hold leadership, and its GetTerm() must equal the lease store's current holder token")
 }
@@ -1048,7 +1077,7 @@ func TestNewManager_ClusterMode_WiresLeaseStoreFromStorageManager(t *testing.T) 
 
 	state, err := storageManager.GetLeaseStore().GetLease(context.Background(), clusterLeadershipLeaseName)
 	require.NoError(t, err)
-	assert.Equal(t, token, state.Token, "GetTerm must equal the wired store's own current token")
+	assert.Equal(t, LeaseTermFloor+state.Token, token, "GetTerm must equal the wired store's own current token offset by LeaseTermFloor")
 	assert.Equal(t, nodeID, state.HolderID)
 }
 

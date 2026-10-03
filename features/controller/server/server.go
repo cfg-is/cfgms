@@ -1255,6 +1255,11 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// out.
 		var dispatchControlPlane = controlPlane
 		deliveryServer = internaldelivery.NewServer(connRegistry, controlPlane, logger)
+		if cfg.HA.IsClusterMode() && cfg.InternalDeliveryListenAddr == "" {
+			// Issue #4512: without the delivery listener this node can only reach
+			// stewards connected to itself; say so rather than degrading silently.
+			logger.Warn("internaldelivery: internal_delivery_listen_addr is not set in cluster mode; commands reach only stewards connected to this node")
+		}
 		if haManager != nil && cfg.HA.IsClusterMode() && routingStore != nil && certManager != nil && cfg.InternalDeliveryListenAddr != "" {
 			// Mint a dedicated mTLS CLIENT certificate for outbound delivery
 			// forwarding, exactly as pkg/ha mints one for the Raft peer
@@ -1350,7 +1355,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			Signer:             commandSigner,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
 			IsLocallyConnected: isLocallyConnected,
-			Logger:             logger,
+			// Issue #4510: same term source as the command publisher below, so
+			// execute_script passes the steward fence like every other command.
+			TermSource: haManager,
+			Logger:     logger,
 		})
 		if dispatcherErr != nil {
 			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)

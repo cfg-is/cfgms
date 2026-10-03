@@ -28,6 +28,11 @@ function jsonResponse(status: number, body: unknown = {}): Response {
   })
 }
 
+/** Wraps a payload in the controller's response envelope (Server.writeResponse) — Issue #4505. */
+function envelope(data: unknown): { data: unknown; timestamp: string } {
+  return { data, timestamp: '2026-10-02T00:00:00Z' }
+}
+
 const MOCK_ENROLL_OPTIONS = {
   publicKey: {
     challenge: 'Y2hhbGxlbmdlLWJ5dGVz',
@@ -98,7 +103,7 @@ afterEach(() => {
 
 describe('token source', () => {
   it('reads token from the URL and sends it as X-Enrollment-Token on the begin POST', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
 
     renderEnroll('magic-token-abc123')
 
@@ -123,7 +128,7 @@ describe('token source', () => {
 
   it('never reads the token from sessionStorage or localStorage', async () => {
     const getItem = vi.spyOn(Storage.prototype, 'getItem')
-    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
 
     renderEnroll('tok-url')
 
@@ -137,7 +142,7 @@ describe('token source', () => {
 
 describe('token validation', () => {
   it('shows the register button after the server confirms the token is valid', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
 
     renderEnroll()
 
@@ -195,7 +200,7 @@ describe('WebAuthn create ceremony', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       return Promise.resolve(jsonResponse(201))
     })
 
@@ -221,7 +226,7 @@ describe('WebAuthn create ceremony', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       if (url.includes('/enroll/finish')) return Promise.resolve(jsonResponse(201))
       return Promise.resolve(jsonResponse(200))
     })
@@ -251,7 +256,7 @@ describe('WebAuthn create ceremony', () => {
     )
     vi.stubGlobal('navigator', { credentials: { create: credCreate } })
 
-    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
 
     renderEnroll()
     await waitFor(() => screen.getByRole('button', { name: /register a passkey/i }))
@@ -277,7 +282,7 @@ describe('terminal error states', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       return Promise.resolve(jsonResponse(409))
     })
 
@@ -298,7 +303,7 @@ describe('terminal error states', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       return Promise.resolve(jsonResponse(410))
     })
 
@@ -319,7 +324,7 @@ describe('terminal error states', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       return Promise.resolve(jsonResponse(400))
     })
 
@@ -353,7 +358,7 @@ describe('ceremony cancellation', () => {
     )
     vi.stubGlobal('navigator', { credentials: { create: credCreate } })
 
-    fetchMock.mockResolvedValue(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+    fetchMock.mockResolvedValue(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
 
     renderEnroll()
     await waitFor(() => screen.getByRole('button', { name: /register a passkey/i }))
@@ -378,7 +383,7 @@ describe('success routing', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       if (url.includes('/enroll/finish')) return Promise.resolve(jsonResponse(201))
       return Promise.resolve(jsonResponse(200))
     })
@@ -403,7 +408,7 @@ describe('success routing', () => {
 
     fetchMock.mockImplementation((input) => {
       const url = String(input)
-      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, MOCK_ENROLL_OPTIONS))
+      if (url.includes('/enroll/begin')) return Promise.resolve(jsonResponse(200, envelope(MOCK_ENROLL_OPTIONS)))
       if (url.includes('/enroll/finish')) return Promise.resolve(jsonResponse(201))
       return Promise.resolve(jsonResponse(200))
     })

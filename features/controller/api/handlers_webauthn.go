@@ -223,6 +223,13 @@ func (s *Server) handleWebAuthnRegisterBegin(w http.ResponseWriter, r *http.Requ
 		// (a separate, later story), not the one-time enrollment here.
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			UserVerification: protocol.VerificationRequired,
+			// Passkey login is usernameless (BeginDiscoverableLogin, empty
+			// allowCredentials), so only a discoverable credential can ever sign
+			// in. Without this, authenticators that default to non-discoverable
+			// (password managers, many security keys) register a passkey that
+			// login can never find (Issue #4505).
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+			RequireResidentKey: protocol.ResidentKeyRequired(),
 		}),
 		// Prevent re-registering an authenticator already enrolled for this account.
 		webauthn.WithExclusions(webauthn.Credentials(user.credentials).CredentialDescriptors()),
@@ -804,6 +811,13 @@ func (s *Server) handlePasskeyEnrollBegin(w http.ResponseWriter, r *http.Request
 	creation, sessionData, err := wa.BeginRegistration(user,
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			UserVerification: protocol.VerificationRequired,
+			// Passkey login is usernameless (BeginDiscoverableLogin, empty
+			// allowCredentials), so only a discoverable credential can ever sign
+			// in. Without this, authenticators that default to non-discoverable
+			// (password managers, many security keys) register a passkey that
+			// login can never find (Issue #4505).
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+			RequireResidentKey: protocol.ResidentKeyRequired(),
 		}),
 		webauthn.WithExclusions(webauthn.Credentials(user.credentials).CredentialDescriptors()),
 	)

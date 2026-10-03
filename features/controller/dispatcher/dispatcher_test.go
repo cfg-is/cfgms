@@ -1658,3 +1658,47 @@ func TestMetaIntReadsJSONRoundTrippedNumbers(t *testing.T) {
 	assert.Equal(t, 0, metaInt(nil))
 	assert.Equal(t, 0, metaInt("2"))
 }
+
+// staticTermSource returns a fixed fencing term (same shape as the command
+// publisher's test term source).
+type staticTermSource struct{ term uint64 }
+
+func (s staticTermSource) GetTerm() uint64 { return s.term }
+
+// TestDispatcherStampsFencingTerm guards Issue #4510: in cluster mode every
+// steward has a fence ratchet set by the command publisher's stamped commands,
+// and it rejects term 0. execute_script must carry the same fencing term, or no
+// ad-hoc script can ever run in a cluster.
+func TestDispatcherStampsFencingTerm(t *testing.T) {
+	const term = uint64(1)<<32 + 7
+	controlPlane := &testControlPlane{}
+	dispatcher, err := New(&Config{
+		Queue:        newTestQueue(t, nil),
+		ControlPlane: controlPlane,
+		Signer:       testCommandSigner{},
+		TermSource:   staticTermSource{term: term},
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	execution := &script.QueuedExecution{ExecutionID: "exec-term", Shell: script.ShellBash}
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, prepared))
+
+	require.Len(t, controlPlane.sent, 1)
+	assert.Equal(t, term, controlPlane.sent[0].Command.Term, "execute_script must carry the fencing term")
+}
+
+// TestDispatcherWithoutTermSourceSendsZero keeps single-server behaviour: with no
+// term source the command carries term 0, which an unratcheted steward accepts.
+func TestDispatcherWithoutTermSourceSendsZero(t *testing.T) {
+	controlPlane := &testControlPlane{}
+	dispatcher := newTestDispatcher(t, newTestQueue(t, nil), controlPlane)
+
+	execution := &script.QueuedExecution{ExecutionID: "exec-noterm", Shell: script.ShellBash}
+	prepared := &script.PreparedExecution{ScriptContent: "hostname"}
+	require.NoError(t, dispatcher.sendCommand(context.Background(), "steward-1", execution, prepared))
+
+	require.Len(t, controlPlane.sent, 1)
+	assert.Zero(t, controlPlane.sent[0].Command.Term)
+}
