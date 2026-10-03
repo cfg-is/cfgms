@@ -1327,7 +1327,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		var queueStore scriptmodule.QueueStore
 		var isLocallyConnected func(string) bool
 		if cfg.HA.IsClusterMode() {
-			if shared := storageManager.GetExecutionQueueStore(); shared != nil && connRegistry != nil {
+			if shared := storageManager.GetExecutionQueueStore(); shared != nil {
 				queueStore = controllerrun.NewSharedQueueStore(shared)
 				registryForDispatch := connRegistry
 				isLocallyConnected = func(stewardID string) bool {
