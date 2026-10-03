@@ -156,7 +156,7 @@ func (s *SQLiteStewardStore) GetStewardByDeviceID(ctx context.Context, deviceID 
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
 		       tenant_id, hidden
-		FROM stewards WHERE device_id = ? ORDER BY id ASC LIMIT 1`, deviceID)
+		FROM stewards WHERE device_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardRow(row)
 }
 
@@ -173,7 +173,7 @@ func (s *SQLiteStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context, 
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json,
 		       tenant_id, hidden
-		FROM stewards WHERE device_id = ? AND tenant_id = ? ORDER BY id ASC LIMIT 1`,
+		FROM stewards WHERE device_id = ? AND tenant_id = ? ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardRow(row)
 }

@@ -431,7 +431,11 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 	// the certificate is minted so a colliding claim gets no credential either.
 	if s.stewardStore != nil && entry.DeviceID != "" {
 		existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(ctx, entry.DeviceID, entry.TenantID)
-		if lookupErr == nil && existing != nil && existing.ID != entry.StewardID {
+		// A deregistered match no longer holds the device (Issue #4534): device
+		// lookups return a live record ahead of deregistered ones, so a
+		// deregistered result means no live steward holds this device_id.
+		if lookupErr == nil && existing != nil && existing.ID != entry.StewardID &&
+			existing.Status != business.StewardStatusDeregistered {
 			s.logger.Warn("Duplicate DeviceID at registration claim within tenant",
 				"pending_id", logging.SanitizeLogValue(entry.PendingID),
 				"steward_id", logging.SanitizeLogValue(entry.StewardID),
@@ -941,7 +945,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// token.TenantID is authenticated (derived from the registration token), so the
 	// lookup is tenant-scoped and cannot match a different tenant's collision.
 	if s.stewardStore != nil {
-		if existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID); lookupErr == nil && existing != nil {
+		if existing, lookupErr := s.stewardStore.GetStewardByDeviceIDForTenant(r.Context(), req.DeviceID, token.TenantID); lookupErr == nil && existing != nil &&
+			existing.Status != business.StewardStatusDeregistered { // Issue #4534: decommissioned devices may re-enroll
 			s.logger.Warn("Duplicate DeviceID registration attempt within tenant",
 				"device_id", logging.SanitizeLogValue(req.DeviceID),
 				"tenant_id", logging.SanitizeLogValue(token.TenantID))

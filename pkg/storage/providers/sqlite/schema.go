@@ -716,7 +716,10 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 		// plain index above cannot serialize two concurrent claims asserting one
 		// device_id; this partial unique index can. Empty device_id means "not
 		// asserted" and is excluded so those rows do not collide with each other.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_stewards_tenant_device ON stewards(tenant_id, device_id) WHERE device_id <> ''`,
+		// Issue #4534: deregistered records release their device_id (revoked ones do
+		// not); renamed so existing databases replace the old predicate.
+		`DROP INDEX IF EXISTS uq_stewards_tenant_device`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_stewards_tenant_device_active ON stewards(tenant_id, device_id) WHERE device_id <> '' AND status <> 'deregistered'`,
 
 		// Commands — durable command dispatch state (ADR-003 §1 Deficiency #5, Issue #665)
 		// Records are append-only for audit purposes; PurgeExpiredRecords removes

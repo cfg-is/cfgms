@@ -115,7 +115,9 @@ func (s *FlatFileStewardStore) RegisterSteward(_ context.Context, record *busine
 			return fmt.Errorf("flatfile: failed to scan for device_id conflict: %w", err)
 		}
 		for _, r := range all {
-			if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID {
+			// A deregistered record no longer reserves its device_id (Issue #4534).
+			if r.TenantID == record.TenantID && r.DeviceID == record.DeviceID && r.ID != record.ID &&
+				r.Status != business.StewardStatusDeregistered {
 				return business.ErrStewardDeviceIDConflict
 			}
 		}
@@ -209,7 +211,16 @@ func deterministicStewardMatch(matches []*business.StewardRecord) (*business.Ste
 	if len(matches) == 0 {
 		return nil, business.ErrStewardNotFound
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	// A non-deregistered record wins over deregistered ones, so a device that
+	// re-enrolled after decommission resolves to its live record (Issue #4534).
+	sort.Slice(matches, func(i, j int) bool {
+		di := matches[i].Status == business.StewardStatusDeregistered
+		dj := matches[j].Status == business.StewardStatusDeregistered
+		if di != dj {
+			return !di
+		}
+		return matches[i].ID < matches[j].ID
+	})
 	return matches[0], nil
 }
 
