@@ -55,6 +55,8 @@ var (
 	_ interfaces.NonceStoreCreator          = (*DatabaseProvider)(nil)
 	_ interfaces.LeaseStoreCreator          = (*DatabaseProvider)(nil)
 	_ interfaces.RoutingStoreCreator        = (*DatabaseProvider)(nil)
+	_ interfaces.ScriptRunStoreCreator      = (*DatabaseProvider)(nil)
+	_ interfaces.ExecutionQueueStoreCreator = (*DatabaseProvider)(nil)
 	_ interfaces.CertRevocationStoreCreator = (*DatabaseProvider)(nil)
 	_ interfaces.SigningCursorStoreCreator  = (*DatabaseProvider)(nil)
 	_ interfaces.ModuleApprovalStoreCreator = (*DatabaseProvider)(nil)
@@ -392,6 +394,35 @@ func (p *DatabaseProvider) CreateRoutingStore(config map[string]interface{}) (bu
 	store, err := NewDatabaseRoutingStore(db, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database routing store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateScriptRunStore creates the PostgreSQL-backed ScriptRunStore shared by
+// every controller node (Issue #4528). Implements interfaces.ScriptRunStoreCreator.
+func (p *DatabaseProvider) CreateScriptRunStore(config map[string]interface{}) (business.ScriptRunStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseScriptRunStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database script run store: %w", err)
+	}
+	return store, nil
+}
+
+// CreateExecutionQueueStore creates the PostgreSQL-backed ExecutionQueueStore
+// shared by every controller node (Issue #4528). Implements
+// interfaces.ExecutionQueueStoreCreator.
+func (p *DatabaseProvider) CreateExecutionQueueStore(config map[string]interface{}) (business.ExecutionQueueStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseExecutionQueueStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database execution queue store: %w", err)
 	}
 	return store, nil
 }

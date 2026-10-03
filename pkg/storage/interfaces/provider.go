@@ -135,6 +135,22 @@ type RoutingStoreCreator interface {
 	CreateRoutingStore(config map[string]interface{}) (business.RoutingStore, error)
 }
 
+// ScriptRunStoreCreator is an optional StorageProvider extension for backends
+// that can hold script runs, jobs and execution grants shared across
+// controller nodes (Issue #4528). Cluster mode uses it so a run accepted by one
+// node is visible to, and completable by, every node.
+type ScriptRunStoreCreator interface {
+	CreateScriptRunStore(config map[string]interface{}) (business.ScriptRunStore, error)
+}
+
+// ExecutionQueueStoreCreator is an optional StorageProvider extension for
+// backends that can hold the execution queue shared across controller nodes
+// (Issue #4528), so the node holding a steward's session dispatches its work
+// whichever node queued it.
+type ExecutionQueueStoreCreator interface {
+	CreateExecutionQueueStore(config map[string]interface{}) (business.ExecutionQueueStore, error)
+}
+
 // NodeRegistryStoreCreator is an optional StorageProvider extension for
 // backends that support the shared controller-node registry (Issue #3763,
 // ADR-031 Decision 5's post-Raft membership mechanism): each ClusterMode
@@ -844,6 +860,8 @@ type StorageManager struct {
 	nonceStore               business.NonceStore               // Issue #3755, ADR-031: durable registration-refresh nonce
 	leaseStore               business.LeaseStore               // ADR-031 Decision 5: fenced singleton-claim leases
 	routingStore             business.RoutingStore             // ADR-031 Decision 3, Issue #3764: shared steward-routing table
+	scriptRunStore           business.ScriptRunStore           // Issue #4528: shared script runs (cluster mode)
+	executionQueueStore      business.ExecutionQueueStore      // Issue #4528: shared execution queue (cluster mode)
 	nodeRegistryStore        business.NodeRegistryStore        // Issue #3763, ADR-031 Decision 5: post-Raft cluster membership
 	certRevocationStore      certinterfaces.RevocationStore    // Issue #3852, ADR-031: cluster-visible cert revocation list
 	signingCursorStore       certinterfaces.SigningCursorStore // Issue #3852, ADR-031: cluster-visible signing rotation cursor
@@ -1069,6 +1087,29 @@ func (sm *StorageManager) GetRoutingStore() business.RoutingStore {
 // SetRoutingStore wires the routing store after construction.
 func (sm *StorageManager) SetRoutingStore(s business.RoutingStore) {
 	sm.routingStore = s
+}
+
+// GetScriptRunStore returns the shared script run store (Issue #4528), or nil
+// when the provider does not implement ScriptRunStoreCreator.
+func (sm *StorageManager) GetScriptRunStore() business.ScriptRunStore {
+	return sm.scriptRunStore
+}
+
+// SetScriptRunStore wires the script run store after construction.
+func (sm *StorageManager) SetScriptRunStore(s business.ScriptRunStore) {
+	sm.scriptRunStore = s
+}
+
+// GetExecutionQueueStore returns the shared execution queue store (Issue
+// #4528), or nil when the provider does not implement
+// ExecutionQueueStoreCreator.
+func (sm *StorageManager) GetExecutionQueueStore() business.ExecutionQueueStore {
+	return sm.executionQueueStore
+}
+
+// SetExecutionQueueStore wires the execution queue store after construction.
+func (sm *StorageManager) SetExecutionQueueStore(s business.ExecutionQueueStore) {
+	sm.executionQueueStore = s
 }
 
 // GetNodeRegistryStore returns the shared controller-node registry (Issue
@@ -1533,6 +1574,29 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		if routingStore != nil {
 			sm.SetRoutingStore(routingStore)
 			appendIfCloser(&openedStores, routingStore)
+		}
+	}
+	// Wire the shared script run and execution queue stores (Issue #4528).
+	// Without them a run is visible only on the node that accepted it, and only
+	// that node's dispatcher can deliver it.
+	if src, ok := provider.(ScriptRunStoreCreator); ok {
+		scriptRunStore, err := src.CreateScriptRunStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create script run store: %w", err)
+		}
+		if scriptRunStore != nil {
+			sm.SetScriptRunStore(scriptRunStore)
+			appendIfCloser(&openedStores, scriptRunStore)
+		}
+	}
+	if eqc, ok := provider.(ExecutionQueueStoreCreator); ok {
+		executionQueueStore, err := eqc.CreateExecutionQueueStore(dbCfg)
+		if err != nil && !errors.Is(err, business.ErrNotSupported) {
+			return nil, fmt.Errorf("cluster storage: failed to create execution queue store: %w", err)
+		}
+		if executionQueueStore != nil {
+			sm.SetExecutionQueueStore(executionQueueStore)
+			appendIfCloser(&openedStores, executionQueueStore)
 		}
 	}
 	// Wire node registry store if the provider implements NodeRegistryStoreCreator
