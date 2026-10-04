@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"github.com/cfgis/cfgms/features/tenant"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/features/controller/service"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/configrouting"
