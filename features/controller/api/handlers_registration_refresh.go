@@ -773,7 +773,9 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	// tenantAuthDenied) return 404 "pending refresh not found" — the same response as the
 	// tenant-scoped case above and the ErrPendingRefreshNotFound path — so the endpoint never
 	// discloses pending-refresh existence across tenant boundaries to a root-scoped caller.
-	if principal, _ := r.Context().Value(principalContextKey).(*Principal); principal != nil && principal.RootScoped {
+	// "Root-scoped" is the boundary's own predicate (GlobalScope for an account-bound
+	// principal, Issue #4337), so a bound root-scope caller without the marker is covered.
+	if principal, _ := r.Context().Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) {
 		if s.tenantManager == nil {
 			http.Error(w, "pending refresh not found", http.StatusNotFound)
 			return
