@@ -488,6 +488,9 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// the background instead of exiting. Process liveness is never gated on
 		// controller availability. (Issue #2034)
 		connectedCh := make(chan *client.TransportClient, 1)
+		// Read once, before the goroutine starts: the loop below can outlive
+		// runStewardInternal's caller, so it must not re-read the package var.
+		rejectedRetry := rejectedReadmissionRetry
 		go func() {
 			backoff := 5 * time.Second
 			const maxBackoff = 5 * time.Minute
@@ -514,12 +517,12 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 					// device (Issue #4532).
 					logger.Error("Controller refused re-admission; asking again later",
 						"operation", "connect_rejected",
-						"error", connErr,
-						"retry_in", rejectedReadmissionRetry)
+						"error", logging.SanitizeLogValue(connErr.Error()),
+						"retry_in", rejectedRetry)
 					select {
 					case <-runCtx.Done():
 						return
-					case <-time.After(rejectedReadmissionRetry):
+					case <-time.After(rejectedRetry):
 					}
 					continue
 				}
