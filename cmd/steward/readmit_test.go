@@ -433,3 +433,42 @@ func TestReadmissionPacer_DistrustsImplausiblePaceFile(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+// TestRunSteward_TrustDowngradeKeepsChecking guards the founder decision on
+// Issue #4532: a trust downgrade still refuses to connect, but no longer stops the
+// connect loop — the steward checks again at the slow interval.
+func TestRunSteward_TrustDowngradeKeepsChecking(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+	saved := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = saved }()
+	prevRetry := rejectedReadmissionRetry
+	rejectedReadmissionRetry = 20 * time.Millisecond
+	defer func() { rejectedReadmissionRetry = prevRetry }()
+
+	var attempts atomic.Int32
+	downgraded := connectFuncT(func(context.Context, string, string, TrustSource, string, *identity.FileKeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+		attempts.Add(1)
+		return nil, checkTrustDowngrade(trustSourceTOFU, "", &StewardIdentity{TrustMode: "install-pinned"})
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, runStewardInternal(ctx, "tok_test_downgrade", "", "", downgraded))
+	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "a trust downgrade keeps being re-checked")
+}
+
+// TestClearReadmissionState_DropsPaceAndFiledRequest: once connected, neither a
+// pacing schedule nor a filed request carries over (lab finding on Issue #4532 —
+// an approval re-registered the record and the stored identity reconnected first).
+func TestClearReadmissionState_DropsPaceAndFiledRequest(t *testing.T) {
+	dir := t.TempDir()
+	saveReadmitPace(dir, time.Now().Add(30*time.Minute))
+	require.NoError(t, saveRefreshPendingState(dir, PendingState{PendingID: "refresh-1", ClientKeyPEM: "k"}))
+
+	clearReadmissionState(dir)
+
+	_, ok := loadReadmitPace(dir)
+	assert.False(t, ok)
+	assert.False(t, hasOpenReadmission(dir))
+}

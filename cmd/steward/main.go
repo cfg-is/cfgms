@@ -510,9 +510,10 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				if runCtx.Err() != nil {
 					return
 				}
-				// Terminal security decisions must not be silently retried —
-				// they are integrity failures, not transient not-ready conditions.
-				// Log loudly and stop the retry loop; the operator must take action.
+				// Security refusals are never silently retried, but they never stop
+				// the steward either (Issue #4532): it logs loudly and asks again at
+				// a slow interval, so it recovers without anyone at the device once
+				// the cause is resolved.
 				if errors.Is(connErr, registration.ErrRefreshRejected) {
 					// The controller refused re-admission (revoked, tenant policy, or an
 					// operator rejected it). The refusal holds, but the steward keeps
@@ -530,10 +531,21 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 					continue
 				}
 				if isTrustDowngrade(connErr) {
-					logger.Error("Trust-anchor downgrade rejected; wipe identity to change trust source",
-						"operation", "connect_terminal",
-						"error", logging.SanitizeLogValue(connErr.Error()))
-					return
+					// The configured trust source is weaker than the one this steward
+					// enrolled with — a possible man-in-the-middle signal, so it will not
+					// connect with it. It checks again at the slow interval: a transient
+					// cause (a pinned CA file briefly unreadable) then recovers on its
+					// own; a real change needs the identity wiped to re-enroll.
+					logger.Error("Trust-anchor downgrade refused; not connecting with a weaker trust source, checking again later",
+						"operation", "connect_trust_downgrade",
+						"error", logging.SanitizeLogValue(connErr.Error()),
+						"retry_in", rejectedRetry)
+					select {
+					case <-runCtx.Done():
+						return
+					case <-time.After(rejectedRetry):
+					}
+					continue
 				}
 				logger.Warn("Controller connection failed; running in degraded mode, will retry",
 					"operation", "connect_retry",
@@ -1114,7 +1126,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
 	tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger)
 	if tc != nil {
-		clearReadmitPace(certStoreDir)
+		clearReadmissionState(certStoreDir)
 		return tc, nil
 	}
 
@@ -1144,7 +1156,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			tc, readmitErr := readmitWithDeviceKey(ctx, storedID, ks, certStoreDir, token, controllerURL, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
 			switch {
 			case readmitErr == nil:
-				clearReadmitPace(certStoreDir)
+				clearReadmissionState(certStoreDir)
 				return tc, nil
 			case errors.Is(readmitErr, registration.ErrRefreshPending),
 				errors.Is(readmitErr, registration.ErrRefreshRejected),
@@ -1676,6 +1688,15 @@ func saveReadmitPace(dir string, next time.Time) {
 // stale schedule never carries over to a later outage.
 func clearReadmitPace(dir string) {
 	_ = os.Remove(filepath.Join(dir, readmitPaceFileName))
+}
+
+// clearReadmissionState drops all re-admission state once the steward is
+// connected: the pacing schedule, and any filed request. Approving a request
+// re-registers the steward record, so the stored identity often reconnects
+// before the request is collected; the request is then moot (Issue #4532).
+func clearReadmissionState(dir string) {
+	clearReadmitPace(dir)
+	_ = clearRefreshPendingState(dir)
 }
 
 // randomJitter returns a uniformly random duration in [0, max).
