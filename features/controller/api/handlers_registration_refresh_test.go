@@ -1666,3 +1666,64 @@ func TestHandleApproveRefresh_AccountBoundRootScope_NoCrossing_Returns404(t *tes
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
 }
+
+// TestHandleRefreshClaim_ExpiredPendingIsNotAvailable verifies an expired pending
+// entry answers 404 so the steward files a new request.
+func TestHandleRefreshClaim_ExpiredPendingIsNotAvailable(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-exp", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: "refresh-expired", DeviceID: testDeviceID, TenantID: testTenantID,
+		CSRPEM: testValidCSRPEM, Status: business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC().Add(-8 * 24 * time.Hour), ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	})
+	assert.Equal(t, http.StatusNotFound, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-expired", priv).Code)
+}
+
+// TestHandleRefreshComplete_RequeueSupersedesOpenRequest guards the #4533 review:
+// a device that files a new request supersedes its own open one, so repeated
+// re-admission attempts keep one open entry per device in the approval queue.
+func TestHandleRefreshComplete_RequeueSupersedesOpenRequest(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-requeue", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+	for i := 0; i < 3; i++ {
+		rec := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+
+	entries, err := f.pending.ListPendingRefresh(context.Background(), testTenantID)
+	require.NoError(t, err)
+	open := 0
+	for _, e := range entries {
+		if e.Status == business.PendingRefreshStatusPending {
+			open++
+		}
+	}
+	assert.Equal(t, 1, open, "only the newest request stays open")
+}
+
+// TestRefreshRoutes_RateLimitedPerSource guards the #4533 review: the public
+// refresh handshake has a per-source budget like the other public routes.
+func TestRefreshRoutes_RateLimitedPerSource(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+
+	limited := false
+	for i := 0; i < 300 && !limited; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/unknown-device/refresh/challenge", bytes.NewReader([]byte(`{}`)))
+		r.RemoteAddr = "198.51.100.7:4000"
+		rec := httptest.NewRecorder()
+		f.server.router.ServeHTTP(rec, r)
+		limited = rec.Code == http.StatusTooManyRequests
+	}
+	assert.True(t, limited, "one source exceeding the per-minute budget is refused with 429")
+}

@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"net/url"
 	"os"
 	"os/signal"
@@ -529,12 +531,12 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				if isTrustDowngrade(connErr) {
 					logger.Error("Trust-anchor downgrade rejected; wipe identity to change trust source",
 						"operation", "connect_terminal",
-						"error", connErr)
+						"error", logging.SanitizeLogValue(connErr.Error()))
 					return
 				}
 				logger.Warn("Controller connection failed; running in degraded mode, will retry",
 					"operation", "connect_retry",
-					"error", connErr,
+					"error", logging.SanitizeLogValue(connErr.Error()),
 					"backoff", backoff)
 				select {
 				case <-runCtx.Done():
@@ -1124,10 +1126,16 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	if reconnErr != nil {
 		logger.Warn("Stored-identity reconnect failed; requesting re-admission with the device key",
 			"error", logging.SanitizeLogValue(reconnErr.Error()))
+		unreachable := errors.Is(reconnErr, errStoredIdentityUnreachable)
 		if ks == nil || ks.DeviceID() == "" {
-			if errors.Is(reconnErr, errStoredIdentityUnreachable) {
+			if unreachable {
 				return nil, reconnErr
 			}
+		} else if unreachable && !unreachableReadmission.due(time.Now()) {
+			// An unreachable control plane re-admits on a jittered, hourly pace:
+			// across a fleet-wide outage every steward would otherwise re-admit
+			// together every budget cycle. A refusal is never paced.
+			return nil, reconnErr
 		} else {
 			storedID, _ := loadIdentity(certStoreDir)
 			tc, readmitErr := readmitWithDeviceKey(ctx, storedID, ks, certStoreDir, token, controllerURL, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
@@ -1577,6 +1585,50 @@ const storedIdentityAdmissionWindow = 10 * time.Second
 // with its device key (Issue #4532). Each later cycle tries the stored identity
 // again first, so a controller that comes back is used as soon as it answers.
 var storedIdentityConnectBudget = 5 * time.Minute
+
+// unreachableReadmission paces re-admission whose cause is an unreachable control
+// plane (Issue #4532): the first attempt waits a random delay of up to
+// unreachableReadmitJitter, and later ones unreachableReadmitInterval plus jitter,
+// so a fleet that loses its controller's control plane does not re-admit — and,
+// under auto_accept, get certificates signed — in lockstep.
+var unreachableReadmission = &readmissionPacer{}
+
+var (
+	unreachableReadmitInterval = time.Hour
+	unreachableReadmitJitter   = 30 * time.Minute
+)
+
+type readmissionPacer struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
+// due reports whether an unreachable-cause re-admission may run now, scheduling
+// the next one when it may.
+func (p *readmissionPacer) due(now time.Time) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.next.IsZero() {
+		p.next = now.Add(randomJitter(unreachableReadmitJitter))
+	}
+	if now.Before(p.next) {
+		return false
+	}
+	p.next = now.Add(unreachableReadmitInterval + randomJitter(unreachableReadmitJitter))
+	return true
+}
+
+// randomJitter returns a uniformly random duration in [0, max).
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return max / 2
+	}
+	return time.Duration(n.Int64())
+}
 
 // errStoredIdentityUnreachable marks a stored-identity reconnect that failed
 // without the controller rejecting the identity — unreachable for the whole

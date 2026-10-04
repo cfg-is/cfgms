@@ -552,9 +552,16 @@ func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "approved refresh has no certificate bundle", http.StatusInternalServerError)
 			return
 		}
-		if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), entry.PendingID, business.PendingRefreshStatusClaimed); err != nil {
+		// Compare-and-swap approved -> claimed: of two racing claims exactly one
+		// receives the bundle; the other sees it as already collected.
+		claimed, err := s.pendingRefreshStore.ClaimApprovedRefresh(r.Context(), entry.PendingID)
+		if err != nil {
 			s.logger.Error("Failed to mark refresh claimed", "pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(err.Error()))
 			http.Error(w, "failed to claim refresh", http.StatusInternalServerError)
+			return
+		}
+		if !claimed {
+			http.Error(w, "pending refresh not available", http.StatusNotFound)
 			return
 		}
 		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
@@ -647,6 +654,12 @@ func (s *Server) handleRefreshQueueEntry(
 		return
 	}
 
+	// One open request per device (Issue #4532): a steward that files a new
+	// request (it lost its pending state, or its earlier request expired)
+	// supersedes its own open one, so repeated re-admission attempts never grow
+	// the approval queue.
+	s.supersedeOpenRefreshes(r.Context(), deviceID, record.TenantID)
+
 	pendingID := fmt.Sprintf("refresh-%d", time.Now().UnixNano())
 	entry := &business.PendingRefreshEntry{
 		PendingID:               pendingID,
@@ -687,6 +700,25 @@ func (s *Server) handleRefreshQueueEntry(
 		PendingID: pendingID,
 	}); err != nil {
 		s.logger.Error("Failed to encode refresh queued response", "error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// supersedeOpenRefreshes expires deviceID's open pending refreshes in tenantID.
+// Best-effort: a failure leaves an extra entry for an operator to see, never a
+// refusal of the new request.
+func (s *Server) supersedeOpenRefreshes(ctx context.Context, deviceID, tenantID string) {
+	entries, err := s.pendingRefreshStore.ListPendingRefresh(ctx, tenantID)
+	if err != nil {
+		s.logger.Warn("Failed to list pending refreshes for supersede", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+	for _, e := range entries {
+		if e.DeviceID != deviceID || e.Status != business.PendingRefreshStatusPending {
+			continue
+		}
+		if err := s.pendingRefreshStore.UpdateRefreshStatus(ctx, e.PendingID, business.PendingRefreshStatusExpired); err != nil {
+			s.logger.Warn("Failed to supersede pending refresh", "pending_id", logging.SanitizeLogValue(e.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+		}
 	}
 }
 

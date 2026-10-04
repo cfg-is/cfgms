@@ -104,4 +104,10 @@ type PendingRefreshStore interface {
 	// pendingID. Called by the /refresh/complete handler after signature verification.
 	// Returns ErrPendingRefreshNotFound if no record exists for the ID.
 	StoreClaimBundle(ctx context.Context, pendingID string, bundle []byte) error
+
+	// ClaimApprovedRefresh atomically moves an approved entry to "claimed" and
+	// reports whether this call made the transition, so an approved refresh is
+	// delivered to exactly one claim even when claims race (Issue #4532). Returns
+	// (false, nil) when the entry exists but is not approved.
+	ClaimApprovedRefresh(ctx context.Context, pendingID string) (bool, error)
 }
