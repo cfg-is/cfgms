@@ -502,7 +502,9 @@ func (s *Server) authorizeStewardRebootWindowTenant(w http.ResponseWriter, r *ht
 		return "", false
 	}
 
-	if principal != nil && principal.RootScoped {
+	// The boundary's own predicate (GlobalScope for an account-bound principal, Issue
+	// #4337): the route carries a steward ID, so this inline check is the only guard.
+	if subjectToTenantCrossingBoundary(principal) {
 		if s.tenantManager == nil {
 			// No ancestry source wired: fail closed exactly as if no crossing were
 			// active, matching authorizeRootScopedTenantAccess's nil-store stance.
