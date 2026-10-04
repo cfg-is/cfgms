@@ -188,7 +188,7 @@ func TestConfigSourceRouter_CrossTenantRejected(t *testing.T) {
 // TestConfigSourceRouter_DefaultTenantCallerStillCrossTenantChecked is a
 // REQUIRED test (Issue #4348): a caller authenticated as the "default" tenant
 // (a genuine, reserved tenant ID — features/tenant/manager.go's
-// ErrCannotSuspendDefault — not a sentinel for "unauthenticated") must still
+// ErrCannotSuspendRoot — not a sentinel for "unauthenticated") must still
 // be subject to the same same-tenant/ancestor rule as any other tenant.
 // Before the fix, checkCrossTenant treated ctxTenant == "default" as an
 // unconditional bypass, so a "default"-tenant caller could read any other

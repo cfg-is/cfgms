@@ -122,13 +122,13 @@ Expected output (abbreviated):
 [bootstrap] Step 6: Systemd service
 [bootstrap] cfgms-controller service started.
 [bootstrap] Step 7: Tenant seed
-[bootstrap]   Tenant team-root: created.
+[bootstrap]   Tenant root: created.
 [bootstrap]   Tenant agent-test: created.
 [bootstrap]   Tenant infra-hyperv: created.
 [bootstrap] Tenant seeding complete.
 [bootstrap] Step 8: Smoke test
 [PASS] health: GET /api/v1/health
-[PASS] tenant-exists: team-root
+[PASS] tenant-exists: root
 [PASS] tenant-exists: agent-test
 [PASS] tenant-exists: infra-hyperv
 
@@ -491,10 +491,15 @@ and run the same systemctl commands.
 **Step 7 — Tenant seed**
 The script runs `cfg tenant create` three times (idempotent):
 ```bash
-cfg tenant create --tenant-id=team-root
-cfg tenant create --tenant-id=agent-test --parent=team-root
-cfg tenant create --tenant-id=infra-hyperv --parent=team-root
+cfg tenant create --tenant-id=root
+cfg tenant create --tenant-id=agent-test --parent=root
+cfg tenant create --tenant-id=infra-hyperv --parent=root
 ```
+`root` is the deployment's single top-level tenant: root-scoped administrators reach
+every other tenant through it. A controller seeded before `root` was standardised keeps
+its existing top-level tenant as the root, and refuses to create a second top-level
+`root` beside it — the first command then reports the tenant as not created, and the
+smoke test's `tenant-exists: root` check fails for that deployment.
 The `cfg` binary uses `CFGMS_ADMIN_BUNDLE` for authentication. Run these after
 the controller is running, using the copy of the admin bundle you captured in step 5
 (e.g. `CFGMS_ADMIN_BUNDLE=/run/cfgms-admin-bundle/admin.bundle.yaml cfg tenant create ...`
@@ -517,14 +522,14 @@ The smoke test (`scripts/tier1-smoke-test.sh`) validates the bootstrapped contro
 | Check | What it verifies |
 |-------|-----------------|
 | `health: GET /api/v1/health` | REST API accepts mTLS connections and returns HTTP 200 |
-| `tenant-exists: team-root` | Root tenant seeded successfully |
-| `tenant-exists: agent-test` | Child tenant seeded under team-root |
-| `tenant-exists: infra-hyperv` | Child tenant seeded under team-root |
+| `tenant-exists: root` | Root tenant seeded successfully |
+| `tenant-exists: agent-test` | Child tenant seeded under root |
+| `tenant-exists: infra-hyperv` | Child tenant seeded under root |
 
 Expected output:
 ```
 [PASS] health: GET /api/v1/health
-[PASS] tenant-exists: team-root
+[PASS] tenant-exists: root
 [PASS] tenant-exists: agent-test
 [PASS] tenant-exists: infra-hyperv
 

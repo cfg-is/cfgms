@@ -30,11 +30,11 @@ Tenant operations require admin mTLS authentication via an admin bundle file.
 The bundle path can be provided via --bundle or the CFGMS_ADMIN_BUNDLE environment variable.
 
 Examples:
-  # Create a root tenant
-  cfg tenant create --tenant-id=team-root
+  # Create the root tenant (a fresh deployment's single top-level tenant)
+  cfg tenant create --tenant-id=root
 
   # Create a child tenant
-  cfg tenant create --tenant-id=agent-test --parent=team-root`,
+  cfg tenant create --tenant-id=agent-test --parent=root`,
 }
 
 // tenantCreateCmd creates a named tenant on the controller.
@@ -51,8 +51,8 @@ The tenant ID must conform to Kubernetes RFC 1123 DNS label rules:
 The command is idempotent: re-running it on an existing tenant exits 0.
 
 Examples:
-  cfg tenant create --tenant-id=team-root
-  cfg tenant create --tenant-id=agent-test --parent=team-root`,
+  cfg tenant create --tenant-id=root
+  cfg tenant create --tenant-id=agent-test --parent=root`,
 	RunE: runTenantCreate,
 }
 

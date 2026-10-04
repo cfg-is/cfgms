@@ -366,20 +366,22 @@ func resolveDNADataRoot(cfg *config.Config) string {
 	return root
 }
 
-// resolveRootTenantID returns the OSS single-root deployment's bootstrap/root
-// tenant ID ("default" — features/tenant/manager.go, e.g. ErrCannotSuspendDefault),
-// resolved through the tenant store rather than handed to configrouting.NewSyncService
-// as a bare literal. A missing record is logged but does not block startup:
-// SyncService.Run tolerates an unknown root — it enumerates zero git tenants until
-// the record exists, and picks them up on the next Register once it does — so
-// construction order here never depends on tenant bootstrap having already run.
-func resolveRootTenantID(ctx context.Context, tenantStore business.TenantStore, logger logging.Logger) string {
-	const bootstrapRootTenantID = "default"
-	if _, err := tenantStore.GetTenant(ctx, bootstrapRootTenantID); err != nil {
-		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
-			"root_tenant_id", bootstrapRootTenantID)
+// resolveRootTenantID returns the deployment's root tenant for the periodic config
+// sync's single-root boundary, resolved by the tenant manager (Issue #4542): the
+// tenant named "root", else the single top-level tenant. A missing or ambiguous
+// root is logged but does not block startup: SyncService.Run tolerates an unknown
+// root — it enumerates zero git tenants until one resolves.
+func resolveRootTenantID(ctx context.Context, tenants *tenant.Manager, logger logging.Logger) string {
+	root := tenants.RootTenantID(ctx)
+	if root == "" {
+		logger.Warn("configrouting: root tenant is ambiguous; periodic config sync will enumerate no git tenants until one root tenant exists")
+		return tenant.RootTenantID
 	}
-	return bootstrapRootTenantID
+	if _, err := tenants.GetTenant(ctx, root); err != nil {
+		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
+			"root_tenant_id", root)
+	}
+	return root
 }
 
 // resolveInstallerBlobRoot returns the configured installer artifact root, or
@@ -803,7 +805,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// cascade") — distinct from the save=deploy steward fan-out registered
 	// separately below in features/controller/api/server.go, which is a
 	// write-triggered push, not a cascade recompute.
-	rootTenantID := resolveRootTenantID(context.Background(), storageManager.GetTenantStore(), logger)
+	rootTenantID := resolveRootTenantID(context.Background(), tenantManager, logger)
 	cascadeFn := func(ctx context.Context, tenantID string) error {
 		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
 		return err

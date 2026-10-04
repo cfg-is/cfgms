@@ -743,16 +743,16 @@ func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	// Create a tenant named "default" so any status change would be observable.
-	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "default"})
+	// Create the root tenant so any status change would be observable.
+	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: RootTenantID})
 	require.NoError(t, err)
 
-	_, suspendErr := manager.SuspendTenant(ctx, "default")
-	require.Error(t, suspendErr, "SuspendTenant must return an error for the default tenant")
-	require.ErrorIs(t, suspendErr, ErrCannotSuspendDefault)
+	_, suspendErr := manager.SuspendTenant(ctx, RootTenantID)
+	require.Error(t, suspendErr, "SuspendTenant must return an error for the root tenant")
+	require.ErrorIs(t, suspendErr, ErrCannotSuspendRoot)
 
 	// Status must remain Active — the guard must not have mutated the tenant.
-	td, err := manager.GetTenant(ctx, "default")
+	td, err := manager.GetTenant(ctx, RootTenantID)
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status,
 		"default tenant status must be unchanged after a rejected suspend")
@@ -1180,13 +1180,13 @@ func buildSubtree(t *testing.T, manager *Manager) (string, string, string) {
 	return root.ID, child.ID, grand.ID
 }
 
-// TestManager_SuspendTenant_DefaultProtected verifies the default-tenant guard is
+// TestManager_SuspendTenant_DefaultProtected verifies the root-tenant guard is
 // preserved after the cascade rewrite.
 func TestManager_SuspendTenant_DefaultProtected(t *testing.T) {
 	manager := newTestTenantManager(t)
-	_, err := manager.SuspendTenant(context.Background(), "default")
+	_, err := manager.SuspendTenant(context.Background(), RootTenantID)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrCannotSuspendDefault)
+	assert.ErrorIs(t, err, ErrCannotSuspendRoot)
 }
 
 // TestManager_SuspendTenant_CascadesSubtree verifies Decision 1: suspending the root

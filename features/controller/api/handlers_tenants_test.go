@@ -488,35 +488,35 @@ func TestHandleSuspendTenant_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-// TestHandleSuspendTenant_DefaultGuard_HTTP verifies that POST /api/v1/tenants/default/suspend
+// TestHandleSuspendTenant_DefaultGuard_HTTP verifies that POST /api/v1/tenants/root/suspend
 // returns an error response (not 200) end-to-end through the HTTP handler (Issue #3181 AC).
-// A real "default" tenant is created so the default-tenant guard in SuspendTenant (not a
+// A real "root" tenant is created so the root-tenant guard (Issue #4542) in SuspendTenant (not a
 // missing-tenant 404 from GetTenant) is what produces the error.
 func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "default"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenant.RootTenantID})
 	require.NoError(t, err)
 
-	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/default/suspend", nil)
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/"+tenant.RootTenantID+"/suspend", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
 	assert.NotEqual(t, http.StatusOK, w.Code,
-		"suspending the default tenant must return an error, not 200")
+		"suspending the root tenant must return an error, not 200")
 	assert.Equal(t, http.StatusBadRequest, w.Code,
-		"the default-tenant guard must produce 400 PROTECTED_TENANT, not a 500 server fault")
+		"the root-tenant guard must produce 400 PROTECTED_TENANT, not a 500 server fault")
 
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&errResp))
 	assert.Equal(t, "PROTECTED_TENANT", errResp.Error.Code)
 
 	// Status must not have changed.
-	td, err := server.tenantManager.GetTenant(ctx, "default")
+	td, err := server.tenantManager.GetTenant(ctx, tenant.RootTenantID)
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status,
-		"default tenant must remain Active after a rejected suspend attempt")
+		"root tenant must remain Active after a rejected suspend attempt")
 }
 
 // TestHandleSuspendTenant_ScopeGuard pins handleSuspendTenant's own scope guard, called

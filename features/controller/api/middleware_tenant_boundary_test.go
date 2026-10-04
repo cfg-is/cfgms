@@ -264,7 +264,7 @@ func TestRootScopedPrincipal_RootTenantItselfAlwaysAllowed(t *testing.T) {
 	for _, entry := range tenantBoundaryRouteTable {
 		entry := entry
 		t.Run(entry.String(), func(t *testing.T) {
-			_, reached := serveBoundaryRoute(t, server, entry, caller, rootTenantID)
+			_, reached := serveBoundaryRoute(t, server, entry, caller, tenant.RootTenantID)
 			assert.True(t, reached,
 				"a root-scoped caller must reach %s for the root tenant itself", entry.permission)
 		})

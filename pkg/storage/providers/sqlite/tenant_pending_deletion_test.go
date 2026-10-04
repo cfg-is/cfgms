@@ -277,7 +277,7 @@ func TestPendingDeletion_DefaultTenantProtection(t *testing.T) {
 	}))
 
 	deleted, err := store.ApproveDeletion(ctx, "default", "bob", true, now)
-	require.NoError(t, err, "the store must not carry a default-tenant guard; that guard belongs to the manager")
+	require.NoError(t, err, "the store must not carry a root-tenant guard; that guard belongs to the manager")
 	assert.Equal(t, []string{"default"}, deleted)
 
 	_, err = store.GetTenant(ctx, "default")

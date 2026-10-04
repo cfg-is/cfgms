@@ -875,7 +875,10 @@ func TestCliLoginSession_RootScoped_SubjectToTenantBoundary(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNotFound, rec.Code,
+	// cli-login-root is the deployment's root (the single top-level tenant, Issue
+	// #4542), so cli-login-msp-a is a strict descendant: ADR-025 A2.5 refuses it
+	// with the crossing challenge rather than a silent 404.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a root-scoped CLI-login session must not see a real descendant tenant without an active grant")
 }
 

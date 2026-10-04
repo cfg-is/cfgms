@@ -308,9 +308,9 @@ func TestApproveTenantDeletion_DefaultTenantProtected(t *testing.T) {
 	m := newTestTenantManager(t)
 	ctx := context.Background()
 
-	_, err := m.ApproveTenantDeletion(ctx, "default", "bob", false)
+	_, err := m.ApproveTenantDeletion(ctx, RootTenantID, "bob", false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot delete default tenant")
+	assert.Contains(t, err.Error(), "cannot delete root tenant")
 }
 
 func TestApproveTenantDeletion_CascadeDeletesEntireSubtree(t *testing.T) {

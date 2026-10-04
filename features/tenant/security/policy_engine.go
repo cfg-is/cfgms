@@ -393,7 +393,7 @@ func (tspe *TenantSecurityPolicyEngine) evaluateTenantSecurityPolicy(ctx context
 		}
 	case PolicyEnforcementModeBlock:
 		// Block on any critical or high severity violations
-		if criticalViolations > 0 || (highViolations > 0 && tenantPolicy.TenantID != "default") {
+		if criticalViolations > 0 || (highViolations > 0 && tenantPolicy.TenantID != tenant.RootTenantID) {
 			result.Allowed = false
 			result.Decision = "block_on_violation"
 			result.BlockReason = fmt.Sprintf("Policy violations: %d critical, %d high", criticalViolations, highViolations)

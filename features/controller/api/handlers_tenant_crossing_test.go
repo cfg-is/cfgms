@@ -96,6 +96,16 @@ func setupCrossingTestServer(t *testing.T) *Server {
 	return wireCrossingStore(t, setupTestServer(t))
 }
 
+// seedRootTenant creates the deployment's "root" tenant (ADR-032: exactly one root,
+// MSPs are its children) so tests' MSP tenants are never mistaken for the root by
+// tenant.Manager.RootTenantID (Issue #4542).
+func seedRootTenant(t *testing.T, server *Server) *Server {
+	t.Helper()
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: tenant.RootTenantID})
+	require.NoError(t, err)
+	return server
+}
+
 // setupCrossingTestServerWithLogger is setupCrossingTestServer with the logger supplied
 // at construction. Tests that capture authorization audit records must use this rather
 // than assigning server.logger afterwards: New() starts background sweep goroutines
@@ -383,7 +393,7 @@ func makeRootScopedAdminTestCert(t *testing.T) *x509.Certificate {
 // TestHandleCreateTenantCrossingGrant_Success verifies an MSP admin scoped to its own
 // tenant can create a grant for a root-scoped support principal (ADR-025 Decision 2(a)).
 func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
 	require.NoError(t, err)
@@ -404,7 +414,7 @@ func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
 // TestHandleCreateTenantCrossingGrant_CrossTenantRefused verifies an MSP admin cannot
 // grant access into a tenant outside its own subtree.
 func TestHandleCreateTenantCrossingGrant_CrossTenantRefused(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-b"})
 	require.NoError(t, err)
@@ -594,7 +604,7 @@ func TestHandleTenantBreakGlass_RequiresRootScoped(t *testing.T) {
 // TestHandleTenantBreakGlass_RequiresJustification verifies a missing or too-short
 // X-Justification is rejected before any crossing is created.
 func TestHandleTenantBreakGlass_RequiresJustification(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
 	require.NoError(t, err)

@@ -821,17 +821,21 @@ else
         if [[ -n "$INSTALL_PREFIX" ]]; then
             CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" >&2 2>/dev/null \
                 && log "  Tenant ${tenant_id}: created." \
-                || log "  Tenant ${tenant_id}: already exists (idempotent)."
+                || log "  Tenant ${tenant_id}: not created (already exists, or refused by the controller)."
         else
             CFGMS_ADMIN_BUNDLE="$ADMIN_BUNDLE" "$CFG_BIN" "${args[@]}" >&2 \
                 && log "  Tenant ${tenant_id}: created." \
-                || log "  Tenant ${tenant_id}: already exists (idempotent)."
+                || log "  Tenant ${tenant_id}: not created (already exists, or refused by the controller)."
         fi
     }
 
-    _seed_tenant "team-root"
-    _seed_tenant "agent-test" "team-root"
-    _seed_tenant "infra-hyperv" "team-root"
+    # "root" is the deployment's single top-level tenant (ADR-032, Issue #4542).
+    # On a deployment seeded before that standard (top tenant "team-root") the
+    # controller refuses a second top-level "root", the existing tree is left as
+    # is, and the children below already exist.
+    _seed_tenant "root"
+    _seed_tenant "agent-test" "root"
+    _seed_tenant "infra-hyperv" "root"
 
     log "Tenant seeding complete."
 fi

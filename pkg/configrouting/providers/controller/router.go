@@ -245,7 +245,7 @@ func (r *controllerRouter) SyncTenantWithRemote(ctx context.Context, tenantID st
 //
 // "default" is NOT treated as a bypass value here: it is a genuine, reserved
 // tenant ID (features/tenant/manager.go's bootstrap/root tenant — see e.g.
-// ErrCannotSuspendDefault), not a sentinel for "unauthenticated." A caller
+// ErrCannotSuspendRoot), not a sentinel for "unauthenticated." A caller
 // actually authenticated as tenant "default" is subject to the same
 // same-tenant/ancestor rules as any other tenant; treating it as an automatic
 // passthrough would let a "default"-tenant principal read any other tenant's

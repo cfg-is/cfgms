@@ -54,18 +54,27 @@ func NewStorageAdapter(store business.TenantStore) Store {
 }
 
 // Common errors
+// RootTenantID is the single top-level tenant every other tenant descends from
+// (ADR-025 Decision 1's "root"). It is the protected tenant: it cannot be
+// suspended or deleted, and Manager.EnsureRootTenant creates it and re-parents
+// any other top-level tenant beneath it (Issue #4542).
+const RootTenantID = "root"
+
 var (
 	// ErrTenantNotFound aliases the storage-layer sentinel rather than declaring a
 	// second "tenant is missing" error. Manager passes store errors through
 	// untouched, so a caller that matched this value while a provider returned the
 	// storage sentinel would never match — the divergence that let a missing-tenant
 	// lookup be misclassified as a backend fault.
-	ErrTenantNotFound       = business.ErrTenantDoesNotExist
-	ErrTenantExists         = business.ErrTenantAlreadyExists
-	ErrInvalidParent        = fmt.Errorf("invalid parent tenant")
-	ErrCircularReference    = fmt.Errorf("circular reference in tenant hierarchy")
-	ErrTenantHasChildren    = fmt.Errorf("tenant has child tenants")
-	ErrCannotSuspendDefault = fmt.Errorf("cannot suspend default tenant")
+	ErrTenantNotFound    = business.ErrTenantDoesNotExist
+	ErrTenantExists      = business.ErrTenantAlreadyExists
+	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
+	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
+	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
+	ErrCannotSuspendRoot = fmt.Errorf("cannot suspend root tenant")
+	// ErrRootTenantConflict is returned when creating the "root" tenant would make
+	// it a second top-level tenant beside an existing one (Issue #4542).
+	ErrRootTenantConflict = fmt.Errorf("cannot create root tenant: another top-level tenant already exists and remains this deployment's root")
 
 	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
 	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")

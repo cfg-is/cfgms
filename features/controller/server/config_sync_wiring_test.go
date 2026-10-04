@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"github.com/cfgis/cfgms/features/tenant"
 	"sync"
 	"testing"
 	"time"
@@ -406,20 +407,25 @@ func TestSyncService_LifecycleTiedToContextCancellation(t *testing.T) {
 }
 
 // TestResolveRootTenantID verifies the server-side helper that supplies
-// SyncService's rootTenantID. It resolves the tenant store's "default" tenant ID
-// rather than handing a literal to NewSyncService (Issue #4408 acceptance
-// criteria), and does not fail startup when the bootstrap tenant record is absent.
+// SyncService's rootTenantID resolves through the tenant manager (Issue #4542)
+// and never fails startup: "root" on an empty store, the single top-level tenant
+// on a tree seeded before "root" was standardised, and "root" once it exists.
 func TestResolveRootTenantID(t *testing.T) {
 	storageManager := pkgtesting.SetupTestStorage(t)
 	tenantStore := storageManager.GetTenantStore()
 	logger := logging.NewNoopLogger()
+	resolve := func() string {
+		// A fresh manager per call: the test seeds through the store, bypassing
+		// the manager's own root-cache invalidation.
+		return resolveRootTenantID(context.Background(), tenant.NewManager(tenantStore, nil), logger)
+	}
 
-	// No "default" tenant record yet — must still return "default", not fail.
-	got := resolveRootTenantID(context.Background(), tenantStore, logger)
-	assert.Equal(t, "default", got)
+	assert.Equal(t, tenant.RootTenantID, resolve(), "an empty store resolves the conventional root ID")
 
-	// Once the record exists, resolution still returns "default".
-	addWiringTestTenant(t, tenantStore, "default", "", nil)
-	got = resolveRootTenantID(context.Background(), tenantStore, logger)
-	assert.Equal(t, "default", got)
+	addWiringTestTenant(t, tenantStore, "team-root", "", nil)
+	addWiringTestTenant(t, tenantStore, "infra-hyperv", "team-root", nil)
+	assert.Equal(t, "team-root", resolve(), "a single pre-existing top-level tenant is the root")
+
+	addWiringTestTenant(t, tenantStore, tenant.RootTenantID, "", nil)
+	assert.Equal(t, tenant.RootTenantID, resolve(), "a tenant named root wins")
 }

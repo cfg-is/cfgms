@@ -47,6 +47,12 @@ type Manager struct {
 	// suspension has already been recorded (Issue #4347).
 	suspendMu sync.Mutex
 
+	// Root tenant resolution cache (root.go, Issue #4542).
+	rootMu         sync.Mutex
+	rootID         string
+	rootResolved   bool
+	rootResolvedAt time.Time
+
 	// RealmID is the deployment-wide realm qualifier naming this cell (ADR-032
 	// Decision 3). Empty by default (self-hosted: no realm concept). It is never
 	// stored per-tenant — every tenant's qualified identity is computed on demand
@@ -135,6 +141,12 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 	// Defense-in-depth: prevents subtree membership from growing under an in-flight deletion hold.
 	// If the parent does not yet exist, the storage layer's constraints enforce that;
 	// we only need to check the state of parents that do exist.
+	if tenantID == RootTenantID && req.ParentID == "" {
+		if err := m.checkRootCreatable(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	if req.ParentID != "" {
 		parent, err := m.store.GetTenant(ctx, req.ParentID)
 		if err != nil && !errors.Is(err, business.ErrTenantDoesNotExist) {
@@ -166,6 +178,9 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 	// Create the tenant in storage
 	if err := m.store.CreateTenant(ctx, td); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
+	}
+	if td.ParentID == "" {
+		m.invalidateRootTenant()
 	}
 
 	// Emit audit event when a git config source is set on creation
@@ -295,8 +310,8 @@ type CascadeRestoreResult struct {
 // A cycle in the tenant hierarchy (data corruption) causes an error rather than an
 // infinite loop. An audit event is recorded on success (fire-and-forget).
 func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeSuspendResult, error) {
-	if tenantID == "default" {
-		return nil, ErrCannotSuspendDefault
+	if tenantID == RootTenantID {
+		return nil, ErrCannotSuspendRoot
 	}
 
 	m.suspendMu.Lock()
@@ -521,9 +536,9 @@ func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tena
 
 // DeleteTenant deletes a tenant
 func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
-	// Cannot delete default tenant
-	if tenantID == "default" {
-		return fmt.Errorf("cannot delete default tenant")
+	// Cannot delete the root tenant
+	if tenantID == RootTenantID {
+		return fmt.Errorf("cannot delete root tenant")
 	}
 
 	// Check if tenant has child tenants
@@ -554,7 +569,11 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	}
 
 	// Hard-delete the tenant row from storage.
-	return m.store.DeleteTenant(ctx, tenantID)
+	if err := m.store.DeleteTenant(ctx, tenantID); err != nil {
+		return err
+	}
+	m.invalidateRootTenant()
+	return nil
 }
 
 // RequestTenantDeletion begins the ADR-027 Decision 3 deletion pipeline for
@@ -564,8 +583,8 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 // found. On success the hold-period timer starts and a PendingDeletion record
 // is written with the pinned member set.
 func (m *Manager) RequestTenantDeletion(ctx context.Context, tenantID, requesterID string, holdPeriod time.Duration) (*business.PendingDeletion, error) {
-	if tenantID == "default" {
-		return nil, fmt.Errorf("cannot delete default tenant")
+	if tenantID == RootTenantID {
+		return nil, fmt.Errorf("cannot delete root tenant")
 	}
 
 	// BFS walk of the subtree; collect member IDs and reject any unsuspended tenant.
@@ -634,8 +653,8 @@ func (m *Manager) CancelTenantDeletion(ctx context.Context, tenantID string) err
 // membership match, then hard-deletes the entire subtree. RBAC cleanup runs afterward
 // on the returned IDs (best-effort, fire-and-forget on individual tenant failures).
 func (m *Manager) ApproveTenantDeletion(ctx context.Context, tenantID, approverID string, requireDualControl bool) ([]string, error) {
-	if tenantID == "default" {
-		return nil, fmt.Errorf("cannot delete default tenant")
+	if tenantID == RootTenantID {
+		return nil, fmt.Errorf("cannot delete root tenant")
 	}
 
 	deleted, err := m.store.ApproveDeletion(ctx, tenantID, approverID, requireDualControl, time.Now())
