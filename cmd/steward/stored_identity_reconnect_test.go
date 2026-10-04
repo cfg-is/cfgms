@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -175,4 +176,26 @@ func TestRegisterAndConnect_ControllerRejectsIdentity_FallsBackToRegistration(t 
 	require.Error(t, err, "the test controller refuses registration too")
 	assert.NotErrorIs(t, err, errStoredIdentityUnreachable)
 	assert.Positive(t, hits.Load(), "a rejected stored identity must fall back to registration")
+}
+
+// TestClearStoredIdentity verifies install --reenroll's helper removes the
+// identity record and pending state, so the next start registers, and leaves the
+// cert store alone. A second call on the cleared directory is a no-op.
+func TestClearStoredIdentity(t *testing.T) {
+	f := newStoredIdentityFixture(t, "127.0.0.1:1")
+	require.NoError(t, savePendingState(f.certStoreDir, PendingState{PendingID: "pending-1"}))
+
+	require.NoError(t, clearStoredIdentity(f.certStoreDir))
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	assert.Nil(t, id, "the identity record must be gone")
+	pending, err := loadPendingState(f.certStoreDir)
+	require.NoError(t, err)
+	assert.Nil(t, pending, "pending registration state must be gone")
+
+	tc, err := tryReconnectWithStoredIdentity(context.Background(), f.certStoreDir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	assert.Nil(t, tc)
+	assert.NoError(t, err, "with no stored identity the connect sequence falls through to registration")
+
+	require.NoError(t, clearStoredIdentity(f.certStoreDir))
 }

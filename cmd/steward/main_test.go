@@ -116,7 +116,7 @@ func TestRunInstallRequiresElevation(t *testing.T) {
 	if isElevated() {
 		t.Skip("test requires non-elevated process — running as root")
 	}
-	err := runInstall("tok_test_abc123", "", "", "")
+	err := runInstall("tok_test_abc123", "", "", "", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "elevated privileges")
 }
@@ -125,7 +125,7 @@ func TestRunInstallCACertFileNotFound(t *testing.T) {
 	// Verify runInstall returns an error that includes the filename when --controller-ca
 	// names a path that does not exist.
 	missing := filepath.Join(t.TempDir(), "nonexistent-ca.crt")
-	err := runInstall("tok_test_abc123", "", missing, "")
+	err := runInstall("tok_test_abc123", "", missing, "", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-ca.crt")
 }
@@ -144,6 +144,7 @@ func TestInstallCommandFlagSurface(t *testing.T) {
 		"controller-url": true,
 		"controller-ca":  true,
 		"fingerprint":    true,
+		"reenroll":       true, // Issue #4532: explicit re-enrollment off a stored identity
 	}
 
 	var flagNames []string
@@ -153,14 +154,14 @@ func TestInstallCommandFlagSurface(t *testing.T) {
 
 	for _, name := range flagNames {
 		assert.True(t, expected[name],
-			"unexpected flag %q on install subcommand — install accepts only --regtoken, --controller-url, --controller-ca, --fingerprint", name)
+			"unexpected flag %q on install subcommand — install accepts only --regtoken, --controller-url, --controller-ca, --fingerprint, --reenroll", name)
 	}
 	for name := range expected {
 		assert.NotNil(t, cmd.Flags().Lookup(name),
 			"required flag %q must be registered on install subcommand", name)
 	}
 	assert.Len(t, flagNames, len(expected),
-		"install command must have exactly %d flags: --regtoken, --controller-url, --controller-ca, --fingerprint", len(expected))
+		"install command must have exactly %d flags: --regtoken, --controller-url, --controller-ca, --fingerprint, --reenroll", len(expected))
 }
 
 func TestRunUninstallRequiresElevation(t *testing.T) {

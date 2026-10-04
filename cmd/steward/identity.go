@@ -101,6 +101,19 @@ func clearPendingState(dir string) error {
 	return nil
 }
 
+// clearStoredIdentity removes the stored identity record and any pending
+// registration state from dir, so the next start registers with its token
+// instead of reconnecting (install --reenroll, Issue #4532). Certificates in the
+// cert store are left in place; registration imports the new client certificate.
+// Missing files are not an error.
+func clearStoredIdentity(dir string) error {
+	path := filepath.Join(dir, identityFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear stored identity: %w", err)
+	}
+	return clearPendingState(dir)
+}
+
 // identityFileName is the name of the on-disk steward identity file,
 // stored alongside the cert store in defaultCertStoreDir().
 const identityFileName = "steward-identity.json"

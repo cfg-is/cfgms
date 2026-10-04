@@ -213,6 +213,17 @@ openssl x509 -in /etc/cfgms/certs/<file>.crt -text -noout | grep "Not After"
 Restart `cfgms-controller` after replacing a certificate the running process
 loaded at startup.
 
+**Re-enrolling a steward.** A steward with a stored identity keeps reconnecting
+with it while the controller is unreachable, and registers with its token only
+when the controller rejects that identity (unknown, deregistered or revoked
+steward, or a certificate the controller's CA did not issue). A steward whose
+original controller is gone for good never gets that rejection; re-enroll it
+explicitly with a fresh token:
+
+```bash
+cfgms-steward install --regtoken <TOKEN> --reenroll
+```
+
 ### 3. Terminal Session Management
 
 **When to use**: Terminal sessions stuck, resource exhaustion

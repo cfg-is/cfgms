@@ -666,6 +666,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
 	var regToken, controllerURL, caCertPath, fingerprint string
+	var reenroll bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -695,9 +696,15 @@ Install-pinned (private CA, self-hosted deployments — ADR-013 §3):
 TOFU — trust-on-first-use (lab environments):
 
   cfgms-steward install --regtoken TOKEN \
-    --controller-url https://ctrl.example.com`,
+    --controller-url https://ctrl.example.com
+
+A steward that already has a stored identity keeps reconnecting with it, and
+registers with its token only when the controller rejects that identity. If the
+controller it enrolled with is gone for good, re-enroll it explicitly:
+
+  cfgms-steward install --regtoken TOKEN --reenroll`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, controllerURL, caCertPath, fingerprint)
+			return runInstall(regToken, controllerURL, caCertPath, fingerprint, reenroll)
 		},
 	}
 
@@ -706,6 +713,7 @@ TOFU — trust-on-first-use (lab environments):
 	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
 	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
+	cmd.Flags().BoolVar(&reenroll, "reenroll", false, "Discard the stored controller identity so the steward registers with --regtoken on start")
 
 	return cmd
 }
@@ -744,7 +752,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
+func runInstall(regToken, controllerURL, caCertPath, fingerprint string, reenroll bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -765,6 +773,14 @@ func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
 		return fmt.Errorf("install requires elevated privileges\n" +
 			"  Windows: right-click the binary and select 'Run as administrator'\n" +
 			"  Linux/macOS: re-run with sudo")
+	}
+
+	if reenroll {
+		// Cleared before Install restarts the service, so the restarted steward
+		// finds no stored identity and registers with regToken (Issue #4532).
+		if err := clearStoredIdentity(defaultCertStoreDir()); err != nil {
+			return err
+		}
 	}
 
 	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
@@ -871,7 +887,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "", "")
+		return runInstall(token, "", "", "", false)
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
