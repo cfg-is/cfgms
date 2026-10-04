@@ -775,15 +775,39 @@ func runInstall(regToken, controllerURL, caCertPath, fingerprint string, reenrol
 			"  Linux/macOS: re-run with sudo")
 	}
 
+	install := func() error { return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint) }
 	if reenroll {
-		// Cleared before Install restarts the service, so the restarted steward
-		// finds no stored identity and registers with regToken (Issue #4532).
-		if err := clearStoredIdentity(defaultCertStoreDir()); err != nil {
-			return err
-		}
+		return reenrollAndInstall(defaultCertStoreDir(), install)
 	}
+	return install()
+}
 
-	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
+// reenrollAndInstall discards the stored identity in dir so the service install
+// restarts into registration with its token (Issue #4532). The identity must be
+// gone before install restarts the service, so it is cleared first; if install
+// then fails, the backup is restored so the host is never left with neither its
+// old identity nor a new one.
+func reenrollAndInstall(dir string, install func() error) error {
+	backup, err := snapshotStoredIdentity(dir)
+	if err != nil {
+		return err
+	}
+	if err := clearStoredIdentity(dir); err != nil {
+		return err
+	}
+	if len(backup) > 0 {
+		fmt.Printf("Discarded the stored controller identity in %s; the steward will register with the supplied token\n", dir)
+	}
+	if err := install(); err != nil {
+		if restoreErr := restoreStoredIdentity(dir, backup); restoreErr != nil {
+			return fmt.Errorf("install failed (%w) and the stored identity could not be restored: %v", err, restoreErr)
+		}
+		if len(backup) > 0 {
+			fmt.Printf("Install failed; restored the stored controller identity in %s\n", dir)
+		}
+		return err
+	}
+	return nil
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -1569,12 +1593,12 @@ func connectWithApprovedRegistration(
 // round trip of its approval check, so silence for this long counts as admitted.
 //
 // The stored identity is abandoned for registration only when the controller
-// definitively rejects it (interfaces.ErrIdentityRejected): its certificate is
-// refused, the controller presents a certificate the identity's CA does not
-// trust, or the steward is unknown, deregistered or revoked. An unreachable or
-// slow controller — including one whose HTTPS API is up while its control plane
-// is down — is retried with the stored identity indefinitely, so a healthy
-// steward never spends a registration token or creates a duplicate record.
+// definitively rejects it (interfaces.ErrIdentityRejected): the steward is
+// unknown, deregistered or revoked. An unreachable or slow controller — including
+// one whose HTTPS API is up while its control plane is down — and every TLS
+// handshake failure are retried with the stored identity indefinitely, so a
+// healthy steward never spends a registration token or creates a duplicate
+// record. See docs/architecture/steward-operating-model.md.
 const storedIdentityAdmissionWindow = 10 * time.Second
 
 // errStoredIdentityUnreachable marks a stored-identity reconnect that failed

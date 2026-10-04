@@ -930,7 +930,18 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 6. Steward checks for a cfg from the controller.
 7. Normal operation begins.
 
-On every subsequent startup the steward re-registers via the same HTTP REST endpoint — HTTP registration is called on every invocation and there is no stored-certificate resume path that skips it. The cert stored by `cert.Manager` is used for TLS handshakes within the session but does not replace the HTTP registration call.
+### Reconnecting with a Stored Identity
+
+On every subsequent startup the steward first reconnects with its stored identity — the identity record (`steward-identity.json`) and the client certificate in its `cert.Manager` store — skipping HTTP registration (#1719). It falls back to the registration-refresh handshake (expired client certificate) or to HTTP registration with its token only when the stored identity is unusable or **definitively rejected by the controller** (#4532):
+
+- **Rejected:** the controller refuses the control channel with `PermissionDenied` or `Unauthenticated`, which it does only after authenticating the TLS peer and looking the steward up (unknown, deregistered or revoked steward). A locally unusable identity (missing controller certificates, no valid client certificate) also falls back.
+- **Not rejected — retried with the stored identity indefinitely:** an unreachable or slow controller, including one whose HTTPS API is up while its control plane is down, and every TLS handshake failure. TLS failures have transient causes — a controller with a skewed clock rejects a valid client certificate, a TLS-intercepting proxy presents an untrusted server certificate — and must never cost a healthy steward its one-time registration token or create a duplicate record.
+
+The controller sends nothing when it admits a control channel; a refusal arrives on the first receive. The stored-identity connect therefore waits up to a fixed **10-second admission window** after the stream opens: a refusal inside the window is a rejection, and silence for the full window counts as admitted. Every admitted stored-identity reconnect pays that 10 s before the connect completes (heartbeats do not end the wait). Connects right after a fresh registration use no window and retry every failure.
+
+A rejection that arrives mid-session (a steward deregistered while connected) keeps the steward in its reconnect loop; it does not re-register in place.
+
+A steward whose original controller is gone for good never receives a rejection — every attempt is unreachable. Re-enroll it explicitly with `cfgms-steward install --regtoken <token> --reenroll`, which discards the stored identity before the service restarts (and restores it if the install fails).
 
 ### Approval Workflow
 

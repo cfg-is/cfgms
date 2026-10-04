@@ -22,11 +22,10 @@ import (
 var ErrStewardNotConnected = errors.New("steward not connected")
 
 // ErrIdentityRejected reports that the controller definitively refused the
-// steward's identity: its client certificate was rejected during the TLS
-// handshake, the controller presented a certificate the identity's CA does not
-// trust, or the control channel was refused as unauthenticated or not approved
-// (unknown, deregistered or revoked steward). It is never returned for an
-// unreachable or timed-out controller (Issue #4532).
+// steward's identity: the control channel was refused as unauthenticated or not
+// approved (unknown, deregistered or revoked steward). It is never returned for an
+// unreachable or timed-out controller, nor for a TLS handshake failure, which can
+// be transient (clock skew, an intercepting proxy) (Issue #4532).
 var ErrIdentityRejected = errors.New("controller rejected steward identity")
 
 // ControlPlaneProvider defines the interface for control plane implementations.

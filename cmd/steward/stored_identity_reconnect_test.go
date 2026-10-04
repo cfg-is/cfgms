@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -198,4 +199,42 @@ func TestClearStoredIdentity(t *testing.T) {
 	assert.NoError(t, err, "with no stored identity the connect sequence falls through to registration")
 
 	require.NoError(t, clearStoredIdentity(f.certStoreDir))
+}
+
+// TestReenrollAndInstall_RestoresIdentityWhenInstallFails guards the #4533 review:
+// --reenroll clears the identity before install (the restarted service must find
+// none), so a failed install must put it back rather than leave the host with
+// neither the old identity nor a new one.
+func TestReenrollAndInstall_RestoresIdentityWhenInstallFails(t *testing.T) {
+	f := newStoredIdentityFixture(t, "127.0.0.1:1")
+	require.NoError(t, savePendingState(f.certStoreDir, PendingState{PendingID: "pending-1"}))
+	identityBefore := f.identityBytes(t)
+	pendingBefore, err := os.ReadFile(filepath.Join(f.certStoreDir, pendingStateFileName))
+	require.NoError(t, err)
+
+	var sawIdentityDuringInstall bool
+	installErr := errors.New("service manager refused the install")
+	err = reenrollAndInstall(f.certStoreDir, func() error {
+		_, statErr := os.Stat(filepath.Join(f.certStoreDir, identityFileName))
+		sawIdentityDuringInstall = statErr == nil
+		return installErr
+	})
+
+	require.ErrorIs(t, err, installErr)
+	assert.False(t, sawIdentityDuringInstall, "the identity must already be gone when install restarts the service")
+	assert.Equal(t, identityBefore, f.identityBytes(t), "the stored identity must be restored byte for byte")
+	pendingAfter, err := os.ReadFile(filepath.Join(f.certStoreDir, pendingStateFileName))
+	require.NoError(t, err)
+	assert.Equal(t, pendingBefore, pendingAfter, "pending registration state must be restored")
+}
+
+// TestReenrollAndInstall_ClearsIdentityWhenInstallSucceeds verifies the success
+// path leaves no stored identity, so the restarted steward registers.
+func TestReenrollAndInstall_ClearsIdentityWhenInstallSucceeds(t *testing.T) {
+	f := newStoredIdentityFixture(t, "127.0.0.1:1")
+	require.NoError(t, reenrollAndInstall(f.certStoreDir, func() error { return nil }))
+
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	assert.Nil(t, id)
 }

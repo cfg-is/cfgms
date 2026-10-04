@@ -12,7 +12,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -506,43 +505,30 @@ func (p *Provider) markIdentityRejected(cause error) error {
 }
 
 // isIdentityRejection reports whether err is the controller definitively refusing
-// this steward's identity rather than a transport failure: an Unauthenticated or
-// PermissionDenied control-channel status, or a TLS handshake failure over
-// certificates. Connection refused, timeouts, and Unavailable without a
-// certificate failure are not rejections.
+// this steward's identity: an Unauthenticated or PermissionDenied control-channel
+// status, which the controller returns only after authenticating the TLS peer and
+// looking the steward up (unknown, deregistered or revoked steward).
+//
+// TLS handshake failures are deliberately NOT rejections, even certificate ones:
+// they have transient causes that must never cost a healthy steward its one-time
+// registration token. A controller whose clock is skewed rejects a valid client
+// certificate as not yet valid or expired (Go's TLS server sends bad_certificate
+// for every verification failure), and a TLS-intercepting proxy presents a
+// certificate the stored CA does not trust. A steward whose controller is truly
+// gone is re-enrolled explicitly with install --reenroll (Issue #4532).
 func isIdentityRejection(err error) bool {
 	if err == nil {
 		return false
 	}
-	if s, ok := status.FromError(err); ok {
-		switch s.Code() {
-		case codes.Unauthenticated, codes.PermissionDenied:
-			return true
-		}
+	s, ok := status.FromError(err)
+	if !ok {
+		return false
 	}
-	msg := err.Error()
-	for _, marker := range identityRejectionMarkers {
-		if strings.Contains(msg, marker) {
-			return true
-		}
+	switch s.Code() {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return true
 	}
 	return false
-}
-
-// identityRejectionMarkers are the certificate-failure texts a QUIC/TLS handshake
-// error carries: the controller rejecting the client certificate (TLS alerts), or
-// presenting one this identity's CA does not trust (a different controller). Over
-// QUIC they arrive flattened into the error string inside an Unavailable status,
-// so they are matched as text.
-var identityRejectionMarkers = []string{
-	"tls: bad certificate",
-	"tls: unknown certificate authority",
-	"tls: certificate required",
-	"tls: revoked certificate",
-	"tls: expired certificate",
-	"tls: unsupported certificate",
-	"tls: access denied",
-	"x509: certificate signed by unknown authority",
 }
 
 // dialInitial repeats dialAndOpenStream, using the same escalating backoff as

@@ -810,34 +810,54 @@ func TestClientStart_AdmissionWindow_ApprovalRefusedIsIdentityRejected(t *testin
 	assert.False(t, client.IsConnected())
 }
 
-// TestClientStart_AdmissionWindow_UntrustedClientCertIsIdentityRejected guards
-// Issue #4532: a client certificate the controller's CA did not issue (the
-// steward enrolled with a different controller) fails the TLS handshake and is
-// reported as ErrIdentityRejected.
-func TestClientStart_AdmissionWindow_UntrustedClientCertIsIdentityRejected(t *testing.T) {
+// assertKeepsRetrying starts client and asserts Start is still retrying after
+// wait, then that stopping it returns an error that is not an identity rejection.
+func assertKeepsRetrying(t *testing.T, client *Provider, wait time.Duration) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- client.Start(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Start returned instead of retrying: %v", err)
+	case <-time.After(wait):
+	}
+	require.NoError(t, client.Stop(context.Background()))
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, interfaces.ErrIdentityRejected)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after Stop")
+	}
+}
+
+// TestClientStart_AdmissionWindow_ClientCertRejectedAtTLSKeepsRetrying guards the
+// #4533 review: the controller rejecting the client certificate during the TLS
+// handshake is retried, not treated as an identity rejection. Go's TLS server
+// sends the same bad_certificate alert for a valid certificate it judges not yet
+// valid or expired under a skewed clock, so the alert alone must never send a
+// healthy steward to registration.
+func TestClientStart_AdmissionWindow_ClientCertRejectedAtTLSKeepsRetrying(t *testing.T) {
 	controllerCA := newTestCA(t)
 	otherCA := newTestCA(t)
 	clientTLS := otherCA.clientTLSConfig(t, "steward-foreign-cert-test")
-	// Trust the controller's server certificate so only the client certificate is wrong.
+	// Trust the controller's server certificate so only the client certificate fails.
 	clientTLS.RootCAs = controllerCA.clientTLSConfig(t, "trust-only").RootCAs
 	addr := startAdmissionServer(t, controllerCA.serverTLSConfig(t), nil)
-	client := newAdmissionClient(t, addr, clientTLS, "steward-foreign-cert-test")
 
-	err := startWithin(t, client, 20*time.Second)
-	require.ErrorIs(t, err, interfaces.ErrIdentityRejected)
+	assertKeepsRetrying(t, newAdmissionClient(t, addr, clientTLS, "steward-foreign-cert-test"), 6*time.Second)
 }
 
-// TestClientStart_AdmissionWindow_UntrustedServerCertIsIdentityRejected guards
-// Issue #4532: a controller presenting a certificate the stored identity's CA does
-// not trust is a different controller, reported as ErrIdentityRejected.
-func TestClientStart_AdmissionWindow_UntrustedServerCertIsIdentityRejected(t *testing.T) {
+// TestClientStart_AdmissionWindow_UntrustedServerCertKeepsRetrying guards the #4533
+// review: a server certificate the stored CA does not trust is retried — a
+// TLS-intercepting proxy produces exactly this, and it must not cost a healthy
+// steward its registration token.
+func TestClientStart_AdmissionWindow_UntrustedServerCertKeepsRetrying(t *testing.T) {
 	controllerCA := newTestCA(t)
 	storedCA := newTestCA(t)
 	addr := startAdmissionServer(t, controllerCA.serverTLSConfig(t), nil)
-	client := newAdmissionClient(t, addr, storedCA.clientTLSConfig(t, "steward-moved-test"), "steward-moved-test")
 
-	err := startWithin(t, client, 20*time.Second)
-	require.ErrorIs(t, err, interfaces.ErrIdentityRejected)
+	assertKeepsRetrying(t, newAdmissionClient(t, addr, storedCA.clientTLSConfig(t, "steward-moved-test"), "steward-moved-test"), 6*time.Second)
 }
 
 // TestClientStart_AdmissionWindow_AdmittedConnects verifies an admitted identity
@@ -879,8 +899,10 @@ func TestIsIdentityRejection(t *testing.T) {
 		{"unauthenticated", status.Error(codes.Unauthenticated, "no peer info"), true},
 		{"unavailable approval service", status.Error(codes.Unavailable, "steward approval service unavailable"), false},
 		{"connection timeout", status.Error(codes.Unavailable, "connection error: desc = \"transport: Error while dialing: timeout: no recent network activity\""), false},
-		{"bad certificate alert", status.Error(codes.Unavailable, "connection error: desc = \"transport: CRYPTO_ERROR 0x12a (remote): tls: bad certificate\""), true},
-		{"unknown authority", errors.New("tls: failed to verify certificate: x509: certificate signed by unknown authority"), true},
+		{"wrapped permission denied", fmt.Errorf("failed to open ControlChannel: %w", status.Error(codes.PermissionDenied, "steward reconnect not approved")), true},
+		{"bad certificate alert", status.Error(codes.Unavailable, "connection error: desc = \"transport: CRYPTO_ERROR 0x12a (remote): tls: bad certificate\""), false},
+		{"expired certificate alert (clock skew)", status.Error(codes.Unavailable, "connection error: desc = \"transport: CRYPTO_ERROR 0x12d (remote): tls: expired certificate\""), false},
+		{"unknown authority (intercepting proxy)", errors.New("tls: failed to verify certificate: x509: certificate signed by unknown authority"), false},
 		{"context deadline", context.DeadlineExceeded, false},
 	}
 	for _, tc := range cases {

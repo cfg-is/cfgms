@@ -101,6 +101,34 @@ func clearPendingState(dir string) error {
 	return nil
 }
 
+// snapshotStoredIdentity reads the files clearStoredIdentity removes, keyed by
+// file name, so a failed re-enrollment can restore them. Missing files are
+// omitted.
+func snapshotStoredIdentity(dir string) (map[string][]byte, error) {
+	backup := map[string][]byte{}
+	for _, name := range []string{identityFileName, pendingStateFileName} {
+		data, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- fixed file names under the steward cert store
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("back up %s: %w", name, err)
+		}
+		backup[name] = data
+	}
+	return backup, nil
+}
+
+// restoreStoredIdentity writes back files captured by snapshotStoredIdentity.
+func restoreStoredIdentity(dir string, backup map[string][]byte) error {
+	for name, data := range backup {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+			return fmt.Errorf("restore %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // clearStoredIdentity removes the stored identity record and any pending
 // registration state from dir, so the next start registers with its token
 // instead of reconnecting (install --reenroll, Issue #4532). Certificates in the
