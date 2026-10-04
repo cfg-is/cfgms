@@ -91,6 +91,23 @@ type RefreshCompleteResponse struct {
 	IssuerChain string `json:"issuer_chain,omitempty"` // Issue #3778: chain from ClientCert's direct issuer up to (not including) CACert
 	SigningCert string `json:"signing_cert,omitempty"`
 	ServerCert  string `json:"server_cert,omitempty"` // same value as signing_cert; matches initial registration response field name
+
+	// Identity fields, set with the certificate, so a steward that re-admits with
+	// its device key after losing its stored identity record can rebuild it
+	// (Issue #4532).
+	StewardID        string `json:"steward_id,omitempty"`
+	TenantID         string `json:"tenant_id,omitempty"`
+	TransportAddress string `json:"transport_address,omitempty"`
+}
+
+// RefreshClaimRequest is the body of POST /api/v1/stewards/{device_id}/refresh/claim:
+// a fresh challenge's proof-of-possession plus the pending refresh to collect
+// (Issue #4532).
+type RefreshClaimRequest struct {
+	PendingID string `json:"pending_id"`
+	Nonce     string `json:"nonce"`     // base64url nonce from challenge response
+	IssuedAt  int64  `json:"issued_at"` // server_ts from challenge (Unix nanoseconds)
+	Signature string `json:"signature"` // base64url Ed25519 sig over PoP message
 }
 
 // ---- Handlers ---------------------------------------------------------------
@@ -311,105 +328,8 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.nonceStore == nil {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "nonce_store_unavailable"})
-		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Gates (4) and (6): nonce absent/expired → 401; found → consumed atomically
-	// in the same store call (Issue #3755, ADR-031). A separate peek-then-delete
-	// would reopen the cross-node race this store exists to close, so lookup and
-	// consume collapse into one GetAndConsumeNonce call — deleted regardless of
-	// the outcome of the gates below, exactly as the prior cache.Delete did.
-	nonceKey := refreshNonceKeyPrefix + deviceID
-	rawEntry, found, err := s.nonceStore.GetAndConsumeNonce(r.Context(), nonceKey)
-	if err != nil {
-		s.logger.Error("Failed to consume nonce", "error", logging.SanitizeLogValue(err.Error()))
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "store_read_failed"})
-		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "nonce_not_found"})
-		http.Error(w, "challenge expired or not found", http.StatusUnauthorized)
-		return
-	}
-	var nonce refreshNonceEntry
-	if err := json.Unmarshal(rawEntry, &nonce); err != nil {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSystemEvent, "refresh_error",
-			business.AuditResultError, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "nonce_type_error"})
-		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
-		return
-	}
-
-	// Gate (5): IssuedAt > 60s → 401
-	issuedAtTime := time.Unix(0, req.IssuedAt)
-	if time.Since(issuedAtTime) > nonceMaxAge {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "nonce_expired_issuedAt"})
-		http.Error(w, "challenge nonce has expired", http.StatusUnauthorized)
-		return
-	}
-
-	// Decode nonce bytes from base64url.
-	nonceBytes, err := base64.RawURLEncoding.DecodeString(req.Nonce)
-	if err != nil {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "invalid_nonce_encoding"})
-		http.Error(w, "invalid nonce encoding", http.StatusUnauthorized)
-		return
-	}
-
-	sigBytes, err := base64.RawURLEncoding.DecodeString(req.Signature)
-	if err != nil {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityMedium,
-			map[string]interface{}{"reason": "invalid_signature_encoding"})
-		http.Error(w, "invalid signature encoding", http.StatusUnauthorized)
-		return
-	}
-
-	// Gate (7): PoP verify — message = sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64)
-	if len(record.IdentityKeyPub) != ed25519.PublicKeySize {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultDenied, business.AuditSeverityHigh,
-			map[string]interface{}{"reason": "no_identity_key"})
-		http.Error(w, "device has no identity key registered", http.StatusForbidden)
-		return
-	}
-
-	var tsBytes [8]byte
-	binary.BigEndian.PutUint64(tsBytes[:], nonce.ServerTS)
-	h := sha256.New()
-	h.Write(nonceBytes)
-	h.Write([]byte(deviceID))
-	h.Write(tsBytes[:])
-	popMsg := h.Sum(nil)
-
-	if !s.popVerifier.Verify(ed25519.PublicKey(record.IdentityKeyPub), popMsg, sigBytes) {
-		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
-			business.AuditEventSecurityEvent, "refresh_rejected",
-			business.AuditResultFailure, business.AuditSeverityCritical,
-			map[string]interface{}{"reason": "invalid_pop"})
-		http.Error(w, "proof-of-possession verification failed", http.StatusUnauthorized)
+	// Gates (4)-(7): nonce, IssuedAt, consume, proof-of-possession.
+	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.IssuedAt) {
 		return
 	}
 
@@ -437,6 +357,221 @@ func (s *Server) handleRefreshComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRefreshByPolicy(w, r, record, deviceID, req.Provenance, req.CSRPEM, policy)
+	}
+}
+
+// verifyRefreshProof runs the shared nonce and proof-of-possession gates (4)-(7)
+// of the refresh handshake for record, the device resolved from the path: the
+// challenge nonce must exist and is consumed, IssuedAt must be fresh, and the
+// signature must verify against record.IdentityKeyPub. It writes the error
+// response and returns false on any failure. Used by /refresh/complete and
+// /refresh/claim.
+func (s *Server) verifyRefreshProof(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, deviceID, nonceB64, sigB64 string, issuedAt int64) bool {
+	if s.nonceStore == nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_store_unavailable"})
+		http.Error(w, "nonce store unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+
+	// Gates (4) and (6): nonce absent/expired → 401; found → consumed atomically
+	// in the same store call (Issue #3755, ADR-031). A separate peek-then-delete
+	// would reopen the cross-node race this store exists to close, so lookup and
+	// consume collapse into one GetAndConsumeNonce call — deleted regardless of
+	// the outcome of the gates below, exactly as the prior cache.Delete did.
+	nonceKey := refreshNonceKeyPrefix + deviceID
+	rawEntry, found, err := s.nonceStore.GetAndConsumeNonce(r.Context(), nonceKey)
+	if err != nil {
+		s.logger.Error("Failed to consume nonce", "error", logging.SanitizeLogValue(err.Error()))
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "store_read_failed"})
+		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
+		return false
+	}
+	if !found {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_not_found"})
+		http.Error(w, "challenge expired or not found", http.StatusUnauthorized)
+		return false
+	}
+	var nonce refreshNonceEntry
+	if err := json.Unmarshal(rawEntry, &nonce); err != nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSystemEvent, "refresh_error",
+			business.AuditResultError, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_type_error"})
+		http.Error(w, "internal error reading challenge", http.StatusInternalServerError)
+		return false
+	}
+
+	// Gate (5): IssuedAt > 60s → 401
+	issuedAtTime := time.Unix(0, issuedAt)
+	if time.Since(issuedAtTime) > nonceMaxAge {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "nonce_expired_issuedAt"})
+		http.Error(w, "challenge nonce has expired", http.StatusUnauthorized)
+		return false
+	}
+
+	// Decode nonce bytes from base64url.
+	nonceBytes, err := base64.RawURLEncoding.DecodeString(nonceB64)
+	if err != nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "invalid_nonce_encoding"})
+		http.Error(w, "invalid nonce encoding", http.StatusUnauthorized)
+		return false
+	}
+
+	sigBytes, err := base64.RawURLEncoding.DecodeString(sigB64)
+	if err != nil {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityMedium,
+			map[string]interface{}{"reason": "invalid_signature_encoding"})
+		http.Error(w, "invalid signature encoding", http.StatusUnauthorized)
+		return false
+	}
+
+	// Gate (7): PoP verify — message = sha256(nonce_bytes || device_id_utf8 || server_ts_be_uint64)
+	if len(record.IdentityKeyPub) != ed25519.PublicKeySize {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultDenied, business.AuditSeverityHigh,
+			map[string]interface{}{"reason": "no_identity_key"})
+		http.Error(w, "device has no identity key registered", http.StatusForbidden)
+		return false
+	}
+
+	var tsBytes [8]byte
+	binary.BigEndian.PutUint64(tsBytes[:], nonce.ServerTS)
+	h := sha256.New()
+	h.Write(nonceBytes)
+	h.Write([]byte(deviceID))
+	h.Write(tsBytes[:])
+	popMsg := h.Sum(nil)
+
+	if !s.popVerifier.Verify(ed25519.PublicKey(record.IdentityKeyPub), popMsg, sigBytes) {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_rejected",
+			business.AuditResultFailure, business.AuditSeverityCritical,
+			map[string]interface{}{"reason": "invalid_pop"})
+		http.Error(w, "proof-of-possession verification failed", http.StatusUnauthorized)
+		return false
+	}
+
+	return true
+}
+
+// handleRefreshClaim handles POST /api/v1/stewards/{device_id}/refresh/claim: a
+// steward whose refresh was queued for approval collects the outcome (Issue
+// #4532). Before this endpoint an approved refresh was signed and stored but
+// never delivered, so under require_approval a steward re-queued forever.
+//
+// Identity is proven exactly as for /refresh/complete — a fresh challenge nonce
+// signed with the device identity key — and the pending entry must belong to
+// that device. Outcomes: 200 with the certificate bundle (once; the entry is
+// then marked claimed), 202 still pending, 403 rejected or revoked, 404 unknown,
+// expired or already claimed — the steward then starts a new refresh.
+//
+//architecture:allow-unscoped-tenant-read -- pre-authentication handshake, no caller tenant established until PoP verifies (Issue #4336)
+func (s *Server) handleRefreshClaim(w http.ResponseWriter, r *http.Request) {
+	deviceID := mux.Vars(r)["device_id"]
+
+	var req RefreshClaimRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PendingID == "" {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if s.stewardStore == nil || s.pendingRefreshStore == nil {
+		http.Error(w, "refresh stores unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	record, err := s.stewardStore.GetStewardByDeviceID(r.Context(), deviceID)
+	if err != nil {
+		if err == business.ErrStewardNotFound {
+			http.Error(w, "device not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to look up steward by device ID", "device_id", logging.SanitizeLogValue(deviceID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to look up device", http.StatusInternalServerError)
+		return
+	}
+	if record.Status == business.StewardStatusRevoked {
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventSecurityEvent, "refresh_claim_rejected",
+			business.AuditResultDenied, business.AuditSeverityCritical,
+			map[string]interface{}{"decision": "denied", "reason": "revoked"})
+		http.Error(w, "device is revoked", http.StatusForbidden)
+		return
+	}
+	if !s.verifyRefreshProof(w, r, record, deviceID, req.Nonce, req.Signature, req.IssuedAt) {
+		return
+	}
+
+	entry, err := s.pendingRefreshStore.GetPendingRefreshByID(r.Context(), req.PendingID)
+	if err != nil {
+		if err == business.ErrPendingRefreshNotFound {
+			http.Error(w, "pending refresh not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to get pending refresh", "pending_id", logging.SanitizeLogValue(req.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to get pending refresh", http.StatusInternalServerError)
+		return
+	}
+	// The entry must belong to the device that just proved possession; another
+	// device's pending ID is indistinguishable from an unknown one.
+	if entry.DeviceID != deviceID || entry.TenantID != record.TenantID {
+		http.Error(w, "pending refresh not found", http.StatusNotFound)
+		return
+	}
+
+	switch entry.Status {
+	case business.PendingRefreshStatusPending:
+		if time.Now().UTC().After(entry.ExpiresAt) {
+			http.Error(w, "pending refresh expired", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		if err := json.NewEncoder(w).Encode(RefreshCompleteResponse{Status: "queued", PendingID: entry.PendingID}); err != nil {
+			s.logger.Error("Failed to encode refresh claim response", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	case business.PendingRefreshStatusApproved:
+		if len(entry.ClaimBundle) == 0 {
+			http.Error(w, "approved refresh has no certificate bundle", http.StatusInternalServerError)
+			return
+		}
+		if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), entry.PendingID, business.PendingRefreshStatusClaimed); err != nil {
+			s.logger.Error("Failed to mark refresh claimed", "pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+			http.Error(w, "failed to claim refresh", http.StatusInternalServerError)
+			return
+		}
+		s.emitRefreshAudit(r.Context(), deviceID, record.TenantID,
+			business.AuditEventAuthentication, "refresh_claimed",
+			business.AuditResultSuccess, business.AuditSeverityMedium,
+			map[string]interface{}{"pending_id": logging.SanitizeLogValue(entry.PendingID)})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// #nosec G117 -- the stored bundle is the signed client certificate set
+		// produced at approval; it carries no private key (Issue #3781).
+		if _, err := w.Write(entry.ClaimBundle); err != nil {
+			s.logger.Error("Failed to write refresh claim bundle", "error", logging.SanitizeLogValue(err.Error()))
+		}
+	case business.PendingRefreshStatusRejected:
+		http.Error(w, "refresh rejected", http.StatusForbidden)
+	default: // expired, claimed
+		http.Error(w, "pending refresh not available", http.StatusNotFound)
 	}
 }
 
@@ -594,6 +729,13 @@ func (s *Server) buildRefreshClaimResponse(ctx context.Context, record *business
 		ClientCert:  string(clientCert.CertificatePEM),
 		CACert:      string(caCert),
 		IssuerChain: string(clientCert.IssuerChainPEM),
+		StewardID:   record.ID,
+		TenantID:    record.TenantID,
+	}
+	// Best-effort: a steward that still has its identity record keeps its stored
+	// transport address when this is empty.
+	if transportAddr, addrErr := s.getTransportAddress(); addrErr == nil {
+		resp.TransportAddress = transportAddr
 	}
 
 	if signingCertPEM, sigErr := s.certManager.GetSigningCertificate(); sigErr == nil && len(signingCertPEM) > 0 {

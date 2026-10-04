@@ -932,16 +932,26 @@ The administrator chooses which flavor fits the deployment workflow. Both arrive
 
 ### Reconnecting with a Stored Identity
 
-On every subsequent startup the steward first reconnects with its stored identity — the identity record (`steward-identity.json`) and the client certificate in its `cert.Manager` store — skipping HTTP registration (#1719). It falls back to the registration-refresh handshake (expired client certificate) or to HTTP registration with its token only when the stored identity is unusable or **definitively rejected by the controller** (#4532):
+**A healthy, online steward is never left unable to get back in.** When its identity cannot be trusted it goes back through the controller's approval process — trusted by default or queued for an operator, per tenant policy — but it never ends up stuck (#4532).
 
-- **Rejected:** the controller refuses the control channel with `PermissionDenied` or `Unauthenticated`, which it does only after authenticating the TLS peer and looking the steward up (unknown, deregistered or revoked steward). A locally unusable identity (missing controller certificates, no valid client certificate) also falls back.
-- **Not rejected — retried with the stored identity indefinitely:** an unreachable or slow controller, including one whose HTTPS API is up while its control plane is down, and every TLS handshake failure. TLS failures have transient causes — a controller with a skewed clock rejects a valid client certificate, a TLS-intercepting proxy presents an untrusted server certificate — and must never cost a healthy steward its one-time registration token or create a duplicate record.
+On every subsequent startup the steward first reconnects with its stored identity — the identity record (`steward-identity.json`) and the client certificate in its `cert.Manager` store — skipping HTTP registration (#1719). When that fails, it walks this sequence each connect cycle:
 
-The controller sends nothing when it admits a control channel; a refusal arrives on the first receive. The stored-identity connect therefore waits up to a fixed **10-second admission window** after the stream opens: a refusal inside the window is a rejection, and silence for the full window counts as admitted. Every admitted stored-identity reconnect pays that 10 s before the connect completes (heartbeats do not end the wait). Connects right after a fresh registration use no window and retry every failure.
+1. **Stored identity.** Dial the controller's control plane with the stored identity for up to a **5-minute connect budget** (the budget is checked between dial attempts, so one cycle can run up to about 20 s past it). The controller refusing the control channel with `PermissionDenied` or `Unauthenticated` — which it does only after authenticating the TLS peer and looking the steward up (unknown, deregistered or revoked steward) — ends this step at once.
+2. **Re-admission with the device key.** If the stored identity was refused, is locally unusable (e.g. an expired client certificate), or stayed unreachable for the whole budget, the steward asks to be re-admitted through the registration-refresh handshake (ADR-011), proving its identity with the device key. It ties back to the same steward record, so it never creates a duplicate. Tenant policy decides:
+   - **Issued:** a new certificate; the steward reconnects with it.
+   - **Queued for approval:** the steward keeps the pending ID and the private key of the CSR it submitted (`steward-refresh-pending.json`, 0600), and each later cycle collects the outcome through `POST /api/v1/stewards/{device_id}/refresh/claim` instead of filing a new request. Approval delivers the certificate signed from that CSR.
+   - **Refused** (revoked, tenant policy `reject`, or an operator rejected it): the refusal holds, but the steward keeps running and asks again every hour, so a later approval needs no one at the device.
+   - **Unknown device** (the controller has no record of it): go to step 3.
+   - **No answer** (the controller's HTTPS side is unreachable too): retry the stored identity next cycle.
+3. **Registration with the configured token**, through the normal registration approval workflow. Tokens are reusable, so this spends nothing. A `409` — the controller already holds this device's record, typically because the stored identity record was lost — routes back to step 2, and the identity is rebuilt from the steward ID, tenant and transport address the re-admission response carries.
 
-A rejection that arrives mid-session (a steward deregistered while connected) keeps the steward in its reconnect loop; it does not re-register in place.
+The stored identity is never deleted until a replacement is issued, and each cycle tries it again first, so a controller that comes back is used as soon as it answers. TLS handshake failures are not treated as refusals: they have transient causes (a controller with a skewed clock rejects a valid client certificate; a TLS-intercepting proxy presents an untrusted server certificate), so they fall under the connect budget and end, at worst, in a visible re-admission request on the controller.
 
-A steward whose original controller is gone for good never receives a rejection — every attempt is unreachable. Re-enroll it explicitly with `cfgms-steward install --regtoken <token> --reenroll`, which discards the stored identity before the service restarts (and restores it if the install fails).
+The controller sends nothing when it admits a control channel; a refusal arrives on the first receive. The stored-identity connect therefore waits up to a fixed **10-second admission window** after the stream opens: a refusal inside the window is a refusal, and silence for the full window counts as admitted. Every admitted stored-identity reconnect pays that 10 s before the connect completes (heartbeats do not end the wait). Connects right after a fresh registration use no window and no budget.
+
+A refusal that arrives mid-session (a steward deregistered while connected) keeps the steward in its reconnect loop; it does not re-admit in place until the process restarts.
+
+The only state that needs someone at the device is an install-pinned steward whose controller now presents a certificate from a different CA: the steward cannot trust that controller over HTTPS, by design, and is reinstalled with the new CA.
 
 ### Approval Workflow
 

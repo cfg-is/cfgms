@@ -111,6 +111,10 @@ const (
 	trustSourceCompileBaked  TrustSource = 3 // URL baked via ldflags
 )
 
+// rejectedReadmissionRetry is how long a steward whose re-admission the
+// controller refused waits before asking again (Issue #4532).
+var rejectedReadmissionRetry = time.Hour
+
 // connectFuncT is the signature of the controller connect function, injectable
 // for testing so tests can simulate a controller-unreachable condition without
 // touching the network. Production code always uses registerAndConnect. (Issue #2034)
@@ -504,10 +508,20 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 				// they are integrity failures, not transient not-ready conditions.
 				// Log loudly and stop the retry loop; the operator must take action.
 				if errors.Is(connErr, registration.ErrRefreshRejected) {
-					logger.Error("Registration refresh rejected by controller; steward must be manually re-admitted",
-						"operation", "connect_terminal",
-						"error", connErr)
-					return
+					// The controller refused re-admission (revoked, tenant policy, or an
+					// operator rejected it). The refusal holds, but the steward keeps
+					// asking at a slow interval so a later approval needs no one at the
+					// device (Issue #4532).
+					logger.Error("Controller refused re-admission; asking again later",
+						"operation", "connect_rejected",
+						"error", connErr,
+						"retry_in", rejectedReadmissionRetry)
+					select {
+					case <-runCtx.Done():
+						return
+					case <-time.After(rejectedReadmissionRetry):
+					}
+					continue
 				}
 				if isTrustDowngrade(connErr) {
 					logger.Error("Trust-anchor downgrade rejected; wipe identity to change trust source",
@@ -666,7 +680,6 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 // buildInstallCommand builds the `cfgms-steward install` subcommand.
 func buildInstallCommand() *cobra.Command {
 	var regToken, controllerURL, caCertPath, fingerprint string
-	var reenroll bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -696,15 +709,9 @@ Install-pinned (private CA, self-hosted deployments — ADR-013 §3):
 TOFU — trust-on-first-use (lab environments):
 
   cfgms-steward install --regtoken TOKEN \
-    --controller-url https://ctrl.example.com
-
-A steward that already has a stored identity keeps reconnecting with it, and
-registers with its token only when the controller rejects that identity. If the
-controller it enrolled with is gone for good, re-enroll it explicitly:
-
-  cfgms-steward install --regtoken TOKEN --reenroll`,
+    --controller-url https://ctrl.example.com`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInstall(regToken, controllerURL, caCertPath, fingerprint, reenroll)
+			return runInstall(regToken, controllerURL, caCertPath, fingerprint)
 		},
 	}
 
@@ -713,7 +720,6 @@ controller it enrolled with is gone for good, re-enroll it explicitly:
 	cmd.Flags().StringVar(&controllerURL, "controller-url", "", "Controller URL (install-pinned and TOFU modes; omit to use compile-time URL)")
 	cmd.Flags().StringVar(&caCertPath, "controller-ca", "", "Path to controller CA certificate PEM file (install-pinned mode)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "Expected SHA-256 fingerprint of the CA certificate (hex, from controller --init output)")
-	cmd.Flags().BoolVar(&reenroll, "reenroll", false, "Discard the stored controller identity so the steward registers with --regtoken on start")
 
 	return cmd
 }
@@ -752,7 +758,7 @@ func buildStatusCommand() *cobra.Command {
 }
 
 // runInstall performs the install operation for the current platform.
-func runInstall(regToken, controllerURL, caCertPath, fingerprint string, reenroll bool) error {
+func runInstall(regToken, controllerURL, caCertPath, fingerprint string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
@@ -775,39 +781,7 @@ func runInstall(regToken, controllerURL, caCertPath, fingerprint string, reenrol
 			"  Linux/macOS: re-run with sudo")
 	}
 
-	install := func() error { return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint) }
-	if reenroll {
-		return reenrollAndInstall(defaultCertStoreDir(), install)
-	}
-	return install()
-}
-
-// reenrollAndInstall discards the stored identity in dir so the service install
-// restarts into registration with its token (Issue #4532). The identity must be
-// gone before install restarts the service, so it is cleared first; if install
-// then fails, the backup is restored so the host is never left with neither its
-// old identity nor a new one.
-func reenrollAndInstall(dir string, install func() error) error {
-	backup, err := snapshotStoredIdentity(dir)
-	if err != nil {
-		return err
-	}
-	if err := clearStoredIdentity(dir); err != nil {
-		return err
-	}
-	if len(backup) > 0 {
-		fmt.Printf("Discarded the stored controller identity in %s; the steward will register with the supplied token\n", dir)
-	}
-	if err := install(); err != nil {
-		if restoreErr := restoreStoredIdentity(dir, backup); restoreErr != nil {
-			return fmt.Errorf("install failed (%w) and the stored identity could not be restored: %v", err, restoreErr)
-		}
-		if len(backup) > 0 {
-			fmt.Printf("Install failed; restored the stored controller identity in %s\n", dir)
-		}
-		return err
-	}
-	return nil
+	return mgr.Install(regToken, controllerURL, caCertPEM, fingerprint)
 }
 
 // runUninstall performs the uninstall operation for the current platform.
@@ -911,7 +885,7 @@ func runInteractive() error {
 
 	switch choice {
 	case "1":
-		return runInstall(token, "", "", "", false)
+		return runInstall(token, "", "", "")
 	case "2":
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1131,60 +1105,51 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		priorCAPinFingerprint = storedID.CAPinFingerprint
 	}
 
-	// Attempt cert-reuse reconnect (skips HTTP registration on restart). A
-	// stored identity the controller could not be reached with is returned so the
-	// connect loop retries it after its backoff; only a rejected or locally
-	// unusable identity falls through to the refresh and registration paths
-	// below (Issue #4532).
-	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger); tc != nil {
+	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
+	tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger)
+	if tc != nil {
 		return tc, nil
-	} else if reconnErr != nil {
-		if errors.Is(reconnErr, errStoredIdentityUnreachable) {
-			return nil, reconnErr
-		}
-		logger.Warn("Stored identity rejected or unusable; checking for expired-cert refresh path",
-			"error", logging.SanitizeLogValue(reconnErr.Error()))
 	}
 
-	// Expired-cert refresh path (Issue #2094): when a stored identity exists and all
-	// client certs are expired, attempt the registration-refresh handshake before
-	// falling through to full HTTP re-registration.
-	if ks != nil && ks.DeviceID() != "" {
-		if storedID, loadErr := loadIdentity(certStoreDir); loadErr == nil && storedID != nil {
-			certMgr, certMgrErr := cert.NewManager(&cert.ManagerConfig{
-				StoragePath:    certStoreDir,
-				LoadExistingCA: true,
-			})
-			if certMgrErr == nil {
-				if certs, listErr := certMgr.ListCertificates(); listErr == nil && hasExpiredClientCert(certs) {
-					tc, refreshErr := refreshAndConnect(ctx, storedID, ks, certStoreDir, token, controllerURL, runtimeCfg, publicBeta, logger)
-					if refreshErr == nil {
-						return tc, nil
-					}
-					if errors.Is(refreshErr, registration.ErrRefreshPending) {
-						logger.Warn("Registration refresh pending operator approval; retry later",
-							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
-						return nil, refreshErr
-					}
-					if errors.Is(refreshErr, registration.ErrRefreshRejected) {
-						logger.Error("Registration refresh rejected; steward must be manually re-admitted",
-							"device_id", logging.SanitizeLogValue(ks.DeviceID()))
-						return nil, refreshErr
-					}
-					logger.Warn("Registration refresh failed; falling back to HTTP re-registration", "error", refreshErr)
-				}
+	// Re-admission (Issue #4532): a steward is never left unable to get back in.
+	// Whenever its stored identity fails — refused by the controller, locally
+	// unusable (e.g. an expired client certificate), or unreachable for the whole
+	// connect budget — it asks the controller to re-admit this device, proving it
+	// with its device key. Tenant policy decides whether that is granted at once
+	// or queued for operator approval; the stored identity is kept until a
+	// replacement is issued, and the next cycle tries it again first.
+	if reconnErr != nil {
+		logger.Warn("Stored-identity reconnect failed; requesting re-admission with the device key",
+			"error", logging.SanitizeLogValue(reconnErr.Error()))
+		if ks == nil || ks.DeviceID() == "" {
+			if errors.Is(reconnErr, errStoredIdentityUnreachable) {
+				return nil, reconnErr
+			}
+		} else {
+			storedID, _ := loadIdentity(certStoreDir)
+			tc, readmitErr := readmitWithDeviceKey(ctx, storedID, ks, certStoreDir, token, controllerURL, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+			switch {
+			case readmitErr == nil:
+				return tc, nil
+			case errors.Is(readmitErr, registration.ErrRefreshPending),
+				errors.Is(readmitErr, registration.ErrRefreshRejected):
+				return nil, readmitErr
+			case errors.Is(readmitErr, registration.ErrRefreshUnknownDevice):
+				logger.Warn("Controller has no record of this device; registering with the configured token")
+			case errors.Is(reconnErr, errStoredIdentityUnreachable):
+				// Neither the control plane nor the re-admission endpoint answered:
+				// retry the stored identity on the next cycle.
+				return nil, fmt.Errorf("%w; re-admission unavailable: %v", reconnErr, readmitErr)
+			default:
+				logger.Warn("Re-admission failed; registering with the configured token",
+					"error", logging.SanitizeLogValue(readmitErr.Error()))
 			}
 		}
 	}
 
 	logger.Info("Registering steward via HTTP API")
 
-	var httpCfg *registration.HTTPConfig
-	if trustSrc == trustSourceInstallPinned {
-		httpCfg = buildHTTPConfigForInstallPinned(controllerURL, 30*time.Second, installCAPEM, logger)
-	} else {
-		httpCfg = buildHTTPConfig(controllerURL, 30*time.Second, logger)
-	}
+	httpCfg := registrationHTTPConfig(controllerURL, trustSrc, installCAPEM, logger)
 	// Enrollment into a controller cluster is the one event allowed to clear the
 	// persisted Raft-term fence ratchet, so a rebuilt cluster (terms restart at 1)
 	// does not permanently lock this steward out (Issue #3437). The registration
@@ -1269,6 +1234,13 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	regReq.OS = runtime.GOOS
 
 	regResp, pendingResp, err := httpClient.Register(regCtx, regReq)
+	if errors.Is(err, registration.ErrDeviceAlreadyRegistered) && ks != nil && ks.DeviceID() != "" {
+		// The controller already holds a record for this device — typically the
+		// stored identity record was lost. Re-admit with the device key against that
+		// record instead of being refused forever (Issue #4532).
+		logger.Warn("Controller already has a record for this device; requesting re-admission with the device key")
+		return readmitWithDeviceKey(ctx, nil, ks, certStoreDir, token, controllerURL, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("HTTP registration failed: %w", err)
 	}
@@ -1592,19 +1564,22 @@ func connectWithApprovedRegistration(
 // (Issue #4532). The controller sends nothing on admission and refuses within a
 // round trip of its approval check, so silence for this long counts as admitted.
 //
-// The stored identity is abandoned for registration only when the controller
-// definitively rejects it (interfaces.ErrIdentityRejected): the steward is
-// unknown, deregistered or revoked. An unreachable or slow controller — including
-// one whose HTTPS API is up while its control plane is down — and every TLS
-// handshake failure are retried with the stored identity indefinitely, so a
-// healthy steward never spends a registration token or creates a duplicate
-// record. See docs/architecture/steward-operating-model.md.
+// A refusal (interfaces.ErrIdentityRejected: unknown, deregistered or revoked
+// steward) sends the steward straight to re-admission with its device key; see
+// registerAndConnect and docs/architecture/steward-operating-model.md.
 const storedIdentityAdmissionWindow = 10 * time.Second
 
+// storedIdentityConnectBudget bounds how long one stored-identity reconnect keeps
+// dialing an unreachable controller before the steward requests re-admission
+// with its device key (Issue #4532). Each later cycle tries the stored identity
+// again first, so a controller that comes back is used as soon as it answers.
+var storedIdentityConnectBudget = 5 * time.Minute
+
 // errStoredIdentityUnreachable marks a stored-identity reconnect that failed
-// without the controller rejecting the identity — unreachable, timed out, or
-// cancelled. registerAndConnect retries the stored identity on it instead of
-// registering (Issue #4532).
+// without the controller rejecting the identity — unreachable for the whole
+// connect budget, a TLS handshake failure, or cancelled (Issue #4532).
+// registerAndConnect then requests re-admission, and retries the stored identity
+// if the re-admission endpoint does not answer either.
 var errStoredIdentityUnreachable = errors.New("controller not reachable with the stored identity")
 
 // tryReconnectWithStoredIdentity attempts to reconnect using the steward's
@@ -1710,6 +1685,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		PublicBeta:                      publicBeta,
 		CertStoreDir:                    certStoreDir,
 		AdmissionWindow:                 storedIdentityAdmissionWindow,
+		InitialConnectTimeout:           storedIdentityConnectBudget,
 		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:              dnaRefreshIntervalReconnect,
@@ -1901,7 +1877,8 @@ func enrichApprovedWithDeviceIdentity(reg *approvedRegistration, ks *identity.Fi
 // completes the renewed mTLS identity: the caller must store that pair together.
 //
 // Errors from RefreshComplete (ErrRefreshPending on HTTP 202, ErrRefreshRejected
-// on HTTP 403) are returned unwrapped so callers can match them with errors.Is.
+// on HTTP 403) are returned unwrapped so callers can match them with errors.Is;
+// keyPEM is returned alongside them so a queued request's key can be kept.
 func completeRefreshWithFreshKeypair(
 	ctx context.Context,
 	httpClient *registration.HTTPClient,
@@ -1918,66 +1895,195 @@ func completeRefreshWithFreshKeypair(
 		return nil, "", fmt.Errorf("build refresh certificate signing request: %w", err)
 	}
 
-	completeResp, err := httpClient.RefreshComplete(ctx, deviceID, tenantID, nonce, serverTS, pop, csrPEM)
-	if err != nil {
-		return nil, "", err // ErrRefreshPending or ErrRefreshRejected propagated to caller
-	}
-
 	renewedKeyPEM, err := registration.EncodeECDSAPrivateKeyPEM(renewedKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode renewed steward private key: %w", err)
 	}
+
+	completeResp, err := httpClient.RefreshComplete(ctx, deviceID, tenantID, nonce, serverTS, pop, csrPEM)
+	if err != nil {
+		// A queued request (ErrRefreshPending) still returns the key: the eventual
+		// approval signs this CSR, so the caller must keep the key to pair with it
+		// (Issue #4532).
+		return nil, renewedKeyPEM, err
+	}
 	return completeResp, renewedKeyPEM, nil
 }
 
-// refreshAndConnect performs the registration-refresh handshake (ADR-011, Issue #2094)
-// for a steward whose mTLS cert has expired. The handshake proves device identity via
-// an Ed25519 proof-of-possession signature over a server-issued nonce.
+// readmitWithDeviceKey re-admits this device through the registration-refresh
+// handshake (ADR-011), proving its identity with the device key (Issue #2094,
+// #4532). It runs whenever the stored identity cannot reconnect — not only when
+// the client certificate has expired — and after a 409 from registration, when
+// the controller already holds this device's record (id is then nil and the
+// identity is rebuilt from the response).
 //
-// Returns ErrRefreshPending when the controller queues the request for manual approval.
-// Returns ErrRefreshRejected when the controller refuses (revoked or dormant device).
-// On success, persists the new cert via saveIdentity and reconnects.
-func refreshAndConnect(
+// A request the controller queues for approval is persisted with the private key
+// of its CSR; later calls collect the outcome through the claim endpoint instead
+// of filing a new request, so an approval is actually delivered.
+//
+// Returns *registration.RefreshPendingError (ErrRefreshPending) while queued,
+// ErrRefreshRejected when refused, and ErrRefreshUnknownDevice when the
+// controller has no record of the device. On success it reconnects.
+func readmitWithDeviceKey(
 	ctx context.Context,
 	id *StewardIdentity,
 	ks *identity.FileKeyStore,
 	certStoreDir, token, controllerURL string,
+	trustSrc TrustSource,
+	installCAPEM string,
 	runtimeCfg stewardconfig.StewardConfig,
 	publicBeta bool,
 	logger logging.Logger,
 ) (*client.TransportClient, error) {
 	if controllerURL == "" {
-		return nil, fmt.Errorf("controller URL not set; cannot perform registration refresh")
+		return nil, fmt.Errorf("controller URL not set; cannot request re-admission")
 	}
 
-	httpClient, err := registration.NewHTTPClient(buildHTTPConfig(controllerURL, 30*time.Second, logger))
+	// The same trust configuration registration uses: an install-pinned steward
+	// reaches its controller through the pinned CA.
+	httpClient, err := registration.NewHTTPClient(registrationHTTPConfig(controllerURL, trustSrc, installCAPEM, logger))
 	if err != nil {
-		return nil, fmt.Errorf("create HTTP client for refresh: %w", err)
+		return nil, fmt.Errorf("create HTTP client for re-admission: %w", err)
 	}
 
-	logger.Info("Attempting registration-refresh handshake",
+	stewardID, tenantID := "", ""
+	if id != nil {
+		stewardID, tenantID = id.StewardID, id.TenantID
+	}
+	logger.Info("Requesting re-admission with the device key",
 		"device_id", logging.SanitizeLogValue(ks.DeviceID()),
-		"steward_id", logging.SanitizeLogValue(id.StewardID))
+		"steward_id", logging.SanitizeLogValue(stewardID))
 
+	nonce, serverTS, pop, err := signRefreshChallenge(ctx, httpClient, ks)
+	if err != nil {
+		return nil, err
+	}
+
+	exchangeCtx, exchangeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer exchangeCancel()
+
+	var completeResp *registration.RefreshCompleteResponse
+	var renewedKeyPEM string
+	pending, pendingErr := loadRefreshPendingState(certStoreDir)
+	if pendingErr != nil {
+		logger.Warn("Discarding unreadable pending re-admission state", "error", logging.SanitizeLogValue(pendingErr.Error()))
+		_ = clearRefreshPendingState(certStoreDir)
+	}
+	if pending != nil {
+		completeResp, err = httpClient.RefreshClaim(exchangeCtx, ks.DeviceID(), pending.PendingID, nonce, serverTS, pop)
+		switch {
+		case err == nil:
+			renewedKeyPEM = pending.ClientKeyPEM
+		case errors.Is(err, registration.ErrRefreshPending):
+			logger.Info("Re-admission is pending operator approval",
+				"pending_id", logging.SanitizeLogValue(pending.PendingID))
+			return nil, err
+		case errors.Is(err, registration.ErrRefreshRejected), errors.Is(err, registration.ErrRefreshNotAvailable):
+			// Rejected, expired or already collected: the next cycle files a new
+			// request, so a later policy change or approval can still admit it.
+			_ = clearRefreshPendingState(certStoreDir)
+			return nil, err
+		default:
+			return nil, fmt.Errorf("collect pending re-admission: %w", err)
+		}
+	} else {
+		completeResp, renewedKeyPEM, err = completeRefreshWithFreshKeypair(
+			exchangeCtx, httpClient, ks.DeviceID(), tenantID, nonce, serverTS, pop)
+		if err != nil {
+			var queued *registration.RefreshPendingError
+			if errors.As(err, &queued) && queued.PendingID != "" && renewedKeyPEM != "" {
+				if saveErr := saveRefreshPendingState(certStoreDir, PendingState{PendingID: queued.PendingID, ClientKeyPEM: renewedKeyPEM}); saveErr != nil {
+					logger.Warn("Failed to persist pending re-admission; the next cycle files a new request",
+						"error", logging.SanitizeLogValue(saveErr.Error()))
+				}
+				logger.Info("Re-admission queued for operator approval",
+					"pending_id", logging.SanitizeLogValue(queued.PendingID))
+			}
+			return nil, err
+		}
+	}
+	_ = clearRefreshPendingState(certStoreDir)
+
+	logger.Info("Re-admission approved; storing new certificate",
+		"steward_id", logging.SanitizeLogValue(stewardID))
+
+	// Preserve the stored trust mode — the trust anchor is already established,
+	// matching registerAndConnect's reconnect semantics. With no stored identity
+	// the configured trust source applies.
+	refreshTrustSrc := trustSrc
+	priorCAPin := ""
+	if id != nil {
+		if stored := trustSourceFromMode(id.TrustMode); stored != 0 {
+			refreshTrustSrc = stored
+		}
+		priorCAPin = id.CAPinFingerprint
+		// Trust downgrade guard (Issue #4324 item 5): reject a CA swap against the
+		// fingerprint already pinned in id.
+		if dgErr := checkTrustDowngrade(refreshTrustSrc, completeResp.CACert, id); dgErr != nil {
+			return nil, fmt.Errorf("re-admission rejected: %w", dgErr)
+		}
+	}
+	if refreshTrustSrc == 0 {
+		refreshTrustSrc = trustSourceCompileBaked
+	}
+
+	bundle := approvedRegistration{
+		StewardID:        completeResp.StewardID,
+		TenantID:         completeResp.TenantID,
+		TransportAddress: completeResp.TransportAddress,
+		ClientCert:       completeResp.ClientCert,
+		ClientKey:        renewedKeyPEM,
+		CACert:           completeResp.CACert,
+		ServerCert:       completeResp.ServerCert,
+		IssuerChain:      completeResp.IssuerChain,
+	}
+	// The stored identity stays authoritative for anything the response omits
+	// (older controllers send no identity fields or transport address).
+	if id != nil {
+		bundle.StewardID, bundle.TenantID = id.StewardID, id.TenantID
+		if bundle.TransportAddress == "" {
+			bundle.TransportAddress = id.TransportAddress
+		}
+		if bundle.ServerCert == "" {
+			bundle.ServerCert = id.ServerCertPEM
+		}
+	}
+	if bundle.StewardID == "" || bundle.TransportAddress == "" {
+		return nil, fmt.Errorf("re-admission response lacks the steward identity or transport address needed without a stored identity")
+	}
+	enrichApprovedWithDeviceIdentity(&bundle, ks)
+	pinCAPEM := ""
+	if refreshTrustSrc == trustSourceInstallPinned {
+		pinCAPEM = installCAPEM
+	}
+	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, pinCAPEM, priorCAPin, runtimeCfg, publicBeta, logger)
+}
+
+// signRefreshChallenge obtains a challenge nonce and signs the proof-of-possession
+// digest sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
+// with the device key (ADR-011 §4); the formula must match the controller's.
+func signRefreshChallenge(ctx context.Context, httpClient *registration.HTTPClient, ks *identity.FileKeyStore) (string, int64, []byte, error) {
 	challengeCtx, challengeCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer challengeCancel()
 
 	challenge, err := httpClient.RefreshChallenge(challengeCtx, ks.DeviceID())
 	if err != nil {
-		return nil, fmt.Errorf("refresh challenge: %w", err)
+		if errors.Is(err, registration.ErrRefreshRejected) || errors.Is(err, registration.ErrRefreshUnknownDevice) {
+			return "", 0, nil, err
+		}
+		return "", 0, nil, fmt.Errorf("refresh challenge: %w", err)
 	}
 
-	// Decode the nonce from base64url.
 	nonceBytes, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
 	if err != nil {
-		return nil, fmt.Errorf("decode refresh nonce: %w", err)
+		return "", 0, nil, fmt.Errorf("decode refresh nonce: %w", err)
+	}
+	if challenge.ServerTS > math.MaxInt64 {
+		return "", 0, nil, fmt.Errorf("refresh challenge server timestamp exceeds int64 range")
 	}
 
-	// Compute the PoP digest: sha256(nonce_bytes || device_id_utf8 || server_ts_big_endian_uint64)
-	// per ADR-011 §4. This formula must match the controller's implementation exactly.
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], challenge.ServerTS)
-
 	digestInput := make([]byte, 0, len(nonceBytes)+len(ks.DeviceID())+8)
 	digestInput = append(digestInput, nonceBytes...)
 	digestInput = append(digestInput, []byte(ks.DeviceID())...)
@@ -1986,79 +2092,21 @@ func refreshAndConnect(
 
 	pop, err := ks.Sign(digest[:])
 	if err != nil {
-		return nil, fmt.Errorf("sign refresh digest: %w", err)
-	}
-
-	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer completeCancel()
-
-	if challenge.ServerTS > math.MaxInt64 {
-		return nil, fmt.Errorf("refresh challenge server timestamp exceeds int64 range")
+		return "", 0, nil, fmt.Errorf("sign refresh digest: %w", err)
 	}
 	// #nosec G115 -- the controller-provided uint64 timestamp is explicitly
 	// rejected above unless it fits the signed protocol field.
-	serverTS := int64(challenge.ServerTS)
+	return challenge.Nonce, int64(challenge.ServerTS), pop, nil
+}
 
-	completeResp, renewedKeyPEM, err := completeRefreshWithFreshKeypair(
-		completeCtx, httpClient, ks.DeviceID(), id.TenantID, challenge.Nonce, serverTS, pop)
-	if err != nil {
-		return nil, err // ErrRefreshPending or ErrRefreshRejected propagated to caller
+// registrationHTTPConfig returns the HTTP client configuration registration and
+// re-admission share: the pinned CA for an install-pinned steward, the default
+// trust otherwise.
+func registrationHTTPConfig(controllerURL string, trustSrc TrustSource, installCAPEM string, logger logging.Logger) *registration.HTTPConfig {
+	if trustSrc == trustSourceInstallPinned {
+		return buildHTTPConfigForInstallPinned(controllerURL, 30*time.Second, installCAPEM, logger)
 	}
-
-	logger.Info("Registration refresh approved; storing new certificate",
-		"steward_id", logging.SanitizeLogValue(id.StewardID))
-
-	// Preserve the stored trust mode on refresh — the trust anchor is already
-	// established, matching registerAndConnect's reconnect semantics.
-	refreshTrustSrc := trustSourceFromMode(id.TrustMode)
-	if refreshTrustSrc == 0 {
-		refreshTrustSrc = trustSourceCompileBaked
-	}
-
-	// Trust downgrade guard (Issue #4324 item 5): registerAndConnect already runs
-	// checkTrustDowngrade before enrolling; the refresh path reached this point
-	// without an equivalent check, so a controller (or MITM) returning a
-	// different CA in completeResp went undetected for install-pinned and
-	// compile-baked trust sources. refreshTrustSrc is derived from id.TrustMode
-	// itself so this never rejects on trust-source level, but it does reject a
-	// CA swap against the fingerprint already pinned in id.
-	if dgErr := checkTrustDowngrade(refreshTrustSrc, completeResp.CACert, id); dgErr != nil {
-		return nil, fmt.Errorf("registration refresh rejected: %w", dgErr)
-	}
-
-	// Persist the refreshed identity with updated certs.
-	// The controller's refresh response does not include TransportAddress or ServerCert
-	// (the connection endpoint and signing cert do not change during cert refresh).
-	// Preserve the stored values as authoritative fallbacks so the reconnect succeeds
-	// even when the controller omits those optional fields.
-	updatedID := *id
-	updatedID.CACertPEM = completeResp.CACert
-	if completeResp.ServerCert != "" {
-		updatedID.ServerCertPEM = completeResp.ServerCert
-	}
-	if completeResp.TransportAddress != "" {
-		updatedID.TransportAddress = completeResp.TransportAddress
-	}
-	if saveErr := saveIdentity(certStoreDir, updatedID); saveErr != nil {
-		logger.Warn("Failed to persist refreshed identity; next restart may re-register", "error", saveErr)
-	}
-
-	bundle := approvedRegistration{
-		StewardID:        id.StewardID,
-		TenantID:         id.TenantID,
-		TransportAddress: updatedID.TransportAddress,
-		ClientCert:       completeResp.ClientCert,
-		ClientKey:        renewedKeyPEM,
-		CACert:           completeResp.CACert,
-		ServerCert:       updatedID.ServerCertPEM,
-		IssuerChain:      completeResp.IssuerChain,
-	}
-	enrichApprovedWithDeviceIdentity(&bundle, ks)
-	// id.CAPinFingerprint (real pinned state, not a zero value) flows through so
-	// a TOFU-sourced refresh compares completeResp.CACert against history via
-	// pinTOFUCA instead of treating this call as a first-time pin (Issue #4324
-	// item 5).
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, "", id.CAPinFingerprint, runtimeCfg, publicBeta, logger)
+	return buildHTTPConfig(controllerURL, 30*time.Second, logger)
 }
 
 // buildCertManagerAndSecretStore initialises a cert.Manager (holding the

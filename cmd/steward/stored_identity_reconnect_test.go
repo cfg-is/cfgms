@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/pem"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +18,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	stewardconfig "github.com/cfgis/cfgms/features/steward/config"
 	"github.com/cfgis/cfgms/pkg/cert"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc"
@@ -116,6 +114,33 @@ func unusedUDPAddr(t *testing.T) string {
 	return addr
 }
 
+// pointAtRefusingController starts a real gRPC control plane, trusted by the
+// fixture's CA, whose approval check refuses every steward — the controller's
+// answer to an unknown, deregistered or revoked steward — and points the stored
+// identity's transport address at it.
+func (f *storedIdentityFixture) pointAtRefusingController(t *testing.T) {
+	t.Helper()
+	serverCert := f.serverCert(t)
+	serverTLS, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, []byte(f.caPEM), tls.VersionTLS13)
+	require.NoError(t, err)
+	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
+
+	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(denyAllApproval{}))
+	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "server",
+		"addr":       "127.0.0.1:0",
+		"tls_config": serverTLS,
+		"registry":   registry.NewRegistry(),
+	}))
+	require.NoError(t, server.Start(context.Background()))
+	t.Cleanup(server.ForceStop)
+
+	id, err := loadIdentity(f.certStoreDir)
+	require.NoError(t, err)
+	id.TransportAddress = server.ListenAddr()
+	require.NoError(t, saveIdentity(f.certStoreDir, *id))
+}
+
 // denyAllApproval refuses every steward's control channel, as the controller does
 // for an unknown, deregistered or revoked steward.
 type denyAllApproval struct{}
@@ -144,29 +169,12 @@ func TestRegisterAndConnect_UnreachableControlPlane_KeepsStoredIdentity(t *testi
 
 // TestRegisterAndConnect_ControllerRejectsIdentity_FallsBackToRegistration guards
 // the stranded-steward case Issue #4532 exists for: a controller that refuses the
-// stored identity (here, the control channel's approval check) sends the steward
-// to registration with its token.
+// stored identity (here, the control channel's approval check) never leaves the
+// steward stuck. With no device key to re-admit with, it registers with its token;
+// with one, it re-admits (TestRegisterAndConnect_RejectedStoredIdentityReadmitsWithDeviceKey).
 func TestRegisterAndConnect_ControllerRejectsIdentity_FallsBackToRegistration(t *testing.T) {
 	f := newStoredIdentityFixture(t, "placeholder")
-	serverCert := f.serverCert(t)
-	serverTLS, err := cert.CreateServerTLSConfig(serverCert.CertificatePEM, serverCert.PrivateKeyPEM, []byte(f.caPEM), tls.VersionTLS13)
-	require.NoError(t, err)
-	serverTLS.NextProtos = []string{quictransport.ALPNProtocol}
-
-	server := grpcCP.New(grpcCP.ModeServer, grpcCP.WithApprovalChecker(denyAllApproval{}))
-	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
-		"mode":       "server",
-		"addr":       "127.0.0.1:0",
-		"tls_config": serverTLS,
-		"registry":   registry.NewRegistry(),
-	}))
-	require.NoError(t, server.Start(context.Background()))
-	t.Cleanup(server.ForceStop)
-
-	id, err := loadIdentity(f.certStoreDir)
-	require.NoError(t, err)
-	id.TransportAddress = server.ListenAddr()
-	require.NoError(t, saveIdentity(f.certStoreDir, *id))
+	f.pointAtRefusingController(t)
 
 	srv, httpsCAPEM, hits := registrationCounter(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -177,64 +185,4 @@ func TestRegisterAndConnect_ControllerRejectsIdentity_FallsBackToRegistration(t 
 	require.Error(t, err, "the test controller refuses registration too")
 	assert.NotErrorIs(t, err, errStoredIdentityUnreachable)
 	assert.Positive(t, hits.Load(), "a rejected stored identity must fall back to registration")
-}
-
-// TestClearStoredIdentity verifies install --reenroll's helper removes the
-// identity record and pending state, so the next start registers, and leaves the
-// cert store alone. A second call on the cleared directory is a no-op.
-func TestClearStoredIdentity(t *testing.T) {
-	f := newStoredIdentityFixture(t, "127.0.0.1:1")
-	require.NoError(t, savePendingState(f.certStoreDir, PendingState{PendingID: "pending-1"}))
-
-	require.NoError(t, clearStoredIdentity(f.certStoreDir))
-	id, err := loadIdentity(f.certStoreDir)
-	require.NoError(t, err)
-	assert.Nil(t, id, "the identity record must be gone")
-	pending, err := loadPendingState(f.certStoreDir)
-	require.NoError(t, err)
-	assert.Nil(t, pending, "pending registration state must be gone")
-
-	tc, err := tryReconnectWithStoredIdentity(context.Background(), f.certStoreDir, "token", trustSourceCompileBaked, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
-	assert.Nil(t, tc)
-	assert.NoError(t, err, "with no stored identity the connect sequence falls through to registration")
-
-	require.NoError(t, clearStoredIdentity(f.certStoreDir))
-}
-
-// TestReenrollAndInstall_RestoresIdentityWhenInstallFails guards the #4533 review:
-// --reenroll clears the identity before install (the restarted service must find
-// none), so a failed install must put it back rather than leave the host with
-// neither the old identity nor a new one.
-func TestReenrollAndInstall_RestoresIdentityWhenInstallFails(t *testing.T) {
-	f := newStoredIdentityFixture(t, "127.0.0.1:1")
-	require.NoError(t, savePendingState(f.certStoreDir, PendingState{PendingID: "pending-1"}))
-	identityBefore := f.identityBytes(t)
-	pendingBefore, err := os.ReadFile(filepath.Join(f.certStoreDir, pendingStateFileName))
-	require.NoError(t, err)
-
-	var sawIdentityDuringInstall bool
-	installErr := errors.New("service manager refused the install")
-	err = reenrollAndInstall(f.certStoreDir, func() error {
-		_, statErr := os.Stat(filepath.Join(f.certStoreDir, identityFileName))
-		sawIdentityDuringInstall = statErr == nil
-		return installErr
-	})
-
-	require.ErrorIs(t, err, installErr)
-	assert.False(t, sawIdentityDuringInstall, "the identity must already be gone when install restarts the service")
-	assert.Equal(t, identityBefore, f.identityBytes(t), "the stored identity must be restored byte for byte")
-	pendingAfter, err := os.ReadFile(filepath.Join(f.certStoreDir, pendingStateFileName))
-	require.NoError(t, err)
-	assert.Equal(t, pendingBefore, pendingAfter, "pending registration state must be restored")
-}
-
-// TestReenrollAndInstall_ClearsIdentityWhenInstallSucceeds verifies the success
-// path leaves no stored identity, so the restarted steward registers.
-func TestReenrollAndInstall_ClearsIdentityWhenInstallSucceeds(t *testing.T) {
-	f := newStoredIdentityFixture(t, "127.0.0.1:1")
-	require.NoError(t, reenrollAndInstall(f.certStoreDir, func() error { return nil }))
-
-	id, err := loadIdentity(f.certStoreDir)
-	require.NoError(t, err)
-	assert.Nil(t, id)
 }

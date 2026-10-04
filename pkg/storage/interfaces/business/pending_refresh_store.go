@@ -19,6 +19,9 @@ const (
 	PendingRefreshStatusApproved = "approved"
 	PendingRefreshStatusRejected = "rejected"
 	PendingRefreshStatusExpired  = "expired"
+	// PendingRefreshStatusClaimed marks an approved refresh whose certificate the
+	// steward has collected through the claim endpoint (Issue #4532).
+	PendingRefreshStatusClaimed = "claimed"
 )
 
 // PendingRefreshEntry holds the durable state for a single registration-refresh

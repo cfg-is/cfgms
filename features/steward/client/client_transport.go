@@ -361,8 +361,9 @@ type TransportClient struct {
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
-	certStoreDir    string
-	admissionWindow time.Duration
+	certStoreDir          string
+	admissionWindow       time.Duration
+	initialConnectTimeout time.Duration
 
 	// revokedVersions is the controller-supplied list of revoked steward versions.
 	// Protected by revokedVersionsMu. Updated via SetRevokedVersions. (Issue #1943)
@@ -601,6 +602,12 @@ type TransportConfig struct {
 	// hands control back to the registration fallback.
 	AdmissionWindow time.Duration
 
+	// InitialConnectTimeout bounds the initial control-plane dial (Issue #4532).
+	// Zero retries until the controller is reachable — right after a fresh
+	// registration. The stored-identity reconnect sets it so an unreachable
+	// controller hands control back to the re-admission sequence.
+	InitialConnectTimeout time.Duration
+
 	// UpgradeAllowDowngrade, when true, permits the upgrade handler to install a
 	// steward version older than or equal to the currently running version.
 	// Mirrors steward.cfg upgrade.allow_downgrade. (Issue #1943)
@@ -769,6 +776,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		secretStore:                     cfg.SecretStore,
 		certStoreDir:                    cfg.CertStoreDir,
 		admissionWindow:                 cfg.AdmissionWindow,
+		initialConnectTimeout:           cfg.InitialConnectTimeout,
 		fenceRatchet:                    fenceRatchet,
 		termRatchetSet:                  ratchetSet,
 		highestTermSeen:                 highestTermSeen,
@@ -960,6 +968,9 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		}
 		if c.admissionWindow > 0 {
 			providerCfg["admission_window"] = c.admissionWindow
+		}
+		if c.initialConnectTimeout > 0 {
+			providerCfg["initial_connect_timeout"] = c.initialConnectTimeout
 		}
 		if tlsConfig == nil {
 			return fmt.Errorf("refusing to initialize gRPC control plane provider without a TLS configuration; mutual TLS is mandatory")

@@ -100,16 +100,19 @@ type Provider struct {
 	// controller's verdict on the first receive (Issue #4532). 0 keeps retrying
 	// every failure until p.ctx is done (Issue #3849).
 	admissionWindow time.Duration
-	rejectOnce      sync.Once
-	rejectedCh      chan struct{}
-	rejectErr       error
-	firstRecvOnce   sync.Once
-	firstRecvCh     chan struct{}
-	maxConnections  int
-	stewardID       string
-	tenantID        string
-	logger          logging.Logger
-	startTime       time.Time
+	// initialConnectTimeout bounds dialInitial's retries (Issue #4532). 0 retries
+	// until p.ctx is done (Issue #3849). It never bounds the established session.
+	initialConnectTimeout time.Duration
+	rejectOnce            sync.Once
+	rejectedCh            chan struct{}
+	rejectErr             error
+	firstRecvOnce         sync.Once
+	firstRecvCh           chan struct{}
+	maxConnections        int
+	stewardID             string
+	tenantID              string
+	logger                logging.Logger
+	startTime             time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
 	backoffOverride *backoff
@@ -234,6 +237,8 @@ func (p *Provider) Registry() registry.Registry {
 //     interfaces.ErrIdentityRejected when the controller definitively refuses the identity,
 //     waiting up to this long after the stream opens for the verdict (optional; 0 retries
 //     every failure until the provider's context ends)
+//   - "initial_connect_timeout": time.Duration - Client mode: stop retrying the initial dial after
+//     this long and return the last error (optional; 0 retries until the provider's context ends)
 //
 // Server mode additional keys:
 //   - "grpc_server": *grpc.Server - Externally-created gRPC server (optional; when provided,
@@ -276,6 +281,12 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 			return fmt.Errorf("admission_window must not be negative")
 		}
 		p.admissionWindow = aw
+	}
+	if ict, ok := config["initial_connect_timeout"].(time.Duration); ok {
+		if ict < 0 {
+			return fmt.Errorf("initial_connect_timeout must not be negative")
+		}
+		p.initialConnectTimeout = ict
 	}
 	if max, ok := config["max_connections"].(int); ok {
 		if max < 1 {
@@ -548,9 +559,16 @@ func isIdentityRejection(err error) bool {
 // When admissionWindow is set, a definitive identity rejection stops retrying and
 // is returned wrapping interfaces.ErrIdentityRejected (Issue #4532): a steward
 // reconnecting with a stored identity falls back to registration only then. An
-// unreachable or slow controller is still retried until p.ctx is done.
+// unreachable or slow controller is retried until p.ctx is done, or until
+// initialConnectTimeout elapses when it is set: the budget covers only this
+// initial connect, never the session p.ctx governs, and lets a steward with a
+// stored identity move on to re-admission (Issue #4532).
 func (p *Provider) dialInitial() error {
 	b := defaultBackoff()
+	var deadline time.Time
+	if p.initialConnectTimeout > 0 {
+		deadline = time.Now().Add(p.initialConnectTimeout)
+	}
 	for {
 		err := p.dialAndOpenStream()
 		if err == nil {
@@ -566,7 +584,18 @@ func (p *Provider) dialInitial() error {
 		default:
 		}
 
-		timer := time.NewTimer(b.next())
+		wait := b.next()
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("initial connect gave up after %s: %w", p.initialConnectTimeout, err)
+			}
+			if wait > remaining {
+				wait = remaining
+			}
+		}
+
+		timer := time.NewTimer(wait)
 		select {
 		case <-p.ctx.Done():
 			timer.Stop()

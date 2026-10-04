@@ -10,10 +10,40 @@ import "errors"
 // Callers should log and schedule a retry rather than treating this as fatal.
 var ErrRefreshPending = errors.New("registration refresh pending operator approval")
 
-// ErrRefreshRejected is returned by RefreshChallenge or RefreshComplete when the
-// controller refuses the request for a revoked or dormant device (HTTP 403).
-// Callers must halt and not fall through to full re-registration.
+// RefreshPendingError is the ErrRefreshPending a queued refresh returns, carrying
+// the pending ID the steward collects the outcome with through RefreshClaim
+// (Issue #4532). errors.Is(err, ErrRefreshPending) matches it.
+type RefreshPendingError struct {
+	PendingID string
+}
+
+func (e *RefreshPendingError) Error() string { return ErrRefreshPending.Error() }
+
+// Is reports whether target is ErrRefreshPending.
+func (e *RefreshPendingError) Is(target error) bool { return target == ErrRefreshPending }
+
+// ErrRefreshRejected is returned by RefreshChallenge, RefreshComplete or
+// RefreshClaim when the controller refuses the request (HTTP 403): the device is
+// revoked, tenant policy rejects refreshes, or an operator rejected it. The
+// refusal holds until the controller changes it; callers keep asking at a slow
+// interval rather than stopping, so a later approval needs no one at the device
+// (Issue #4532). They must not fall through to full re-registration.
 var ErrRefreshRejected = errors.New("registration refresh rejected by controller")
+
+// ErrRefreshUnknownDevice is returned when the controller has no steward record
+// for this device (HTTP 404 from the challenge or complete call): the device must
+// register with its token instead (Issue #4532).
+var ErrRefreshUnknownDevice = errors.New("controller has no record of this device")
+
+// ErrRefreshNotAvailable is returned by RefreshClaim when the pending refresh no
+// longer exists, has expired, or was already collected: the steward starts a new
+// refresh (Issue #4532).
+var ErrRefreshNotAvailable = errors.New("pending registration refresh is no longer available")
+
+// ErrDeviceAlreadyRegistered is returned by Register when the controller already
+// holds an active record for this device ID (HTTP 409). The device re-admits with
+// its device key through the refresh handshake instead (Issue #4532).
+var ErrDeviceAlreadyRegistered = errors.New("device is already registered with the controller")
 
 // RefreshChallengeResponse is the response body from POST /api/v1/stewards/{device_id}/refresh/challenge.
 type RefreshChallengeResponse struct {
@@ -35,4 +65,10 @@ type RefreshCompleteResponse struct {
 	IssuerChain      string `json:"issuer_chain,omitempty"`
 	ServerCert       string `json:"server_cert,omitempty"`
 	TransportAddress string `json:"transport_address"`
+
+	// StewardID and TenantID identify the record the certificate was issued for,
+	// so a steward re-admitting without its stored identity record can rebuild it
+	// (Issue #4532). Empty from controllers that predate the fields.
+	StewardID string `json:"steward_id,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
 }

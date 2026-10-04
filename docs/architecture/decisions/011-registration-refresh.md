@@ -215,6 +215,13 @@ Provenance is corroboration, not proof: the cryptographic identity proof is the 
 
 ---
 
+### Amendment 1 — Re-admission for any failed stored identity; approvals are delivered (Issue #4532)
+
+- **Trigger.** The handshake is no longer reserved for an expired client certificate. A steward runs it whenever its stored identity cannot reconnect — refused by the controller, locally unusable, or unreachable for a bounded connect budget while the controller's HTTPS side answers — and after a `409` from registration (the controller already holds the device's record). The device key ties the request to the existing record; the lifecycle gate and policy (§3, §6) decide the outcome exactly as before.
+- **Delivery.** `POST /api/v1/stewards/{device_id}/refresh/claim` lets a steward collect a queued request's outcome, proving possession with a fresh challenge exactly as `/refresh/complete` does. The steward keeps the queued CSR's private key and pending ID and claims instead of re-submitting; an approved entry is delivered once and marked `claimed`. Before this, an approval was signed and stored but never delivered, so under `require_approval` (the default) and for every archived steward the device queued forever.
+- **Refusal.** A `403` is no longer terminal for the steward process: the refusal holds, and the steward asks again hourly so a later approval needs no one at the device.
+- **Identity in the response.** The issued response carries `steward_id`, `tenant_id` and `transport_address`, so a steward that lost its identity record can rebuild it.
+
 ## Consequences
 
 **Positive**

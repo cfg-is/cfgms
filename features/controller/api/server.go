@@ -756,6 +756,7 @@ func (s *Server) setupRouter() {
 	// Registered on the base router like /api/v1/register (Issue #2096).
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
 	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
+	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/claim", s.handleRefreshClaim).Methods("POST", "OPTIONS")
 
 	// All routes on the api subrouter require authentication (enforced by authenticationMiddleware).
 	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
