@@ -6,18 +6,23 @@ package grpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	cfgcert "github.com/cfgis/cfgms/pkg/cert"
+	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // testEnv holds a matched server + client provider pair connected over real QUIC+mTLS.
@@ -716,68 +721,171 @@ func TestClientStop_DuringInitialDialDoesNotDeadlock(t *testing.T) {
 	}
 }
 
-// TestClientStart_InitialConnectTimeoutGivesUp guards Issue #4532: a steward
-// reconnecting with a stored identity must be able to give up on an
-// unreachable controller and fall back to registration. With
-// initial_connect_timeout set, Start returns the last dial error once the
-// budget has elapsed instead of retrying until the (undeadlined) context ends.
-func TestClientStart_InitialConnectTimeoutGivesUp(t *testing.T) {
-	_, clientTLS := newTestTLSConfigs(t, "steward-connect-budget-test")
-	addr := reserveUnusedUDPAddr(t)
-
-	client := New(ModeClient)
-	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":                    "client",
-		"addr":                    addr,
-		"tls_config":              clientTLS,
-		"steward_id":              "steward-connect-budget-test",
-		"initial_connect_timeout": time.Second,
-	}))
-	t.Cleanup(func() { _ = client.Stop(context.Background()) })
-
-	startErr := make(chan error, 1)
-	go func() { startErr <- client.Start(context.Background()) }()
-
-	select {
-	case err := <-startErr:
-		require.Error(t, err, "nothing is listening, so the initial connect must fail")
-		assert.Contains(t, err.Error(), "initial connect gave up")
-	case <-time.After(30 * time.Second):
-		t.Fatal("client.Start kept retrying past initial_connect_timeout")
+// startAdmissionServer starts a server provider with the given approval checker
+// (nil admits every steward) and returns its listen address.
+func startAdmissionServer(t *testing.T, serverTLS *tls.Config, checker StewardApprovalChecker) string {
+	t.Helper()
+	var opts []option
+	if checker != nil {
+		opts = append(opts, WithApprovalChecker(checker))
 	}
-}
-
-// TestClientStart_InitialConnectTimeoutDoesNotBoundSession guards the other
-// half of Issue #4532: the budget applies to the initial dial only. A session
-// established within it must outlive it.
-func TestClientStart_InitialConnectTimeoutDoesNotBoundSession(t *testing.T) {
-	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-budget-session-test")
-	addr := reserveUnusedUDPAddr(t)
-
-	reg := registry.NewRegistry()
-	server := New(ModeServer)
+	server := New(ModeServer, opts...)
 	require.NoError(t, server.Initialize(context.Background(), map[string]interface{}{
 		"mode":       "server",
-		"addr":       addr,
+		"addr":       "127.0.0.1:0",
 		"tls_config": serverTLS,
-		"registry":   reg,
+		"registry":   registry.NewRegistry(),
 	}))
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(server.ForceStop)
+	return server.ListenAddr()
+}
 
+// newAdmissionClient returns an initialized client provider with admission_window set.
+func newAdmissionClient(t *testing.T, addr string, clientTLS *tls.Config, stewardID string) *Provider {
+	t.Helper()
 	client := New(ModeClient)
 	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
-		"mode":                    "client",
-		"addr":                    addr,
-		"tls_config":              clientTLS,
-		"steward_id":              "steward-budget-session-test",
-		"initial_connect_timeout": 500 * time.Millisecond,
+		"mode":             "client",
+		"addr":             addr,
+		"tls_config":       clientTLS,
+		"steward_id":       stewardID,
+		"admission_window": 5 * time.Second,
 	}))
 	t.Cleanup(func() { _ = client.Stop(context.Background()) })
-	require.NoError(t, client.Start(context.Background()))
+	return client
+}
 
-	time.Sleep(1500 * time.Millisecond) // three times the budget
-	assert.True(t, client.IsConnected(), "the established session must survive past initial_connect_timeout")
-	_, ok := reg.Get("steward-budget-session-test")
-	assert.True(t, ok, "the steward must still be registered on the server")
+// startWithin runs client.Start and returns its error, failing the test if it
+// does not return within limit.
+func startWithin(t *testing.T, client *Provider, limit time.Duration) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- client.Start(context.Background()) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(limit):
+		t.Fatalf("client.Start did not return within %s", limit)
+		return nil
+	}
+}
+
+// TestClientStart_AdmissionWindow_UnreachableKeepsRetrying guards Issue #4532: a
+// controller that is merely unreachable is never reported as an identity
+// rejection — the initial connect keeps retrying, so a steward reconnecting with
+// a stored identity never falls back to registration because of an outage.
+func TestClientStart_AdmissionWindow_UnreachableKeepsRetrying(t *testing.T) {
+	_, clientTLS := newTestTLSConfigs(t, "steward-unreachable-test")
+	client := newAdmissionClient(t, reserveUnusedUDPAddr(t), clientTLS, "steward-unreachable-test")
+
+	done := make(chan error, 1)
+	go func() { done <- client.Start(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Start returned while nothing was listening: %v", err)
+	case <-time.After(8 * time.Second):
+	}
+
+	require.NoError(t, client.Stop(context.Background()))
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, interfaces.ErrIdentityRejected, "an unreachable controller is not a rejection")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after Stop")
+	}
+}
+
+// TestClientStart_AdmissionWindow_ApprovalRefusedIsIdentityRejected guards Issue
+// #4532: the controller refusing the control channel (unknown, deregistered or
+// revoked steward) is reported as ErrIdentityRejected rather than retried.
+func TestClientStart_AdmissionWindow_ApprovalRefusedIsIdentityRejected(t *testing.T) {
+	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-refused-test")
+	addr := startAdmissionServer(t, serverTLS, rejectAll{})
+	client := newAdmissionClient(t, addr, clientTLS, "steward-refused-test")
+
+	err := startWithin(t, client, 20*time.Second)
+	require.ErrorIs(t, err, interfaces.ErrIdentityRejected)
+	assert.False(t, client.IsConnected())
+}
+
+// TestClientStart_AdmissionWindow_UntrustedClientCertIsIdentityRejected guards
+// Issue #4532: a client certificate the controller's CA did not issue (the
+// steward enrolled with a different controller) fails the TLS handshake and is
+// reported as ErrIdentityRejected.
+func TestClientStart_AdmissionWindow_UntrustedClientCertIsIdentityRejected(t *testing.T) {
+	controllerCA := newTestCA(t)
+	otherCA := newTestCA(t)
+	clientTLS := otherCA.clientTLSConfig(t, "steward-foreign-cert-test")
+	// Trust the controller's server certificate so only the client certificate is wrong.
+	clientTLS.RootCAs = controllerCA.clientTLSConfig(t, "trust-only").RootCAs
+	addr := startAdmissionServer(t, controllerCA.serverTLSConfig(t), nil)
+	client := newAdmissionClient(t, addr, clientTLS, "steward-foreign-cert-test")
+
+	err := startWithin(t, client, 20*time.Second)
+	require.ErrorIs(t, err, interfaces.ErrIdentityRejected)
+}
+
+// TestClientStart_AdmissionWindow_UntrustedServerCertIsIdentityRejected guards
+// Issue #4532: a controller presenting a certificate the stored identity's CA does
+// not trust is a different controller, reported as ErrIdentityRejected.
+func TestClientStart_AdmissionWindow_UntrustedServerCertIsIdentityRejected(t *testing.T) {
+	controllerCA := newTestCA(t)
+	storedCA := newTestCA(t)
+	addr := startAdmissionServer(t, controllerCA.serverTLSConfig(t), nil)
+	client := newAdmissionClient(t, addr, storedCA.clientTLSConfig(t, "steward-moved-test"), "steward-moved-test")
+
+	err := startWithin(t, client, 20*time.Second)
+	require.ErrorIs(t, err, interfaces.ErrIdentityRejected)
+}
+
+// TestClientStart_AdmissionWindow_AdmittedConnects verifies an admitted identity
+// connects normally with admission_window set and the session stays up.
+func TestClientStart_AdmissionWindow_AdmittedConnects(t *testing.T) {
+	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-admitted-test")
+	addr := startAdmissionServer(t, serverTLS, approveAll{})
+	client := newAdmissionClient(t, addr, clientTLS, "steward-admitted-test")
+
+	require.NoError(t, startWithin(t, client, 30*time.Second))
+	assert.True(t, client.IsConnected())
+}
+
+// TestClientStart_NoAdmissionWindow_RefusalIsRetried pins the default: without
+// admission_window, a refused control channel is not surfaced by Start (the
+// fresh-registration connect keeps its existing retry behaviour).
+func TestClientStart_NoAdmissionWindow_RefusalIsRetried(t *testing.T) {
+	serverTLS, clientTLS := newTestTLSConfigs(t, "steward-default-refused-test")
+	addr := startAdmissionServer(t, serverTLS, rejectAll{})
+	client := New(ModeClient)
+	require.NoError(t, client.Initialize(context.Background(), map[string]interface{}{
+		"mode":       "client",
+		"addr":       addr,
+		"tls_config": clientTLS,
+		"steward_id": "steward-default-refused-test",
+	}))
+	t.Cleanup(func() { _ = client.Stop(context.Background()) })
+	assert.NoError(t, startWithin(t, client, 30*time.Second))
+}
+
+func TestIsIdentityRejection(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"permission denied", status.Error(codes.PermissionDenied, "steward reconnect not approved"), true},
+		{"unauthenticated", status.Error(codes.Unauthenticated, "no peer info"), true},
+		{"unavailable approval service", status.Error(codes.Unavailable, "steward approval service unavailable"), false},
+		{"connection timeout", status.Error(codes.Unavailable, "connection error: desc = \"transport: Error while dialing: timeout: no recent network activity\""), false},
+		{"bad certificate alert", status.Error(codes.Unavailable, "connection error: desc = \"transport: CRYPTO_ERROR 0x12a (remote): tls: bad certificate\""), true},
+		{"unknown authority", errors.New("tls: failed to verify certificate: x509: certificate signed by unknown authority"), true},
+		{"context deadline", context.DeadlineExceeded, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isIdentityRejection(tc.err))
+		})
+	}
 }

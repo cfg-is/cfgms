@@ -361,8 +361,8 @@ type TransportClient struct {
 
 	// certStoreDir is the on-disk cert/identity directory. The upgrade handler
 	// downloads binaries to a subdirectory here. (Issue #1943)
-	certStoreDir          string
-	initialConnectTimeout time.Duration
+	certStoreDir    string
+	admissionWindow time.Duration
 
 	// revokedVersions is the controller-supplied list of revoked steward versions.
 	// Protected by revokedVersionsMu. Updated via SetRevokedVersions. (Issue #1943)
@@ -592,11 +592,14 @@ type TransportConfig struct {
 	// handler returns an error. (Issue #1943)
 	CertStoreDir string
 
-	// InitialConnectTimeout bounds the initial control-plane dial (Issue #4532).
-	// Zero retries until the controller is reachable — right after a fresh
-	// registration. The stored-identity reconnect sets it so an unreachable
-	// controller hands control back to the registration fallback.
-	InitialConnectTimeout time.Duration
+	// AdmissionWindow, when set, makes Connect fail with an error wrapping
+	// controlplane interfaces.ErrIdentityRejected when the controller definitively
+	// refuses this identity, waiting up to this long after the control stream
+	// opens for its verdict (Issue #4532). An unreachable controller is retried
+	// until ctx ends either way. Zero — right after a fresh registration — retries
+	// every failure. The stored-identity reconnect sets it so a rejected identity
+	// hands control back to the registration fallback.
+	AdmissionWindow time.Duration
 
 	// UpgradeAllowDowngrade, when true, permits the upgrade handler to install a
 	// steward version older than or equal to the currently running version.
@@ -765,7 +768,7 @@ func NewTransportClient(cfg *TransportConfig) (*TransportClient, error) {
 		identityPersistFunc:             cfg.IdentityPersistFunc,
 		secretStore:                     cfg.SecretStore,
 		certStoreDir:                    cfg.CertStoreDir,
-		initialConnectTimeout:           cfg.InitialConnectTimeout,
+		admissionWindow:                 cfg.AdmissionWindow,
 		fenceRatchet:                    fenceRatchet,
 		termRatchetSet:                  ratchetSet,
 		highestTermSeen:                 highestTermSeen,
@@ -955,8 +958,8 @@ func (c *TransportClient) Connect(ctx context.Context) error {
 		if tenantID != "" {
 			providerCfg["tenant_id"] = tenantID
 		}
-		if c.initialConnectTimeout > 0 {
-			providerCfg["initial_connect_timeout"] = c.initialConnectTimeout
+		if c.admissionWindow > 0 {
+			providerCfg["admission_window"] = c.admissionWindow
 		}
 		if tlsConfig == nil {
 			return fmt.Errorf("refusing to initialize gRPC control plane provider without a TLS configuration; mutual TLS is mandatory")

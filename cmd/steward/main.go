@@ -27,6 +27,10 @@ import (
 	"syscall"
 	"time"
 
+	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+
+	"github.com/spf13/cobra"
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	"github.com/cfgis/cfgms/cmd/steward/service"
 	"github.com/cfgis/cfgms/features/steward"
@@ -43,7 +47,6 @@ import (
 	"github.com/cfgis/cfgms/pkg/registration/identity"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/version"
-	"github.com/spf13/cobra"
 
 	// Import logging providers to register them
 	_ "github.com/cfgis/cfgms/pkg/logging/providers/file"
@@ -1069,7 +1072,7 @@ func loadConnectedRuntimeConfig(publicBeta bool) (stewardconfig.StewardConfig, e
 func registerAndConnect(ctx context.Context, token, controllerURL string, trustSrc TrustSource, installCAPEM string, ks *identity.FileKeyStore, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	logger.Info("Starting steward connect sequence")
 
-	certStoreDir := defaultCertStoreDir()
+	certStoreDir := certStoreDirResolver()
 	runtimeCfg, err := loadConnectedRuntimeConfig(publicBeta)
 	if err != nil {
 		return nil, err
@@ -1088,11 +1091,19 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 		priorCAPinFingerprint = storedID.CAPinFingerprint
 	}
 
-	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
+	// Attempt cert-reuse reconnect (skips HTTP registration on restart). A
+	// stored identity the controller could not be reached with is returned so the
+	// connect loop retries it after its backoff; only a rejected or locally
+	// unusable identity falls through to the refresh and registration paths
+	// below (Issue #4532).
 	if tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger); tc != nil {
 		return tc, nil
 	} else if reconnErr != nil {
-		logger.Warn("Stored-identity reconnect failed; checking for expired-cert refresh path", "error", reconnErr)
+		if errors.Is(reconnErr, errStoredIdentityUnreachable) {
+			return nil, reconnErr
+		}
+		logger.Warn("Stored identity rejected or unusable; checking for expired-cert refresh path",
+			"error", logging.SanitizeLogValue(reconnErr.Error()))
 	}
 
 	// Expired-cert refresh path (Issue #2094): when a stored identity exists and all
@@ -1536,22 +1547,36 @@ func connectWithApprovedRegistration(
 	return transportClient, nil
 }
 
+// storedIdentityAdmissionWindow is how long the stored-identity reconnect waits,
+// once its control stream opens, for the controller to refuse the identity
+// (Issue #4532). The controller sends nothing on admission and refuses within a
+// round trip of its approval check, so silence for this long counts as admitted.
+//
+// The stored identity is abandoned for registration only when the controller
+// definitively rejects it (interfaces.ErrIdentityRejected): its certificate is
+// refused, the controller presents a certificate the identity's CA does not
+// trust, or the steward is unknown, deregistered or revoked. An unreachable or
+// slow controller — including one whose HTTPS API is up while its control plane
+// is down — is retried with the stored identity indefinitely, so a healthy
+// steward never spends a registration token or creates a duplicate record.
+const storedIdentityAdmissionWindow = 10 * time.Second
+
+// errStoredIdentityUnreachable marks a stored-identity reconnect that failed
+// without the controller rejecting the identity — unreachable, timed out, or
+// cancelled. registerAndConnect retries the stored identity on it instead of
+// registering (Issue #4532).
+var errStoredIdentityUnreachable = errors.New("controller not reachable with the stored identity")
+
 // tryReconnectWithStoredIdentity attempts to reconnect using the steward's
 // persisted identity record and the client cert already in the cert store,
 // skipping HTTP re-registration entirely.
 //
 // Returns (nil, nil) when no stored identity exists — caller falls through to
 // HTTP registration (first run or manually cleared identity).
-// Returns (nil, err) when a stored identity exists but reconnect fails — caller
-// should log the error and fall back to HTTP registration.
-// storedIdentityConnectBudget bounds the stored-identity reconnect's initial
-// dial (Issue #4532). Past it, registerAndConnect falls back to registering with
-// the configured token; if the controller is merely down, that fails too and the
-// connect loop retries the stored identity after its backoff, so a healthy
-// steward never re-registers needlessly. Three of gRPC's 20s per-attempt
-// connect ceilings.
-const storedIdentityConnectBudget = 60 * time.Second
-
+// Returns (nil, err) when a stored identity exists but reconnect fails: wrapping
+// errStoredIdentityUnreachable when the controller could not be reached (retry
+// the stored identity), otherwise for a rejected or locally unusable identity
+// (fall back to refresh or registration).
 func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token string, trustSrc TrustSource, runtimeCfg stewardconfig.StewardConfig, publicBeta bool, logger logging.Logger) (*client.TransportClient, error) {
 	id, err := loadIdentity(certStoreDir)
 	if err != nil {
@@ -1644,7 +1669,7 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 		ModuleTrustAdditionalPublishers: runtimeCfg.Steward.ModuleTrust.AdditionalPublishers,
 		PublicBeta:                      publicBeta,
 		CertStoreDir:                    certStoreDir,
-		InitialConnectTimeout:           storedIdentityConnectBudget,
+		AdmissionWindow:                 storedIdentityAdmissionWindow,
 		UpgradeAllowDowngrade:           upgradeAllowDowngradeReconnect,
 		UpgradePublisherTrustStore:      buildTestPublisherTrustStore(logger),
 		DNARefreshInterval:              dnaRefreshIntervalReconnect,
@@ -1679,7 +1704,14 @@ func tryReconnectWithStoredIdentity(ctx context.Context, certStoreDir, token str
 	transportClient.SetTenantID(id.TenantID)
 
 	if err := transportClient.Connect(ctx); err != nil {
-		return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
+		// Stop the control plane so a provider left reconnecting in the background
+		// (a refusal on the first receive starts its reconnect loop) does not keep
+		// dialing with an identity this attempt is abandoning.
+		_ = transportClient.Disconnect(context.Background())
+		if errors.Is(err, controlplaneInterfaces.ErrIdentityRejected) {
+			return nil, fmt.Errorf("failed to connect to controller with stored identity: %w", err)
+		}
+		return nil, fmt.Errorf("%w: %v", errStoredIdentityUnreachable, err)
 	}
 
 	logger.Info("Reconnected to controller via stored identity",
@@ -2084,6 +2116,11 @@ func buildClientCertManagerAtPath(certStorePath, clientCertPEM, clientKeyPEM, is
 
 	return certMgr
 }
+
+// certStoreDirResolver returns the cert/identity directory registerAndConnect
+// uses. Tests point it at a temporary directory; production uses
+// defaultCertStoreDir.
+var certStoreDirResolver = defaultCertStoreDir
 
 // defaultCertStoreDir returns the platform-specific stable directory for the
 // steward's on-demand client certificate store. Uses the same path convention
