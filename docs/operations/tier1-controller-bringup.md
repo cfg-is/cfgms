@@ -122,17 +122,19 @@ Expected output (abbreviated):
 [bootstrap] Step 6: Systemd service
 [bootstrap] cfgms-controller service started.
 [bootstrap] Step 7: Tenant seed
+[bootstrap]   Tenant root: created.
 [bootstrap]   Tenant team-root: created.
 [bootstrap]   Tenant agent-test: created.
 [bootstrap]   Tenant infra-hyperv: created.
 [bootstrap] Tenant seeding complete.
 [bootstrap] Step 8: Smoke test
 [PASS] health: GET /api/v1/health
+[PASS] tenant-exists: root
 [PASS] tenant-exists: team-root
 [PASS] tenant-exists: agent-test
 [PASS] tenant-exists: infra-hyperv
 
-Result: 4 passed, 0 failed
+Result: 5 passed, 0 failed
 
 ==========================================
  Tier 1 Controller Bootstrap Complete
@@ -489,12 +491,20 @@ Manually: copy the unit from `docs/deployment/single-controller/cfgms-controller
 and run the same systemctl commands.
 
 **Step 7 — Tenant seed**
-The script runs `cfg tenant create` three times (idempotent):
+The script runs `cfg tenant create` four times (idempotent):
 ```bash
-cfg tenant create --tenant-id=team-root
+cfg tenant create --tenant-id=root
+cfg tenant create --tenant-id=team-root --parent=root
 cfg tenant create --tenant-id=agent-test --parent=team-root
 cfg tenant create --tenant-id=infra-hyperv --parent=team-root
 ```
+The root tenant is the deployment's single tenant with no parent: root-scoped
+administrators reach every other tenant through it, and the controller refuses to create
+a second tenant without a parent. `root` is only its conventional name — the root is
+identified by position, so a controller seeded earlier with a different top-level tenant
+(for example `team-root`) keeps that tenant as its root. On such a controller the first
+command fails, the existing tree is left as is, and the smoke test's
+`tenant-exists: root` check fails.
 The `cfg` binary uses `CFGMS_ADMIN_BUNDLE` for authentication. Run these after
 the controller is running, using the copy of the admin bundle you captured in step 5
 (e.g. `CFGMS_ADMIN_BUNDLE=/run/cfgms-admin-bundle/admin.bundle.yaml cfg tenant create ...`
@@ -506,7 +516,7 @@ the same bundle copy as step 7:
 ```bash
 CFGMS_ADMIN_BUNDLE=/path/to/admin.bundle.yaml bash scripts/tier1-smoke-test.sh
 ```
-Expected: 4 checks pass (health + 3 tenant-exists). See §10.
+Expected: 5 checks pass (health + 4 tenant-exists). See §10.
 
 ---
 
@@ -517,18 +527,20 @@ The smoke test (`scripts/tier1-smoke-test.sh`) validates the bootstrapped contro
 | Check | What it verifies |
 |-------|-----------------|
 | `health: GET /api/v1/health` | REST API accepts mTLS connections and returns HTTP 200 |
-| `tenant-exists: team-root` | Root tenant seeded successfully |
+| `tenant-exists: root` | Root tenant seeded successfully |
+| `tenant-exists: team-root` | Team tenant seeded under root |
 | `tenant-exists: agent-test` | Child tenant seeded under team-root |
 | `tenant-exists: infra-hyperv` | Child tenant seeded under team-root |
 
 Expected output:
 ```
 [PASS] health: GET /api/v1/health
+[PASS] tenant-exists: root
 [PASS] tenant-exists: team-root
 [PASS] tenant-exists: agent-test
 [PASS] tenant-exists: infra-hyperv
 
-Result: 4 passed, 0 failed
+Result: 5 passed, 0 failed
 ```
 
 To run it manually right after bootstrap, on the controller, while the bundle

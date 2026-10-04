@@ -141,7 +141,7 @@ func TestTerminalScope_RootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
 	// setupCrossingTestServer but also seeds a steward in controllerService.
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -181,7 +181,7 @@ func TestTerminalScope_EmptyTenantNoRootScope_Refused(t *testing.T) {
 func TestTerminalScope_AccountBoundLowAssurance_NoCrossing_Returns401Challenge(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestTerminalScope_AccountBoundLowAssurance_NoCrossing_Returns401Challenge(t
 func TestTerminalScope_AccountBoundLowAssurance_WithCrossing_Allowed(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -230,7 +230,7 @@ func TestTerminalScope_AccountBoundLowAssurance_WithCrossing_Allowed(t *testing.
 func TestTerminalScope_RootScoped_WithCrossing_Allowed(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-b", ParentID: "root"})
 	require.NoError(t, err)

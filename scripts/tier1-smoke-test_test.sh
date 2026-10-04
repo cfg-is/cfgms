@@ -181,9 +181,9 @@ READY_F = os.environ['STUB_READY_FILE']
 PORT_F  = os.environ['STUB_PORT_FILE']
 
 TENANTS = {
-    'all-pass':           ['team-root', 'agent-test', 'infra-hyperv'],
-    'health-fail':        ['team-root', 'agent-test', 'infra-hyperv'],
-    'missing-team-root':  ['agent-test', 'infra-hyperv'],
+    'all-pass':           ['root', 'team-root', 'agent-test', 'infra-hyperv'],
+    'health-fail':        ['root', 'team-root', 'agent-test', 'infra-hyperv'],
+    'missing-root':       ['team-root', 'agent-test', 'infra-hyperv'],
 }
 present = TENANTS.get(MODE, TENANTS['all-pass'])
 
@@ -407,10 +407,10 @@ test_all_pass() {
 
   local pass_lines
   pass_lines=$(grep -c '^\[PASS\]' <<< "$out" 2>/dev/null) || pass_lines=0
-  if [[ "$pass_lines" -eq 4 ]]; then
-    _pass "all-pass: output contains 4 [PASS] lines"
+  if [[ "$pass_lines" -eq 5 ]]; then
+    _pass "all-pass: output contains 5 [PASS] lines"
   else
-    _fail "all-pass: expected 4 [PASS] lines, got $pass_lines — output: $out"
+    _fail "all-pass: expected 5 [PASS] lines, got $pass_lines — output: $out"
   fi
 
   local fail_lines
@@ -421,7 +421,7 @@ test_all_pass() {
     _fail "all-pass: expected 0 [FAIL] lines, got $fail_lines — output: $out"
   fi
 
-  if grep -q '^Result: 4 passed, 0 failed' <<< "$out"; then
+  if grep -q '^Result: 5 passed, 0 failed' <<< "$out"; then
     _pass "all-pass: summary line correct"
   else
     _fail "all-pass: missing or wrong summary line — output: $out"
@@ -456,10 +456,10 @@ test_health_fail() {
   # Tenant checks must still run even after health failure (3 [PASS] lines expected)
   local pass_lines
   pass_lines=$(grep -c '^\[PASS\]' <<< "$out" 2>/dev/null) || pass_lines=0
-  if [[ "$pass_lines" -eq 3 ]]; then
-    _pass "health-fail: tenant checks still run (3 [PASS] tenant lines)"
+  if [[ "$pass_lines" -eq 4 ]]; then
+    _pass "health-fail: tenant checks still run (4 [PASS] tenant lines)"
   else
-    _fail "health-fail: expected 3 [PASS] tenant lines, got $pass_lines — output: $out"
+    _fail "health-fail: expected 4 [PASS] tenant lines, got $pass_lines — output: $out"
   fi
 }
 
@@ -468,7 +468,7 @@ test_missing_tenant() {
   mkdir -p "$d"
   _setup_certs "$d"
   _write_stub_server "$d/stub_server.py"
-  _start_server "missing-team-root" "$d" || return
+  _start_server "missing-root" "$d" || return
 
   _make_bundle "$d" "$SERVER_PORT"
 
@@ -482,10 +482,10 @@ test_missing_tenant() {
     _fail "missing-tenant: expected exit 1, got $rc — output: $out"
   fi
 
-  if grep -q '^\[FAIL\] tenant-exists: team-root' <<< "$out"; then
-    _pass "missing-tenant: [FAIL] line present for team-root"
+  if grep -q '^\[FAIL\] tenant-exists: root' <<< "$out"; then
+    _pass "missing-tenant: [FAIL] line present for root"
   else
-    _fail "missing-tenant: missing [FAIL] tenant-exists: team-root line — output: $out"
+    _fail "missing-tenant: missing [FAIL] tenant-exists: root line — output: $out"
   fi
 
   if grep -q '^\[PASS\] tenant-exists: agent-test' <<< "$out" &&

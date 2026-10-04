@@ -68,7 +68,7 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 	// at "root") and act as a fleet-wide skeleton key, so it is never a legitimate grant
 	// target — the per-MSP grant (Decision 2(a)) or the justified, 30-minute break-glass
 	// (Decision 2(b)) are the only ways across the boundary.
-	if tenantID == rootTenantID {
+	if s.isRootTenantForCrossing(r.Context(), tenantID) {
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"access grants cannot be created on the root tenant", "ROOT_TENANT_NOT_GRANTABLE")
 		return
@@ -191,7 +191,7 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 	// tenant in the tree via the ancestry walk in hasActiveTenantCrossing. A root-scoped
 	// caller already reaches "root" itself without any crossing (ADR-025 Decision 1), so
 	// break-glass on "root" can only ever be an escalation attempt.
-	if tenantID == rootTenantID {
+	if s.isRootTenantForCrossing(r.Context(), tenantID) {
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"break-glass cannot be invoked on the root tenant", "ROOT_TENANT_NOT_CROSSABLE")
 		return
