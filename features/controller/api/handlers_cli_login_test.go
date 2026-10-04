@@ -855,9 +855,7 @@ func TestCliLoginSession_RootScoped_SubjectToTenantBoundary(t *testing.T) {
 	server.SetTenantCrossingStore(tcs)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cli-login-root"})
-	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cli-login-msp-a", ParentID: "cli-login-root"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cli-login-msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	principal := browserPrincipalAfterPasskeyLogin("root-op-2", true)
@@ -875,7 +873,9 @@ func TestCliLoginSession_RootScoped_SubjectToTenantBoundary(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusNotFound, rec.Code,
+	// cli-login-msp-a is a strict descendant of the deployment root, so ADR-025 A2.5
+	// refuses it with the crossing challenge rather than a silent 404.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"a root-scoped CLI-login session must not see a real descendant tenant without an active grant")
 }
 

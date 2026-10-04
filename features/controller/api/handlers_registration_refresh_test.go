@@ -84,6 +84,8 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
+	testTenantStores.Store(tenantManager, tenantStore)
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)
@@ -1633,4 +1635,34 @@ func TestHandleRefreshClaim_Refusals(t *testing.T) {
 		"another device's pending refresh is indistinguishable from an unknown one")
 	assert.Equal(t, http.StatusForbidden, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-rejected", priv).Code)
 	assert.Equal(t, http.StatusNotFound, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-missing", priv).Code)
+}
+
+// TestHandleApproveRefresh_AccountBoundRootScope_NoCrossing_Returns404 guards the
+// inline crossing check on a {pending_id} route (the middleware boundary is skipped):
+// an account-bound root-scope caller without the marker is subject to the boundary
+// exactly like a marked one, so without a crossing it gets the same 404 and nothing
+// is mutated.
+func TestHandleApproveRefresh_AccountBoundRootScope_NoCrossing_Returns404(t *testing.T) {
+	f := newRefreshFixture(t, nil)
+	pendingID := "refresh-bound-root-no-crossing"
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: pendingID,
+		DeviceID:  testDeviceID,
+		TenantID:  testTenantID,
+		Status:    business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	})
+
+	req := approveRefreshRequest(pendingID, boundRootScopeNoMarker("root-account-refresh"))
+	rec := httptest.NewRecorder()
+	f.server.handleApproveRefresh(rec, req)
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "pending refresh not found",
+		"the crossing guard, not a later lookup, must refuse the request")
+
+	entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
 }

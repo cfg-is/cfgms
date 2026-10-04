@@ -13,6 +13,7 @@ package dispatcher
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -64,8 +65,9 @@ type lockMetaEntry struct {
 type Dispatcher struct {
 	queue              *script.ExecutionQueue
 	controlPlane       controlplaneInterfaces.ControlPlaneProvider
-	signer             signature.Signer // optional; when nil commands are sent unsigned
-	termSource         TermSource       // optional; when nil commands carry term 0
+	signer             signature.Signer            // optional; when nil commands are sent unsigned
+	isLocallyConnected func(stewardID string) bool // optional; nil = dispatch to every queued device
+	termSource         TermSource                  // optional; when nil commands carry term 0
 	requireSignedAdhoc bool
 	// deviceLocks maps deviceID → chan struct{} (capacity 1).
 	// A non-blocking send acquires the slot; a receive releases it.
@@ -142,6 +144,13 @@ type Config struct {
 	// RequireSignedAdhoc makes a signer mandatory and prevents unsigned
 	// execute_script delivery. Public-beta deployments must set this true.
 	RequireSignedAdhoc bool
+	// IsLocallyConnected reports whether a steward's control-plane session is
+	// held by this node. When set, the dispatcher only dispatches to locally
+	// connected stewards: with a cluster-shared execution queue (Issue #4528)
+	// every node sees every device's work, and the node holding the session is
+	// the one that must deliver it and receive its result. Nil dispatches to
+	// every device in the queue (single-node behaviour).
+	IsLocallyConnected func(stewardID string) bool
 	// TermSource stamps the current fencing term onto every execute_script
 	// command, as the command publisher does for all other commands (#3390).
 	// Stewards that have seen a stamped command reject term 0 (ADR-029
@@ -190,6 +199,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		queue:               cfg.Queue,
 		controlPlane:        cfg.ControlPlane,
 		signer:              cfg.Signer,
+		isLocallyConnected:  cfg.IsLocallyConnected,
 		termSource:          cfg.TermSource,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
 		pollInterval:        interval,
@@ -461,6 +471,12 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Issue #4528: with a shared queue, only the node holding the steward's
+	// session dispatches to it, so the dispatching node is also the node that
+	// receives the result. Other nodes leave the work queued.
+	if d.isLocallyConnected != nil && !d.isLocallyConnected(deviceID) {
+		return
+	}
 
 	// Acquire per-device slot BEFORE dequeuing.
 	if !d.tryAcquireDevice(deviceID) {
@@ -512,6 +528,25 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// Lock is intentionally NOT released here. It is held until handleCompletionEvent
 	// receives the steward's EventScriptCompleted and calls releaseDevice. This ensures
 	// no second execution is dispatched while the first is running.
+}
+
+// metaInt reads an integer metadata value. A durable queue store returns
+// metadata through a JSON round-trip, so numbers arrive as float64 (or
+// json.Number) rather than int; reading only int would reset a retry counter
+// to 0 on every attempt and retry an idempotent failure forever (Issue #4528).
+func metaInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
 }
 
 // currentTerm returns the fencing term from the configured TermSource, or 0 when
@@ -738,7 +773,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			runID, _ = qe.Metadata["workflow_run_id"].(string)
 			jobID, _ = qe.Metadata["job_id"].(string)
 			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
-			retryCount, _ = qe.Metadata["retry_count"].(int)
+			retryCount = metaInt(qe.Metadata["retry_count"])
 			origQE = qe
 			break
 		}

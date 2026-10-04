@@ -96,6 +96,16 @@ func setupCrossingTestServer(t *testing.T) *Server {
 	return wireCrossingStore(t, setupTestServer(t))
 }
 
+// seedRootTenant creates the deployment's "root" tenant (ADR-032: exactly one root,
+// MSPs are its children) so tests' MSP tenants are never mistaken for the root by
+// tenant.Manager.RootTenantID (Issue #4542).
+func seedRootTenant(t *testing.T, server *Server) *Server {
+	t.Helper()
+	err := ensureTestRootTenant(context.Background(), server.tenantManager)
+	require.NoError(t, err)
+	return server
+}
+
 // setupCrossingTestServerWithLogger is setupCrossingTestServer with the logger supplied
 // at construction. Tests that capture authorization audit records must use this rather
 // than assigning server.logger afterwards: New() starts background sweep goroutines
@@ -124,7 +134,7 @@ func TestAuthorizeRootScopedCaller_DeniedRealDescendantWithoutCrossing(t *testin
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -151,7 +161,7 @@ func TestAuthorizeRootScopedCaller_AllowedWithActiveGrant(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -190,7 +200,7 @@ func TestAuthorizeAccountBoundCaller_LowAssuranceStillGatedByBoundary(t *testing
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -214,7 +224,7 @@ func TestAuthorizeAccountBoundCaller_LowAssuranceAllowedWithActiveGrant(t *testi
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -245,7 +255,7 @@ func TestAuthorizeAccountBoundCaller_LowAssuranceAllowedWithActiveGrant(t *testi
 func TestAuthorizeRootScopedCaller_RootItselfAlwaysAllowed(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
@@ -257,17 +267,15 @@ func TestAuthorizeRootScopedCaller_RootItselfAlwaysAllowed(t *testing.T) {
 }
 
 // TestAuthorizeRootScopedCaller_UnrelatedTopLevelTenant_Returns404NotChallenge verifies
-// that a tenant outside "root"'s own subtree entirely (a second, unrelated top-level
-// tenant — multi-root deployments) is an ordinary out-of-scope 404, not a crossing
-// case: there is nothing ADR-025 Decision 2 can remedy for a tenant that isn't part of
-// root's subtree at all.
+// that a second, unrelated top-level tenant (a legacy multi-root store; the manager
+// refuses to create one, Issue #4542) is an ordinary out-of-scope 404, not a crossing
+// case. With two parentless tenants the root is ambiguous, so root-scoped
+// authorization denies outright: there is nothing ADR-025 Decision 2 can remedy.
 func TestAuthorizeRootScopedCaller_UnrelatedTopLevelTenant_Returns404NotChallenge(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
-	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "second-root"})
-	require.NoError(t, err)
+	require.NoError(t, ensureTestRootTenant(ctx, server.tenantManager))
+	seedLegacyTopLevelTenant(t, server, "second-root")
 
 	caller := rootScopedPrincipal("root-operator-1")
 	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/tenants/second-root", "second-root", caller, nil)
@@ -283,7 +291,7 @@ func TestAuthorizeRootScopedCaller_UnrelatedTopLevelTenant_Returns404NotChalleng
 func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -320,7 +328,7 @@ func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 func TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -383,9 +391,9 @@ func makeRootScopedAdminTestCert(t *testing.T) *x509.Certificate {
 // TestHandleCreateTenantCrossingGrant_Success verifies an MSP admin scoped to its own
 // tenant can create a grant for a root-scoped support principal (ADR-025 Decision 2(a)).
 func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
@@ -404,9 +412,9 @@ func TestHandleCreateTenantCrossingGrant_Success(t *testing.T) {
 // TestHandleCreateTenantCrossingGrant_CrossTenantRefused verifies an MSP admin cannot
 // grant access into a tenant outside its own subtree.
 func TestHandleCreateTenantCrossingGrant_CrossTenantRefused(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-b"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-b", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	mspAAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
@@ -427,7 +435,7 @@ func TestHandleCreateTenantCrossingGrant_CrossTenantRefused(t *testing.T) {
 func TestHandleCreateTenantCrossingGrant_RootTenantRefused(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -454,7 +462,7 @@ func TestHandleCreateTenantCrossingGrant_RootTenantRefused(t *testing.T) {
 func TestHandleCreateTenantCrossingGrant_RootScopedCallerRefused(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -480,7 +488,7 @@ func TestHandleCreateTenantCrossingGrant_RootScopedCallerRefused(t *testing.T) {
 func TestHandleCreateTenantCrossingGrant_SelfGrantRefused(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	mspAdmin := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
@@ -504,7 +512,7 @@ func TestHandleCreateTenantCrossingGrant_SelfGrantRefused(t *testing.T) {
 func TestCrossingOnRootDoesNotCoverDescendants(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -532,7 +540,7 @@ func TestCrossingOnRootDoesNotCoverDescendants(t *testing.T) {
 func TestHandleTenantBreakGlass_RootTenantRefused(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
@@ -553,7 +561,7 @@ func TestHandleTenantBreakGlass_RootTenantRefused(t *testing.T) {
 func TestHandleTenantBreakGlass_Success(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -579,7 +587,7 @@ func TestHandleTenantBreakGlass_Success(t *testing.T) {
 func TestHandleTenantBreakGlass_RequiresRootScoped(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	notRootScoped := &Principal{ID: "msp-a-admin", TenantID: "msp-a", Assurance: session.AssuranceStrong}
@@ -594,9 +602,9 @@ func TestHandleTenantBreakGlass_RequiresRootScoped(t *testing.T) {
 // TestHandleTenantBreakGlass_RequiresJustification verifies a missing or too-short
 // X-Justification is rejected before any crossing is created.
 func TestHandleTenantBreakGlass_RequiresJustification(t *testing.T) {
-	server := setupCrossingTestServer(t)
+	server := seedRootTenant(t, setupCrossingTestServer(t))
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	caller := rootScopedPrincipal("root-operator-1")
@@ -618,7 +626,7 @@ func TestHandleTenantBreakGlass_RequiresJustification(t *testing.T) {
 func TestHandleListTenantCrossings_ReturnsActivity(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	now := time.Now().UTC()
@@ -644,4 +652,90 @@ func TestHandleListTenantCrossings_ReturnsActivity(t *testing.T) {
 	items, ok := resp.Data.([]interface{})
 	require.True(t, ok)
 	assert.Len(t, items, 2)
+}
+
+// accountBoundRootScopePrincipal is a principal resolved from a root-scope account
+// whose request carries no ADR-025 root-scope marker: an mTLS admin cert bound to
+// the account but issued before the marker existed, or a browser/CLI session below
+// phishing-resistant assurance. subjectToTenantCrossingBoundary judges it on
+// GlobalScope (Issue #4337), so the boundary treats it as root-scoped.
+func accountBoundRootScopePrincipal(id string) *Principal {
+	return &Principal{
+		ID:            id,
+		Name:          "mtls-admin:" + id,
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		RootScoped:    false,
+		AccountBound:  true,
+		ImplicitAdmin: true,
+	}
+}
+
+// TestHandleTenantBreakGlass_AccountBoundRootScope_Allowed guards that a principal the
+// tenant boundary challenges for a crossing can actually obtain one: the boundary
+// and the break-glass handler must agree on who is root-scoped. Before the fix the
+// boundary returned tenant_crossing_required while break-glass refused the same
+// caller with NOT_ROOT_SCOPED, leaving no path into any child tenant.
+func TestHandleTenantBreakGlass_AccountBoundRootScope_Allowed(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	err := ensureTestRootTenant(ctx, server.tenantManager)
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	caller := accountBoundRootScopePrincipal("root-account-1")
+	require.True(t, subjectToTenantCrossingBoundary(caller), "precondition: the boundary treats this caller as root-scoped")
+	require.Equal(t, tenantAuthNeedsCrossing, server.authorizeTenantAccess(ctx, caller, "msp-a"))
+
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte("{}"))
+	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
+	rec := httptest.NewRecorder()
+	server.handleTenantBreakGlass(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	assert.Equal(t, tenantAuthAllowed, server.authorizeTenantAccess(ctx, caller, "msp-a"),
+		"after break-glass the boundary must admit the caller")
+}
+
+// TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused guards the
+// self-dealing rule for the same principal shape: a caller the boundary treats as
+// root-scoped must not mint a grant (consent belongs to the MSP); break-glass is its
+// only path. Before the fix the RootScoped-only check let it through once the caller
+// held a break-glass crossing — turning a justified 30-minute crossing into a
+// self-issued grant of any duration.
+func TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	err := ensureTestRootTenant(ctx, server.tenantManager)
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	caller := accountBoundRootScopePrincipal("root-account-1")
+	now := time.Now()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:            "bound-root-break-glass",
+		TenantID:      "msp-a",
+		PrincipalID:   caller.ID,
+		Kind:          business.TenantCrossingKindBreakGlass,
+		GrantedBy:     caller.ID,
+		Justification: "Customer P1 outage, ticket INC-4821, need config diff now",
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(30 * time.Minute),
+	}))
+	require.Equal(t, tenantAuthAllowed, server.authorizeTenantAccess(ctx, caller, "msp-a"),
+		"precondition: the break-glass crossing admits the caller")
+
+	// Grant a colleague, not itself: SELF_GRANT_FORBIDDEN already covers self-grants.
+	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-2", "duration_minutes": 60})
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", caller, body)
+	rec := httptest.NewRecorder()
+	server.handleCreateTenantCrossingGrant(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "ROOT_SCOPED_CANNOT_GRANT")
+
+	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-2", "msp-a")
+	require.NoError(t, err)
+	assert.False(t, active, "a root-scoped caller must not consent on the MSP's behalf")
 }

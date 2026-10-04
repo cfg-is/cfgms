@@ -366,20 +366,17 @@ func resolveDNADataRoot(cfg *config.Config) string {
 	return root
 }
 
-// resolveRootTenantID returns the OSS single-root deployment's bootstrap/root
-// tenant ID ("default" — features/tenant/manager.go, e.g. ErrCannotSuspendDefault),
-// resolved through the tenant store rather than handed to configrouting.NewSyncService
-// as a bare literal. A missing record is logged but does not block startup:
-// SyncService.Run tolerates an unknown root — it enumerates zero git tenants until
-// the record exists, and picks them up on the next Register once it does — so
-// construction order here never depends on tenant bootstrap having already run.
-func resolveRootTenantID(ctx context.Context, tenantStore business.TenantStore, logger logging.Logger) string {
-	const bootstrapRootTenantID = "default"
-	if _, err := tenantStore.GetTenant(ctx, bootstrapRootTenantID); err != nil {
-		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
-			"root_tenant_id", bootstrapRootTenantID)
+// resolveRootTenantID returns the deployment's root tenant for the periodic config
+// sync's single-root boundary: the single tenant with no parent, resolved by the
+// tenant manager (Issue #4542). With no tenants, or several parentless tenants, it
+// returns "" and logs a warning without blocking startup; SyncService then syncs
+// no tenants and refuses every Register.
+func resolveRootTenantID(ctx context.Context, tenants *tenant.Manager, logger logging.Logger) string {
+	root := tenants.RootTenantID(ctx)
+	if root == "" {
+		logger.Warn("configrouting: no root tenant (no tenants, or more than one top-level tenant); periodic config sync covers no tenants until the controller restarts with exactly one")
 	}
-	return bootstrapRootTenantID
+	return root
 }
 
 // resolveInstallerBlobRoot returns the configured installer artifact root, or
@@ -803,7 +800,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 	// cascade") — distinct from the save=deploy steward fan-out registered
 	// separately below in features/controller/api/server.go, which is a
 	// write-triggered push, not a cascade recompute.
-	rootTenantID := resolveRootTenantID(context.Background(), storageManager.GetTenantStore(), logger)
+	rootTenantID := resolveRootTenantID(context.Background(), tenantManager, logger)
 	cascadeFn := func(ctx context.Context, tenantID string) error {
 		_, err := configService.GetEffectiveConfiguration(ctx, tenantID, "")
 		return err
@@ -1321,12 +1318,30 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		logger.Info("Initializing execution queue and job dispatcher...")
 		monitor := scriptmodule.NewExecutionMonitor()
 		keyManager := scriptmodule.NewEphemeralKeyManager()
+		// Issue #4528: in cluster mode the queue is the shared database store, so
+		// the node holding a steward's session dispatches its work whichever node
+		// queued it. Single-node keeps the in-memory store (nil).
+		var queueStore scriptmodule.QueueStore
+		var isLocallyConnected func(string) bool
+		if cfg.HA.IsClusterMode() {
+			if shared := storageManager.GetExecutionQueueStore(); shared != nil {
+				queueStore = controllerrun.NewSharedQueueStore(shared)
+				registryForDispatch := connRegistry
+				isLocallyConnected = func(stewardID string) bool {
+					_, ok := registryForDispatch.Get(stewardID)
+					return ok
+				}
+				logger.Info("Execution queue: using the cluster-shared store")
+			} else {
+				logger.Warn("Execution queue: cluster mode without a shared queue store; exec reaches only runs accepted by this node")
+			}
+		}
 		executionQueue = scriptmodule.NewExecutionQueue(
 			monitor,
 			keyManager,
 			0,              // maxAge — defaults to 24 h
 			cfg.ListenAddr, // controllerURL for ephemeral-key callbacks
-			nil,            // store — defaults to InMemoryQueueStore
+			queueStore,     // store — nil defaults to InMemoryQueueStore
 			nil,            // scriptRepo — resolved at dispatch time when wired separately
 			0,              // dispatchTimeout — defaults to 1 h
 		)
@@ -1336,6 +1351,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			ControlPlane:       dispatchControlPlane,
 			Signer:             commandSigner,
 			RequireSignedAdhoc: cfg.Execution.RequireSignedAdhoc,
+			IsLocallyConnected: isLocallyConnected,
 			// Issue #4510: same term source as the command publisher below, so
 			// execute_script passes the steward fence like every other command.
 			TermSource: haManager,
@@ -1995,7 +2011,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Issue #1673: Wire run/job/execution model into API server.
 	// The run store opens a dedicated connection to the same SQLite database.
-	if runManager := initializeRunManager(context.Background(), cfg, executionQueue, logger); runManager != nil {
+	if runManager := initializeRunManager(context.Background(), cfg, storageManager, executionQueue, logger); runManager != nil {
 		srv.runManager = runManager
 		httpServer.SetRunManager(runManager, executionQueue)
 		// Wire the run manager as the dispatcher's completion sink so steward
@@ -4254,9 +4270,20 @@ func (s *Server) GetTransportListenAddr() string {
 func initializeRunManager(
 	ctx context.Context,
 	cfg *config.Config,
+	storageManager *interfaces.StorageManager,
 	executionQueue *scriptmodule.ExecutionQueue,
 	logger logging.Logger,
 ) *controllerrun.Manager {
+	// Issue #4528: in cluster mode runs live in the shared database so a run
+	// accepted by one node is visible to, and completed on, every node.
+	if cfg.HA.IsClusterMode() && storageManager != nil {
+		if shared := storageManager.GetScriptRunStore(); shared != nil {
+			logger.Info("Run manager initialized with the cluster-shared run store")
+			return controllerrun.NewManager(controllerrun.NewSharedRunStore(shared), executionQueue)
+		}
+		logger.Warn("Run manager: cluster mode without a shared run store; runs are visible only on the node that accepted them")
+	}
+
 	if cfg.Storage == nil || cfg.Storage.SQLitePath == "" {
 		logger.Warn("Run manager: SQLite path not configured, run API disabled")
 		return nil

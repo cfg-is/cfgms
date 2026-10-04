@@ -25,6 +25,13 @@ var ErrStewardAlreadyExists = errors.New("steward already exists")
 // revoked holder pass that gate. Providers enforce this with a unique index on
 // (tenant_id, device_id) restricted to non-empty device_id, which is what makes
 // the guard hold under concurrent claims rather than only in sequence (Issue #3403).
+//
+// A DEREGISTERED record does not hold its device_id (Issue #4534): decommissioning
+// releases the device so the same machine can enroll again, while the record keeps
+// the device_id for history matching. Revoked records still hold it. Device lookups
+// return a non-deregistered record ahead of deregistered ones, so at most one live
+// record answers for a device and an old deregistered record's key cannot be used
+// to revive it once the device has re-enrolled.
 var ErrStewardDeviceIDConflict = errors.New("device_id already registered by another steward in this tenant")
 
 // ErrStewardRevoked is returned by callers of GetStewardByDeviceID when the

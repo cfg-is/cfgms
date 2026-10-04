@@ -284,6 +284,13 @@ func (s *SyncService) syncOnce(ctx context.Context, tenantID string, info *pkgco
 // findGitTenants returns IDs of all tenants under rootTenantID with a git config source,
 // walking the hierarchy recursively.
 func (s *SyncService) findGitTenants(ctx context.Context) ([]string, error) {
+	// No resolvable root (no tenants, or several top-level tenants): there is no
+	// single-root subtree to sync. Walking children of "" would instead list every
+	// top-level tenant (Issue #4542).
+	if s.rootTenantID == "" {
+		return nil, nil
+	}
+
 	var result []string
 
 	rootInfo, _ := s.router.GetEffectiveConfigSource(ctx, s.rootTenantID)

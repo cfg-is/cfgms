@@ -211,7 +211,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceID(ctx context.Context, deviceI
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
-		FROM steward_records WHERE device_id = $1 ORDER BY id ASC LIMIT 1`, deviceID)
+		FROM steward_records WHERE device_id = $1 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`, deviceID)
 	return scanStewardDBRow(row)
 }
 
@@ -227,7 +227,7 @@ func (s *DatabaseStewardStore) GetStewardByDeviceIDForTenant(ctx context.Context
 		SELECT id, tenant_id, hostname, platform, arch, version, ip_address, status,
 		       registered_at, last_seen, last_heartbeat_at,
 		       device_id, identity_key_pub, key_protection_level, last_provenance_json, hidden
-		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY id ASC LIMIT 1`,
+		FROM steward_records WHERE device_id = $1 AND tenant_id = $2 ORDER BY (status = 'deregistered') ASC, id ASC LIMIT 1`,
 		deviceID, tenantID)
 	return scanStewardDBRow(row)
 }

@@ -41,6 +41,18 @@ type CA struct {
 }
 
 // NewCA creates a new Certificate Authority manager
+// clockSkewAllowance is how far before issuance a certificate's NotBefore is
+// set. Verifiers check validity against their own clocks, and a steward whose
+// clock trails the controller's by even seconds would otherwise see a
+// certificate it was just issued as not yet valid — which made the enrollment
+// fence-ratchet reset fail closed on such hosts (Issue #4536).
+const clockSkewAllowance = 5 * time.Minute
+
+// notBefore returns the NotBefore for a certificate issued now.
+func notBefore() time.Time {
+	return time.Now().Add(-clockSkewAllowance)
+}
+
 func NewCA(config *CAConfig) (*CA, error) {
 	if config == nil {
 		return nil, fmt.Errorf("CA config is required")
@@ -107,7 +119,7 @@ func (ca *CA) Initialize(config *CAConfig) error {
 			OrganizationalUnit: []string{ca.config.OrganizationalUnit},
 			CommonName:         fmt.Sprintf("%s Root CA", ca.config.Organization),
 		},
-		NotBefore:             time.Now(),
+		NotBefore:             notBefore(),
 		NotAfter:              time.Now().Add(time.Duration(ca.config.ValidityDays) * 24 * time.Hour),
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
@@ -495,7 +507,7 @@ func (ca *CA) GenerateServerCertificate(config *ServerCertConfig) (*Certificate,
 			Organization: []string{config.Organization},
 			CommonName:   config.CommonName,
 		},
-		NotBefore:   time.Now(),
+		NotBefore:   notBefore(),
 		NotAfter:    time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
 		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -582,7 +594,7 @@ func (ca *CA) GenerateClientCertificate(config *ClientCertConfig) (*Certificate,
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      subject,
-		NotBefore:    time.Now(),
+		NotBefore:    notBefore(),
 		NotAfter:     time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -676,7 +688,7 @@ func (ca *CA) SignClientCertificateRequest(pubKey crypto.PublicKey, config *Clie
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      subject,
-		NotBefore:    time.Now(),
+		NotBefore:    notBefore(),
 		NotAfter:     time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
@@ -784,7 +796,7 @@ func (ca *CA) SignSubordinateCA(pubKey crypto.PublicKey, config *SubordinateCACo
 	template := &x509.Certificate{
 		SerialNumber:          serialNumber,
 		Subject:               subject,
-		NotBefore:             time.Now(),
+		NotBefore:             notBefore(),
 		NotAfter:              time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
@@ -869,7 +881,7 @@ func (ca *CA) GenerateSigningCertificate(config *SigningCertConfig) (*Certificat
 			Organization: []string{config.Organization},
 			CommonName:   config.CommonName,
 		},
-		NotBefore:   time.Now(),
+		NotBefore:   notBefore(),
 		NotAfter:    time.Now().Add(time.Duration(config.ValidityDays) * 24 * time.Hour),
 		KeyUsage:    x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},

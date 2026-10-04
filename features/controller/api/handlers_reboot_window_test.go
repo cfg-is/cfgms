@@ -19,6 +19,7 @@ import (
 	"github.com/cfgis/cfgms/features/rbac"
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/audit"
+	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 )
@@ -112,11 +113,10 @@ func TestGetStewardRebootWindow_CascadeResolvesInheritedWindow(t *testing.T) {
 	// at LevelClient (index 1 in the tenant path). The handler's PUT falls back to
 	// client-policies/{tenantID} when s.tenantStore is nil; level-1 in the resolver
 	// reads the same namespace.
-	rootID := "cascade-root"
+	// setupTestServer seeds the deployment root, which is level 0 of the path.
+	rootID := testRootTenantID
 	tenantID := "cascade-client"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: rootID, Name: "cascade-root"})
-	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: rootID})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: rootID})
 	require.NoError(t, err)
 
 	stewardID := "cascade-steward-1"
@@ -165,7 +165,7 @@ func TestGetStewardRebootWindow_UnrestrictedWhenNoWindowDeclared(t *testing.T) {
 
 	stewardID := "unrestricted-steward"
 	tenantID := "unrestricted-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "unrestricted-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "unrestricted-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "localhost:7001", "online"))
 
@@ -196,7 +196,7 @@ func TestPutStewardRebootWindow_DeviceLevelOverride(t *testing.T) {
 
 	stewardID := "device-override-steward"
 	tenantID := "device-override-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "device-override-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "device-override-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "localhost:7002", "online"))
 
@@ -357,7 +357,7 @@ func TestRebootWindowPermissions_GrantableThroughCreateAPIKey(t *testing.T) {
 	ctx := context.Background()
 
 	tenantID := "least-priv-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	createBody := []byte(`{"name":"reboot-window-key","tenant_id":"` + tenantID +
@@ -443,9 +443,9 @@ func TestGetStewardRebootWindow_CrossTenantCaller_404(t *testing.T) {
 	attackerTenant := "iso-attacker-tenant"
 	stewardID := "iso-victim-steward"
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, victimTenant, "localhost:7010", "online"))
 
@@ -476,9 +476,9 @@ func TestPutStewardRebootWindow_CrossTenantCaller_404_NoWrite(t *testing.T) {
 	attackerTenant := "write-attacker-tenant"
 	stewardID := "write-victim-steward"
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, victimTenant, "localhost:7011", "online"))
 
@@ -523,7 +523,7 @@ func TestGetStewardRebootWindow_RootScopedCallerWithoutCrossing_Challenged(t *te
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rw", ParentID: "root"})
 	require.NoError(t, err)
@@ -554,7 +554,7 @@ func TestPutStewardRebootWindow_RootScopedCallerWithActiveCrossing_Allowed(t *te
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rw2", ParentID: "root"})
 	require.NoError(t, err)
@@ -598,3 +598,46 @@ var _ interface {
 	Flush(ctx context.Context) error
 	QueryEntries(ctx context.Context, filter *business.AuditFilter) ([]*business.AuditEntry, error)
 } = (*audit.Manager)(nil)
+
+// boundRootScopeNoMarker is a principal resolved from a root-scope account whose
+// request carries no ADR-025 root-scope marker (a pre-marker bound admin cert, or a
+// session below phishing-resistant assurance). subjectToTenantCrossingBoundary judges
+// it on GlobalScope (Issue #4337), so it is root-scoped for the tenant boundary.
+func boundRootScopeNoMarker(id string) *Principal {
+	return &Principal{
+		ID:            id,
+		Name:          "mtls-admin:" + id,
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		RootScoped:    false,
+		AccountBound:  true,
+		ImplicitAdmin: true,
+	}
+}
+
+// TestGetStewardRebootWindow_AccountBoundRootScopeWithoutCrossing_Challenged guards the
+// inline crossing check: the route carries a steward ID, so the middleware boundary is
+// skipped and this check is the only guard. It must use the boundary's own predicate,
+// so an account-bound root-scope caller without the marker is challenged too.
+func TestGetStewardRebootWindow_AccountBoundRootScopeWithoutCrossing_Challenged(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+
+	err := ensureTestRootTenant(ctx, server.tenantManager)
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rwb", ParentID: testRootTenantID})
+	require.NoError(t, err)
+
+	stewardID := "msp-rwb-steward"
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "msp-rwb", "localhost:7013", "online"))
+
+	caller := boundRootScopeNoMarker("root-account-rw")
+	req := requestAsPrincipal(t, http.MethodGet,
+		"/api/v1/stewards/"+stewardID+"/reboot-window", stewardID, caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleGetStewardRebootWindow(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code,
+		"an account-bound root-scope caller without a crossing must get a tenant-crossing challenge: %s", rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}

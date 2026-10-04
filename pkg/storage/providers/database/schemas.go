@@ -914,6 +914,88 @@ func (s DatabaseSchemas) CreateRoutingTable(ctx context.Context, db *sql.DB) err
 	return nil
 }
 
+// CreateScriptRunTables creates the script run, job and execution-grant tables
+// backing business.ScriptRunStore (Issue #4528). In cluster mode every
+// controller node reads and completes runs through these shared tables.
+func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS script_runs (
+			run_id         TEXT PRIMARY KEY,
+			tenant_id      TEXT NOT NULL,
+			created_by     TEXT NOT NULL DEFAULT '',
+			created_at     TIMESTAMP WITH TIME ZONE NOT NULL,
+			status         TEXT NOT NULL,
+			filter_json    JSONB,
+			script_ref     TEXT NOT NULL DEFAULT '',
+			inline_content TEXT NOT NULL DEFAULT '',
+			shell          TEXT NOT NULL DEFAULT '',
+			job_count      INTEGER NOT NULL DEFAULT 0,
+			completed_jobs INTEGER NOT NULL DEFAULT 0,
+			failed_jobs    INTEGER NOT NULL DEFAULT 0
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_script_runs_tenant_created ON script_runs(tenant_id, created_at DESC);",
+		`CREATE TABLE IF NOT EXISTS script_run_jobs (
+			job_id       TEXT PRIMARY KEY,
+			run_id       TEXT NOT NULL,
+			device_id    TEXT NOT NULL,
+			execution_id TEXT NOT NULL DEFAULT '',
+			status       TEXT NOT NULL,
+			created_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+			completed_at TIMESTAMP WITH TIME ZONE,
+			output       TEXT NOT NULL DEFAULT '',
+			stderr       TEXT NOT NULL DEFAULT '',
+			exit_code    INTEGER NOT NULL DEFAULT 0
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_run_id ON script_run_jobs(run_id);",
+		`CREATE TABLE IF NOT EXISTS execution_grants (
+			execution_id TEXT PRIMARY KEY,
+			device_id    TEXT NOT NULL,
+			tenant_id    TEXT NOT NULL,
+			scope_json   JSONB NOT NULL,
+			created_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at   TIMESTAMP WITH TIME ZONE NOT NULL,
+			consumed     BOOLEAN NOT NULL DEFAULT false
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_execution_grants_device ON execution_grants(device_id, execution_id);",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create script run tables: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateExecutionQueueTable creates the cfgms_execution_queue table backing
+// business.ExecutionQueueStore (Issue #4528). payload holds the feature's full
+// queue entry; the remaining columns are what the store selects and
+// transitions on. The partial unique index enforces "one queued entry per
+// device and parameter hash" across every node.
+func (s DatabaseSchemas) CreateExecutionQueueTable(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_execution_queue (
+			execution_id  TEXT PRIMARY KEY,
+			device_id     TEXT NOT NULL,
+			param_hash    TEXT NOT NULL,
+			state         TEXT NOT NULL,
+			queued_at     TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at    TIMESTAMP WITH TIME ZONE NOT NULL,
+			dispatched_at TIMESTAMP WITH TIME ZONE,
+			completed_at  TIMESTAMP WITH TIME ZONE,
+			payload       JSONB NOT NULL
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_execution_queue_device_state ON cfgms_execution_queue(device_id, state);",
+		"CREATE INDEX IF NOT EXISTS idx_execution_queue_state ON cfgms_execution_queue(state);",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_queue_queued_dedup ON cfgms_execution_queue(device_id, param_hash) WHERE state = 'queued';",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_execution_queue table: %w", err)
+		}
+	}
+	return nil
+}
+
 // CreateNodeRegistryTable creates the cfgms_node_registry table backing the
 // shared controller-node registry (Issue #3763, ADR-031 Decision 5's
 // post-Raft membership mechanism): each ClusterMode node's advertised
@@ -1171,6 +1253,14 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 	}
 
 	if err := s.CreateRoutingTable(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreateScriptRunTables(ctx, db); err != nil {
+		return err
+	}
+
+	if err := s.CreateExecutionQueueTable(ctx, db); err != nil {
 		return err
 	}
 
@@ -1455,7 +1545,14 @@ func (s DatabaseSchemas) CreateStewardRecordsTable(ctx context.Context, db *sql.
 		// This partial unique index is the backstop that makes the winner deterministic.
 		// device_id is NOT NULL DEFAULT '' and empty means "not asserted", so rows with
 		// no device_id are excluded rather than colliding with each other.
-		"CREATE UNIQUE INDEX IF NOT EXISTS uq_steward_records_tenant_device ON steward_records(tenant_id, device_id) WHERE device_id <> '';",
+		// Issue #4534: a deregistered (decommissioned) record no longer reserves its
+		// device_id, so the machine can enroll again; it keeps the device_id for
+		// history matching. Revoked records still reserve it. The index is renamed
+		// so existing databases replace the old predicate; the new name keeps the
+		// old one as a prefix, which is what RegisterSteward's conflict detection
+		// matches on.
+		"DROP INDEX IF EXISTS uq_steward_records_tenant_device;",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uq_steward_records_tenant_device_active ON steward_records(tenant_id, device_id) WHERE device_id <> '' AND status <> 'deregistered';",
 		"CREATE INDEX IF NOT EXISTS idx_steward_records_last_seen   ON steward_records(last_seen);",
 	}
 	for _, idx := range indexes {
@@ -1758,6 +1855,10 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS cfgms_ip_trust_ranges;",
 		"DROP TABLE IF EXISTS cfgms_leases;",
 		"DROP TABLE IF EXISTS cfgms_routing;",
+		"DROP TABLE IF EXISTS cfgms_execution_queue;",
+		"DROP TABLE IF EXISTS execution_grants;",
+		"DROP TABLE IF EXISTS script_run_jobs;",
+		"DROP TABLE IF EXISTS script_runs;",
 		"DROP TABLE IF EXISTS cfgms_node_registry;",
 		"DROP TABLE IF EXISTS rbac_role_assignments;", // Has foreign keys to subjects and roles
 		"DROP TABLE IF EXISTS rbac_subjects;",
