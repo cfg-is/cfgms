@@ -653,3 +653,89 @@ func TestHandleListTenantCrossings_ReturnsActivity(t *testing.T) {
 	require.True(t, ok)
 	assert.Len(t, items, 2)
 }
+
+// accountBoundRootScopePrincipal is a principal resolved from a root-scope account
+// whose request carries no ADR-025 root-scope marker: an mTLS admin cert bound to
+// the account but issued before the marker existed, or a browser/CLI session below
+// phishing-resistant assurance. subjectToTenantCrossingBoundary judges it on
+// GlobalScope (Issue #4337), so the boundary treats it as root-scoped.
+func accountBoundRootScopePrincipal(id string) *Principal {
+	return &Principal{
+		ID:            id,
+		Name:          "mtls-admin:" + id,
+		Assurance:     session.AssuranceStrong,
+		GlobalScope:   true,
+		RootScoped:    false,
+		AccountBound:  true,
+		ImplicitAdmin: true,
+	}
+}
+
+// TestHandleTenantBreakGlass_AccountBoundRootScope_Allowed guards that a principal the
+// tenant boundary challenges for a crossing can actually obtain one: the boundary
+// and the break-glass handler must agree on who is root-scoped. Before the fix the
+// boundary returned tenant_crossing_required while break-glass refused the same
+// caller with NOT_ROOT_SCOPED, leaving no path into any child tenant.
+func TestHandleTenantBreakGlass_AccountBoundRootScope_Allowed(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := accountBoundRootScopePrincipal("root-account-1")
+	require.True(t, subjectToTenantCrossingBoundary(caller), "precondition: the boundary treats this caller as root-scoped")
+	require.Equal(t, tenantAuthNeedsCrossing, server.authorizeTenantAccess(ctx, caller, "msp-a"))
+
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/break-glass", "msp-a", caller, []byte("{}"))
+	req.Header.Set("X-Justification", "Customer P1 outage, ticket INC-4821, need config diff now")
+	rec := httptest.NewRecorder()
+	server.handleTenantBreakGlass(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	assert.Equal(t, tenantAuthAllowed, server.authorizeTenantAccess(ctx, caller, "msp-a"),
+		"after break-glass the boundary must admit the caller")
+}
+
+// TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused guards the
+// self-dealing rule for the same principal shape: a caller the boundary treats as
+// root-scoped must not mint a grant (consent belongs to the MSP); break-glass is its
+// only path. Before the fix the RootScoped-only check let it through once the caller
+// held a break-glass crossing — turning a justified 30-minute crossing into a
+// self-issued grant of any duration.
+func TestHandleCreateTenantCrossingGrant_AccountBoundRootScope_Refused(t *testing.T) {
+	server := setupCrossingTestServer(t)
+	ctx := context.Background()
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	require.NoError(t, err)
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
+	require.NoError(t, err)
+
+	caller := accountBoundRootScopePrincipal("root-account-1")
+	now := time.Now()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(ctx, &business.TenantCrossing{
+		ID:            "bound-root-break-glass",
+		TenantID:      "msp-a",
+		PrincipalID:   caller.ID,
+		Kind:          business.TenantCrossingKindBreakGlass,
+		GrantedBy:     caller.ID,
+		Justification: "Customer P1 outage, ticket INC-4821, need config diff now",
+		CreatedAt:     now,
+		ExpiresAt:     now.Add(30 * time.Minute),
+	}))
+	require.Equal(t, tenantAuthAllowed, server.authorizeTenantAccess(ctx, caller, "msp-a"),
+		"precondition: the break-glass crossing admits the caller")
+
+	// Grant a colleague, not itself: SELF_GRANT_FORBIDDEN already covers self-grants.
+	body, _ := json.Marshal(map[string]interface{}{"principal_id": "root-operator-2", "duration_minutes": 60})
+	req := requestAsPrincipal(t, http.MethodPost, "/api/v1/tenants/msp-a/access-grants", "msp-a", caller, body)
+	rec := httptest.NewRecorder()
+	server.handleCreateTenantCrossingGrant(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "ROOT_SCOPED_CANNOT_GRANT")
+
+	active, err := server.tenantCrossingStore.HasActiveTenantCrossing(ctx, "root-operator-2", "msp-a")
+	require.NoError(t, err)
+	assert.False(t, active, "a root-scoped caller must not consent on the MSP's behalf")
+}

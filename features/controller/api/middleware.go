@@ -183,7 +183,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 		s.logger.Info("HTTP request",
 			"method", r.Method,
-			"path", logging.SanitizeLogValue(r.URL.Path),
+			"path", logging.SanitizeLogValue(redactCredentialPath(r.URL.Path)),
 			"status", wrapped.statusCode,
 			"duration", duration,
 			"remote_addr", logging.SanitizeLogValue(r.RemoteAddr),
@@ -1801,7 +1801,7 @@ func (s *Server) auditAuthorizationDecision(r *http.Request, decision *Authoriza
 		"granted":        decision.Granted,
 		"reason":         logging.SanitizeLogValue(decision.Reason),
 		"duration_ms":    decision.DurationMs,
-		"request_path":   logging.SanitizeLogValue(r.URL.Path),
+		"request_path":   logging.SanitizeLogValue(redactCredentialPath(r.URL.Path)),
 		"request_method": logging.SanitizeLogValue(r.Method),
 		"remote_addr":    logging.SanitizeLogValue(r.RemoteAddr),
 		"user_agent":     logging.SanitizeLogValue(r.Header.Get("User-Agent")),

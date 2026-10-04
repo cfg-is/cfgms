@@ -193,6 +193,58 @@ func TestStewardStoreContract_DeviceIDUniquePerTenant(t *testing.T) {
 	})
 }
 
+// assertDeregisteredStewardReleasesDeviceID is the Issue #4534 contract: a
+// decommissioned (deregistered) steward stops reserving its device_id, the device
+// can enroll again under a new steward ID, lookups resolve to the live record, and
+// the live record reserves the device as before.
+func assertDeregisteredStewardReleasesDeviceID(t *testing.T, store business.StewardStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenant := "tenant-release-" + suffix
+	devID := fmt.Sprintf("%064x", time.Now().UnixNano())
+	oldID, newID, thirdID := "steward-a-"+suffix, "steward-z-"+suffix, "steward-c-"+suffix
+
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(oldID, tenant, devID)))
+	require.NoError(t, store.DeregisterSteward(ctx, oldID))
+
+	// The machine re-enrolls under a new ID. newID sorts AFTER oldID, so the
+	// lookups below prove a live record wins over a deregistered one rather than
+	// winning by ID order.
+	require.NoError(t, store.RegisterSteward(ctx, contractStewardRec(newID, tenant, devID)),
+		"a deregistered record must not block re-enrolling the same device")
+
+	got, err := store.GetStewardByDeviceIDForTenant(ctx, devID, tenant)
+	require.NoError(t, err)
+	assert.Equal(t, newID, got.ID, "the tenant-scoped lookup resolves to the live record")
+	got, err = store.GetStewardByDeviceID(ctx, devID)
+	require.NoError(t, err)
+	assert.Equal(t, newID, got.ID, "the unscoped lookup (registration refresh) resolves to the live record")
+
+	old, err := store.GetSteward(ctx, oldID)
+	require.NoError(t, err)
+	assert.Equal(t, business.StewardStatusDeregistered, old.Status)
+	assert.Equal(t, devID, old.DeviceID, "the deregistered record keeps its device_id for history matching")
+
+	err = store.RegisterSteward(ctx, contractStewardRec(thirdID, tenant, devID))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, business.ErrStewardDeviceIDConflict, "the live record still reserves the device")
+}
+
+// TestStewardStoreContract_DeregisteredReleasesDeviceID runs the Issue #4534
+// contract across all three StewardStore providers.
+func TestStewardStoreContract_DeregisteredReleasesDeviceID(t *testing.T) {
+	t.Run("flatfile", func(t *testing.T) {
+		assertDeregisteredStewardReleasesDeviceID(t, newContractFlatFileStewardStore(t))
+	})
+	t.Run("sqlite", func(t *testing.T) {
+		assertDeregisteredStewardReleasesDeviceID(t, newContractSQLiteStewardStore(t))
+	})
+	t.Run("database", func(t *testing.T) {
+		assertDeregisteredStewardReleasesDeviceID(t, newContractDatabaseStewardStoreOrSkip(t))
+	})
+}
+
 // ---------------------------------------------------------------------------
 // AuditStore.AppendChainedEntry contract (Issue #3754)
 // ---------------------------------------------------------------------------
