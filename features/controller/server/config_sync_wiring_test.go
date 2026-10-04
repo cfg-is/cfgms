@@ -407,9 +407,10 @@ func TestSyncService_LifecycleTiedToContextCancellation(t *testing.T) {
 }
 
 // TestResolveRootTenantID verifies the server-side helper that supplies
-// SyncService's rootTenantID resolves through the tenant manager (Issue #4542)
-// and never fails startup: "root" on an empty store, the single top-level tenant
-// on a tree seeded before "root" was standardised, and "root" once it exists.
+// SyncService's rootTenantID resolves the root by position through the tenant
+// manager (Issue #4542) and never fails startup: no root on an empty store, the
+// single top-level tenant whatever its name, and no root once a second top-level
+// tenant makes the tree ambiguous.
 func TestResolveRootTenantID(t *testing.T) {
 	storageManager := pkgtesting.SetupTestStorage(t)
 	tenantStore := storageManager.GetTenantStore()
@@ -420,12 +421,12 @@ func TestResolveRootTenantID(t *testing.T) {
 		return resolveRootTenantID(context.Background(), tenant.NewManager(tenantStore, nil), logger)
 	}
 
-	assert.Equal(t, tenant.RootTenantID, resolve(), "an empty store resolves the conventional root ID")
+	assert.Empty(t, resolve(), "an empty store has no root")
 
 	addWiringTestTenant(t, tenantStore, "team-root", "", nil)
 	addWiringTestTenant(t, tenantStore, "infra-hyperv", "team-root", nil)
-	assert.Equal(t, "team-root", resolve(), "a single pre-existing top-level tenant is the root")
+	assert.Equal(t, "team-root", resolve(), "the single top-level tenant is the root, whatever its name")
 
-	addWiringTestTenant(t, tenantStore, tenant.RootTenantID, "", nil)
-	assert.Equal(t, tenant.RootTenantID, resolve(), "a tenant named root wins")
+	addWiringTestTenant(t, tenantStore, "root", "", nil)
+	assert.Empty(t, resolve(), "a second top-level tenant makes the root ambiguous, even one named root")
 }

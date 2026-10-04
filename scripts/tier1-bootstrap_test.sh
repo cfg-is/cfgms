@@ -366,7 +366,7 @@ else
 
     # Three tenants seeded
     SEED_MARKER="${T2_PREFIX}/etc/cfgms/.tenants-seeded"
-    for tenant in root agent-test infra-hyperv; do
+    for tenant in root team-root agent-test infra-hyperv; do
         if ! grep -q "^${tenant}$" "$SEED_MARKER" 2>/dev/null; then
             fail "test2: tenant not seeded: $tenant"
             PASS_THIS=false

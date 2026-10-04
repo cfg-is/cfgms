@@ -323,6 +323,7 @@ PYTHON
 }
 
 _check_tenant "root"
+_check_tenant "team-root"
 _check_tenant "agent-test"
 _check_tenant "infra-hyperv"
 

@@ -145,7 +145,7 @@ func waitUntilHoldElapsed(t *testing.T, s *Server, tenantID string) {
 func createSuspendedTenant(t *testing.T, s *Server, id string) {
 	t.Helper()
 	ctx := context.Background()
-	_, err := s.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id})
+	_, err := s.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = s.tenantManager.SuspendTenant(ctx, id)
 	require.NoError(t, err)
@@ -231,7 +231,7 @@ func TestHandleRequestTenantDeletion_SubtreeNotSuspended409(t *testing.T) {
 	server, store := setupTenantDeletionServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ns-root"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ns-root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ns-child", ParentID: "del-ns-root"})
 	require.NoError(t, err)
@@ -473,7 +473,7 @@ func TestHandleApproveTenantDeletion_SecondApproverSucceeds(t *testing.T) {
 	setMinimalHold(t, server, true)
 
 	// A two-tenant subtree proves the whole subtree is removed, not just the root.
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ok-root"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ok-root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-ok-child", ParentID: "del-ok-root"})
 	require.NoError(t, err)
@@ -640,7 +640,7 @@ func TestTenantDeletionHandlers_CrossTenantReturns404(t *testing.T) {
 			// The outsider's own tenant is real, so the guard is exercised on the
 			// "not an ancestor" branch rather than on the fail-closed path taken when
 			// the ancestry lookup itself errors.
-			_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-x-outsider"})
+			_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "del-x-outsider", ParentID: testRootTenantID})
 			require.NoError(t, err)
 
 			require.Equal(t, http.StatusAccepted,

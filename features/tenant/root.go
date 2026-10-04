@@ -19,22 +19,15 @@ import (
 // create/delete.
 const rootTenantCacheTTL = 30 * time.Second
 
-// RootTenantID resolves the deployment's top-level tenant (ADR-025 Decision 1's
-// "root"; ADR-032: exactly one root tenant per deployment) — Issue #4542.
+// RootTenantID resolves the deployment's root tenant (ADR-025 Decision 1's
+// "root"; ADR-032: exactly one root tenant per deployment). The root is
+// identified by position, not name: it is the single tenant with no parent,
+// whatever its ID (Issue #4542). Fresh deployments name it "root" by convention
+// only; a deployment seeded with a top tenant named "default" or "team-root"
+// resolves that tenant, with no tenant moved or renamed.
 //
-//   - A top-level tenant whose ID is RootTenantID ("root") is the root when it
-//     exists. New deployments create it at bootstrap. A "root" with a parent is
-//     never the root (CreateTenant refuses one; this guards rows written by other
-//     paths).
-//   - Otherwise the single tenant with no parent is the root. Deployments seeded
-//     before "root" was standardised (e.g. a top-level "team-root") keep their
-//     existing tree: re-parenting would shift every tenant's config-inheritance
-//     level, which is its index in the tenant path.
-//   - With no tenants at all, RootTenantID is returned, so the first top-level
-//     tenant a fresh deployment creates should be "root".
-//   - With several parentless tenants and none named "root" the root is
-//     ambiguous: "" is returned and an error is logged. Callers treat "" as "no
-//     tenant is root" and fail closed.
+// It returns "" — no root — when there are no tenants, and when several tenants
+// have no parent (logged as an error). Callers treat "" as fail-closed.
 func (m *Manager) RootTenantID(ctx context.Context) string {
 	m.rootMu.Lock()
 	defer m.rootMu.Unlock()
@@ -54,72 +47,65 @@ func (m *Manager) RootTenantID(ctx context.Context) string {
 }
 
 func (m *Manager) resolveRootTenantID(ctx context.Context) (string, error) {
-	if t, err := m.store.GetTenant(ctx, RootTenantID); err == nil {
-		if t.ParentID == "" {
-			return RootTenantID, nil
-		}
-	} else if !errors.Is(err, business.ErrTenantDoesNotExist) {
-		return "", err
-	}
-
-	tenants, err := m.store.ListTenants(ctx, nil)
+	topLevel, err := m.topLevelTenantIDs(ctx)
 	if err != nil {
 		return "", err
 	}
-	var topLevel []string
-	for _, t := range tenants {
-		if t.ParentID == "" {
-			topLevel = append(topLevel, t.ID)
-		}
-	}
 	switch len(topLevel) {
 	case 0:
-		return RootTenantID, nil
+		return "", nil
 	case 1:
 		return topLevel[0], nil
 	default:
-		slog.Error("tenant: root tenant is ambiguous — several top-level tenants and none named root; root-scoped access is denied until one root exists",
+		slog.Error("tenant: root tenant is ambiguous — several tenants have no parent; root-scoped access is denied until one remains",
 			"top_level_tenants", len(topLevel))
 		return "", nil
 	}
 }
 
-// isProtectedRootTenant reports whether tenantID is the deployment root, which
-// cannot be suspended or deleted: the top-level "root", or the resolved root of a
-// deployment seeded before "root" was standardised (Issue #4542). When the root is
-// ambiguous or cannot be resolved it fails closed and protects every top-level
-// tenant, since any of them may be the intended root.
-func (m *Manager) isProtectedRootTenant(ctx context.Context, tenantID string) bool {
-	root := m.RootTenantID(ctx)
-	if root != "" {
-		return tenantID == root
+// topLevelTenantIDs returns the IDs of every tenant with no parent.
+func (m *Manager) topLevelTenantIDs(ctx context.Context) ([]string, error) {
+	tenants, err := m.store.ListTenants(ctx, nil)
+	if err != nil {
+		return nil, err
 	}
-	if tenantID == RootTenantID {
-		return true
+	var ids []string
+	for _, t := range tenants {
+		if t.ParentID == "" {
+			ids = append(ids, t.ID)
+		}
+	}
+	return ids, nil
+}
+
+// isProtectedRootTenant reports whether tenantID is the deployment root, which
+// cannot be suspended or deleted. When the root is ambiguous or cannot be
+// resolved it fails closed and protects every tenant with no parent, since any
+// of them may be the intended root (Issue #4542).
+func (m *Manager) isProtectedRootTenant(ctx context.Context, tenantID string) bool {
+	if root := m.RootTenantID(ctx); root != "" {
+		return tenantID == root
 	}
 	t, err := m.store.GetTenant(ctx, tenantID)
 	if err != nil {
-		// Unknown tenant: the caller's own lookup reports not-found; a store error
-		// protects (fail closed).
+		// Unknown tenant: the caller's own lookup reports not-found. A store
+		// error protects (fail closed).
 		return !errors.Is(err, business.ErrTenantDoesNotExist)
 	}
 	return t.ParentID == ""
 }
 
-// checkRootCreatable refuses to create a top-level "root" beside an existing
-// top-level tenant. "root" would win RootTenantID resolution and leave the
-// existing tree outside root's subtree, cutting root-scoped principals off from
-// every tenant in it (Issue #4542). A deployment seeded before "root" was
-// standardised keeps its existing top tenant as root.
-func (m *Manager) checkRootCreatable(ctx context.Context) error {
-	tenants, err := m.store.ListTenants(ctx, nil)
+// checkTopLevelCreatable refuses a tenant with no parent when one already
+// exists: a deployment has exactly one root (ADR-032), and a second parentless
+// tenant would make the root ambiguous (Issue #4542). Callers hold topLevelMu
+// across this check and the write.
+func (m *Manager) checkTopLevelCreatable(ctx context.Context) error {
+	topLevel, err := m.topLevelTenantIDs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list tenants: %w", err)
 	}
-	for _, t := range tenants {
-		if t.ParentID == "" && t.ID != RootTenantID {
-			return ErrRootTenantConflict
-		}
+	if len(topLevel) > 0 {
+		return ErrTopLevelTenantExists
 	}
 	return nil
 }

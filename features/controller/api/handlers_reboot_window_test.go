@@ -112,11 +112,10 @@ func TestGetStewardRebootWindow_CascadeResolvesInheritedWindow(t *testing.T) {
 	// at LevelClient (index 1 in the tenant path). The handler's PUT falls back to
 	// client-policies/{tenantID} when s.tenantStore is nil; level-1 in the resolver
 	// reads the same namespace.
-	rootID := "cascade-root"
+	// setupTestServer seeds the deployment root, which is level 0 of the path.
+	rootID := testRootTenantID
 	tenantID := "cascade-client"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: rootID, Name: "cascade-root"})
-	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: rootID})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: rootID})
 	require.NoError(t, err)
 
 	stewardID := "cascade-steward-1"
@@ -165,7 +164,7 @@ func TestGetStewardRebootWindow_UnrestrictedWhenNoWindowDeclared(t *testing.T) {
 
 	stewardID := "unrestricted-steward"
 	tenantID := "unrestricted-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "unrestricted-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "unrestricted-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "localhost:7001", "online"))
 
@@ -196,7 +195,7 @@ func TestPutStewardRebootWindow_DeviceLevelOverride(t *testing.T) {
 
 	stewardID := "device-override-steward"
 	tenantID := "device-override-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "device-override-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: "device-override-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, tenantID, "localhost:7002", "online"))
 
@@ -357,7 +356,7 @@ func TestRebootWindowPermissions_GrantableThroughCreateAPIKey(t *testing.T) {
 	ctx := context.Background()
 
 	tenantID := "least-priv-tenant"
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenantID, Name: tenantID, ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	createBody := []byte(`{"name":"reboot-window-key","tenant_id":"` + tenantID +
@@ -443,9 +442,9 @@ func TestGetStewardRebootWindow_CrossTenantCaller_404(t *testing.T) {
 	attackerTenant := "iso-attacker-tenant"
 	stewardID := "iso-victim-steward"
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, victimTenant, "localhost:7010", "online"))
 
@@ -476,9 +475,9 @@ func TestPutStewardRebootWindow_CrossTenantCaller_404_NoWrite(t *testing.T) {
 	attackerTenant := "write-attacker-tenant"
 	stewardID := "write-victim-steward"
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: victimTenant, Name: victimTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: attackerTenant, Name: attackerTenant, ParentID: testRootTenantID})
 	require.NoError(t, err)
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, victimTenant, "localhost:7011", "online"))
 

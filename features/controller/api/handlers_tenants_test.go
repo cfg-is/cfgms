@@ -45,7 +45,7 @@ func tenantIDsFromListResponse(t *testing.T, body []byte) []string {
 func TestHandleCreateTenant_ExplicitID(t *testing.T) {
 	server := setupTestServer(t)
 
-	body, _ := json.Marshal(map[string]string{"id": "team-root"})
+	body, _ := json.Marshal(map[string]string{"id": "team-root", "parent_id": testRootTenantID})
 	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -67,7 +67,7 @@ func TestHandleCreateTenant_DuplicateID(t *testing.T) {
 
 	// Create the tenant once
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "dup-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "dup-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// Attempt to create with the same ID — must return 409
@@ -132,9 +132,9 @@ func TestHandleCreateTenant_ScopedStrongSession_ForeignParentDenied(t *testing.T
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-client-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-client-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-msp-b"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "create-scope-msp-b", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	sess, _, err := sessionMgr.Issue(ctx, "client-a-operator", "cfg-cli", "create-scope-client-a")
@@ -182,9 +182,9 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("foreign parent_id is refused and nothing is written", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-client-a"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-client-a", ParentID: testRootTenantID})
 		require.NoError(t, err)
-		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-msp-b"})
+		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-msp-b", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		rec := createAs(t, server, &Principal{ID: "client-a-admin", TenantID: "guard-client-a"},
@@ -198,10 +198,10 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("unknown parent_id is refused with the same response as a foreign one", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-client"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-client", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
-		foreign, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-msp"})
+		foreign, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-oracle-msp", ParentID: testRootTenantID})
 		require.NoError(t, err)
 		require.Equal(t, "guard-oracle-msp", foreign.ID)
 
@@ -231,7 +231,7 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("omitted parent_id is refused for a scoped caller", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-noparent-client"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-noparent-client", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		rec := createAs(t, server, &Principal{ID: "client-admin", TenantID: "guard-noparent-client"},
@@ -245,7 +245,7 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("own tenant as parent still succeeds", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-own-client"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-own-client", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		rec := createAs(t, server, &Principal{ID: "own-admin", TenantID: "guard-own-client"},
@@ -260,7 +260,7 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("own descendant as parent still succeeds", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-desc-msp"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-desc-msp", ParentID: testRootTenantID})
 		require.NoError(t, err)
 		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
 			ID:       "guard-desc-child",
@@ -277,22 +277,24 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 		assert.Equal(t, "guard-desc-child", td.ParentID)
 	})
 
-	t.Run("unscoped admin keeps creating root-level tenants", func(t *testing.T) {
+	t.Run("unscoped admin passes the scope guard but cannot add a second top-level tenant", func(t *testing.T) {
 		server := setupTestServer(t)
-		ctx := context.Background()
 
-		// Issue #4336: unrestricted tenant creation now requires the same
+		// Issue #4336: unrestricted tenant creation requires the same
 		// certificate-authenticated signal authorizeTenantAccess's own "unrestricted"
 		// branch requires everywhere else in this file (CertSerial != ""), not merely
 		// an unscoped, non-RootScoped Principal — that used to include a nil
 		// principal and any principal whose scope was simply never established.
+		// It passes the guard; the tenant manager then refuses a second tenant with
+		// no parent, since setupTestServer seeded the root (Issue #4542).
 		rec := createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial"},
 			map[string]string{"id": "guard-unscoped-root"})
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "TOP_LEVEL_TENANT_EXISTS")
 
-		td, err := server.tenantManager.GetTenant(ctx, "guard-unscoped-root")
-		require.NoError(t, err)
-		assert.Empty(t, td.ParentID)
+		rec = createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial"},
+			map[string]string{"id": "guard-unscoped-child", "parent_id": testRootTenantID})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
 	// TestHandleCreateTenant_ScopeGuard/nil_principal_is_refused and
@@ -307,7 +309,7 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("nil principal is refused", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-nilprincipal-msp"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-nilprincipal-msp", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		raw, err := json.Marshal(map[string]string{"id": "guard-nilprincipal-graft", "parent_id": "guard-nilprincipal-msp"})
@@ -325,7 +327,7 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 	t.Run("unscoped non-certificate-authenticated principal is refused", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-unset-msp"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "guard-unset-msp", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		// TenantID == "" and RootScoped == false, but CertSerial is also empty — the
@@ -403,7 +405,7 @@ func TestHandleGetTenant_Exists(t *testing.T) {
 
 	// Use an unscoped admin request so the caller can read any tenant.
 	ctx := context.Background()
-	td, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "readable-tenant"})
+	td, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "readable-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := makeAdminRequest(t, http.MethodGet, fmt.Sprintf("/api/v1/tenants/%s", td.ID), nil)
@@ -450,7 +452,7 @@ func TestHandleSuspendTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspendable-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// tenant:manage requires AssuranceStrong — use an mTLS admin cert (AssuranceStrong,
@@ -499,7 +501,7 @@ func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
 	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 
-	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/"+tenant.RootTenantID+"/suspend", nil)
+	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/"+testRootTenantID+"/suspend", nil)
 	w := httptest.NewRecorder()
 	server.router.ServeHTTP(w, req)
 
@@ -513,7 +515,7 @@ func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
 	assert.Equal(t, "PROTECTED_TENANT", errResp.Error.Code)
 
 	// Status must not have changed.
-	td, err := server.tenantManager.GetTenant(ctx, tenant.RootTenantID)
+	td, err := server.tenantManager.GetTenant(ctx, testRootTenantID)
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status,
 		"root tenant must remain Active after a rejected suspend attempt")
@@ -539,7 +541,7 @@ func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
 	t.Run("cross-tenant caller gets 404 and the tenant stays active", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-victim"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-victim", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		rec := suspendAs(t, server, &Principal{ID: "other-admin", TenantID: "suspend-other"}, "suspend-victim")
@@ -572,7 +574,7 @@ func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
 	t.Run("own tenant is still suspendable", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-self"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-self", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		rec := suspendAs(t, server, &Principal{ID: "self-admin", TenantID: "suspend-self"}, "suspend-self")
@@ -596,9 +598,9 @@ func TestHandleSuspendTenant_ScopedStrongSession_SiblingReturns404(t *testing.T)
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-b"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-sib-client-b", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	sess, _, err := sessionMgr.Issue(ctx, "msp-operator", "cfg-cli", "suspend-sib-client-a")
@@ -636,7 +638,7 @@ func TestHandleSuspendTenant_ScopedStrongSession_DescendantSucceeds(t *testing.T
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-desc-client-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "suspend-desc-client-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
 		ID:       "suspend-desc-child-1",
@@ -688,7 +690,7 @@ func TestHandleRestoreTenant_Success(t *testing.T) {
 	server := setupTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restorable-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restorable-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
 		ID:       "restorable-child",
@@ -734,7 +736,7 @@ func TestHandleRestoreTenant_StillSuspendedReported(t *testing.T) {
 	server := setupTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-root"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "ss-child", ParentID: "ss-root"})
 	require.NoError(t, err)
@@ -848,7 +850,7 @@ func TestHandleRestoreTenant_ScopeGuard(t *testing.T) {
 	t.Run("cross-tenant caller gets 404 and the tenant stays suspended", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-victim"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-victim", ParentID: testRootTenantID})
 		require.NoError(t, err)
 		_, err = server.tenantManager.SuspendTenant(ctx, "restore-victim")
 		require.NoError(t, err)
@@ -885,7 +887,7 @@ func TestHandleRestoreTenant_ScopeGuard(t *testing.T) {
 	t.Run("own tenant is still restorable", func(t *testing.T) {
 		server := setupTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-self"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-self", ParentID: testRootTenantID})
 		require.NoError(t, err)
 		_, err = server.tenantManager.SuspendTenant(ctx, "restore-self")
 		require.NoError(t, err)
@@ -907,9 +909,9 @@ func TestHandleRestoreTenant_ScopedStrongSession_SiblingReturns404(t *testing.T)
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-b"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-sib-client-b", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.SuspendTenant(ctx, "restore-sib-client-b")
 	require.NoError(t, err)
@@ -949,7 +951,7 @@ func TestHandleRestoreTenant_SubTenantCannotEscapeAncestorSuspension(t *testing.
 	server, sessionMgr, _ := setupTestServerWithSession(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-msp"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-msp", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "esc-client", ParentID: "esc-msp"})
 	require.NoError(t, err)
@@ -995,7 +997,7 @@ func TestHandleRestoreTenant_MissingPermission(t *testing.T) {
 	apiKey := NewTestKey(t, server, []string{"tenant:read"})
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-perm-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "restore-perm-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/restore-perm-tenant/restore", nil)
@@ -1012,7 +1014,7 @@ func TestHandleSuspendTenant_MissingPermission(t *testing.T) {
 	apiKey := NewTestKey(t, server, []string{"tenant:read"})
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "perm-check-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "perm-check-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tenants/perm-check-tenant/suspend", nil)
@@ -1030,6 +1032,7 @@ func TestHandleGetTenant_ResponseShape(t *testing.T) {
 
 	ctx := context.Background()
 	td, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "shape-tenant",
 		Description: "test description",
 	})
@@ -1060,7 +1063,7 @@ func TestHandleGetTenant_CrossTenant_Returns404(t *testing.T) {
 
 	// Create two sibling tenants — the caller is scoped to client-1, not client-2.
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-2"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-2", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// Caller scoped to client-1.
@@ -1097,7 +1100,7 @@ func TestHandleGetTenant_SameTenant_Returns200(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:read"}, "msp-a", 5*time.Minute)
@@ -1121,7 +1124,7 @@ func TestHandleGetTenant_UnscopedAdmin_CanReadAnyTenant(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "any-tenant"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "any-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants/any-tenant", nil)
@@ -1173,7 +1176,7 @@ func TestHandleGetTenant_SiblingPrefix_Returns404(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-10"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-10", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// "client-1" scoped caller tries to read "client-10".
@@ -1202,7 +1205,7 @@ func TestHandleGetTenant_ScopedCaller_SeesOwnDescendant(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "get-desc-msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "get-desc-msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
 		ID:       "get-desc-client-1",
@@ -1234,9 +1237,9 @@ func TestHandleListTenants_UnscopedAdmin_ReturnsAll(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-alpha"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-alpha", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-beta"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-beta", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := makeAdminRequest(t, http.MethodGet, "/api/v1/tenants", nil)
@@ -1255,9 +1258,9 @@ func TestHandleListTenants_ScopedCaller_FiltersToOwnTenant(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "scoped-mine"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "scoped-mine", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "scoped-other"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "scoped-other", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "scoped-mine", 5*time.Minute)
@@ -1280,9 +1283,9 @@ func TestHandleListTenants_ClientScopedCallerCannotSeeSibling(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-client-1"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-client-1", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-client-2"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "list-client-2", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "list-client-1", 5*time.Minute)
@@ -1316,10 +1319,10 @@ func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	err := ensureTestRootTenant(ctx, server.tenantManager)
-	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
-	require.NoError(t, err)
+	require.NoError(t, ensureTestRootTenant(ctx, server.tenantManager))
+	// A flat tenant with no ancestry relationship to "root": only a legacy
+	// multi-root store can hold one (Issue #4542).
+	seedLegacyTopLevelTenant(t, server, "msp-a")
 
 	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "root", 5*time.Minute)
 
@@ -1407,14 +1410,14 @@ func TestHandleListTenants_ScopedCaller_SeesOwnDescendant(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-msp-a"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
 		ID:       "desc-client-1",
 		ParentID: "desc-msp-a",
 	})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-unrelated"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "desc-unrelated", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	callerKey := NewEphemeralTestKey(t, server, []string{"tenant:list"}, "desc-msp-a", 5*time.Minute)
@@ -1465,7 +1468,8 @@ func TestHandleListTenants_StorageFailure_Returns500(t *testing.T) {
 	// A tenant the caller is authorized to see, so an empty result cannot be mistaken
 	// for a correct response: on the success path this ID is returned.
 	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{
-		ID: "list-failure-visible",
+		ParentID: testRootTenantID,
+		ID:       "list-failure-visible",
 	})
 	require.NoError(t, err)
 
@@ -1526,6 +1530,7 @@ func TestHandleUpdateTenant_Success(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "update-me",
 		Description: "original",
 	})
@@ -1576,7 +1581,7 @@ func TestHandleUpdateTenant_InvalidBody(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "update-badbody"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "update-badbody", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	req := makeAdminRequest(t, http.MethodPut, "/api/v1/tenants/update-badbody", bytes.NewBufferString("not-json"))
@@ -1643,6 +1648,7 @@ func TestHandleUpdateTenant_CrossTenant_Returns404(t *testing.T) {
 	ctx := context.Background()
 	// Target exists but belongs to a different scope ("cross-target").
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "cross-target",
 		Description: "original",
 	})
@@ -1686,6 +1692,7 @@ func TestHandleUpdateTenant_SiblingPrefix_Returns404(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "client-10",
 		Description: "original",
 	})
@@ -1722,6 +1729,7 @@ func TestHandleUpdateTenant_OwnTenant_Allowed(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "msp-a",
 		Description: "original",
 	})
@@ -1756,6 +1764,7 @@ func TestHandleUpdateTenant_ScopedStrongSession_CrossTenantReturns404(t *testing
 
 	// A tenant that exists but sits outside the caller's subtree.
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
+		ParentID:    testRootTenantID,
 		ID:          "client-2",
 		Description: "original",
 	})
@@ -1799,7 +1808,7 @@ func TestHandleUpdateTenant_ValidationFailure_Returns400WithDetail(t *testing.T)
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "validate-me"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "validate-me", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// A name containing a space fails Manager.validateTenantRequest's name regex.
@@ -1892,7 +1901,7 @@ func TestHandleUpdateTenant_BackendError_LogValueSanitized(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-injection-target"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-injection-target", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		// The name must clear Manager.validateTenantRequest so the failure lands on the
@@ -1931,7 +1940,7 @@ func TestHandleUpdateTenant_BackendError_LogValueSanitized(t *testing.T) {
 		)
 
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-clean-target"})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "log-clean-target", ParentID: testRootTenantID})
 		require.NoError(t, err)
 
 		body, err := json.Marshal(map[string]string{
@@ -2001,9 +2010,9 @@ func TestHandleUpdateTenant_ForeignCredentialRef_Returns400(t *testing.T) {
 	server := setupTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "victim-msp"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "victim-msp", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-msp"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-msp", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -2038,7 +2047,7 @@ func TestHandleUpdateTenant_OwnCredentialRef_Returns200(t *testing.T) {
 	server := setupTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "self-msp"})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "self-msp", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	body, _ := json.Marshal(map[string]interface{}{

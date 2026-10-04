@@ -53,13 +53,6 @@ func NewStorageAdapter(store business.TenantStore) Store {
 	return store
 }
 
-// RootTenantID is the conventional ID of the deployment's single top-level tenant
-// (ADR-025 Decision 1's "root"; ADR-032). New deployments create it at bootstrap.
-// A deployment seeded before it was standardised keeps its existing top tenant,
-// which Manager.RootTenantID resolves instead (Issue #4542). The ID is reserved:
-// it may only name a top-level tenant.
-const RootTenantID = "root"
-
 // Common errors
 
 var (
@@ -74,12 +67,10 @@ var (
 	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
 	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
 	ErrCannotSuspendRoot = fmt.Errorf("cannot suspend root tenant")
-	// ErrRootTenantConflict is returned when creating the "root" tenant would make
-	// it a second top-level tenant beside an existing one (Issue #4542).
-	ErrRootTenantConflict = fmt.Errorf("cannot create root tenant: another top-level tenant already exists and remains this deployment's root")
-	// ErrRootTenantIDReserved is returned when "root" is requested as the ID of a
-	// tenant with a parent: the ID is reserved for the top-level tenant (Issue #4542).
-	ErrRootTenantIDReserved = fmt.Errorf("tenant ID %q is reserved for the top-level tenant", RootTenantID)
+	// ErrTopLevelTenantExists is returned when a tenant with no parent is created
+	// while one already exists: a deployment has exactly one root tenant, the
+	// single tenant with no parent (ADR-032, Issue #4542).
+	ErrTopLevelTenantExists = fmt.Errorf("a top-level tenant already exists; create the tenant under a parent")
 
 	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
 	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")

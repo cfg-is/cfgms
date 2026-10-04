@@ -26,6 +26,11 @@ import (
 )
 
 // newTestTenantManager creates a Manager backed by real SQLite+flatfile storage.
+// testRootTenantID is the conventional name of a deployment's root tenant. The
+// root is identified by position (the single tenant with no parent), never by
+// this name (Issue #4542); tests use it only to name the tenant they seed.
+const testRootTenantID = "root"
+
 // newTestTenantManager returns a manager over a store that already holds the
 // deployment's top-level "root" tenant, so tenants a test creates without a parent
 // are ordinary top-level tenants rather than the resolved root, which is
@@ -42,7 +47,7 @@ func seedRootTenantInStore(t *testing.T, store Store) {
 	t.Helper()
 	now := time.Now()
 	require.NoError(t, store.CreateTenant(context.Background(), &business.TenantData{
-		ID: RootTenantID, Name: RootTenantID, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
+		ID: testRootTenantID, Name: testRootTenantID, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
 }
 
 // newBareTestTenantManager returns a manager over an empty store.
@@ -59,6 +64,7 @@ func TestManager_CreateTenant(t *testing.T) {
 
 	// Test creating a new tenant
 	req := &TenantRequest{
+		ParentID:    testRootTenantID,
 		Name:        "Test-Tenant",
 		Description: "A test tenant",
 		Metadata: map[string]string{
@@ -89,7 +95,8 @@ func TestManager_CreateTenant_WithParent(t *testing.T) {
 
 	// Create parent tenant
 	parentReq := &TenantRequest{
-		Name: "Parent-Tenant",
+		ParentID: testRootTenantID,
+		Name:     "Parent-Tenant",
 	}
 	parent, err := manager.CreateTenant(ctx, parentReq)
 	require.NoError(t, err)
@@ -106,7 +113,8 @@ func TestManager_CreateTenant_WithParent(t *testing.T) {
 	// Verify hierarchy
 	hierarchy, err := manager.GetTenantHierarchy(ctx, child.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 1, hierarchy.Depth)
+	// root → parent → child (Issue #4542: the parent sits under the seeded root).
+	assert.Equal(t, 2, hierarchy.Depth)
 	assert.Contains(t, hierarchy.Path, parent.ID)
 	assert.Contains(t, hierarchy.Path, child.ID)
 
@@ -128,19 +136,19 @@ func TestManager_CreateTenant_Validation(t *testing.T) {
 	}{
 		{
 			name: "empty name",
-			req:  &TenantRequest{Name: ""},
+			req:  &TenantRequest{Name: "", ParentID: testRootTenantID},
 		},
 		{
 			name: "invalid characters",
-			req:  &TenantRequest{Name: "test@tenant!"},
+			req:  &TenantRequest{Name: "test@tenant!", ParentID: testRootTenantID},
 		},
 		{
 			name: "name too long",
-			req:  &TenantRequest{Name: string(make([]byte, 65))},
+			req:  &TenantRequest{Name: string(make([]byte, 65)), ParentID: testRootTenantID},
 		},
 		{
 			name: "description too long",
-			req:  &TenantRequest{Name: "test", Description: string(make([]byte, 256))},
+			req:  &TenantRequest{Name: "test", Description: string(make([]byte, 256)), ParentID: testRootTenantID},
 		},
 	}
 
@@ -157,7 +165,7 @@ func TestManager_ListTenants(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test tenants
-	tenant1, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant1"})
+	tenant1, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant1", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	tenant2, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Tenant2", ParentID: tenant1.ID})
@@ -182,6 +190,7 @@ func TestManager_UpdateTenant(t *testing.T) {
 
 	// Create tenant
 	originalReq := &TenantRequest{
+		ParentID:    testRootTenantID,
 		Name:        "Original-Name",
 		Description: "Original Description",
 	}
@@ -190,6 +199,7 @@ func TestManager_UpdateTenant(t *testing.T) {
 
 	// Update tenant
 	updateReq := &TenantRequest{
+		ParentID:    testRootTenantID,
 		Name:        "Updated-Name",
 		Description: "Updated Description",
 		Metadata: map[string]string{
@@ -212,7 +222,7 @@ func TestManager_DeleteTenant(t *testing.T) {
 	ctx := context.Background()
 
 	// Create tenant
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "ToDelete"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "ToDelete", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// Delete tenant
@@ -229,7 +239,7 @@ func TestManager_DeleteTenant_WithChildren(t *testing.T) {
 	ctx := context.Background()
 
 	// Create parent and child tenants
-	parent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Parent"})
+	parent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Parent", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	_, err = manager.CreateTenant(ctx, &TenantRequest{Name: "Child", ParentID: parent.ID})
@@ -246,7 +256,7 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 	ctx := context.Background()
 
 	// Create hierarchy: grandparent -> parent -> child
-	grandparent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Grandparent"})
+	grandparent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Grandparent", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	parent, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Parent", ParentID: grandparent.ID})
@@ -289,7 +299,7 @@ func TestDeleteTenant_CascadesRBACCleanup(t *testing.T) {
 	ctx = rbac.WithSensitiveOperationJustification(ctx, "test: tenant RBAC cleanup cascade")
 
 	// Create a tenant — this also calls CreateTenantDefaultRoles (in-memory only)
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "RBACCleanupTenant"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "RBACCleanupTenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	tenantID := tenant.ID
 
@@ -341,7 +351,7 @@ func TestDeleteTenant_CascadesRBACCleanup_NilRBACManager(t *testing.T) {
 	manager := setupRealTenantManager(t, nil)
 	ctx := context.Background()
 
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoRBACTenant"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoRBACTenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	require.NoError(t, manager.DeleteTenant(ctx, tenant.ID))
@@ -362,7 +372,7 @@ func TestDeleteTenant_CascadesRBACCleanup_PartialFailureContinues(t *testing.T) 
 	// in-memory store only (not the durable RBAC store). The cascade will
 	// encounter "role not found" errors from the durable layer — those must be
 	// logged as warnings, not returned as failures.
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "PartialFailureTenant"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "PartialFailureTenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	// DeleteTenant must return nil despite individual cascade errors
@@ -382,14 +392,15 @@ func TestManager_UpdateTenant_InvalidatesConfigCache(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Cache-Invalidation-Test"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Cache-Invalidation-Test", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	inv := &recordingInvalidator{}
 	manager.WithConfigRouter(inv)
 
 	updateReq := &TenantRequest{
-		Name: tenant.Name,
+		ParentID: testRootTenantID,
+		Name:     tenant.Name,
 		Metadata: map[string]string{
 			"config_source_type": "controller",
 		},
@@ -427,10 +438,10 @@ func TestManager_UpdateTenant_NoRouterWired_NoError(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "No-Router-Tenant"})
+	tenant, err := manager.CreateTenant(ctx, &TenantRequest{Name: "No-Router-Tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
-	_, err = manager.UpdateTenant(ctx, tenant.ID, &TenantRequest{Name: tenant.Name})
+	_, err = manager.UpdateTenant(ctx, tenant.ID, &TenantRequest{Name: tenant.Name, ParentID: testRootTenantID})
 	require.NoError(t, err, "UpdateTenant without a wired router must succeed")
 }
 
@@ -456,7 +467,8 @@ func TestManager_WithMountPointValidator_BlocksCreateOnFailure(t *testing.T) {
 
 	ctx := context.Background()
 	_, err := manager.CreateTenant(ctx, &TenantRequest{
-		Name: "BlockedTenant",
+		ParentID: testRootTenantID,
+		Name:     "BlockedTenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType: "git",
 			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
@@ -474,7 +486,8 @@ func TestManager_WithMountPointValidator_AllowsCreateOnSuccess(t *testing.T) {
 
 	ctx := context.Background()
 	td, err := manager.CreateTenant(ctx, &TenantRequest{
-		Name: "AllowedTenant",
+		ParentID: testRootTenantID,
+		Name:     "AllowedTenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType: "git",
 			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
@@ -490,7 +503,7 @@ func TestManager_WithMountPointValidator_BlocksUpdateOnFailure(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "UpdateBlockedTenant"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "UpdateBlockedTenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	manager.WithMountPointValidator(&testMountPointValidator{
@@ -498,7 +511,8 @@ func TestManager_WithMountPointValidator_BlocksUpdateOnFailure(t *testing.T) {
 	}, nil)
 
 	_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
-		Name: td.Name,
+		ParentID: testRootTenantID,
+		Name:     td.Name,
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType: "git",
 			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
@@ -573,7 +587,8 @@ func TestManager_WithAuditManager_RecordsEventOnCreate(t *testing.T) {
 
 	ctx := context.Background()
 	td, err := manager.CreateTenant(ctx, &TenantRequest{
-		Name: "AuditedTenant",
+		ParentID: testRootTenantID,
+		Name:     "AuditedTenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType: "git",
 			cfgpkg.MetaKeyConfigSourceURL:  "https://github.com/example/configs.git",
@@ -643,8 +658,9 @@ func TestManager_CreateTenant_WithExplicitID(t *testing.T) {
 	ctx := context.Background()
 
 	req := &TenantRequest{
-		ID:   "team-root",
-		Name: "Team-Root",
+		ParentID: testRootTenantID,
+		ID:       "team-root",
+		Name:     "Team-Root",
 	}
 
 	td, err := manager.CreateTenant(ctx, req)
@@ -664,7 +680,8 @@ func TestManager_CreateTenant_ExplicitID_DefaultsNameToID(t *testing.T) {
 
 	// When Name is omitted, ID is used as Name
 	req := &TenantRequest{
-		ID: "agent-test",
+		ParentID: testRootTenantID,
+		ID:       "agent-test",
 	}
 
 	td, err := manager.CreateTenant(ctx, req)
@@ -677,7 +694,7 @@ func TestManager_CreateTenant_ExplicitID_WithParent(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	parent, err := manager.CreateTenant(ctx, &TenantRequest{ID: "team-root"})
+	parent, err := manager.CreateTenant(ctx, &TenantRequest{ID: "team-root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	child, err := manager.CreateTenant(ctx, &TenantRequest{
@@ -728,7 +745,7 @@ func TestManager_CreateTenant_InvalidExplicitID_ReturnsError(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "Team_Root"})
+	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: "Team_Root", ParentID: testRootTenantID})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid explicit tenant ID")
 }
@@ -737,7 +754,7 @@ func TestManager_SuspendTenant(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "suspend-test"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "suspend-test", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status)
 
@@ -765,12 +782,12 @@ func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
 	ctx := context.Background()
 
 	// newTestTenantManager seeds the root tenant, so any status change is observable.
-	_, suspendErr := manager.SuspendTenant(ctx, RootTenantID)
+	_, suspendErr := manager.SuspendTenant(ctx, testRootTenantID)
 	require.Error(t, suspendErr, "SuspendTenant must return an error for the root tenant")
 	require.ErrorIs(t, suspendErr, ErrCannotSuspendRoot)
 
 	// Status must remain Active — the guard must not have mutated the tenant.
-	td, err := manager.GetTenant(ctx, RootTenantID)
+	td, err := manager.GetTenant(ctx, testRootTenantID)
 	require.NoError(t, err)
 	assert.Equal(t, business.TenantStatusActive, td.Status,
 		"default tenant status must be unchanged after a rejected suspend")
@@ -897,7 +914,7 @@ func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
 
 	capture := captureSlog(t)
 
-	_, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Orphan-Tenant"})
+	_, err := manager.CreateTenant(ctx, &TenantRequest{Name: "Orphan-Tenant", ParentID: testRootTenantID})
 	require.Error(t, err, "CreateTenant must fail when RBAC role creation fails")
 	assert.Contains(t, err.Error(), "failed to create tenant RBAC roles",
 		"returned error must surface the RBAC failure to the caller")
@@ -1039,16 +1056,17 @@ func TestManager_UpdateTenant_RejectsForeignCredentialRef(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	victim, err := manager.CreateTenant(ctx, &TenantRequest{ID: "victim-tenant", Name: "victim-tenant"})
+	victim, err := manager.CreateTenant(ctx, &TenantRequest{ID: "victim-tenant", Name: "victim-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "attacker-tenant", Name: "attacker-tenant"})
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "attacker-tenant", Name: "attacker-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	validator := &recordingMountPointValidator{}
 	manager.WithMountPointValidator(validator, nil)
 
 	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
-		Name: attacker.Name,
+		ParentID: testRootTenantID,
+		Name:     attacker.Name,
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:       "git",
 			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
@@ -1072,11 +1090,12 @@ func TestManager_UpdateTenant_RejectsForeignCredentialRefUnderNonGitType(t *test
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "parking-tenant", Name: "parking-tenant"})
+	attacker, err := manager.CreateTenant(ctx, &TenantRequest{ID: "parking-tenant", Name: "parking-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	_, err = manager.UpdateTenant(ctx, attacker.ID, &TenantRequest{
-		Name: attacker.Name,
+		ParentID: testRootTenantID,
+		Name:     attacker.Name,
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:       "controller",
 			cfgpkg.MetaKeyConfigSourceCredential: "victim-tenant/git-token",
@@ -1092,7 +1111,7 @@ func TestManager_UpdateTenant_RejectsTraversingCredentialRef(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "traversal-tenant", Name: "traversal-tenant"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "traversal-tenant", Name: "traversal-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	for _, ref := range []string{
@@ -1103,7 +1122,8 @@ func TestManager_UpdateTenant_RejectsTraversingCredentialRef(t *testing.T) {
 		"traversal-tenant/",
 	} {
 		_, err = manager.UpdateTenant(ctx, td.ID, &TenantRequest{
-			Name: td.Name,
+			ParentID: testRootTenantID,
+			Name:     td.Name,
 			Metadata: map[string]string{
 				cfgpkg.MetaKeyConfigSourceType:       "git",
 				cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
@@ -1121,14 +1141,15 @@ func TestManager_UpdateTenant_AcceptsOwnCredentialRef(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "self-ref-tenant", Name: "self-ref-tenant"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "self-ref-tenant", Name: "self-ref-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	validator := &recordingMountPointValidator{}
 	manager.WithMountPointValidator(validator, nil)
 
 	updated, err := manager.UpdateTenant(ctx, td.ID, &TenantRequest{
-		Name: td.Name,
+		ParentID: testRootTenantID,
+		Name:     td.Name,
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:       "git",
 			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
@@ -1148,8 +1169,9 @@ func TestManager_CreateTenant_RejectsForeignCredentialRef(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := manager.CreateTenant(ctx, &TenantRequest{
-		ID:   "child-tenant",
-		Name: "child-tenant",
+		ParentID: testRootTenantID,
+		ID:       "child-tenant",
+		Name:     "child-tenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:       "git",
 			cfgpkg.MetaKeyConfigSourceURL:        "https://attacker.example/r.git",
@@ -1170,8 +1192,9 @@ func TestManager_CreateTenant_AcceptsOwnCredentialRef(t *testing.T) {
 	ctx := context.Background()
 
 	td, err := manager.CreateTenant(ctx, &TenantRequest{
-		ID:   "own-cred-tenant",
-		Name: "own-cred-tenant",
+		ParentID: testRootTenantID,
+		ID:       "own-cred-tenant",
+		Name:     "own-cred-tenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:       "git",
 			cfgpkg.MetaKeyConfigSourceURL:        "https://example.com/r.git",
@@ -1190,7 +1213,7 @@ func buildSubtree(t *testing.T, manager *Manager) (string, string, string) {
 	t.Helper()
 	ctx := context.Background()
 
-	root, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-root", Name: "cs-root"})
+	root, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-root", Name: "cs-root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	child, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cs-child", Name: "cs-child", ParentID: root.ID})
 	require.NoError(t, err)
@@ -1203,7 +1226,7 @@ func buildSubtree(t *testing.T, manager *Manager) (string, string, string) {
 // preserved after the cascade rewrite.
 func TestManager_SuspendTenant_DefaultProtected(t *testing.T) {
 	manager := newTestTenantManager(t)
-	_, err := manager.SuspendTenant(context.Background(), RootTenantID)
+	_, err := manager.SuspendTenant(context.Background(), testRootTenantID)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCannotSuspendRoot)
 }
@@ -1511,7 +1534,7 @@ func TestManager_SuspendTenant_CycleDetected(t *testing.T) {
 	ctx := context.Background()
 
 	// Create A → B hierarchy.
-	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-a", Name: "cycle-a"})
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-a", Name: "cycle-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "cycle-b", Name: "cycle-b", ParentID: a.ID})
 	require.NoError(t, err)
@@ -1534,7 +1557,7 @@ func TestManager_RestoreTenant_CycleDetected(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-a", Name: "rcycle-a"})
+	a, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-a", Name: "rcycle-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	b, err := manager.CreateTenant(ctx, &TenantRequest{ID: "rcycle-b", Name: "rcycle-b", ParentID: a.ID})
 	require.NoError(t, err)
@@ -1573,7 +1596,7 @@ func TestManager_SuspendRestore_ConcurrentAncestorSuspendVsDescendantRestore(t *
 		ancestorIDs[i] = fmt.Sprintf("race-ancestor-%d", i)
 		descendantIDs[i] = fmt.Sprintf("race-descendant-%d", i)
 
-		_, err := manager.CreateTenant(ctx, &TenantRequest{ID: ancestorIDs[i]})
+		_, err := manager.CreateTenant(ctx, &TenantRequest{ID: ancestorIDs[i], ParentID: testRootTenantID})
 		require.NoError(t, err)
 		_, err = manager.CreateTenant(ctx, &TenantRequest{ID: descendantIDs[i], ParentID: ancestorIDs[i]})
 		require.NoError(t, err)
@@ -1631,7 +1654,7 @@ func TestManager_SuspendRestore_AuditEvents(t *testing.T) {
 	manager.WithAuditManager(auditMgr)
 	ctx := context.Background()
 
-	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "audit-tenant", Name: "audit-tenant"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{ID: "audit-tenant", Name: "audit-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	_, err = manager.SuspendTenant(ctx, td.ID)
@@ -1664,7 +1687,7 @@ func TestManager_SuspendRestore_AuditEvents(t *testing.T) {
 func TestManager_SuspendTenant_NoAuditManager_NoPanic(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
-	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoAuditTenant"})
+	td, err := manager.CreateTenant(ctx, &TenantRequest{Name: "NoAuditTenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	assert.NotPanics(t, func() {

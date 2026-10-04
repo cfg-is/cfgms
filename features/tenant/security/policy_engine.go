@@ -393,7 +393,7 @@ func (tspe *TenantSecurityPolicyEngine) evaluateTenantSecurityPolicy(ctx context
 		}
 	case PolicyEnforcementModeBlock:
 		// Block on any critical or high severity violations
-		if criticalViolations > 0 || (highViolations > 0 && tenantPolicy.TenantID != tenant.RootTenantID) {
+		if criticalViolations > 0 || (highViolations > 0 && !tspe.isRootTenant(ctx, tenantPolicy.TenantID)) {
 			result.Allowed = false
 			result.Decision = "block_on_violation"
 			result.BlockReason = fmt.Sprintf("Policy violations: %d critical, %d high", criticalViolations, highViolations)
@@ -608,4 +608,15 @@ func (cacr *CompiledAccessControlRule) Evaluate(ctx context.Context, request *Se
 	}
 
 	return result, nil
+}
+
+// isRootTenant reports whether tenantID is the deployment root, resolved by
+// position (Issue #4542). Without a tenant manager, or with no resolvable root,
+// no tenant is exempt.
+func (tspe *TenantSecurityPolicyEngine) isRootTenant(ctx context.Context, tenantID string) bool {
+	if tspe.tenantManager == nil {
+		return false
+	}
+	root := tspe.tenantManager.RootTenantID(ctx)
+	return root != "" && tenantID == root
 }

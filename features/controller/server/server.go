@@ -367,19 +367,14 @@ func resolveDNADataRoot(cfg *config.Config) string {
 }
 
 // resolveRootTenantID returns the deployment's root tenant for the periodic config
-// sync's single-root boundary, resolved by the tenant manager (Issue #4542): the
-// tenant named "root", else the single top-level tenant. A missing or ambiguous
-// root is logged but does not block startup: SyncService.Run tolerates an unknown
-// root — it enumerates zero git tenants until one resolves.
+// sync's single-root boundary: the single tenant with no parent, resolved by the
+// tenant manager (Issue #4542). With no tenants, or several parentless tenants, it
+// returns "" and logs a warning without blocking startup; SyncService then syncs
+// no tenants and refuses every Register.
 func resolveRootTenantID(ctx context.Context, tenants *tenant.Manager, logger logging.Logger) string {
 	root := tenants.RootTenantID(ctx)
 	if root == "" {
-		logger.Warn("configrouting: root tenant is ambiguous; periodic config sync will enumerate no git tenants until one root tenant exists")
-		return tenant.RootTenantID
-	}
-	if _, err := tenants.GetTenant(ctx, root); err != nil {
-		logger.Warn("configrouting: root tenant record not found; periodic config sync will enumerate no git tenants until it exists",
-			"root_tenant_id", root)
+		logger.Warn("configrouting: no root tenant (no tenants, or more than one top-level tenant); periodic config sync covers no tenants until the controller restarts with exactly one")
 	}
 	return root
 }

@@ -84,6 +84,8 @@ func newRefreshFixture(t *testing.T, certMgr *cert.Manager) *refreshFixture {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
+	testTenantStores.Store(tenantManager, tenantStore)
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
 	rbacService := service.NewRBACService(rbacManager)

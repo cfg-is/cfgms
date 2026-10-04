@@ -97,11 +97,19 @@ func TestIsAccessLevelSufficient_ZeroValueOrdersBelowEveryRealLevel(t *testing.T
 // It also returns the tenant.Manager so callers can create the tenants an
 // isolation rule references (CreateIsolationRule requires the target tenant
 // to already exist).
+// testRootTenantID is the conventional name of the root tenant these tests seed;
+// the root is identified by position, never by this name (Issue #4542).
+const testRootTenantID = "root"
+
 func newTestTenantIsolationEngine(t *testing.T) (*TenantIsolationEngine, *tenant.Manager) {
 	t.Helper()
 	storageManager := pkgtesting.SetupTestStorage(t)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, nil)
+	// The deployment root (the single tenant with no parent, Issue #4542); test
+	// tenants are created beneath it.
+	_, err := tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: testRootTenantID})
+	require.NoError(t, err)
 
 	auditMgr, err := audit.NewManager(storageManager.GetAuditStore(), "tenant-isolation-test")
 	require.NoError(t, err)
@@ -128,9 +136,9 @@ func TestValidateTenantAccess_SubjectMissingFromAccessLevelsIsDenied(t *testing.
 	ctx := context.Background()
 	engine, tenantManager := newTestTenantIsolationEngine(t)
 
-	_, err := tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "subject-tenant"})
+	_, err := tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "subject-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
-	_, err = tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "target-tenant"})
+	_, err = tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "target-tenant", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	rule := &IsolationRule{

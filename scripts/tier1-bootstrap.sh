@@ -829,13 +829,14 @@ else
         fi
     }
 
-    # "root" is the deployment's single top-level tenant (ADR-032, Issue #4542).
-    # On a deployment seeded before that standard (top tenant "team-root") the
-    # controller refuses a second top-level "root", the existing tree is left as
-    # is, and the children below already exist.
+    # The root tenant is the deployment's single tenant with no parent (ADR-032,
+    # Issue #4542); "root" is its conventional name. On a deployment seeded before
+    # that convention (top tenant "team-root") the controller refuses a second
+    # top-level tenant, so "root" is not created and the existing tree is left as is.
     _seed_tenant "root"
-    _seed_tenant "agent-test" "root"
-    _seed_tenant "infra-hyperv" "root"
+    _seed_tenant "team-root" "root"
+    _seed_tenant "agent-test" "team-root"
+    _seed_tenant "infra-hyperv" "team-root"
 
     log "Tenant seeding complete."
 fi

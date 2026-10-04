@@ -17,24 +17,21 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// isRootTenantForCrossing reports whether tenantID must never carry a crossing:
-// the literal "root" and the resolved root (Issue #4542). A crossing on either
-// would sit on every descendant's ancestry path and act as a fleet-wide key.
+// isRootTenantForCrossing reports whether tenantID is the deployment root, which
+// must never carry a crossing: one there would sit on every descendant's ancestry
+// path and act as a fleet-wide key (Issue #4542).
 func (s *Server) isRootTenantForCrossing(ctx context.Context, tenantID string) bool {
-	if tenantID == tenant.RootTenantID {
-		return true
-	}
 	root := s.rootTenantID(ctx)
 	return root != "" && tenantID == root
 }
 
-// rootTenantID returns the deployment's top-level tenant (ADR-025 Decision 1's
-// "root"), resolved by the tenant manager (Issue #4542): the top-level tenant named
-// "root", else the single top-level tenant. "" means no tenant is root (ambiguous
-// tree), which callers treat as fail-closed.
+// rootTenantID returns the deployment's root tenant (ADR-025 Decision 1's
+// "root"): the single tenant with no parent, resolved by the tenant manager
+// (Issue #4542). "" means no root — no tenants, several parentless tenants, or
+// no tenant manager — which callers treat as fail-closed.
 func (s *Server) rootTenantID(ctx context.Context) string {
 	if s.tenantManager == nil {
-		return tenant.RootTenantID
+		return ""
 	}
 	return s.tenantManager.RootTenantID(ctx)
 }
@@ -375,6 +372,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, business.ErrTenantAlreadyExists) {
 			s.writeErrorResponse(w, http.StatusConflict, "tenant already exists", "TENANT_EXISTS")
+			return
+		}
+		if errors.Is(err, tenant.ErrTopLevelTenantExists) {
+			s.writeErrorResponse(w, http.StatusConflict, "a top-level tenant already exists; specify parent_id", "TOP_LEVEL_TENANT_EXISTS")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "CREATE_FAILED")

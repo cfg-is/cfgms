@@ -855,7 +855,7 @@ func TestCliLoginSession_RootScoped_SubjectToTenantBoundary(t *testing.T) {
 	server.SetTenantCrossingStore(tcs)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cli-login-msp-a", ParentID: tenant.RootTenantID})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "cli-login-msp-a", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	principal := browserPrincipalAfterPasskeyLogin("root-op-2", true)

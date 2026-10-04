@@ -47,8 +47,9 @@ type Manager struct {
 	// suspension has already been recorded (Issue #4347).
 	suspendMu sync.Mutex
 
-	// topLevelMu serializes top-level tenant creation with the root-creatable check
-	// (root.go). It is node-local; see Issue #4547 for the cluster-wide constraint.
+	// topLevelMu serializes top-level tenant creation with the single-top-level
+	// check (root.go). It is node-local; see Issue #4547 for the cluster-wide
+	// constraint.
 	topLevelMu sync.Mutex
 
 	// Root tenant resolution cache (root.go, Issue #4542).
@@ -141,12 +142,6 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		}
 	}
 
-	// "root" is reserved for the top-level tenant: a child named "root" would be
-	// mistaken for the deployment root (Issue #4542).
-	if tenantID == RootTenantID && req.ParentID != "" {
-		return nil, ErrRootTenantIDReserved
-	}
-
 	// Reject tenant creation under a suspended parent or a parent with a pending deletion.
 	// Defense-in-depth: prevents subtree membership from growing under an in-flight deletion hold.
 	// If the parent does not yet exist, the storage layer's constraints enforce that;
@@ -179,16 +174,15 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		UpdatedAt:   now,
 	}
 
-	// Create the tenant in storage. A top-level create holds topLevelMu across the
-	// root-creatable check and the write, so a concurrent top-level create on this
+	// Create the tenant in storage. A tenant with no parent is the deployment
+	// root, of which there is exactly one: a top-level create holds topLevelMu
+	// across the check and the write, so a concurrent top-level create on this
 	// node cannot slip in between them (Issue #4542).
 	if td.ParentID == "" {
 		m.topLevelMu.Lock()
 		defer m.topLevelMu.Unlock()
-		if tenantID == RootTenantID {
-			if err := m.checkRootCreatable(ctx); err != nil {
-				return nil, err
-			}
+		if err := m.checkTopLevelCreatable(ctx); err != nil {
+			return nil, err
 		}
 	}
 	if err := m.store.CreateTenant(ctx, td); err != nil {
