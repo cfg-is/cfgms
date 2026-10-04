@@ -22,8 +22,10 @@ const rootTenantCacheTTL = 30 * time.Second
 // RootTenantID resolves the deployment's top-level tenant (ADR-025 Decision 1's
 // "root"; ADR-032: exactly one root tenant per deployment) — Issue #4542.
 //
-//   - A tenant whose ID is RootTenantID ("root") is the root when it exists. New
-//     deployments create it at bootstrap.
+//   - A top-level tenant whose ID is RootTenantID ("root") is the root when it
+//     exists. New deployments create it at bootstrap. A "root" with a parent is
+//     never the root (CreateTenant refuses one; this guards rows written by other
+//     paths).
 //   - Otherwise the single tenant with no parent is the root. Deployments seeded
 //     before "root" was standardised (e.g. a top-level "team-root") keep their
 //     existing tree: re-parenting would shift every tenant's config-inheritance
@@ -52,8 +54,10 @@ func (m *Manager) RootTenantID(ctx context.Context) string {
 }
 
 func (m *Manager) resolveRootTenantID(ctx context.Context) (string, error) {
-	if _, err := m.store.GetTenant(ctx, RootTenantID); err == nil {
-		return RootTenantID, nil
+	if t, err := m.store.GetTenant(ctx, RootTenantID); err == nil {
+		if t.ParentID == "" {
+			return RootTenantID, nil
+		}
 	} else if !errors.Is(err, business.ErrTenantDoesNotExist) {
 		return "", err
 	}
@@ -78,6 +82,28 @@ func (m *Manager) resolveRootTenantID(ctx context.Context) (string, error) {
 			"top_level_tenants", len(topLevel))
 		return "", nil
 	}
+}
+
+// isProtectedRootTenant reports whether tenantID is the deployment root, which
+// cannot be suspended or deleted: the top-level "root", or the resolved root of a
+// deployment seeded before "root" was standardised (Issue #4542). When the root is
+// ambiguous or cannot be resolved it fails closed and protects every top-level
+// tenant, since any of them may be the intended root.
+func (m *Manager) isProtectedRootTenant(ctx context.Context, tenantID string) bool {
+	root := m.RootTenantID(ctx)
+	if root != "" {
+		return tenantID == root
+	}
+	if tenantID == RootTenantID {
+		return true
+	}
+	t, err := m.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		// Unknown tenant: the caller's own lookup reports not-found; a store error
+		// protects (fail closed).
+		return !errors.Is(err, business.ErrTenantDoesNotExist)
+	}
+	return t.ParentID == ""
 }
 
 // checkRootCreatable refuses to create a top-level "root" beside an existing

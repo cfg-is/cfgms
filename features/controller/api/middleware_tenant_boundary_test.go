@@ -117,7 +117,7 @@ func boundaryTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 func boundaryTestTenants(t *testing.T, server *Server) *Server {
 	t.Helper()
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)

@@ -4447,7 +4447,7 @@ func putStewardConfigAsPrincipal(server *Server, stewardID string, principal *Pr
 func TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -4466,7 +4466,7 @@ func TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challen
 func TestUpdateStewardConfig_AccountBoundRootScoped_WithCrossing_Allowed(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)

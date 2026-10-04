@@ -53,12 +53,14 @@ func NewStorageAdapter(store business.TenantStore) Store {
 	return store
 }
 
-// Common errors
-// RootTenantID is the single top-level tenant every other tenant descends from
-// (ADR-025 Decision 1's "root"). It is the protected tenant: it cannot be
-// suspended or deleted, and Manager.EnsureRootTenant creates it and re-parents
-// any other top-level tenant beneath it (Issue #4542).
+// RootTenantID is the conventional ID of the deployment's single top-level tenant
+// (ADR-025 Decision 1's "root"; ADR-032). New deployments create it at bootstrap.
+// A deployment seeded before it was standardised keeps its existing top tenant,
+// which Manager.RootTenantID resolves instead (Issue #4542). The ID is reserved:
+// it may only name a top-level tenant.
 const RootTenantID = "root"
+
+// Common errors
 
 var (
 	// ErrTenantNotFound aliases the storage-layer sentinel rather than declaring a
@@ -75,6 +77,9 @@ var (
 	// ErrRootTenantConflict is returned when creating the "root" tenant would make
 	// it a second top-level tenant beside an existing one (Issue #4542).
 	ErrRootTenantConflict = fmt.Errorf("cannot create root tenant: another top-level tenant already exists and remains this deployment's root")
+	// ErrRootTenantIDReserved is returned when "root" is requested as the ID of a
+	// tenant with a parent: the ID is reserved for the top-level tenant (Issue #4542).
+	ErrRootTenantIDReserved = fmt.Errorf("tenant ID %q is reserved for the top-level tenant", RootTenantID)
 
 	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
 	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")

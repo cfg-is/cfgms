@@ -523,7 +523,7 @@ func TestGetStewardRebootWindow_RootScopedCallerWithoutCrossing_Challenged(t *te
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rw", ParentID: "root"})
 	require.NoError(t, err)
@@ -554,7 +554,7 @@ func TestPutStewardRebootWindow_RootScopedCallerWithActiveCrossing_Allowed(t *te
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rw2", ParentID: "root"})
 	require.NoError(t, err)

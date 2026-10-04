@@ -17,10 +17,6 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// rootTenantID returns the deployment's top-level tenant (ADR-025 Decision 1's
-// "root"), resolved by the tenant manager (Issue #4542): the tenant named "root",
-// else the single top-level tenant. "" means no tenant is root (ambiguous tree),
-// which callers treat as fail-closed.
 // isRootTenantForCrossing reports whether tenantID must never carry a crossing:
 // the literal "root" and the resolved root (Issue #4542). A crossing on either
 // would sit on every descendant's ancestry path and act as a fleet-wide key.
@@ -32,6 +28,10 @@ func (s *Server) isRootTenantForCrossing(ctx context.Context, tenantID string) b
 	return root != "" && tenantID == root
 }
 
+// rootTenantID returns the deployment's top-level tenant (ADR-025 Decision 1's
+// "root"), resolved by the tenant manager (Issue #4542): the top-level tenant named
+// "root", else the single top-level tenant. "" means no tenant is root (ambiguous
+// tree), which callers treat as fail-closed.
 func (s *Server) rootTenantID(ctx context.Context) string {
 	if s.tenantManager == nil {
 		return tenant.RootTenantID
@@ -647,7 +647,7 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, tenant.ErrCannotSuspendRoot) {
-			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend default tenant", "PROTECTED_TENANT")
+			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend root tenant", "PROTECTED_TENANT")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to suspend tenant", "SUSPEND_FAILED")

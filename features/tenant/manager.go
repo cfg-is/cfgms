@@ -47,6 +47,10 @@ type Manager struct {
 	// suspension has already been recorded (Issue #4347).
 	suspendMu sync.Mutex
 
+	// topLevelMu serializes top-level tenant creation with the root-creatable check
+	// (root.go). It is node-local; see Issue #4547 for the cluster-wide constraint.
+	topLevelMu sync.Mutex
+
 	// Root tenant resolution cache (root.go, Issue #4542).
 	rootMu         sync.Mutex
 	rootID         string
@@ -137,16 +141,16 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		}
 	}
 
+	// "root" is reserved for the top-level tenant: a child named "root" would be
+	// mistaken for the deployment root (Issue #4542).
+	if tenantID == RootTenantID && req.ParentID != "" {
+		return nil, ErrRootTenantIDReserved
+	}
+
 	// Reject tenant creation under a suspended parent or a parent with a pending deletion.
 	// Defense-in-depth: prevents subtree membership from growing under an in-flight deletion hold.
 	// If the parent does not yet exist, the storage layer's constraints enforce that;
 	// we only need to check the state of parents that do exist.
-	if tenantID == RootTenantID && req.ParentID == "" {
-		if err := m.checkRootCreatable(ctx); err != nil {
-			return nil, err
-		}
-	}
-
 	if req.ParentID != "" {
 		parent, err := m.store.GetTenant(ctx, req.ParentID)
 		if err != nil && !errors.Is(err, business.ErrTenantDoesNotExist) {
@@ -175,7 +179,18 @@ func (m *Manager) CreateTenant(ctx context.Context, req *TenantRequest) (*busine
 		UpdatedAt:   now,
 	}
 
-	// Create the tenant in storage
+	// Create the tenant in storage. A top-level create holds topLevelMu across the
+	// root-creatable check and the write, so a concurrent top-level create on this
+	// node cannot slip in between them (Issue #4542).
+	if td.ParentID == "" {
+		m.topLevelMu.Lock()
+		defer m.topLevelMu.Unlock()
+		if tenantID == RootTenantID {
+			if err := m.checkRootCreatable(ctx); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := m.store.CreateTenant(ctx, td); err != nil {
 		return nil, fmt.Errorf("failed to create tenant: %w", err)
 	}
@@ -310,7 +325,7 @@ type CascadeRestoreResult struct {
 // A cycle in the tenant hierarchy (data corruption) causes an error rather than an
 // infinite loop. An audit event is recorded on success (fire-and-forget).
 func (m *Manager) SuspendTenant(ctx context.Context, tenantID string) (*CascadeSuspendResult, error) {
-	if tenantID == RootTenantID {
+	if m.isProtectedRootTenant(ctx, tenantID) {
 		return nil, ErrCannotSuspendRoot
 	}
 
@@ -537,7 +552,7 @@ func (m *Manager) recordTenantLifecycleEvent(ctx context.Context, tenantID, tena
 // DeleteTenant deletes a tenant
 func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 	// Cannot delete the root tenant
-	if tenantID == RootTenantID {
+	if m.isProtectedRootTenant(ctx, tenantID) {
 		return fmt.Errorf("cannot delete root tenant")
 	}
 
@@ -583,7 +598,7 @@ func (m *Manager) DeleteTenant(ctx context.Context, tenantID string) error {
 // found. On success the hold-period timer starts and a PendingDeletion record
 // is written with the pinned member set.
 func (m *Manager) RequestTenantDeletion(ctx context.Context, tenantID, requesterID string, holdPeriod time.Duration) (*business.PendingDeletion, error) {
-	if tenantID == RootTenantID {
+	if m.isProtectedRootTenant(ctx, tenantID) {
 		return nil, fmt.Errorf("cannot delete root tenant")
 	}
 
@@ -653,7 +668,7 @@ func (m *Manager) CancelTenantDeletion(ctx context.Context, tenantID string) err
 // membership match, then hard-deletes the entire subtree. RBAC cleanup runs afterward
 // on the returned IDs (best-effort, fire-and-forget on individual tenant failures).
 func (m *Manager) ApproveTenantDeletion(ctx context.Context, tenantID, approverID string, requireDualControl bool) ([]string, error) {
-	if tenantID == RootTenantID {
+	if m.isProtectedRootTenant(ctx, tenantID) {
 		return nil, fmt.Errorf("cannot delete root tenant")
 	}
 

@@ -351,7 +351,7 @@ func TestHandleCreateTenant_RootScopedCaller(t *testing.T) {
 		t.Helper()
 		server := setupCrossingTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		err := ensureTestRootTenant(ctx, server.tenantManager)
 		require.NoError(t, err)
 		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 		require.NoError(t, err)
@@ -496,7 +496,7 @@ func TestHandleSuspendTenant_DefaultGuard_HTTP(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: tenant.RootTenantID})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 
 	req := makeAdminRequest(t, http.MethodPost, "/api/v1/tenants/"+tenant.RootTenantID+"/suspend", nil)
@@ -554,7 +554,7 @@ func TestHandleSuspendTenant_ScopeGuard(t *testing.T) {
 	t.Run("root-scoped caller without a crossing gets a challenge", func(t *testing.T) {
 		server := setupCrossingTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		err := ensureTestRootTenant(ctx, server.tenantManager)
 		require.NoError(t, err)
 		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 		require.NoError(t, err)
@@ -865,7 +865,7 @@ func TestHandleRestoreTenant_ScopeGuard(t *testing.T) {
 	t.Run("root-scoped caller without a crossing gets a challenge", func(t *testing.T) {
 		server := setupCrossingTestServer(t)
 		ctx := context.Background()
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+		err := ensureTestRootTenant(ctx, server.tenantManager)
 		require.NoError(t, err)
 		_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 		require.NoError(t, err)
@@ -1149,7 +1149,7 @@ func TestHandleGetTenant_UnscopedAdmin_CanReadAnyTenant(t *testing.T) {
 func TestUnscopedAndUnmarked_NonCertificateCaller_NoLongerUnrestricted(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -1316,7 +1316,7 @@ func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 	server := setupTestServer(t)
 
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a"})
 	require.NoError(t, err)
@@ -1347,7 +1347,7 @@ func TestHandleListTenants_UnrelatedFlatTenant_NotVisible(t *testing.T) {
 func TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -1370,7 +1370,7 @@ func TestHandleListTenants_RootScopedCallerDeniedRealDescendantWithoutCrossing(t
 func TestHandleListTenants_RootScopedCallerAllowedWithActiveGrant(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)

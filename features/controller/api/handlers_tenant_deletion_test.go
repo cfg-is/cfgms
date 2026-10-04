@@ -74,6 +74,7 @@ func setupTenantDeletionServer(t *testing.T) (*Server, business.TenantStore) {
 
 	tenantStore := storageManager.GetTenantStore()
 	tenantManager := tenant.NewManager(tenant.NewStorageAdapter(tenantStore), rbacManager)
+	seedTestRootTenant(t, tenantManager)
 
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)

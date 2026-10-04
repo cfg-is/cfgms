@@ -26,7 +26,27 @@ import (
 )
 
 // newTestTenantManager creates a Manager backed by real SQLite+flatfile storage.
+// newTestTenantManager returns a manager over a store that already holds the
+// deployment's top-level "root" tenant, so tenants a test creates without a parent
+// are ordinary top-level tenants rather than the resolved root, which is
+// protected from suspend/delete (Issue #4542).
 func newTestTenantManager(t *testing.T) *Manager {
+	t.Helper()
+	m := newBareTestTenantManager(t)
+	seedRootTenantInStore(t, m.store)
+	return m
+}
+
+// seedRootTenantInStore writes the top-level "root" tenant straight to store.
+func seedRootTenantInStore(t *testing.T, store Store) {
+	t.Helper()
+	now := time.Now()
+	require.NoError(t, store.CreateTenant(context.Background(), &business.TenantData{
+		ID: RootTenantID, Name: RootTenantID, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
+}
+
+// newBareTestTenantManager returns a manager over an empty store.
+func newBareTestTenantManager(t *testing.T) *Manager {
 	t.Helper()
 	storageManager := cfgmstesting.SetupTestStorage(t)
 	rbacManager := cfgmstesting.SetupTestRBACManager(t)
@@ -257,6 +277,7 @@ func TestManager_IsTenantAncestor(t *testing.T) {
 func setupRealTenantManager(t *testing.T, rbacManager *rbac.Manager) *Manager {
 	t.Helper()
 	storageManager := cfgmstesting.SetupTestStorage(t)
+	seedRootTenantInStore(t, storageManager.GetTenantStore())
 	return NewManager(storageManager.GetTenantStore(), rbacManager)
 }
 
@@ -743,10 +764,7 @@ func TestManager_SuspendTenant_DefaultGuard(t *testing.T) {
 	manager := newTestTenantManager(t)
 	ctx := context.Background()
 
-	// Create the root tenant so any status change would be observable.
-	_, err := manager.CreateTenant(ctx, &TenantRequest{ID: RootTenantID})
-	require.NoError(t, err)
-
+	// newTestTenantManager seeds the root tenant, so any status change is observable.
 	_, suspendErr := manager.SuspendTenant(ctx, RootTenantID)
 	require.Error(t, suspendErr, "SuspendTenant must return an error for the root tenant")
 	require.ErrorIs(t, suspendErr, ErrCannotSuspendRoot)
@@ -875,6 +893,7 @@ func TestManager_CreateTenant_RollbackFailure_LogsOrphanedTenant(t *testing.T) {
 	rollbackErr := errors.New("simulated storage failure during rollback")
 	store := &failDeleteTenantStore{Store: storageManager.GetTenantStore(), delErr: rollbackErr}
 	manager := NewManager(store, rbacManager)
+	seedRootTenantInStore(t, store)
 
 	capture := captureSlog(t)
 

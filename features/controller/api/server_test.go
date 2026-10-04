@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -128,6 +129,7 @@ func setupTestServer(t *testing.T) *Server {
 	// Initialize tenant management with durable storage (git-backed)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
 
 	// Create services
 	controllerService := service.NewControllerService(logger)
@@ -214,6 +216,7 @@ func setupRouteTestServer(t *testing.T) *Server {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
 
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -998,6 +1001,7 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
 
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -2195,4 +2199,22 @@ func TestSPAHeadRequest(t *testing.T) {
 	// HEAD must return headers but no body.
 	assert.Empty(t, rr.Body.String())
 	assert.NotEmpty(t, rr.Header().Get("Content-Security-Policy"))
+}
+
+// seedTestRootTenant creates the deployment's top-level "root" tenant (ADR-032) so
+// tenants a test creates without a parent are ordinary top-level tenants rather
+// than the resolved root, which tenant.Manager protects from suspend/delete
+// (Issue #4542).
+func seedTestRootTenant(t *testing.T, m *tenant.Manager) {
+	t.Helper()
+	require.NoError(t, ensureTestRootTenant(context.Background(), m))
+}
+
+// ensureTestRootTenant creates the "root" tenant unless it already exists.
+func ensureTestRootTenant(ctx context.Context, m *tenant.Manager) error {
+	_, err := m.CreateTenant(ctx, &tenant.TenantRequest{ID: tenant.RootTenantID})
+	if errors.Is(err, tenant.ErrTenantExists) {
+		return nil
+	}
+	return err
 }

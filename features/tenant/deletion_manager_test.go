@@ -202,6 +202,7 @@ func TestApproveTenantDeletion_SameApproverRejected(t *testing.T) {
 	// Use a minimal hold period so we can test by injecting an elapsed pending record.
 	store := cfgmstesting.SetupTestStorage(t)
 	m2 := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 
 	// Create the subtree in store2.
 	for _, td := range []struct{ id, parent string }{
@@ -238,6 +239,7 @@ func TestApproveTenantDeletion_SameApproverRejected(t *testing.T) {
 func TestApproveTenantDeletion_DualControlDisabledAllowsSameApprover(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "del-root"
@@ -268,6 +270,7 @@ func TestApproveTenantDeletion_DualControlDisabledAllowsSameApprover(t *testing.
 func TestApproveTenantDeletion_MembershipChangedRejected(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "mem-root"
@@ -316,6 +319,7 @@ func TestApproveTenantDeletion_DefaultTenantProtected(t *testing.T) {
 func TestApproveTenantDeletion_CascadeDeletesEntireSubtree(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "cas-root"
