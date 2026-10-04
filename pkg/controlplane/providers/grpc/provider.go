@@ -16,6 +16,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	quicgo "github.com/quic-go/quic-go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	commonpb "github.com/cfgis/cfgms/api/proto/common"
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
@@ -25,13 +33,6 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	quictransport "github.com/cfgis/cfgms/pkg/transport/quic"
 	"github.com/cfgis/cfgms/pkg/transport/registry"
-	quicgo "github.com/quic-go/quic-go"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Mode defines the provider operating mode.
@@ -93,11 +94,25 @@ type Provider struct {
 	tlsConfig       *tls.Config
 	keepalivePeriod time.Duration // 0 = use QUIC default (25s)
 	idleTimeout     time.Duration // 0 = use QUIC default (90s)
-	maxConnections  int
-	stewardID       string
-	tenantID        string
-	logger          logging.Logger
-	startTime       time.Time
+	// admissionWindow, when set (client mode), makes Start report a definitive
+	// identity rejection instead of retrying it: dialInitial stops on one, and
+	// after the stream opens Start waits up to admissionWindow for the
+	// controller's verdict on the first receive (Issue #4532). 0 keeps retrying
+	// every failure until p.ctx is done (Issue #3849).
+	admissionWindow time.Duration
+	// initialConnectTimeout bounds dialInitial's retries (Issue #4532). 0 retries
+	// until p.ctx is done (Issue #3849). It never bounds the established session.
+	initialConnectTimeout time.Duration
+	rejectOnce            sync.Once
+	rejectedCh            chan struct{}
+	rejectErr             error
+	firstRecvOnce         sync.Once
+	firstRecvCh           chan struct{}
+	maxConnections        int
+	stewardID             string
+	tenantID              string
+	logger                logging.Logger
+	startTime             time.Time
 
 	// Per-instance overrides injected via constructor options (test-only)
 	backoffOverride *backoff
@@ -186,6 +201,8 @@ func New(mode Mode, opts ...option) *Provider {
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
 		logger:            logging.NewNoopLogger(),
 		maxConnections:    50000,
+		rejectedCh:        make(chan struct{}),
+		firstRecvCh:       make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -216,6 +233,12 @@ func (p *Provider) Registry() registry.Registry {
 //   - "keepalive_period": time.Duration - QUIC keepalive interval (optional, default 25s)
 //   - "idle_timeout": time.Duration - QUIC idle timeout (optional, default 90s)
 //   - "on_state_change": func(ConnectionState) - Connection state change callback (optional, client mode only)
+//   - "admission_window": time.Duration - Client mode: Start returns an error wrapping
+//     interfaces.ErrIdentityRejected when the controller definitively refuses the identity,
+//     waiting up to this long after the stream opens for the verdict (optional; 0 retries
+//     every failure until the provider's context ends)
+//   - "initial_connect_timeout": time.Duration - Client mode: stop retrying the initial dial after
+//     this long and return the last error (optional; 0 retries until the provider's context ends)
 //
 // Server mode additional keys:
 //   - "grpc_server": *grpc.Server - Externally-created gRPC server (optional; when provided,
@@ -252,6 +275,18 @@ func (p *Provider) Initialize(ctx context.Context, config map[string]interface{}
 	}
 	if it, ok := config["idle_timeout"].(time.Duration); ok {
 		p.idleTimeout = it
+	}
+	if aw, ok := config["admission_window"].(time.Duration); ok {
+		if aw < 0 {
+			return fmt.Errorf("admission_window must not be negative")
+		}
+		p.admissionWindow = aw
+	}
+	if ict, ok := config["initial_connect_timeout"].(time.Duration); ok {
+		if ict < 0 {
+			return fmt.Errorf("initial_connect_timeout must not be negative")
+		}
+		p.initialConnectTimeout = ict
 	}
 	if max, ok := config["max_connections"].(int); ok {
 		if max < 1 {
@@ -439,8 +474,72 @@ func (p *Provider) startClient() error {
 
 	go p.clientReceiveLoop()
 
+	if p.admissionWindow > 0 {
+		if err := p.awaitAdmission(); err != nil {
+			p.setState(StateDisconnected)
+			return err
+		}
+	}
+
 	p.logger.Info("gRPC control plane client connected", "addr", logging.SanitizeLogValue(p.addr), "steward_id", logging.SanitizeLogValue(p.stewardID))
 	return nil
+}
+
+// awaitAdmission waits for the controller's verdict on a just-opened stream. The
+// controller sends nothing when it admits a stream and refuses one by ending it
+// with a status, which the first Recv observes within a round trip of its
+// approval check. So a refusal inside the window is reported; a first message,
+// or the window elapsing with neither, counts as admitted (Issue #4532).
+func (p *Provider) awaitAdmission() error {
+	timer := time.NewTimer(p.admissionWindow)
+	defer timer.Stop()
+	select {
+	case <-p.rejectedCh:
+		return p.rejectErr
+	case <-p.firstRecvCh:
+		return nil
+	case <-timer.C:
+		return nil
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	}
+}
+
+// markIdentityRejected records the first definitive identity rejection and
+// returns it wrapped in interfaces.ErrIdentityRejected.
+func (p *Provider) markIdentityRejected(cause error) error {
+	p.rejectOnce.Do(func() {
+		p.rejectErr = fmt.Errorf("%w: %v", interfaces.ErrIdentityRejected, cause)
+		close(p.rejectedCh)
+	})
+	return p.rejectErr
+}
+
+// isIdentityRejection reports whether err is the controller definitively refusing
+// this steward's identity: an Unauthenticated or PermissionDenied control-channel
+// status, which the controller returns only after authenticating the TLS peer and
+// looking the steward up (unknown, deregistered or revoked steward).
+//
+// TLS handshake failures are deliberately NOT rejections, even certificate ones:
+// they have transient causes that must never cost a healthy steward its one-time
+// registration token. A controller whose clock is skewed rejects a valid client
+// certificate as not yet valid or expired (Go's TLS server sends bad_certificate
+// for every verification failure), and a TLS-intercepting proxy presents a
+// certificate the stored CA does not trust. A steward whose controller is truly
+// gone is re-enrolled explicitly with install --reenroll (Issue #4532).
+func isIdentityRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	s, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	switch s.Code() {
+	case codes.Unauthenticated, codes.PermissionDenied:
+		return true
+	}
+	return false
 }
 
 // dialInitial repeats dialAndOpenStream, using the same escalating backoff as
@@ -456,12 +555,27 @@ func (p *Provider) startClient() error {
 // initial connect deterministic under load: as long as the caller does not
 // impose its own deadline, the dial keeps trying until the peer is reachable
 // (Issue #3849).
+//
+// When admissionWindow is set, a definitive identity rejection stops retrying and
+// is returned wrapping interfaces.ErrIdentityRejected (Issue #4532): a steward
+// reconnecting with a stored identity falls back to registration only then. An
+// unreachable or slow controller is retried until p.ctx is done, or until
+// initialConnectTimeout elapses when it is set: the budget covers only this
+// initial connect, never the session p.ctx governs, and lets a steward with a
+// stored identity move on to re-admission (Issue #4532).
 func (p *Provider) dialInitial() error {
 	b := defaultBackoff()
+	var deadline time.Time
+	if p.initialConnectTimeout > 0 {
+		deadline = time.Now().Add(p.initialConnectTimeout)
+	}
 	for {
 		err := p.dialAndOpenStream()
 		if err == nil {
 			return nil
+		}
+		if p.admissionWindow > 0 && isIdentityRejection(err) {
+			return p.markIdentityRejected(err)
 		}
 
 		select {
@@ -470,7 +584,18 @@ func (p *Provider) dialInitial() error {
 		default:
 		}
 
-		timer := time.NewTimer(b.next())
+		wait := b.next()
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return fmt.Errorf("initial connect gave up after %s: %w", p.initialConnectTimeout, err)
+			}
+			if wait > remaining {
+				wait = remaining
+			}
+		}
+
+		timer := time.NewTimer(wait)
 		select {
 		case <-p.ctx.Done():
 			timer.Stop()
@@ -547,8 +672,14 @@ func (p *Provider) clientReceiveLoop() {
 			// persistently-refused steward escalating while leaving an ordinary
 			// transport drop reconnecting promptly (Issue #3481).
 			p.resetReconnectBackoff()
+			p.firstRecvOnce.Do(func() { close(p.firstRecvCh) })
 		}
 		if err != nil {
+			// Record a refusal for awaitAdmission. Reconnection below is unchanged:
+			// a steward refused mid-session keeps retrying, as before (Issue #4532).
+			if isIdentityRejection(err) {
+				_ = p.markIdentityRejected(err)
+			}
 			select {
 			case <-p.ctx.Done():
 				p.setState(StateDisconnected)

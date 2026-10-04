@@ -208,6 +208,7 @@ type Server struct {
 	cliLoginSweepLease              lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-login expiry sweep
 	cliPresenceLodgeLimiter         *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence lodge
 	cliPresenceCollectLimiter       *sourceRateLimiter                       // Issue #4287: per-source rate limit on cli-presence collect
+	registrationRefreshLimiter      *sourceRateLimiter                       // Issue #4532: per-source rate limit on the registration-refresh handshake
 	stopCliPresenceSweep            chan struct{}                            // Issue #4287: signals the cli-presence expiry sweep to exit
 	cliPresenceSweepDone            chan struct{}                            // Issue #4287: closed when the cli-presence sweep goroutine exits
 	cliPresenceSweepLease           lease.SingletonJob                       // ADR-031 Decision 4: cluster-singleton claim for the cli-presence expiry sweep
@@ -402,9 +403,13 @@ func New(
 		// bounded from hammering either one.
 		cliPresenceLodgeLimiter:   newSourceRateLimiter(20, time.Minute),
 		cliPresenceCollectLimiter: newSourceRateLimiter(30, time.Minute),
-		stopCliPresenceSweep:      make(chan struct{}),
-		cliPresenceSweepDone:      make(chan struct{}),
-		cliPresenceSweepLease:     cliPresenceSweepLease,
+		// Issue #4532: challenge + complete/claim per re-admission. Generous
+		// because many stewards at one site share a NAT address and re-admit
+		// together after an outage; it bounds abuse, not a site's recovery.
+		registrationRefreshLimiter: newSourceRateLimiter(240, time.Minute),
+		stopCliPresenceSweep:       make(chan struct{}),
+		cliPresenceSweepDone:       make(chan struct{}),
+		cliPresenceSweepLease:      cliPresenceSweepLease,
 		// Issue #3761: default poll interval for runRollout to notice a halt persisted
 		// by a peer node during a ring soak; tests shrink this for determinism.
 		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
@@ -754,8 +759,14 @@ func (s *Server) setupRouter() {
 
 	// Registration-refresh endpoints (unauthenticated — authenticated by device key PoP).
 	// Registered on the base router like /api/v1/register (Issue #2096).
-	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/challenge", s.handleRefreshChallenge).Methods("POST", "OPTIONS")
-	s.router.HandleFunc("/api/v1/stewards/{device_id}/refresh/complete", s.handleRefreshComplete).Methods("POST", "OPTIONS")
+	// One per-source budget across the three, bounding abuse of the public
+	// handshake (Issue #4532).
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/challenge",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshChallenge))).Methods("POST", "OPTIONS")
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/complete",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshComplete))).Methods("POST", "OPTIONS")
+	s.router.Handle("/api/v1/stewards/{device_id}/refresh/claim",
+		s.registrationRefreshLimiter.middleware(s.trustedProxies, http.HandlerFunc(s.handleRefreshClaim))).Methods("POST", "OPTIONS")
 
 	// All routes on the api subrouter require authentication (enforced by authenticationMiddleware).
 	// Routes whose permissions appear in permissionAssurance additionally enforce an assurance-level
@@ -1840,6 +1851,7 @@ func (s *Server) SetRateCounterStore(store business.RateCounterStore) {
 		"cli-login-collect":          s.cliLoginCollectLimiter,
 		"cli-presence-lodge":         s.cliPresenceLodgeLimiter,
 		"cli-presence-collect":       s.cliPresenceCollectLimiter,
+		"registration-refresh":       s.registrationRefreshLimiter,
 	} {
 		if limiter != nil {
 			limiter.useSharedCounter(routeName, store, s.logger)

@@ -151,6 +151,24 @@ func (s *DatabasePendingRefreshStore) UpdateRefreshStatus(ctx context.Context, p
 	return nil
 }
 
+// ClaimApprovedRefresh implements business.PendingRefreshStore: a single
+// conditional UPDATE, so of two racing claims exactly one sees a row change.
+func (s *DatabasePendingRefreshStore) ClaimApprovedRefresh(ctx context.Context, pendingID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE pending_refresh_requests SET status = $1
+		WHERE pending_id = $2 AND status = $3`,
+		business.PendingRefreshStatusClaimed, pendingID, business.PendingRefreshStatusApproved,
+	)
+	if err != nil {
+		return false, fmt.Errorf("database: failed to claim refresh %s: %w", pendingID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("database: failed to claim refresh %s: %w", pendingID, err)
+	}
+	return n == 1, nil
+}
+
 // ListPendingRefresh returns all entries for the given tenantID ordered by
 // created_at ascending. An empty tenantID returns entries for all tenants.
 func (s *DatabasePendingRefreshStore) ListPendingRefresh(ctx context.Context, tenantID string) ([]*business.PendingRefreshEntry, error) {

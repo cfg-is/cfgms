@@ -4,6 +4,8 @@ package sqlite
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -276,4 +278,38 @@ func TestPendingRefreshStore_AddEmptyTenantID(t *testing.T) {
 	entry := testRefreshEntry("pr-notenant", "dev-1", "")
 	err := store.AddPendingRefresh(context.Background(), entry)
 	require.Error(t, err, "empty tenant_id must return an error")
+}
+
+// TestPendingRefreshStore_ClaimApprovedRefresh_ExactlyOnce guards Issue #4532: of
+// several racing claims on one approved entry exactly one wins, and an entry that
+// is not approved is never claimed.
+func TestPendingRefreshStore_ClaimApprovedRefresh_ExactlyOnce(t *testing.T) {
+	store := newTestPendingRefreshStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.AddPendingRefresh(ctx, testRefreshEntry("pr-claim", "devclaim", "t1")))
+	claimed, err := store.ClaimApprovedRefresh(ctx, "pr-claim")
+	require.NoError(t, err)
+	assert.False(t, claimed, "a pending entry is not claimable")
+
+	require.NoError(t, store.UpdateRefreshStatus(ctx, "pr-claim", business.PendingRefreshStatusApproved))
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, claimErr := store.ClaimApprovedRefresh(ctx, "pr-claim")
+			assert.NoError(t, claimErr)
+			if ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), wins.Load(), "exactly one claim wins")
+
+	got, err := store.GetPendingRefreshByID(ctx, "pr-claim")
+	require.NoError(t, err)
+	assert.Equal(t, business.PendingRefreshStatusClaimed, got.Status)
 }

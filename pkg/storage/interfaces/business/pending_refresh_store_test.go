@@ -103,6 +103,17 @@ func (s *inMemPendingRefreshStore) ExpireStaleRefresh(_ context.Context, cutoff 
 	return count, nil
 }
 
+func (s *inMemPendingRefreshStore) ClaimApprovedRefresh(_ context.Context, pendingID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[pendingID]
+	if !ok || e.Status != business.PendingRefreshStatusApproved {
+		return false, nil
+	}
+	e.Status = business.PendingRefreshStatusClaimed
+	return true, nil
+}
+
 func (s *inMemPendingRefreshStore) StoreClaimBundle(_ context.Context, pendingID string, bundle []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
