@@ -21,7 +21,7 @@ func makeSuspendedSubtree(t *testing.T, m *Manager) (rootID, childID, grandID st
 	t.Helper()
 	ctx := context.Background()
 
-	root, err := m.CreateTenant(ctx, &TenantRequest{Name: "Del-Root"})
+	root, err := m.CreateTenant(ctx, &TenantRequest{Name: "Del-Root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	rootID = root.ID
 
@@ -42,7 +42,7 @@ func TestRequestTenantDeletion_SubtreeNotFullySuspended(t *testing.T) {
 	m := newTestTenantManager(t)
 	ctx := context.Background()
 
-	root, err := m.CreateTenant(ctx, &TenantRequest{Name: "Root"})
+	root, err := m.CreateTenant(ctx, &TenantRequest{Name: "Root", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	child, err := m.CreateTenant(ctx, &TenantRequest{Name: "Child", ParentID: root.ID})
 	require.NoError(t, err)
@@ -85,7 +85,7 @@ func TestCreateTenant_RejectsUnderSuspendedParent(t *testing.T) {
 	m := newTestTenantManager(t)
 	ctx := context.Background()
 
-	parent, err := m.CreateTenant(ctx, &TenantRequest{Name: "Parent"})
+	parent, err := m.CreateTenant(ctx, &TenantRequest{Name: "Parent", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	_, err = m.SuspendTenant(ctx, parent.ID)
@@ -202,10 +202,11 @@ func TestApproveTenantDeletion_SameApproverRejected(t *testing.T) {
 	// Use a minimal hold period so we can test by injecting an elapsed pending record.
 	store := cfgmstesting.SetupTestStorage(t)
 	m2 := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 
 	// Create the subtree in store2.
 	for _, td := range []struct{ id, parent string }{
-		{rootID, ""},
+		{rootID, testRootTenantID},
 		{childID, rootID},
 		{grandID, childID},
 	} {
@@ -238,11 +239,13 @@ func TestApproveTenantDeletion_SameApproverRejected(t *testing.T) {
 func TestApproveTenantDeletion_DualControlDisabledAllowsSameApprover(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "del-root"
 	now := time.Now()
 	td := business.TenantData{
+		ParentID:          testRootTenantID,
 		ID:                rootID,
 		Name:              "Del-Root",
 		Status:            business.TenantStatusSuspended,
@@ -268,6 +271,7 @@ func TestApproveTenantDeletion_DualControlDisabledAllowsSameApprover(t *testing.
 func TestApproveTenantDeletion_MembershipChangedRejected(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "mem-root"
@@ -275,7 +279,7 @@ func TestApproveTenantDeletion_MembershipChangedRejected(t *testing.T) {
 	now := time.Now()
 
 	for _, td := range []business.TenantData{
-		{ID: rootID, Name: "Root", Status: business.TenantStatusSuspended, DirectlySuspended: true},
+		{ID: rootID, Name: "Root", ParentID: testRootTenantID, Status: business.TenantStatusSuspended, DirectlySuspended: true},
 	} {
 		td := td
 		require.NoError(t, store.GetTenantStore().CreateTenant(ctx, &td))
@@ -308,14 +312,15 @@ func TestApproveTenantDeletion_DefaultTenantProtected(t *testing.T) {
 	m := newTestTenantManager(t)
 	ctx := context.Background()
 
-	_, err := m.ApproveTenantDeletion(ctx, "default", "bob", false)
+	_, err := m.ApproveTenantDeletion(ctx, testRootTenantID, "bob", false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot delete default tenant")
+	assert.Contains(t, err.Error(), "cannot delete root tenant")
 }
 
 func TestApproveTenantDeletion_CascadeDeletesEntireSubtree(t *testing.T) {
 	store := cfgmstesting.SetupTestStorage(t)
 	m := NewManager(store.GetTenantStore(), nil)
+	seedRootTenantInStore(t, store.GetTenantStore())
 	ctx := context.Background()
 
 	rootID := "cas-root"
@@ -324,7 +329,7 @@ func TestApproveTenantDeletion_CascadeDeletesEntireSubtree(t *testing.T) {
 	now := time.Now()
 
 	for _, td := range []struct{ id, parent string }{
-		{rootID, ""},
+		{rootID, testRootTenantID},
 		{childID, rootID},
 		{grandID, childID},
 	} {
@@ -364,7 +369,7 @@ func TestDeleteTenant_HasChildrenGuardPreserved(t *testing.T) {
 	m := newTestTenantManager(t)
 	ctx := context.Background()
 
-	parent, err := m.CreateTenant(ctx, &TenantRequest{Name: "Parent"})
+	parent, err := m.CreateTenant(ctx, &TenantRequest{Name: "Parent", ParentID: testRootTenantID})
 	require.NoError(t, err)
 	_, err = m.CreateTenant(ctx, &TenantRequest{Name: "Child", ParentID: parent.ID})
 	require.NoError(t, err)

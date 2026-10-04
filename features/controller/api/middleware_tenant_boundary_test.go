@@ -117,7 +117,7 @@ func boundaryTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 func boundaryTestTenants(t *testing.T, server *Server) *Server {
 	t.Helper()
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestRootScopedPrincipal_RootTenantItselfAlwaysAllowed(t *testing.T) {
 	for _, entry := range tenantBoundaryRouteTable {
 		entry := entry
 		t.Run(entry.String(), func(t *testing.T) {
-			_, reached := serveBoundaryRoute(t, server, entry, caller, rootTenantID)
+			_, reached := serveBoundaryRoute(t, server, entry, caller, testRootTenantID)
 			assert.True(t, reached,
 				"a root-scoped caller must reach %s for the root tenant itself", entry.permission)
 		})

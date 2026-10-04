@@ -102,8 +102,17 @@ func TestM365TenantMetadata_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(t, original.DiscoveryMethod, unmarshaled.DiscoveryMethod)
 }
 
+// seedRootTenant writes the deployment's root tenant (the single tenant with no
+// parent, Issue #4542) beneath which discovered M365 tenants are created.
+func seedRootTenant(t *testing.T, store business.TenantStore) {
+	t.Helper()
+	require.NoError(t, store.CreateTenant(context.Background(), &business.TenantData{
+		ID: "root", Name: "root", Status: business.TenantStatusActive}))
+}
+
 func TestCreateCFGMSTenant(t *testing.T) {
 	manager, store, ctx := setupTestManager(t)
+	seedRootTenant(t, store)
 
 	m365Tenant := &TenantInfo{
 		TenantID:    "m365-tenant-123",
@@ -117,12 +126,20 @@ func TestCreateCFGMSTenant(t *testing.T) {
 	err := manager.createCFGMSTenant(ctx, m365Tenant, "admin_consent", time.Now())
 	require.NoError(t, err)
 
-	// Verify tenant was created
+	// Verify tenant was created beneath the root (Issue #4542: a deployment has a
+	// single tenant with no parent, so a discovered tenant is never top-level).
 	tenants, err := store.ListTenants(ctx, nil)
 	require.NoError(t, err)
-	assert.Len(t, tenants, 1)
+	require.Len(t, tenants, 2)
 
-	createdTenant := tenants[0]
+	var createdTenant *business.TenantData
+	for _, td := range tenants {
+		if td.ID != "root" {
+			createdTenant = td
+		}
+	}
+	require.NotNil(t, createdTenant)
+	assert.Equal(t, "root", createdTenant.ParentID)
 	assert.Equal(t, "Contoso-Ltd", createdTenant.Name)
 	assert.Contains(t, createdTenant.Metadata, "m365_metadata")
 	assert.Equal(t, "m365", createdTenant.Metadata["tenant_type"])
@@ -533,3 +550,31 @@ func TestM365TenantManager_GetTenantByM365ID_ListTenantsError(t *testing.T) {
 // real gdap.GDAPProvider backed by a local httptest.Server. It was moved there
 // because features/workflow/modules/m365/gdap imports features/saas, creating
 // an import cycle that prevents importing the real GDAPProvider from this package.
+
+// TestCreateCFGMSTenant_UnderAnyNamedRoot guards Issue #4542: discovery on a
+// deployment that already has a root succeeds and places the tenant under that
+// root whatever it is named, instead of failing with ErrTopLevelTenantExists.
+func TestCreateCFGMSTenant_UnderAnyNamedRoot(t *testing.T) {
+	manager, store, ctx := setupTestManager(t)
+	require.NoError(t, store.CreateTenant(ctx, &business.TenantData{
+		ID: "team-root", Name: "team-root", Status: business.TenantStatusActive}))
+
+	require.NoError(t, manager.createCFGMSTenant(ctx, &TenantInfo{TenantID: "m365-2", DisplayName: "Fabrikam", Domain: "fabrikam.example"}, "gdap", time.Now()))
+
+	created, err := manager.getTenantByM365ID(ctx, "m365-2")
+	require.NoError(t, err)
+	assert.Equal(t, "team-root", created.ParentID)
+}
+
+// TestCreateCFGMSTenant_NoRootFails guards Issue #4542: with no root to place it
+// under, discovery refuses rather than make a customer tenant the deployment root.
+func TestCreateCFGMSTenant_NoRootFails(t *testing.T) {
+	manager, store, ctx := setupTestManager(t)
+
+	err := manager.createCFGMSTenant(ctx, &TenantInfo{TenantID: "m365-3", DisplayName: "Northwind", Domain: "northwind.example"}, "gdap", time.Now())
+	require.ErrorIs(t, err, ErrNoRootTenantForDiscovery)
+
+	tenants, err := store.ListTenants(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, tenants, "no tenant is created")
+}

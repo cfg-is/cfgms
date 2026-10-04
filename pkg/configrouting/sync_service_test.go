@@ -572,3 +572,31 @@ func TestSyncService_RunIsIdempotent(t *testing.T) {
 	defer cancel()
 	require.NoError(t, svc.Stop(stopCtx))
 }
+
+// TestSyncService_NoRootSyncsNothing guards Issue #4542: with no resolvable root
+// (no tenants, or several top-level tenants) the service is given "" and must sync
+// no tenant — walking children of "" would list every top-level tenant — and
+// refuse every Register.
+func TestSyncService_NoRootSyncsNothing(t *testing.T) {
+	ts := newSyncTenantStore(t)
+	addSyncTenant(t, ts, "msp-a", "", nil)
+	addSyncTenant(t, ts, "msp-b", "", nil)
+
+	router := newSyncTestRouter()
+	router.setSource("msp-a", gitSource(time.Hour))
+	router.setSource("msp-b", gitSource(time.Hour))
+
+	auditMgr, _ := newTestAuditManager(t)
+	svc := NewSyncService(router, ts, auditMgr, logging.NewNoopLogger(), noopCascade, "")
+	svc.Run(context.Background())
+
+	svc.mu.Lock()
+	count := len(svc.stops)
+	svc.mu.Unlock()
+	assert.Zero(t, count, "no root means no tenant is synced")
+	assert.ErrorIs(t, svc.Register("msp-a"), ErrCrossRootBoundary)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	require.NoError(t, svc.Stop(stopCtx))
+}

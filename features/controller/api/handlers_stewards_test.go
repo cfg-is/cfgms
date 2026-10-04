@@ -2522,7 +2522,7 @@ func setupMoveStewardServer(t *testing.T) (*Server, business.StewardStore, strin
 	// a CreateTenant failure here is a real setup error and must fail the test.
 	ctx := context.Background()
 	for _, id := range []string{"source-tenant", "dest-tenant"} {
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id, ParentID: testRootTenantID})
 		require.NoError(t, err, "creating tenant %q", id)
 	}
 	return server, st, root
@@ -2604,7 +2604,7 @@ func TestMoveSteward_ConcurrentMovesToDifferentDestinationsCAS(t *testing.T) {
 	ctx := context.Background()
 	for _, srv := range []*Server{nodeA, nodeB} {
 		for _, id := range []string{"dest-tenant-a", "dest-tenant-b"} {
-			_, err := srv.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+			_, err := srv.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id, ParentID: testRootTenantID})
 			require.NoError(t, err, "creating tenant %q", id)
 		}
 	}
@@ -3054,7 +3054,7 @@ func setupMoveAuthServer(t *testing.T) (*Server, business.StewardStore) {
 	// Add extra tenants needed for hierarchical tests. "msp-a" and "other-msp" are flat
 	// parent-level scopes; "msp-a-child" serves as a child-namespace stand-in.
 	for _, id := range []string{"msp-a", "msp-a-child", "other-msp"} {
-		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id})
+		_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: id, Name: id, ParentID: testRootTenantID})
 		require.NoError(t, err, "creating tenant %q", id)
 	}
 	return server, st
@@ -3133,8 +3133,9 @@ func TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix(t *testi
 	// Register "msp-a/child-dst" as a destination tenant via a direct store insertion
 	// (bypassing tenant manager validation) — we only need GetTenant to return active.
 	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
-		ID:   "msp-a-child-dst",
-		Name: "msp-a-child-dst",
+		ParentID: testRootTenantID,
+		ID:       "msp-a-child-dst",
+		Name:     "msp-a-child-dst",
 	})
 	require.NoError(t, err)
 
@@ -4447,7 +4448,7 @@ func putStewardConfigAsPrincipal(server *Server, stewardID string, principal *Pr
 func TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challenge(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)
@@ -4466,7 +4467,7 @@ func TestUpdateStewardConfig_AccountBoundRootScoped_NoCrossing_Returns401Challen
 func TestUpdateStewardConfig_AccountBoundRootScoped_WithCrossing_Allowed(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
 	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-a", ParentID: "root"})
 	require.NoError(t, err)

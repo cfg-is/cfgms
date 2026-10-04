@@ -17,9 +17,24 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// rootTenantID is the conventional ID of the top-level tenant (ADR-025 Decision 1's
-// "root"), shared in spirit with handlers_installer.go's downloadTenantID.
-const rootTenantID = "root"
+// isRootTenantForCrossing reports whether tenantID is the deployment root, which
+// must never carry a crossing: one there would sit on every descendant's ancestry
+// path and act as a fleet-wide key (Issue #4542).
+func (s *Server) isRootTenantForCrossing(ctx context.Context, tenantID string) bool {
+	root := s.rootTenantID(ctx)
+	return root != "" && tenantID == root
+}
+
+// rootTenantID returns the deployment's root tenant (ADR-025 Decision 1's
+// "root"): the single tenant with no parent, resolved by the tenant manager
+// (Issue #4542). "" means no root — no tenants, several parentless tenants, or
+// no tenant manager — which callers treat as fail-closed.
+func (s *Server) rootTenantID(ctx context.Context) string {
+	if s.tenantManager == nil {
+		return ""
+	}
+	return s.tenantManager.RootTenantID(ctx)
+}
 
 // tenantAuthDecision explains why authorizeTenantAccess denied a caller, so handlers
 // can choose the right HTTP response: tenantAuthDenied means 404 (prevents existence
@@ -141,8 +156,13 @@ func (s *Server) authorizeTenantAccess(ctx context.Context, principal *Principal
 // returns tenantAuthAllowed unconditionally in authorizeTenantAccess above and never
 // reaches here.
 func (s *Server) authorizeRootScopedTenantAccess(ctx context.Context, principalID, resourceTenant string) tenantAuthDecision {
-	if resourceTenant == "" || resourceTenant == rootTenantID {
+	rootTenantID := s.rootTenantID(ctx)
+	if resourceTenant == "" || (rootTenantID != "" && resourceTenant == rootTenantID) {
 		return tenantAuthAllowed
+	}
+	if rootTenantID == "" {
+		// Ambiguous tree: no tenant is root, so nothing is in root's subtree.
+		return tenantAuthDenied
 	}
 	isUnderRoot, err := s.tenantManager.IsTenantAncestor(ctx, rootTenantID, resourceTenant)
 	if err != nil {
@@ -197,7 +217,7 @@ func (s *Server) hasActiveTenantCrossing(ctx context.Context, principalID, resou
 		// Grant and break-glass creation both refuse "root" outright
 		// (handlers_tenant_crossing.go); this second gate keeps any row written by an
 		// earlier build, or directly into the store, inert as well.
-		if tenantID == rootTenantID {
+		if s.isRootTenantForCrossing(ctx, tenantID) {
 			continue
 		}
 		active, err := s.tenantCrossingStore.HasActiveTenantCrossing(ctx, principalID, tenantID)
@@ -352,6 +372,10 @@ func (s *Server) handleCreateTenant(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, business.ErrTenantAlreadyExists) {
 			s.writeErrorResponse(w, http.StatusConflict, "tenant already exists", "TENANT_EXISTS")
+			return
+		}
+		if errors.Is(err, tenant.ErrTopLevelTenantExists) {
+			s.writeErrorResponse(w, http.StatusConflict, "a top-level tenant already exists; specify parent_id", "TOP_LEVEL_TENANT_EXISTS")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "CREATE_FAILED")
@@ -623,8 +647,8 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 			return
 		}
-		if errors.Is(err, tenant.ErrCannotSuspendDefault) {
-			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend default tenant", "PROTECTED_TENANT")
+		if errors.Is(err, tenant.ErrCannotSuspendRoot) {
+			s.writeErrorResponse(w, http.StatusBadRequest, "cannot suspend root tenant", "PROTECTED_TENANT")
 			return
 		}
 		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to suspend tenant", "SUSPEND_FAILED")

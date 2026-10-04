@@ -672,9 +672,16 @@ type APITenantResponse struct {
 // ErrTenantAlreadyExists is returned by CreateTenantViaAPI when the server responds HTTP 409.
 var ErrTenantAlreadyExists = fmt.Errorf("tenant already exists")
 
+// ErrTopLevelTenantExists is returned by CreateTenantViaAPI when the controller
+// refuses a tenant with no parent because the deployment already has its single
+// top-level tenant (Issue #4542). Unlike ErrTenantAlreadyExists it is not
+// idempotent success: the requested tenant was not created.
+var ErrTopLevelTenantExists = fmt.Errorf("a top-level tenant already exists; create the tenant with --parent")
+
 // CreateTenantViaAPI creates a tenant via the controller REST API.
-// Returns ErrTenantAlreadyExists when the server responds HTTP 409 (idempotent callers
-// should treat that as success and exit 0).
+// Returns ErrTenantAlreadyExists when the server responds HTTP 409 because the
+// tenant exists (idempotent callers should treat that as success and exit 0), and
+// ErrTopLevelTenantExists when it refuses a second top-level tenant.
 func (c *APIClient) CreateTenantViaAPI(ctx context.Context, req *APITenantCreateRequest) (*APITenantResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -688,6 +695,14 @@ func (c *APIClient) CreateTenantViaAPI(ctx context.Context, req *APITenantCreate
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusConflict {
+		var conflict struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&conflict) == nil && conflict.Error.Code == "TOP_LEVEL_TENANT_EXISTS" {
+			return nil, ErrTopLevelTenantExists
+		}
 		return nil, ErrTenantAlreadyExists
 	}
 	if resp.StatusCode != http.StatusCreated {

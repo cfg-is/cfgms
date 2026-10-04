@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -14,8 +15,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -128,6 +132,8 @@ func setupTestServer(t *testing.T) *Server {
 	// Initialize tenant management with durable storage (git-backed)
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
+	testTenantStores.Store(tenantManager, tenantStore)
 
 	// Create services
 	controllerService := service.NewControllerService(logger)
@@ -214,6 +220,8 @@ func setupRouteTestServer(t *testing.T) *Server {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
+	testTenantStores.Store(tenantManager, tenantStore)
 
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -998,6 +1006,8 @@ func setupTestServerWithLogger(t *testing.T, logger logging.Logger) *Server {
 
 	tenantStore := tenant.NewStorageAdapter(storageManager.GetTenantStore())
 	tenantManager := tenant.NewManager(tenantStore, rbacManager)
+	seedTestRootTenant(t, tenantManager)
+	testTenantStores.Store(tenantManager, tenantStore)
 
 	controllerService := service.NewControllerService(logger)
 	configService := service.NewConfigurationServiceV2(logger, storageManager, controllerService)
@@ -2195,4 +2205,41 @@ func TestSPAHeadRequest(t *testing.T) {
 	// HEAD must return headers but no body.
 	assert.Empty(t, rr.Body.String())
 	assert.NotEmpty(t, rr.Header().Get("Content-Security-Policy"))
+}
+
+// seedTestRootTenant creates the deployment's root tenant (ADR-032: the single
+// tenant with no parent, Issue #4542); tests create their tenants beneath it.
+func seedTestRootTenant(t *testing.T, m *tenant.Manager) {
+	t.Helper()
+	require.NoError(t, ensureTestRootTenant(context.Background(), m))
+}
+
+// ensureTestRootTenant creates the root tenant unless one already exists.
+func ensureTestRootTenant(ctx context.Context, m *tenant.Manager) error {
+	_, err := m.CreateTenant(ctx, &tenant.TenantRequest{ID: testRootTenantID})
+	if errors.Is(err, tenant.ErrTenantExists) || errors.Is(err, tenant.ErrTopLevelTenantExists) {
+		return nil
+	}
+	return err
+}
+
+// testRootTenantID is the conventional name of the root tenant the test servers
+// seed. The root is identified by position (the single tenant with no parent),
+// never by this name (Issue #4542).
+const testRootTenantID = "root"
+
+// testTenantStores maps a test server's tenant manager to the store behind it, so
+// a test can write a tenant shape the manager itself refuses.
+var testTenantStores sync.Map // *tenant.Manager -> tenant.Store
+
+// seedLegacyTopLevelTenant writes a second tenant with no parent straight to the
+// store, the shape of a deployment seeded before the single-root rule (Issue
+// #4542); tenant.Manager.CreateTenant refuses it. The root is then ambiguous.
+func seedLegacyTopLevelTenant(t *testing.T, server *Server, id string) {
+	t.Helper()
+	v, ok := testTenantStores.Load(server.tenantManager)
+	require.True(t, ok, "server was not built by a setupTestServer variant")
+	now := time.Now()
+	require.NoError(t, v.(tenant.Store).CreateTenant(context.Background(), &business.TenantData{
+		ID: id, Name: id, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
 }

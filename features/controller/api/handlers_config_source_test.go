@@ -47,7 +47,8 @@ func setupConfigSourceTestServer(t *testing.T) (*Server, string) {
 
 	ctx := context.Background()
 	td, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
-		Name: "TestConfigSourceTenant",
+		ParentID: testRootTenantID,
+		Name:     "TestConfigSourceTenant",
 		Metadata: map[string]string{
 			cfgpkg.MetaKeyConfigSourceType:   "git",
 			cfgpkg.MetaKeyConfigSourceURL:    "https://github.com/example/configs.git",

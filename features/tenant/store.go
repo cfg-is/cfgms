@@ -54,18 +54,23 @@ func NewStorageAdapter(store business.TenantStore) Store {
 }
 
 // Common errors
+
 var (
 	// ErrTenantNotFound aliases the storage-layer sentinel rather than declaring a
 	// second "tenant is missing" error. Manager passes store errors through
 	// untouched, so a caller that matched this value while a provider returned the
 	// storage sentinel would never match — the divergence that let a missing-tenant
 	// lookup be misclassified as a backend fault.
-	ErrTenantNotFound       = business.ErrTenantDoesNotExist
-	ErrTenantExists         = business.ErrTenantAlreadyExists
-	ErrInvalidParent        = fmt.Errorf("invalid parent tenant")
-	ErrCircularReference    = fmt.Errorf("circular reference in tenant hierarchy")
-	ErrTenantHasChildren    = fmt.Errorf("tenant has child tenants")
-	ErrCannotSuspendDefault = fmt.Errorf("cannot suspend default tenant")
+	ErrTenantNotFound    = business.ErrTenantDoesNotExist
+	ErrTenantExists      = business.ErrTenantAlreadyExists
+	ErrInvalidParent     = fmt.Errorf("invalid parent tenant")
+	ErrCircularReference = fmt.Errorf("circular reference in tenant hierarchy")
+	ErrTenantHasChildren = fmt.Errorf("tenant has child tenants")
+	ErrCannotSuspendRoot = fmt.Errorf("cannot suspend root tenant")
+	// ErrTopLevelTenantExists is returned when a tenant with no parent is created
+	// while one already exists: a deployment has exactly one root tenant, the
+	// single tenant with no parent (ADR-032, Issue #4542).
+	ErrTopLevelTenantExists = fmt.Errorf("a top-level tenant already exists; create the tenant under a parent")
 
 	// Deletion pipeline sentinels (ADR-027 Decisions 3-4, Issue #3182).
 	ErrTenantNotFullySuspended = fmt.Errorf("target subtree is not fully suspended")
