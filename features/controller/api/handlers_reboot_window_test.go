@@ -623,9 +623,9 @@ func TestGetStewardRebootWindow_AccountBoundRootScopeWithoutCrossing_Challenged(
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
 
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "root"})
+	err := ensureTestRootTenant(ctx, server.tenantManager)
 	require.NoError(t, err)
-	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rwb", ParentID: "root"})
+	_, err = server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "msp-rwb", ParentID: testRootTenantID})
 	require.NoError(t, err)
 
 	stewardID := "msp-rwb-steward"
