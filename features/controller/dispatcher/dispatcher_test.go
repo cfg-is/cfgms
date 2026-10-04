@@ -5,6 +5,7 @@ package dispatcher
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -1613,6 +1614,49 @@ func TestDispatcher_New_ValidationErrors(t *testing.T) {
 			assert.Nil(t, d)
 		})
 	}
+}
+
+// TestDispatcherSkipsStewardsNotConnectedLocally guards Issue #4528: with a
+// cluster-shared queue every node sees every device's work, so a node must only
+// dispatch to stewards whose session it holds — the node that also receives the
+// result.
+func TestDispatcherSkipsStewardsNotConnectedLocally(t *testing.T) {
+	cp := &testControlPlane{}
+	q := newTestQueue(t, nil)
+	d, err := New(&Config{
+		Queue:              q,
+		ControlPlane:       cp,
+		PollInterval:       24 * time.Hour,
+		IsLocallyConnected: func(stewardID string) bool { return stewardID == "local-steward" },
+		Logger:             logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, q.QueueExecution("remote-steward", queuedExec("exec-remote", "script-r")))
+	require.NoError(t, q.QueueExecution("local-steward", queuedExec("exec-local", "script-l")))
+
+	d.dispatchForDevice(context.Background(), "remote-steward")
+	d.dispatchForDevice(context.Background(), "local-steward")
+
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	require.Len(t, cp.sent, 1, "only the locally connected steward is dispatched")
+	assert.Equal(t, "local-steward", cp.sent[0].Command.StewardID)
+	remaining := q.PeekForDevice("remote-steward")
+	require.Len(t, remaining, 1)
+	assert.Equal(t, script.QueueStateQueued, remaining[0].State, "the remote steward's work stays queued for the node that holds it")
+}
+
+// TestMetaIntReadsJSONRoundTrippedNumbers guards Issue #4528: a durable queue
+// returns metadata through JSON, where numbers decode as float64. Reading only
+// int would reset retry_count on every attempt.
+func TestMetaIntReadsJSONRoundTrippedNumbers(t *testing.T) {
+	assert.Equal(t, 2, metaInt(2))
+	assert.Equal(t, 2, metaInt(float64(2)))
+	assert.Equal(t, 2, metaInt(int64(2)))
+	assert.Equal(t, 2, metaInt(json.Number("2")))
+	assert.Equal(t, 0, metaInt(nil))
+	assert.Equal(t, 0, metaInt("2"))
 }
 
 // staticTermSource returns a fixed fencing term (same shape as the command
