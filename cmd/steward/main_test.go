@@ -522,7 +522,7 @@ func TestHasExpiredClientCert(t *testing.T) {
 }
 
 // TestRefreshAndConnect_202_ReturnsErrRefreshPending verifies that when the controller
-// returns HTTP 202 for the /refresh/complete endpoint, refreshAndConnect returns
+// returns HTTP 202 for the /refresh/complete endpoint, readmitWithDeviceKey returns
 // ErrRefreshPending rather than a fatal error or a successful connection.
 func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 	dir := t.TempDir()
@@ -554,7 +554,7 @@ func TestRefreshAndConnect_202_ReturnsErrRefreshPending(t *testing.T) {
 		ServerCertPEM:    "fake-server",
 	}
 
-	_, err = refreshAndConnect(context.Background(), storedID, ks, dir, "tok", srv.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	_, err = readmitWithDeviceKey(context.Background(), storedID, ks, dir, "tok", srv.URL, trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.ErrorIs(t, err, registration.ErrRefreshPending,
 		"HTTP 202 from refresh/complete must return ErrRefreshPending, not a fatal error")
 }
@@ -728,10 +728,11 @@ func TestCompleteRefreshWithFreshKeypair_PairsLocalKeyWithIssuedCert(t *testing.
 	require.NoError(t, err)
 }
 
-// TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey verifies that a
-// queued (HTTP 202) refresh returns ErrRefreshPending unwrapped and yields no key
-// — a caller must not treat a queued refresh as an issued credential.
-func TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey(t *testing.T) {
+// TestCompleteRefreshWithFreshKeypair_PendingReturnsKeyForClaim: a queued
+// refresh propagates ErrRefreshPending and hands back the CSR's private key — the
+// eventual approval signs that CSR, so the caller persists the key to pair with
+// the certificate it later claims (Issue #4532).
+func TestCompleteRefreshWithFreshKeypair_PendingReturnsKeyForClaim(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -744,7 +745,7 @@ func TestCompleteRefreshWithFreshKeypair_PendingPropagatesWithoutKey(t *testing.
 		context.Background(), httpClient, "device-pending", "tenant-1", "dGVzdA", 1, []byte("pop"))
 	require.ErrorIs(t, err, registration.ErrRefreshPending)
 	assert.Nil(t, resp)
-	assert.Empty(t, keyPEM, "a queued refresh must not hand back a key for a certificate that was never issued")
+	assert.Contains(t, keyPEM, "PRIVATE KEY", "a queued refresh returns the CSR key the approval will pair with")
 }
 
 // blockTLSCredentialSources removes every source createTLSConfig can build a
@@ -790,7 +791,7 @@ const errNoTLSMaterial = "no TLS certificate material configured"
 // is called before the transport attempt, so the file is a reliable signal.
 //
 // The controller here signs the steward-submitted CSR with a real CA (Issue
-// #3781), so the run also proves refreshAndConnect submits a CSR built over a
+// #3781), so the run also proves readmitWithDeviceKey submits a CSR built over a
 // freshly generated key rather than reading a key off the wire.
 func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	dir := t.TempDir()
@@ -812,7 +813,7 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 		ServerCertPEM:    "fake-server",
 	}
 
-	// refreshAndConnect will fail at connectWithApprovedRegistration (no real transport),
+	// readmitWithDeviceKey will fail at connectWithApprovedRegistration (no real transport),
 	// but saveIdentity is invoked before the transport attempt so the identity file is written.
 	//
 	// The connect must fail before any dial is attempted: mutual TLS is mandatory,
@@ -840,8 +841,8 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	blockTLSCredentialSources(t, dir)
-	_, connectErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
-		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	_, connectErr := readmitWithDeviceKey(ctx, storedID, ks, dir, "tok",
+		controller.server.URL, trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.Error(t, connectErr, "no real transport is listening, so the reconnect must fail")
 	assert.Contains(t, connectErr.Error(), errNoTLSMaterial,
 		"connect must fail closed in createTLSConfig before any dial, not by riding the context to its deadline")
@@ -866,7 +867,7 @@ func TestRefreshAndConnect_SuccessPathPersistsDeviceIdentity(t *testing.T) {
 // [REQUIRED TEST] TestRefreshAndConnect_CAChanged_RejectsDowngrade verifies Issue
 // #4324 item 5: a registration-refresh handshake whose controller response carries
 // a DIFFERENT CA than the one already pinned in the stored identity must be
-// rejected, not silently re-pinned. Before the fix, refreshAndConnect never ran
+// rejected, not silently re-pinned. Before the fix, readmitWithDeviceKey never ran
 // checkTrustDowngrade and connectWithApprovedRegistration always seeded a fresh,
 // empty CAPinFingerprint — so pinTOFUCA / the install-pinned comparison always took
 // the "first pin" branch and accepted whatever CA the controller (or a MITM on the
@@ -910,10 +911,10 @@ func TestRefreshAndConnect_CAChanged_RejectsDowngrade(t *testing.T) {
 	defer cancel()
 	blockTLSCredentialSources(t, dir)
 
-	_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
-		controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+	_, refreshErr := readmitWithDeviceKey(ctx, storedID, ks, dir, "tok",
+		controller.server.URL, trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 	require.Error(t, refreshErr, "a refresh whose returned CA does not match the pinned fingerprint must be rejected")
-	assert.Contains(t, refreshErr.Error(), "registration refresh rejected",
+	assert.Contains(t, refreshErr.Error(), "re-admission rejected",
 		"rejection must come from the trust-downgrade guard, not a later unrelated failure")
 
 	// The identity file must not exist (or must be unchanged) — the refresh must
@@ -924,7 +925,7 @@ func TestRefreshAndConnect_CAChanged_RejectsDowngrade(t *testing.T) {
 }
 
 // TestRefreshAndConnect_SubmitsCSROverFreshKeypair verifies the integration point
-// added by Issue #3781: refreshAndConnect itself builds the /refresh/complete CSR
+// added by Issue #3781: readmitWithDeviceKey itself builds the /refresh/complete CSR
 // over a keypair it generates locally, names the device in it, and generates a
 // distinct keypair on every refresh. The CSR's public key must not be the
 // steward's Ed25519 device-identity key — that key proves identity and is never
@@ -961,8 +962,8 @@ func TestRefreshAndConnect_SubmitsCSROverFreshKeypair(t *testing.T) {
 	blockTLSCredentialSources(t, dir)
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, refreshErr := refreshAndConnect(ctx, storedID, ks, dir, "tok",
-			controller.server.URL, stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
+		_, refreshErr := readmitWithDeviceKey(ctx, storedID, ks, dir, "tok",
+			controller.server.URL, trustSourceCompileBaked, "", stewardconfig.StewardConfig{}, false, logging.NewLogger("error"))
 		cancel()
 		require.Error(t, refreshErr, "no real transport is listening, so the reconnect must fail")
 		assert.Contains(t, refreshErr.Error(), errNoTLSMaterial,
@@ -970,7 +971,7 @@ func TestRefreshAndConnect_SubmitsCSROverFreshKeypair(t *testing.T) {
 	}
 
 	csrs := controller.receivedCSRs()
-	require.Len(t, csrs, 2, "each refreshAndConnect call must submit exactly one CSR")
+	require.Len(t, csrs, 2, "each readmitWithDeviceKey call must submit exactly one CSR")
 
 	pubs := make([]*ecdsa.PublicKey, 0, len(csrs))
 	for i, csr := range csrs {

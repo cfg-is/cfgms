@@ -304,6 +304,9 @@ func (c *HTTPClient) Register(ctx context.Context, req RegistrationRequest) (*Re
 			"tenant_id", pending.TenantID)
 		return nil, &pending, nil
 
+	case http.StatusConflict:
+		return nil, nil, ErrDeviceAlreadyRegistered
+
 	default:
 		return nil, nil, fmt.Errorf("registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
@@ -537,6 +540,8 @@ func (c *HTTPClient) RefreshChallenge(ctx context.Context, deviceID string) (*Re
 		return &cr, nil
 	case http.StatusForbidden:
 		return nil, ErrRefreshRejected
+	case http.StatusNotFound:
+		return nil, ErrRefreshUnknownDevice
 	default:
 		return nil, fmt.Errorf("refresh challenge failed with HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -603,11 +608,87 @@ func (c *HTTPClient) RefreshComplete(ctx context.Context, deviceID, tenantID, no
 		}
 		return &cr, nil
 	case http.StatusAccepted:
-		return nil, ErrRefreshPending
+		return nil, refreshPendingFromBody(body)
 	case http.StatusForbidden:
 		return nil, ErrRefreshRejected
+	case http.StatusNotFound:
+		return nil, ErrRefreshUnknownDevice
 	default:
 		return nil, fmt.Errorf("refresh complete failed with HTTP %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// refreshPendingFromBody builds the RefreshPendingError for a 202 response.
+func refreshPendingFromBody(body []byte) error {
+	var queued struct {
+		PendingID string `json:"pending_id"`
+	}
+	_ = json.Unmarshal(body, &queued)
+	return &RefreshPendingError{PendingID: queued.PendingID}
+}
+
+// RefreshClaim collects the outcome of a queued refresh (Issue #4532), proving
+// possession with a fresh challenge exactly as RefreshComplete does.
+//
+// Returns (*RefreshCompleteResponse, nil) on HTTP 200 (approved; the certificate
+// signs the CSR submitted with the original RefreshComplete, so the caller pairs
+// it with the private key it kept for that request). Returns a
+// *RefreshPendingError on 202, ErrRefreshRejected on 403, and
+// ErrRefreshNotAvailable on 404 (expired, already collected, or unknown).
+func (c *HTTPClient) RefreshClaim(ctx context.Context, deviceID, pendingID, nonce string, issuedAt int64, pop []byte) (*RefreshCompleteResponse, error) {
+	claimURL := fmt.Sprintf("%s/api/v1/stewards/%s/refresh/claim", c.controllerURL, deviceID)
+
+	reqBody, err := json.Marshal(struct {
+		PendingID string `json:"pending_id"`
+		Nonce     string `json:"nonce"`
+		IssuedAt  int64  `json:"issued_at"`
+		Signature string `json:"signature"`
+	}{
+		PendingID: pendingID,
+		Nonce:     nonce,
+		IssuedAt:  issuedAt,
+		Signature: base64.RawURLEncoding.EncodeToString(pop),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal refresh claim request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, claimURL, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("create refresh claim request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send refresh claim request: %w", err)
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			c.logger.Warn("Failed to close refresh claim response body", "error", closeErr)
+		}
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read refresh claim response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var cr RefreshCompleteResponse
+		if err := json.Unmarshal(body, &cr); err != nil {
+			return nil, fmt.Errorf("parse refresh claim response: %w", err)
+		}
+		return &cr, nil
+	case http.StatusAccepted:
+		return nil, &RefreshPendingError{PendingID: pendingID}
+	case http.StatusForbidden:
+		return nil, ErrRefreshRejected
+	case http.StatusNotFound:
+		return nil, ErrRefreshNotAvailable
+	default:
+		return nil, fmt.Errorf("refresh claim failed with HTTP %d: %s", resp.StatusCode, string(body))
 	}
 }
 

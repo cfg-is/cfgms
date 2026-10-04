@@ -115,7 +115,42 @@ Steward-initiated self-registration. Called by the steward agent on first boot. 
 }
 ```
 
-**Response:** Returns controller URL, issued mTLS certificate, and tenant assignment.
+**Response:** Returns controller URL, issued mTLS certificate, and tenant assignment. `409` when the controller already holds an active record for the request's device ID; the steward then re-admits through the registration-refresh handshake below.
+
+### Steward Re-admission (Registration Refresh)
+
+A steward whose stored identity cannot reconnect re-admits with its device identity key (ADR-011 and its Amendment 1). The three calls carry no API key: identity is proven by an Ed25519 signature, made with the device key, over `sha256(nonce || device_id || server_ts)`. The three share one per-source rate limit; over it they answer `429`.
+
+#### POST /api/v1/stewards/{device_id}/refresh/challenge
+
+Issues a single-use nonce (60 s) for the device.
+
+**Response:** `200 {"nonce": "<base64url>", "server_ts": <unix nanoseconds>, "expires_in": 60}`. `403` revoked device, `404` unknown device.
+
+#### POST /api/v1/stewards/{device_id}/refresh/complete
+
+Submits the proof and a CSR over a fresh keypair generated on the steward.
+
+**Request Body:** `{"nonce": "...", "issued_at": <server_ts>, "signature": "<base64url>", "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----..."}`
+
+**Response:**
+- `200` — issued now (tenant policy `auto_accept`): `client_cert`, `ca_cert`, `issuer_chain`, `signing_cert`/`server_cert`, `steward_id`, `tenant_id`, `transport_address`. No private key is ever returned.
+- `202` — queued for approval: `{"status": "queued", "pending_id": "..."}`. A new request from the same device supersedes its open one.
+- `401` bad or expired proof, `403` revoked or refused by policy, `404` unknown device.
+
+#### POST /api/v1/stewards/{device_id}/refresh/claim
+
+Collects the outcome of a queued request, with a fresh challenge's proof. The approved certificate is signed from the CSR submitted with the original `/refresh/complete`, so the steward pairs it with the key it kept for that request.
+
+**Request Body:** `{"pending_id": "...", "nonce": "...", "issued_at": <server_ts>, "signature": "<base64url>"}`
+
+**Response:**
+- `200` — approved: the same certificate bundle as `/refresh/complete`'s `200`. Delivered exactly once; the entry is then `claimed`.
+- `202` — still pending.
+- `401` bad or expired proof, `403` rejected or revoked.
+- `404` — unknown, expired, already claimed, or belonging to another device: the steward files a new request. A `200` lost in transit therefore costs one more approval under `require_approval`.
+
+Operators approve or reject queued requests with `cfg steward refresh list|approve|reject` (`/api/v1/stewards/refresh/pending`, `/api/v1/stewards/refresh/{pending_id}/approve|reject`).
 
 ### Steward Management
 

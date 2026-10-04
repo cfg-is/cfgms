@@ -213,6 +213,20 @@ openssl x509 -in /etc/cfgms/certs/<file>.crt -text -noout | grep "Not After"
 Restart `cfgms-controller` after replacing a certificate the running process
 loaded at startup.
 
+**Stewards that cannot reconnect.** A steward whose stored identity stops working
+re-admits itself with its device key, and falls back to registering with its token
+when the controller has no record of it; it never needs touching to get back in
+(see the steward operating model, "Reconnecting with a Stored Identity"). Under the
+`require_approval` refresh policy its request waits in the pending-refresh queue:
+
+```bash
+cfg steward refresh list
+cfg steward refresh approve <pending_id>
+```
+
+The steward collects the approved certificate on its next connect cycle. A rejected
+steward keeps asking hourly until it is approved.
+
 ### 3. Terminal Session Management
 
 **When to use**: Terminal sessions stuck, resource exhaustion

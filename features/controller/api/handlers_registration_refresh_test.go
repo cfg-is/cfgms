@@ -1551,6 +1551,92 @@ func TestHandleApproveRefresh_RootScoped_RootTenantItself_ProceedsGuard(t *testi
 		"handler must have reached the steward lookup after the guard passed")
 }
 
+// postClaim proves possession with a fresh challenge and POSTs to handleRefreshClaim.
+func postClaim(t *testing.T, server *Server, deviceID, tenantID, pendingID string, priv ed25519.PrivateKey) *httptest.ResponseRecorder {
+	t.Helper()
+	challenge := issueChallenge(t, server, deviceID, tenantID)
+	proof := buildValidCompleteRequest(t, deviceID, tenantID, challenge, priv, nil)
+	body, _ := json.Marshal(RefreshClaimRequest{
+		PendingID: pendingID,
+		Nonce:     proof.Nonce,
+		IssuedAt:  proof.IssuedAt,
+		Signature: proof.Signature,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/"+deviceID+"/refresh/claim", bytes.NewReader(body))
+	r = mux.SetURLVars(r, map[string]string{"device_id": deviceID})
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.handleRefreshClaim(rec, r)
+	return rec
+}
+
+// TestHandleRefreshClaim_DeliversApprovedRefresh guards Issue #4532: an approved
+// refresh is collected by the steward that proved possession — previously it was
+// signed and stored but never delivered, so a steward under require_approval
+// re-queued forever.
+func TestHandleRefreshClaim_DeliversApprovedRefresh(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-claim", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+	queued := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+	require.Equal(t, http.StatusAccepted, queued.Code, queued.Body.String())
+	var q RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(queued.Body.Bytes(), &q))
+
+	pending := postClaim(t, f.server, testDeviceID, testTenantID, q.PendingID, priv)
+	require.Equal(t, http.StatusAccepted, pending.Code, "before approval the claim reports pending: %s", pending.Body.String())
+
+	approve := httptest.NewRecorder()
+	f.server.router.ServeHTTP(approve, makeAdminRequest(t, http.MethodPost, "/api/v1/stewards/refresh/"+q.PendingID+"/approve", nil))
+	require.Equal(t, http.StatusOK, approve.Code, approve.Body.String())
+
+	claimed := postClaim(t, f.server, testDeviceID, testTenantID, q.PendingID, priv)
+	require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
+	var bundle RefreshCompleteResponse
+	require.NoError(t, json.Unmarshal(claimed.Body.Bytes(), &bundle))
+	assert.NotEmpty(t, bundle.ClientCert)
+	assert.NotEmpty(t, bundle.CACert)
+	assert.Equal(t, "steward-claim", bundle.StewardID, "the bundle carries the identity a steward needs to rebuild its record")
+	assert.Equal(t, testTenantID, bundle.TenantID)
+
+	again := postClaim(t, f.server, testDeviceID, testTenantID, q.PendingID, priv)
+	assert.Equal(t, http.StatusNotFound, again.Code, "a claimed refresh is delivered once")
+}
+
+// TestHandleRefreshClaim_Refusals covers the claim endpoint's refusals: a wrong
+// key, another device's pending entry, and a rejected refresh.
+func TestHandleRefreshClaim_Refusals(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	_, wrongPriv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-claim-r", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: "refresh-other-device", DeviceID: "other-device", TenantID: testTenantID,
+		CSRPEM: testValidCSRPEM, Status: business.PendingRefreshStatusApproved, ClaimBundle: []byte(`{"status":"approved"}`),
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: "refresh-rejected", DeviceID: testDeviceID, TenantID: testTenantID,
+		CSRPEM: testValidCSRPEM, Status: business.PendingRefreshStatusRejected,
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+
+	assert.Equal(t, http.StatusUnauthorized, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-rejected", wrongPriv).Code,
+		"a claim without the device key's proof is refused")
+	assert.Equal(t, http.StatusNotFound, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-other-device", priv).Code,
+		"another device's pending refresh is indistinguishable from an unknown one")
+	assert.Equal(t, http.StatusForbidden, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-rejected", priv).Code)
+	assert.Equal(t, http.StatusNotFound, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-missing", priv).Code)
+}
+
 // TestHandleApproveRefresh_AccountBoundRootScope_NoCrossing_Returns404 guards the
 // inline crossing check on a {pending_id} route (the middleware boundary is skipped):
 // an account-bound root-scope caller without the marker is subject to the boundary
@@ -1579,4 +1665,65 @@ func TestHandleApproveRefresh_AccountBoundRootScope_NoCrossing_Returns404(t *tes
 	entry, err := f.pending.GetPendingRefreshByID(context.Background(), pendingID)
 	require.NoError(t, err)
 	assert.Equal(t, business.PendingRefreshStatusPending, entry.Status)
+}
+
+// TestHandleRefreshClaim_ExpiredPendingIsNotAvailable verifies an expired pending
+// entry answers 404 so the steward files a new request.
+func TestHandleRefreshClaim_ExpiredPendingIsNotAvailable(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-exp", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.addPending(t, &business.PendingRefreshEntry{
+		PendingID: "refresh-expired", DeviceID: testDeviceID, TenantID: testTenantID,
+		CSRPEM: testValidCSRPEM, Status: business.PendingRefreshStatusPending,
+		CreatedAt: time.Now().UTC().Add(-8 * 24 * time.Hour), ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	})
+	assert.Equal(t, http.StatusNotFound, postClaim(t, f.server, testDeviceID, testTenantID, "refresh-expired", priv).Code)
+}
+
+// TestHandleRefreshComplete_RequeueSupersedesOpenRequest guards the #4533 review:
+// a device that files a new request supersedes its own open one, so repeated
+// re-admission attempts keep one open entry per device in the approval queue.
+func TestHandleRefreshComplete_RequeueSupersedesOpenRequest(t *testing.T) {
+	pub, priv := newTestEd25519KeyPair(t)
+	f := newRefreshFixture(t, newTestCertManager(t))
+	f.addSteward(t, &business.StewardRecord{
+		ID: "steward-requeue", DeviceID: testDeviceID, TenantID: testTenantID,
+		Status: business.StewardStatusActive, IdentityKeyPub: []byte(pub),
+	})
+	f.setPolicy(t, &business.RefreshPolicy{TenantID: testTenantID, Mode: "require_approval"})
+
+	for i := 0; i < 3; i++ {
+		rec := postComplete(f.server, testDeviceID, buildValidCompleteRequest(t, testDeviceID, testTenantID, issueChallenge(t, f.server, testDeviceID, testTenantID), priv, nil))
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+
+	entries, err := f.pending.ListPendingRefresh(context.Background(), testTenantID)
+	require.NoError(t, err)
+	open := 0
+	for _, e := range entries {
+		if e.Status == business.PendingRefreshStatusPending {
+			open++
+		}
+	}
+	assert.Equal(t, 1, open, "only the newest request stays open")
+}
+
+// TestRefreshRoutes_RateLimitedPerSource guards the #4533 review: the public
+// refresh handshake has a per-source budget like the other public routes.
+func TestRefreshRoutes_RateLimitedPerSource(t *testing.T) {
+	f := newRefreshFixture(t, newTestCertManager(t))
+
+	limited := false
+	for i := 0; i < 300 && !limited; i++ {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/unknown-device/refresh/challenge", bytes.NewReader([]byte(`{}`)))
+		r.RemoteAddr = "198.51.100.7:4000"
+		rec := httptest.NewRecorder()
+		f.server.router.ServeHTTP(rec, r)
+		limited = rec.Code == http.StatusTooManyRequests
+	}
+	assert.True(t, limited, "one source exceeding the per-minute budget is refused with 429")
 }

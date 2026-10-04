@@ -45,9 +45,37 @@ type PendingState struct {
 	ClientKeyPEM string `json:"client_key_pem,omitempty"`
 }
 
+// refreshPendingStateFileName holds a re-admission request the controller queued
+// for approval: its pending ID and the private key of the CSR it submitted, so a
+// later claim can pair the approved certificate with that key (Issue #4532).
+// Same 0600 file-permission protection as the registration pending state.
+const refreshPendingStateFileName = "steward-refresh-pending.json"
+
+func saveRefreshPendingState(dir string, state PendingState) error {
+	return writePendingStateFile(dir, refreshPendingStateFileName, state)
+}
+
+func loadRefreshPendingState(dir string) (*PendingState, error) {
+	return readPendingStateFile(dir, refreshPendingStateFileName)
+}
+
+func clearRefreshPendingState(dir string) error {
+	path := filepath.Join(dir, refreshPendingStateFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear refresh pending state file: %w", err)
+	}
+	return nil
+}
+
 // savePendingState writes state to dir/steward-pending.json with permissions 0600.
 // The write is atomic: content goes to a temp file then renamed into place.
 func savePendingState(dir string, state PendingState) error {
+	return writePendingStateFile(dir, pendingStateFileName, state)
+}
+
+// writePendingStateFile writes state to dir/name with permissions 0600. The write
+// is atomic: content goes to a temp file then renamed into place.
+func writePendingStateFile(dir, name string, state PendingState) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create pending state dir: %w", err)
 	}
@@ -55,7 +83,7 @@ func savePendingState(dir string, state PendingState) error {
 	if err != nil {
 		return fmt.Errorf("marshal pending state: %w", err)
 	}
-	path := filepath.Join(dir, pendingStateFileName)
+	path := filepath.Join(dir, name)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write pending state file: %w", err)
@@ -71,7 +99,12 @@ func savePendingState(dir string, state PendingState) error {
 // Returns (nil, nil) when the file does not exist — caller performs fresh registration.
 // Returns (nil, err) on read/parse failure.
 func loadPendingState(dir string) (*PendingState, error) {
-	path := filepath.Join(dir, pendingStateFileName)
+	return readPendingStateFile(dir, pendingStateFileName)
+}
+
+// readPendingStateFile reads dir/name; (nil, nil) when it does not exist.
+func readPendingStateFile(dir, name string) (*PendingState, error) {
+	path := filepath.Join(dir, name)
 	// #nosec G304 -- dir is the steward's private identity directory and the
 	// pending-state filename is a fixed internal constant.
 	data, err := os.ReadFile(path)
