@@ -1114,6 +1114,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 	// Attempt cert-reuse reconnect (skips HTTP registration on restart).
 	tc, reconnErr := tryReconnectWithStoredIdentity(ctx, certStoreDir, token, trustSrc, runtimeCfg, publicBeta, logger)
 	if tc != nil {
+		clearReadmitPace(certStoreDir)
 		return tc, nil
 	}
 
@@ -1143,6 +1144,7 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			tc, readmitErr := readmitWithDeviceKey(ctx, storedID, ks, certStoreDir, token, controllerURL, trustSrc, installCAPEM, runtimeCfg, publicBeta, logger)
 			switch {
 			case readmitErr == nil:
+				clearReadmitPace(certStoreDir)
 				return tc, nil
 			case errors.Is(readmitErr, registration.ErrRefreshPending),
 				errors.Is(readmitErr, registration.ErrRefreshRejected),
@@ -1618,6 +1620,12 @@ func (p *readmissionPacer) due(dir string, now time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	next, ok := loadReadmitPace(dir)
+	// The file is unauthenticated local state: a value further out than one
+	// interval plus jitter cannot have been written by this pacer, and honouring
+	// it would stall re-admission indefinitely. Treat it as absent.
+	if ok && next.After(now.Add(unreachableReadmitInterval+unreachableReadmitJitter)) {
+		ok = false
+	}
 	if !ok {
 		next = now.Add(randomJitter(unreachableReadmitJitter))
 		saveReadmitPace(dir, next)
@@ -1645,7 +1653,7 @@ func loadReadmitPace(dir string) (time.Time, bool) {
 }
 
 // saveReadmitPace is best-effort: a failed write only means the next start
-// draws a fresh delay.
+// draws a fresh delay. The write is atomic (temp file, then rename).
 func saveReadmitPace(dir string, next time.Time) {
 	data, err := json.Marshal(struct {
 		Next time.Time `json:"next"`
@@ -1654,7 +1662,20 @@ func saveReadmitPace(dir string, next time.Time) {
 		return
 	}
 	_ = os.MkdirAll(dir, 0700)
-	_ = os.WriteFile(filepath.Join(dir, readmitPaceFileName), data, 0600)
+	path := filepath.Join(dir, readmitPaceFileName)
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0600) != nil {
+		return
+	}
+	if os.Rename(tmp, path) != nil {
+		_ = os.Remove(tmp)
+	}
+}
+
+// clearReadmitPace removes the pacing state once the steward is connected, so a
+// stale schedule never carries over to a later outage.
+func clearReadmitPace(dir string) {
+	_ = os.Remove(filepath.Join(dir, readmitPaceFileName))
 }
 
 // randomJitter returns a uniformly random duration in [0, max).

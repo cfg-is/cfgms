@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -397,4 +399,37 @@ func TestRegisterAndConnect_UnreachablePacedReturnsWithoutReadmitting(t *testing
 
 	require.ErrorIs(t, err, errStoredIdentityUnreachable)
 	assert.Zero(t, controller.completes, "no re-admission before the pacer allows it")
+}
+
+// TestReadmissionPacer_DistrustsImplausiblePaceFile guards the #4533 review: the
+// pace file is unauthenticated local state, so a far-future or corrupt value must
+// not stall re-admission — it is treated as absent and a fresh delay is drawn.
+func TestReadmissionPacer_DistrustsImplausiblePaceFile(t *testing.T) {
+	prevInterval, prevJitter := unreachableReadmitInterval, unreachableReadmitJitter
+	unreachableReadmitInterval, unreachableReadmitJitter = time.Hour, 0
+	defer func() { unreachableReadmitInterval, unreachableReadmitJitter = prevInterval, prevJitter }()
+
+	now := time.Now()
+	t.Run("far future", func(t *testing.T) {
+		dir := t.TempDir()
+		saveReadmitPace(dir, time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC))
+		assert.True(t, (&readmissionPacer{}).due(dir, now), "an implausible schedule is redrawn (no jitter: due at once)")
+	})
+	t.Run("corrupt", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, readmitPaceFileName), []byte("{not json"), 0600))
+		assert.True(t, (&readmissionPacer{}).due(dir, now), "a corrupt file is treated as absent")
+	})
+	t.Run("plausible future is honoured", func(t *testing.T) {
+		dir := t.TempDir()
+		saveReadmitPace(dir, now.Add(30*time.Minute))
+		assert.False(t, (&readmissionPacer{}).due(dir, now))
+	})
+	t.Run("cleared on connect", func(t *testing.T) {
+		dir := t.TempDir()
+		saveReadmitPace(dir, now.Add(30*time.Minute))
+		clearReadmitPace(dir)
+		_, ok := loadReadmitPace(dir)
+		assert.False(t, ok)
+	})
 }
