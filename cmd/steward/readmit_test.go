@@ -321,9 +321,9 @@ func TestRegisterAndConnect_UnreachableForBudgetReadmits(t *testing.T) {
 	prevBudget := storedIdentityConnectBudget
 	storedIdentityConnectBudget = 2 * time.Second
 	defer func() { storedIdentityConnectBudget = prevBudget }()
-	prevPacer, prevJitter := unreachableReadmission, unreachableReadmitJitter
-	unreachableReadmission, unreachableReadmitJitter = &readmissionPacer{}, 0
-	defer func() { unreachableReadmission, unreachableReadmitJitter = prevPacer, prevJitter }()
+	prevJitter := unreachableReadmitJitter
+	unreachableReadmitJitter = 0
+	defer func() { unreachableReadmitJitter = prevJitter }()
 
 	controller := newReadmitTestController(t, "queue")
 	f := newStoredIdentityFixture(t, unusedUDPAddr(t))
@@ -342,19 +342,42 @@ func TestRegisterAndConnect_UnreachableForBudgetReadmits(t *testing.T) {
 
 // TestReadmissionPacer_PacesUnreachableReadmission guards the #4533 review: an
 // unreachable control plane re-admits after a random initial delay and then at
-// most once per interval, so a fleet-wide outage does not re-admit in lockstep.
+// most once per interval — and the pace survives a restart (a new pacer reading
+// the same directory), so a flapping host does not re-admit on every start.
 func TestReadmissionPacer_PacesUnreachableReadmission(t *testing.T) {
 	prevInterval, prevJitter := unreachableReadmitInterval, unreachableReadmitJitter
 	unreachableReadmitInterval, unreachableReadmitJitter = time.Hour, 30*time.Minute
 	defer func() { unreachableReadmitInterval, unreachableReadmitJitter = prevInterval, prevJitter }()
 
-	p := &readmissionPacer{}
+	dir := t.TempDir()
 	start := time.Now()
-	assert.False(t, p.due(start), "the first call only schedules")
-	assert.True(t, p.due(start.Add(30*time.Minute)), "due once the initial jitter (< 30m) has passed")
-	assert.False(t, p.due(start.Add(31*time.Minute)), "then not again within the interval")
-	assert.False(t, p.due(start.Add(89*time.Minute)), "interval is at least an hour after the last attempt")
-	assert.True(t, p.due(start.Add(2*time.Hour+time.Minute)), "due again after interval plus jitter")
+	assert.False(t, (&readmissionPacer{}).due(dir, start), "the first call only schedules")
+	assert.True(t, (&readmissionPacer{}).due(dir, start.Add(30*time.Minute)), "due once the initial jitter (< 30m) has passed, across a restart")
+	assert.False(t, (&readmissionPacer{}).due(dir, start.Add(31*time.Minute)), "a restart does not reset the interval")
+	assert.False(t, (&readmissionPacer{}).due(dir, start.Add(89*time.Minute)), "the interval is at least an hour after the last attempt")
+	assert.True(t, (&readmissionPacer{}).due(dir, start.Add(2*time.Hour+time.Minute)), "due again after interval plus jitter")
+}
+
+// TestRegisterAndConnect_OpenRequestIsCollectedUnpaced guards the #4533 review:
+// pacing limits new requests, not collection — with a request already filed the
+// steward claims it on the normal cadence even while the pacer says not yet.
+func TestRegisterAndConnect_OpenRequestIsCollectedUnpaced(t *testing.T) {
+	prevBudget := storedIdentityConnectBudget
+	storedIdentityConnectBudget = 2 * time.Second
+	defer func() { storedIdentityConnectBudget = prevBudget }()
+
+	controller := newReadmitTestController(t, "queue")
+	f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+	saveReadmitPace(f.certStoreDir, time.Now().Add(time.Hour))
+	require.NoError(t, saveRefreshPendingState(f.certStoreDir, PendingState{PendingID: "refresh-pending-1", ClientKeyPEM: "unused"}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := registerAndConnect(ctx, "tok", controller.server.URL, trustSourceCompileBaked, "", newReadmitKeyStore(t), false, logging.NewLogger("error"))
+
+	require.Error(t, err)
+	assert.Equal(t, []string{"refresh-pending-1"}, controller.claims, "the open request is collected despite the pacer")
+	assert.Zero(t, controller.completes, "no new request is filed")
 }
 
 // TestRegisterAndConnect_UnreachablePacedReturnsWithoutReadmitting verifies that
@@ -364,12 +387,9 @@ func TestRegisterAndConnect_UnreachablePacedReturnsWithoutReadmitting(t *testing
 	prevBudget := storedIdentityConnectBudget
 	storedIdentityConnectBudget = 2 * time.Second
 	defer func() { storedIdentityConnectBudget = prevBudget }()
-	prevPacer := unreachableReadmission
-	unreachableReadmission = &readmissionPacer{next: time.Now().Add(time.Hour)}
-	defer func() { unreachableReadmission = prevPacer }()
-
 	controller := newReadmitTestController(t, "queue")
-	newStoredIdentityFixture(t, unusedUDPAddr(t))
+	f := newStoredIdentityFixture(t, unusedUDPAddr(t))
+	saveReadmitPace(f.certStoreDir, time.Now().Add(time.Hour))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

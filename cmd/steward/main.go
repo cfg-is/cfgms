@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -1131,10 +1132,11 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			if unreachable {
 				return nil, reconnErr
 			}
-		} else if unreachable && !unreachableReadmission.due(time.Now()) {
-			// An unreachable control plane re-admits on a jittered, hourly pace:
-			// across a fleet-wide outage every steward would otherwise re-admit
-			// together every budget cycle. A refusal is never paced.
+		} else if unreachable && !hasOpenReadmission(certStoreDir) && !unreachableReadmission.due(certStoreDir, time.Now()) {
+			// An unreachable control plane files new re-admission requests on a
+			// jittered, hourly pace: across a fleet-wide outage every steward would
+			// otherwise re-admit together every budget cycle. A refusal is never
+			// paced, nor is collecting a request already filed.
 			return nil, reconnErr
 		} else {
 			storedID, _ := loadIdentity(certStoreDir)
@@ -1143,7 +1145,10 @@ func registerAndConnect(ctx context.Context, token, controllerURL string, trustS
 			case readmitErr == nil:
 				return tc, nil
 			case errors.Is(readmitErr, registration.ErrRefreshPending),
-				errors.Is(readmitErr, registration.ErrRefreshRejected):
+				errors.Is(readmitErr, registration.ErrRefreshRejected),
+				errors.Is(readmitErr, errStoredIdentityUnreachable):
+				// errStoredIdentityUnreachable here: re-admission issued and stored a
+				// new identity but its connect failed; the next cycle tries it first.
 				return nil, readmitErr
 			case errors.Is(readmitErr, registration.ErrRefreshUnknownDevice):
 				logger.Warn("Controller has no record of this device; registering with the configured token")
@@ -1599,23 +1604,57 @@ var (
 )
 
 type readmissionPacer struct {
-	mu   sync.Mutex
-	next time.Time
+	mu sync.Mutex
 }
 
+// readmitPaceFileName persists when the next unreachable-cause re-admission may
+// run, so a restarting or flapping steward keeps its pace instead of drawing a
+// fresh short delay each start.
+const readmitPaceFileName = "steward-readmit-pace.json"
+
 // due reports whether an unreachable-cause re-admission may run now, scheduling
-// the next one when it may.
-func (p *readmissionPacer) due(now time.Time) bool {
+// (and persisting under dir) the next one when it may.
+func (p *readmissionPacer) due(dir string, now time.Time) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.next.IsZero() {
-		p.next = now.Add(randomJitter(unreachableReadmitJitter))
+	next, ok := loadReadmitPace(dir)
+	if !ok {
+		next = now.Add(randomJitter(unreachableReadmitJitter))
+		saveReadmitPace(dir, next)
 	}
-	if now.Before(p.next) {
+	if now.Before(next) {
 		return false
 	}
-	p.next = now.Add(unreachableReadmitInterval + randomJitter(unreachableReadmitJitter))
+	saveReadmitPace(dir, now.Add(unreachableReadmitInterval+randomJitter(unreachableReadmitJitter)))
 	return true
+}
+
+func loadReadmitPace(dir string) (time.Time, bool) {
+	// #nosec G304 -- fixed file name under the steward's private identity directory.
+	data, err := os.ReadFile(filepath.Join(dir, readmitPaceFileName))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var state struct {
+		Next time.Time `json:"next"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.Next.IsZero() {
+		return time.Time{}, false
+	}
+	return state.Next, true
+}
+
+// saveReadmitPace is best-effort: a failed write only means the next start
+// draws a fresh delay.
+func saveReadmitPace(dir string, next time.Time) {
+	data, err := json.Marshal(struct {
+		Next time.Time `json:"next"`
+	}{Next: next})
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(dir, 0700)
+	_ = os.WriteFile(filepath.Join(dir, readmitPaceFileName), data, 0600)
 }
 
 // randomJitter returns a uniformly random duration in [0, max).
@@ -2111,7 +2150,21 @@ func readmitWithDeviceKey(
 	if refreshTrustSrc == trustSourceInstallPinned {
 		pinCAPEM = installCAPEM
 	}
-	return connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, pinCAPEM, priorCAPin, runtimeCfg, publicBeta, logger)
+	tc, err := connectWithApprovedRegistration(ctx, bundle, certStoreDir, token, refreshTrustSrc, pinCAPEM, priorCAPin, runtimeCfg, publicBeta, logger)
+	if err != nil {
+		// The new identity is already persisted (connectWithApprovedRegistration
+		// saves it before connecting), so the caller retries it as a stored
+		// identity rather than registering — which would 409 and re-admit again.
+		return nil, fmt.Errorf("%w: re-admitted identity stored but connect failed: %v", errStoredIdentityUnreachable, err)
+	}
+	return tc, nil
+}
+
+// hasOpenReadmission reports whether a re-admission request is already filed and
+// awaiting collection.
+func hasOpenReadmission(certStoreDir string) bool {
+	pending, err := loadRefreshPendingState(certStoreDir)
+	return err == nil && pending != nil
 }
 
 // signRefreshChallenge obtains a challenge nonce and signs the proof-of-possession
