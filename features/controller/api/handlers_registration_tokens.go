@@ -89,6 +89,9 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+		return
+	}
 
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
@@ -151,6 +154,9 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 	switch {
 	case scope.IsRoot():
 		tenantID = r.URL.Query().Get("tenant_id")
+		if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+			return
+		}
 	case scope.IsTenant() && scope.Path() != "":
 		tenantID = scope.Path()
 	default:
@@ -223,6 +229,9 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Token not found", http.StatusNotFound)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+		return
+	}
 
 	// Return redacted response — get callers never receive the full secret.
 	resp := tokenToResponseRedacted(token)
@@ -275,6 +284,9 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !s.isAuthorizedForTenant(scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}") {
 		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
 		return
 	}
 
@@ -344,6 +356,9 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Token not found", http.StatusNotFound)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+		return
+	}
 
 	// Revoke the token
 	token.Revoke()
@@ -393,6 +408,9 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/registration/tokens/{tenant_id}/rotate") {
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
+	}
+	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
 		return
 	}
 
