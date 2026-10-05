@@ -13,7 +13,11 @@ package trigger
 // Cannot use pkg/testing helpers here: pkg/testutil pulls in
 // features/controller/config, which is a heavier dependency than the two
 // blank imports it would replace. Same pattern as features/rbac/providers_test.go.
+//
+// The sops secrets provider backs newTestSecretStore: trigger credentials are
+// exercised against the real secret store (Issue #4641).
 import (
+	_ "github.com/cfgis/cfgms/pkg/secrets/providers/sops"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/database"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 	_ "github.com/cfgis/cfgms/pkg/storage/providers/sqlite"

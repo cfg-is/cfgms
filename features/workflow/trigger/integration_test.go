@@ -20,6 +20,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/workflow"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -35,7 +36,7 @@ type IntegrationTestSuite struct {
 	workflowTrigger *TestWorkflowTrigger
 	storage         *TestStorageProvider
 	triggerStore    *inMemoryTriggerStore
-	secretStore     *inMemorySecretStore
+	secretStore     secretsif.SecretStore
 	router          *mux.Router
 	server          *httptest.Server
 }
@@ -254,7 +255,7 @@ func setupIntegrationTest(t *testing.T) *IntegrationTestSuite {
 	// Create components
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
-	secretStore := newInMemorySecretStore()
+	secretStore := newTestSecretStore(t)
 
 	// Create manager first (we'll create scheduler separately)
 	manager := NewTriggerManager(

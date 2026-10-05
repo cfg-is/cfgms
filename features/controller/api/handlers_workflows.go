@@ -124,11 +124,32 @@ func (h *WorkflowHandler) NewRegistrationApprovalHook(logger logging.Logger) Reg
 }
 
 // RegisterTriggerRoutes registers trigger management routes on the provided subrouter.
+// Every trigger route runs behind triggerTenantMiddleware, so the trigger manager
+// scopes to the same tenant the workflow routes resolve (Issue #4640).
 func (h *WorkflowHandler) RegisterTriggerRoutes(router *mux.Router) {
 	if h.triggerAPI == nil {
 		return
 	}
+	router.Use(h.triggerTenantMiddleware)
 	h.triggerAPI.RegisterRoutes(router)
+}
+
+// triggerTenantMiddleware resolves the tenant a trigger request operates on
+// exactly as the workflow routes do — a tenant-scoped caller's own tenant; for a
+// root-scoped caller the deployment's root tenant or a ?tenant= that passes the
+// ADR-025 crossing — and hands it to the trigger manager as ctxkeys.TenantID
+// (Issue #4640). The trigger manager scopes every operation to that value, and a
+// root-scoped caller's own context carries none, so before this every trigger
+// operation refused root admins with "tenant context required". A trigger and the
+// workflow it starts therefore always live in the same tenant.
+func (h *WorkflowHandler) triggerTenantMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		store, ok := h.workflowStoreForRequest(w, r)
+		if !ok {
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, store.TenantID())))
+	})
 }
 
 // workflowStoreForRequest returns a WorkflowStore scoped to the caller's

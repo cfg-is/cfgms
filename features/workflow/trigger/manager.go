@@ -205,6 +205,27 @@ func (tm *TriggerManagerImpl) Stop(ctx context.Context) error {
 	return nil
 }
 
+// triggerSecretKey is the secret-store key a trigger credential is read and
+// deleted by: the credential is stored with the trigger's tenant, and the secret
+// store addresses tenant-owned secrets as "<tenant_id>/<key>" (Issue #4641). A
+// bare ref is refused by the store, so credentials could never be recovered on
+// reload (the trigger was skipped) or cleaned up on delete.
+func triggerSecretKey(tenantID, ref string) string {
+	return tenantID + "/" + ref
+}
+
+// SetPersistence gives the manager the durable trigger store and the secret
+// store for trigger credentials (Issue #4641). The controller passes the storage
+// manager's trigger store — a StorageProvider such as flatfile may not implement
+// one, and without a store triggers live in memory only and are lost on restart.
+// Call before Start, which reloads every tenant's triggers from the store.
+func (tm *TriggerManagerImpl) SetPersistence(triggerStore business.TriggerStore, secretStore secretsif.SecretStore) {
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+	tm.triggerStore = triggerStore
+	tm.secretStore = secretStore
+}
+
 // CreateTrigger creates a new trigger
 func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigger) error {
 	tm.mutex.Lock()
@@ -1028,8 +1049,8 @@ func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, trig
 			if refKey == "" {
 				continue
 			}
-			if delErr := tm.secretStore.DeleteSecret(ctx, refKey); delErr != nil {
-				tm.logger.Warn("failed to clean up secret ref", "ref", refKey, "error", delErr.Error())
+			if delErr := tm.secretStore.DeleteSecret(ctx, triggerSecretKey(record.TenantID, refKey)); delErr != nil {
+				tm.logger.Warn("failed to clean up secret ref", "ref", logging.SanitizeLogValue(refKey), "error", logging.SanitizeLogValue(delErr.Error()))
 			}
 		}
 	}
@@ -1071,10 +1092,10 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	hasAuth := false
 
 	if record.BearerTokenRef != "" {
-		secret, err := tm.secretStore.GetSecret(ctx, record.BearerTokenRef)
+		secret, err := tm.secretStore.GetSecret(ctx, triggerSecretKey(record.TenantID, record.BearerTokenRef))
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-				"trigger_id", record.ID, "ref", record.BearerTokenRef, "error", err.Error())
+				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BearerTokenRef), "error", logging.SanitizeLogValue(err.Error()))
 			return nil, fmt.Errorf("failed to get bearer token for trigger %s: %w", record.ID, err)
 		}
 		auth.BearerToken = secret.Value
@@ -1082,10 +1103,10 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	}
 
 	if record.HMACSecretRef != "" {
-		secret, err := tm.secretStore.GetSecret(ctx, record.HMACSecretRef)
+		secret, err := tm.secretStore.GetSecret(ctx, triggerSecretKey(record.TenantID, record.HMACSecretRef))
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-				"trigger_id", record.ID, "ref", record.HMACSecretRef, "error", err.Error())
+				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.HMACSecretRef), "error", logging.SanitizeLogValue(err.Error()))
 			return nil, fmt.Errorf("failed to get hmac secret for trigger %s: %w", record.ID, err)
 		}
 		auth.Secret = secret.Value
@@ -1093,10 +1114,10 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	}
 
 	if record.APIKeyRef != "" {
-		secret, err := tm.secretStore.GetSecret(ctx, record.APIKeyRef)
+		secret, err := tm.secretStore.GetSecret(ctx, triggerSecretKey(record.TenantID, record.APIKeyRef))
 		if err != nil {
 			tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-				"trigger_id", record.ID, "ref", record.APIKeyRef, "error", err.Error())
+				"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.APIKeyRef), "error", logging.SanitizeLogValue(err.Error()))
 			return nil, fmt.Errorf("failed to get api key for trigger %s: %w", record.ID, err)
 		}
 		auth.APIKey = secret.Value
@@ -1107,10 +1128,10 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		auth.BasicAuth = &BasicAuth{}
 
 		if record.BasicUsernameRef != "" {
-			secret, err := tm.secretStore.GetSecret(ctx, record.BasicUsernameRef)
+			secret, err := tm.secretStore.GetSecret(ctx, triggerSecretKey(record.TenantID, record.BasicUsernameRef))
 			if err != nil {
 				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-					"trigger_id", record.ID, "ref", record.BasicUsernameRef, "error", err.Error())
+					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicUsernameRef), "error", logging.SanitizeLogValue(err.Error()))
 				return nil, fmt.Errorf("failed to get basic username for trigger %s: %w", record.ID, err)
 			}
 			auth.BasicAuth.Username = secret.Value
@@ -1118,10 +1139,10 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		}
 
 		if record.BasicPasswordRef != "" {
-			secret, err := tm.secretStore.GetSecret(ctx, record.BasicPasswordRef)
+			secret, err := tm.secretStore.GetSecret(ctx, triggerSecretKey(record.TenantID, record.BasicPasswordRef))
 			if err != nil {
 				tm.logger.WarnCtx(ctx, "failed to restore trigger credential",
-					"trigger_id", record.ID, "ref", record.BasicPasswordRef, "error", err.Error())
+					"trigger_id", logging.SanitizeLogValue(record.ID), "ref", logging.SanitizeLogValue(record.BasicPasswordRef), "error", logging.SanitizeLogValue(err.Error()))
 				return nil, fmt.Errorf("failed to get basic password for trigger %s: %w", record.ID, err)
 			}
 			auth.BasicAuth.Password = secret.Value

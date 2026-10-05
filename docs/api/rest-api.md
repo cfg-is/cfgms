@@ -2018,10 +2018,15 @@ Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions r
 Trigger endpoints manage scheduled and event-driven workflow execution. The `/triggers` subrouter is registered alongside `/workflows` when a `WorkflowHandler` is wired in (`server.go:717`). All routes inherit the API subrouter's authentication middleware. Trigger types: `schedule`, `webhook`, `siem`, `manual`.
 
 **Tenant scope (applies to every endpoint below):** every trigger operation is
-scoped strictly to the caller's own resolved tenant — unlike most other
-endpoint families in this document, there is no root/unscoped-caller exception
-in this subsystem. `POST /api/v1/triggers` always stores the trigger under the
-caller's own tenant; a `tenant_id` in the request body is accepted but ignored
+scoped strictly to one resolved tenant, resolved exactly as for the workflow
+endpoints: a tenant-scoped caller's own tenant; for a root-scoped caller the
+deployment's root tenant, or a tenant selected with `?tenant=<id>`, which for a
+client tenant requires an active tenant crossing (`401` challenge otherwise).
+There is no all-tenants view. A trigger runs its workflow from the same tenant,
+and the execution acts on that tenant's devices only. Triggers persist in the
+controller's trigger store (credentials in the secret store) and survive a
+restart. `POST /api/v1/triggers` always stores the trigger under the
+resolved tenant; a `tenant_id` in the request body is accepted but ignored
 (overwritten server-side) — the example bodies below show it only because the
 field is echoed back, not because it is honoured. `GET /api/v1/triggers`
 returns only the caller's own tenant's triggers; the `tenant_id` query
