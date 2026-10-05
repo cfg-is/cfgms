@@ -299,11 +299,9 @@ func parseInstallerName(name string) (platform, arch string, ok bool) {
 func (s *Server) installerTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if scope.IsRoot() {
-		if tenantID := r.URL.Query().Get("tenant"); tenantID != "" {
-			if !s.authorizeSelectedTenant(w, r, tenantID) {
-				return "", false
-			}
-			return tenantID, true
+		if selected := r.URL.Query().Get("tenant"); selected != "" {
+			// The stored tenant ID, not the request value, becomes the blob key.
+			return s.selectAuthorizedTenant(w, r, selected)
 		}
 		if tenantID := s.rootTenantID(r.Context()); tenantID != "" {
 			return tenantID, true
