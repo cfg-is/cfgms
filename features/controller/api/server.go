@@ -94,6 +94,7 @@ type Server struct {
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
 	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
+	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore          registration.Store                       // Registration token store for steward registration
@@ -397,6 +398,7 @@ func New(
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		apiKeyIdx:               newAPIKeyIndex(),         // Issue #4574: API-key hash → tenant locator
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
 		trustedProxies:          trustedProxies,           // Issue #1695: parsed from TrustedProxies config
@@ -478,7 +480,7 @@ func New(
 
 	// M-AUTH-1: Load existing API keys from secret store
 	if err := server.loadAPIKeysFromStore(); err != nil {
-		logger.Warn("Failed to load API keys from store", "error", err)
+		logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
@@ -2428,6 +2430,11 @@ func (s *Server) startAPIKeyCleanup() {
 		defer close(s.cleanupDone)
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
+		// Issue #4574: this goroutine is the single background refresher of the
+		// API-key index, so keys created on other controller nodes become locatable
+		// here within apiKeyRevalidateInterval without any request paying for a scan.
+		indexTicker := time.NewTicker(apiKeyRevalidateInterval)
+		defer indexTicker.Stop()
 
 		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
 
@@ -2437,6 +2444,16 @@ func (s *Server) startAPIKeyCleanup() {
 				return
 			case <-ticker.C:
 				s.cleanupExpiredAPIKeys()
+			case <-indexTicker.C:
+				if s.secretStore == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), apiKeyRevalidateInterval)
+				if err := s.refreshAPIKeyIndex(ctx); err != nil {
+					s.logger.Warn("API key index refresh failed",
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+				cancel()
 			}
 		}
 	}()
@@ -2836,13 +2853,17 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	return store, nil
 }
 
-// M-AUTH-1: Load API keys from secret store into memory cache
+// M-AUTH-1: API keys are loaded into the memory cache lazily, on first use.
+// Issue #4574: what is built up front is the API-key index (key hash → tenant), with
+// one store listing, so a cache miss never needs a store-wide scan of its own.
 func (s *Server) loadAPIKeysFromStore() error {
-	// API keys are now stored in the central secrets provider
-	// They are loaded on-demand when authentication is performed
-	// This lazy-loading approach provides better performance and security
-
-	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+	if s.secretStore == nil {
+		return nil
+	}
+	if err := s.refreshAPIKeyIndex(context.Background()); err != nil {
+		return fmt.Errorf("failed to build API key index: %w", err)
+	}
+	s.logger.Info("Secret store ready - API key index built; keys load on first access")
 	return nil
 }
 

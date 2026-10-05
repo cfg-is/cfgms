@@ -1195,42 +1195,34 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 // secret store (deleted, or expired out of it) — Issue #4574.
 var errAPIKeyRevoked = errors.New("API key no longer present in secret store")
 
-// lookupAPIKeyRecord finds the secret-store record of the API key whose SHA-256 is
-// keyHash. With tenantID == "" every tenant is searched, so a key is found without
-// knowing which tenant minted it (Issue #4574); otherwise only tenantID's records are.
-// It returns (nil, nil) when no such record exists. Expired records are excluded by
-// the store, so an expired key is reported as absent.
-//
-// The store has no by-name lookup that spans tenants, so this is a filtered list. The
-// tenant-wide form runs only on a cache miss — once per key per node, then
-// re-validation uses the tenant-scoped form — and unauthenticated misses are bounded
-// by the per-source authDefense budget in front of the API router.
-func (s *Server) lookupAPIKeyRecord(ctx context.Context, tenantID, keyHash string) (*secretsif.SecretMetadata, error) {
-	records, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
-		TenantID:  tenantID,
-		KeyPrefix: keyHash,
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
-		},
-	})
+// readAPIKeyRecord reads one API key's record directly by its store path (Issue
+// #4574): never a listing. It returns (nil, nil) when the record does not exist or is
+// not an API-key record; any other store error is returned.
+func (s *Server) readAPIKeyRecord(ctx context.Context, tenantID, keyHash string) (*secretsif.Secret, error) {
+	var rec *secretsif.Secret
+	var err error
+	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
+		// The tenant is known (from the index or the cache entry): address the
+		// record explicitly, with no reference resolution involved.
+		rec, err = acc.GetTenantSecret(ctx, tenantID, keyHash)
+	} else {
+		// SecretStore lookup path (tenant + key hash), not the credential itself.
+		rec, err = s.secretStore.GetSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+	}
 	if err != nil {
+		if errors.Is(err, secretsif.ErrSecretNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	for _, rec := range records {
-		// KeyPrefix is a prefix filter; require the exact record name.
-		if rec.Key != keyHash {
-			continue
-		}
-		if tenantID != "" && rec.TenantID != tenantID {
-			continue
-		}
-		return rec, nil
+	if rec.Metadata[secretsif.MetadataKeySecretType] != string(secretsif.SecretTypeAPIKey) {
+		return nil, nil
 	}
-	return nil, nil
+	return rec, nil
 }
 
-// apiKeyFromRecord builds the cache entry for apiKey from its secret-store record.
-func apiKeyFromRecord(apiKey string, rec *secretsif.SecretMetadata, validatedAt time.Time) *APIKey {
+// apiKeyFromSecret builds the cache entry for apiKey from its secret-store record.
+func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Time) *APIKey {
 	return &APIKey{
 		ID:          rec.Metadata["id"],
 		Key:         apiKey, // Store plaintext key in memory for fast lookup
@@ -1245,18 +1237,28 @@ func apiKeyFromRecord(apiKey string, rec *secretsif.SecretMetadata, validatedAt 
 }
 
 // M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it.
-// Issue #4574: the record is found by its hash across every tenant — no tenant name is
-// assumed.
+// Issue #4574: the key's tenant comes from the API-key index (no tenant name is
+// assumed), and the record itself is then read directly. An unknown key costs no store
+// access unless the index is older than apiKeyIndexMissRefreshFloor.
 func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
-	rec, err := s.lookupAPIKeyRecord(ctx, "", hashAPIKey(apiKey))
+	keyHash := hashAPIKey(apiKey)
+	entry, found, err := s.locateAPIKey(ctx, keyHash)
 	if err != nil {
-		return nil, fmt.Errorf("API key lookup failed: %w", err)
+		return nil, fmt.Errorf("API key index refresh failed: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+	rec, err := s.readAPIKeyRecord(ctx, entry.TenantID, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("API key read failed: %w", err)
 	}
 	if rec == nil {
+		s.apiKeyIdx.remove(keyHash)
 		return nil, fmt.Errorf("API key not found in secret store")
 	}
 
-	keyInfo := apiKeyFromRecord(apiKey, rec, s.apiKeyNow())
+	keyInfo := apiKeyFromSecret(apiKey, rec, s.apiKeyNow())
 
 	// Cache in memory for future requests
 	s.mu.Lock()
@@ -1270,13 +1272,13 @@ func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKe
 	return keyInfo, nil
 }
 
-// revalidateCachedAPIKey re-reads a cached, store-backed key's record (Issue #4574). On
-// success the cache entry is replaced with one refreshed from the record and stamped
-// validated at now. When the record is gone the entry is evicted and errAPIKeyRevoked
-// is returned. Any other error leaves the cache untouched and is returned for the
-// caller to weigh against apiKeyMaxStaleness.
+// revalidateCachedAPIKey re-reads a cached, store-backed key's record directly (Issue
+// #4574). On success the cache entry is replaced with one refreshed from the record
+// and stamped validated at now. When the record is gone the entry is evicted and
+// errAPIKeyRevoked is returned. Any other error leaves the cache untouched and is
+// returned for the caller to weigh against apiKeyMaxStaleness.
 func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cached *APIKey, now time.Time) (*APIKey, error) {
-	rec, err := s.lookupAPIKeyRecord(ctx, cached.TenantID, cached.recordRef)
+	rec, err := s.readAPIKeyRecord(ctx, cached.TenantID, cached.recordRef)
 	if err != nil {
 		return nil, err
 	}
@@ -1284,10 +1286,11 @@ func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cach
 		s.mu.Lock()
 		delete(s.apiKeys, apiKey)
 		s.mu.Unlock()
+		s.apiKeyIdx.remove(cached.recordRef)
 		return nil, errAPIKeyRevoked
 	}
 
-	refreshed := apiKeyFromRecord(apiKey, rec, now)
+	refreshed := apiKeyFromSecret(apiKey, rec, now)
 	s.mu.Lock()
 	s.apiKeys[apiKey] = refreshed
 	s.mu.Unlock()

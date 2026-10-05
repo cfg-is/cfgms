@@ -105,6 +105,18 @@ func CompareAndSwapIsClusterAtomic(store SecretStore) bool {
 	return ok && c.CompareAndSwapIsClusterAtomic()
 }
 
+// TenantSecretAccessor is implemented by a SecretStore that can address a secret by
+// an explicit (tenantID, key) pair (Issue #4574). The combined "<tenant_id>/<key>"
+// reference taken by GetSecret and DeleteSecret is ambiguous once tenant IDs are
+// hierarchical and keys may contain "/"; a caller that already knows the tenant
+// should use this interface when the store offers it. GetTenantSecret must read the
+// backing store, not a per-instance cache, so changes made through another store
+// instance are observed immediately. Not-found is reported as ErrSecretNotFound.
+type TenantSecretAccessor interface {
+	GetTenantSecret(ctx context.Context, tenantID, key string) (*Secret, error)
+	DeleteTenantSecret(ctx context.Context, tenantID, key string) error
+}
+
 // Secret represents a stored secret with metadata
 // M-AUTH-1: All secret values are encrypted by the provider
 type Secret struct {

@@ -231,6 +231,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist API key", "STORE_ERROR")
 		return
 	}
+	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
 
 	// Create response (includes the actual key only on creation)
 	result := APIKeyCreateResult{
@@ -339,7 +340,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	var name, tenantID string
 	switch {
 	case rec != nil:
-		if err := s.secretStore.DeleteSecret(r.Context(), apiKeyStoreRef(rec.TenantID, rec.Key)); err != nil &&
+		if err := s.deleteAPIKeyRecord(r.Context(), rec.TenantID, rec.Key); err != nil &&
 			!errors.Is(err, secretsif.ErrSecretNotFound) {
 			// Log a category, never err.Error(): the secret ref embeds the key hash.
 			// The durable record survives, so the key still authenticates on every
@@ -350,6 +351,7 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete API key", "STORE_ERROR")
 			return
 		}
+		s.apiKeyIdx.remove(rec.Key)
 		name, tenantID = rec.Description, rec.TenantID
 	case local != nil:
 		name, tenantID = local.Name, local.TenantID
@@ -372,32 +374,43 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // findAPIKeyInScope locates the API key with the given ID for a caller holding scope
-// (Issue #4574). The secret store is consulted first and is authoritative; the local
-// cache is consulted only for local-only entries (recordRef == ""), which have no durable
+// (Issue #4574). The secret store is authoritative: the API-key index names the
+// record's tenant, and the record is then read from that tenant alone. The local cache
+// is consulted only for local-only entries (recordRef == ""), which have no durable
 // record. A key outside the caller's scope is reported exactly like a missing one (both
 // return nil, nil) so callers cannot distinguish the two. A store read error is
 // returned as-is; it is never treated as not-found.
 func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxkeys.TenantScope, route string) (*secretsif.SecretMetadata, *APIKey, error) {
-	records, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
-		Metadata: map[string]string{
-			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
-			"id":                            keyID,
-		},
-		// An expired key is still a record an operator may want to inspect or remove.
-		IncludeExpired: true,
-	})
+	keyHash, entry, found, err := s.locateAPIKeyByID(ctx, keyID)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, rec := range records {
-		if rec.Metadata["id"] != keyID {
-			continue
+	if found {
+		if !s.isAuthorizedForTenant(scope, entry.TenantID, route) {
+			return nil, nil, nil
 		}
-		if s.isAuthorizedForTenant(scope, rec.TenantID, route) {
-			return rec, nil, nil
+		// A tenant-scoped, name-filtered listing rather than GetSecret, because an
+		// expired key is still a record an operator may inspect or remove and
+		// GetSecret refuses expired records. The store skips every other record
+		// before decrypting it, so this opens exactly one record.
+		records, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+			TenantID:       entry.TenantID,
+			KeyPrefix:      keyHash,
+			IncludeExpired: true,
+			Metadata: map[string]string{
+				secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			},
+		})
+		if err != nil {
+			return nil, nil, err
 		}
-	}
-	if len(records) > 0 {
+		for _, rec := range records {
+			if rec.Key == keyHash && rec.TenantID == entry.TenantID && rec.Metadata["id"] == keyID {
+				return rec, nil, nil
+			}
+		}
+		// Indexed but gone: deleted by another node since the last refresh.
+		s.apiKeyIdx.remove(keyHash)
 		return nil, nil, nil
 	}
 
@@ -451,8 +464,18 @@ func apiKeyInfoFromCache(key *APIKey) APIKeyInfo {
 	}
 }
 
-// apiKeyStoreRef is the secret-store path of an API key's durable record.
-// It is a lookup path, not the credential itself — see loadAPIKeyFromStore.
+// deleteAPIKeyRecord deletes an API key's durable record, addressing it by explicit
+// tenant when the store supports it (Issue #4574).
+func (s *Server) deleteAPIKeyRecord(ctx context.Context, tenantID, keyHash string) error {
+	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
+		return acc.DeleteTenantSecret(ctx, tenantID, keyHash)
+	}
+	return s.secretStore.DeleteSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+}
+
+// apiKeyStoreRef is the secret-store path of an API key's durable record. It is a
+// lookup path, not the credential itself. Used only for a store that does not offer
+// secretsif.TenantSecretAccessor; such a store resolves the combined reference itself.
 func apiKeyStoreRef(tenantID, keyHash string) string {
 	return tenantID + "/" + keyHash
 }
@@ -521,6 +544,7 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 		s.mu.Unlock()
 		return nil, fmt.Errorf("failed to store ephemeral key: %w", err)
 	}
+	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
 
 	s.logger.Info("Generated ephemeral API key",
 		"id", apiKey.ID,

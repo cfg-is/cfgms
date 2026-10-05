@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -144,7 +145,7 @@ func TestDeleteAPIKey_StoreOnlyKey_Succeeds(t *testing.T) {
 	rec := callDeleteAPIKey(server, keyID, ctxkeys.NewTenantScope("tenant-a"))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	got, err := server.lookupAPIKeyRecord(context.Background(), "", hashAPIKey(apiKey))
+	got, err := server.readAPIKeyRecord(context.Background(), "tenant-a", hashAPIKey(apiKey))
 	require.NoError(t, err)
 	assert.Nil(t, got, "the durable record must be gone")
 
@@ -176,7 +177,7 @@ func TestDeleteAPIKey_StoreOnlyKey_SiblingTenant_Returns404(t *testing.T) {
 	rec := callDeleteAPIKey(server, keyID, ctxkeys.NewTenantScope("tenant-a"))
 	assert.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
 
-	got, err := server.lookupAPIKeyRecord(context.Background(), "", hashAPIKey(apiKey))
+	got, err := server.readAPIKeyRecord(context.Background(), "tenant-b", hashAPIKey(apiKey))
 	require.NoError(t, err)
 	assert.NotNil(t, got, "a cross-tenant delete attempt must not remove the record")
 	assert.Equal(t, http.StatusOK, authStatus(server, apiKey))
@@ -248,7 +249,9 @@ func TestAPIKey_DeleteOnPeerNode_RejectedWithinBound(t *testing.T) {
 
 	apiKey, keyID := mintStoreAPIKey(t, serverA, []string{"api-key:list"}, "tenant-a")
 
-	// Node B has never seen the key; it loads it from the shared store and caches it.
+	// Node B has never seen the key; once its index refreshes it loads it from the
+	// shared store and caches it.
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
 	require.Equal(t, http.StatusOK, authStatus(serverB, apiKey))
 	require.True(t, isCached(serverB, apiKey))
 
@@ -277,10 +280,13 @@ func TestAPIKey_DeleteOnPeerNode_ViaPeerThatNeverCachedIt(t *testing.T) {
 	serverA, serverB := setupPeerServers(t)
 	clockA := &steppingClock{now: time.Now()}
 	serverA.apiKeyClock = clockA.Now
+	clockB := &steppingClock{now: time.Now()}
+	serverB.apiKeyClock = clockB.Now
 
 	apiKey, keyID := mintStoreAPIKey(t, serverA, []string{"api-key:list"}, "tenant-a")
 	require.Equal(t, http.StatusOK, authStatus(serverA, apiKey))
 
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
 	rec := callDeleteAPIKey(serverB, keyID, ctxkeys.NewTenantScope("tenant-a"))
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -288,25 +294,35 @@ func TestAPIKey_DeleteOnPeerNode_ViaPeerThatNeverCachedIt(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, authStatus(serverA, apiKey))
 }
 
-// failingListSecretStore wraps a real SecretStore and, while failing is set, makes
-// ListSecrets return an error — a store outage seen by re-validation.
-type failingListSecretStore struct {
+// failingReadSecretStore wraps a real SecretStore and, while failing is set, makes
+// reads (GetSecret and ListSecrets) return an error — a store outage.
+type failingReadSecretStore struct {
 	secretsif.SecretStore
 	mu      sync.Mutex
 	failing bool
 }
 
-func (s *failingListSecretStore) setFailing(v bool) {
+func (s *failingReadSecretStore) setFailing(v bool) {
 	s.mu.Lock()
 	s.failing = v
 	s.mu.Unlock()
 }
 
-func (s *failingListSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+func (s *failingReadSecretStore) isFailing() bool {
 	s.mu.Lock()
-	failing := s.failing
-	s.mu.Unlock()
-	if failing {
+	defer s.mu.Unlock()
+	return s.failing
+}
+
+func (s *failingReadSecretStore) GetSecret(ctx context.Context, key string) (*secretsif.Secret, error) {
+	if s.isFailing() {
+		return nil, errors.New("simulated store outage")
+	}
+	return s.SecretStore.GetSecret(ctx, key)
+}
+
+func (s *failingReadSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	if s.isFailing() {
 		return nil, errors.New("simulated store outage")
 	}
 	return s.SecretStore.ListSecrets(ctx, filter)
@@ -322,7 +338,7 @@ func TestAPIKey_RevalidationStoreError_ServesUntilMaxStalenessThenFailsClosed(t 
 	server.apiKeyClock = clock.Now
 	apiKey, _ := mintStoreAPIKey(t, server, []string{"steward:list"}, "tenant-a")
 
-	store := &failingListSecretStore{SecretStore: server.secretStore}
+	store := &failingReadSecretStore{SecretStore: server.secretStore}
 	server.secretStore = store
 	store.setFailing(true)
 
@@ -371,4 +387,129 @@ func TestDeleteAPIKey_StoreDeleteFails_Returns500(t *testing.T) {
 	rec := callDeleteAPIKey(server, keyID, ctxkeys.NewTenantScope("tenant-a"))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
 	assert.Equal(t, http.StatusOK, authStatus(server, apiKey), "the record survived, so the key still works")
+}
+
+// countingListSecretStore wraps a real SecretStore and counts ListSecrets calls — the
+// only store operation that scans.
+type countingListSecretStore struct {
+	secretsif.SecretStore
+	mu    sync.Mutex
+	lists int
+}
+
+func (s *countingListSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	s.mu.Lock()
+	s.lists++
+	s.mu.Unlock()
+	return s.SecretStore.ListSecrets(ctx, filter)
+}
+
+func (s *countingListSecretStore) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lists
+}
+
+// TestAPIKey_UnknownKeyFlood_AtMostOneScanPerFloor verifies an unauthenticated flood
+// of unknown API keys cannot drive store scans: N concurrent unknown-key requests cost
+// at most one listing per apiKeyIndexMissRefreshFloor, and none while the index is
+// fresher than the floor.
+func TestAPIKey_UnknownKeyFlood_AtMostOneScanPerFloor(t *testing.T) {
+	server := setupTestServer(t)
+	clock := &steppingClock{now: time.Now()}
+	server.apiKeyClock = clock.Now
+	store := &countingListSecretStore{SecretStore: server.secretStore}
+	server.secretStore = store
+
+	flood := func(round int) {
+		var wg sync.WaitGroup
+		for i := 0; i < 50; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				// Distinct sources, so the per-source authDefense budget does not
+				// absorb the flood before it reaches API-key resolution.
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+				req.RemoteAddr = fmt.Sprintf("10.%d.%d.1:40000", round, i)
+				req.Header.Set("X-API-Key", fmt.Sprintf("unknown-key-%d-%d", round, i))
+				rec := httptest.NewRecorder()
+				server.router.ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			}(i)
+		}
+		wg.Wait()
+	}
+
+	// The index was built at startup: still fresher than the floor → no scan.
+	server.apiKeyIdx.mu.Lock()
+	server.apiKeyIdx.lastAttemptAt = clock.Now()
+	server.apiKeyIdx.mu.Unlock()
+	flood(0)
+	assert.Equal(t, 0, store.count(), "a fresh index answers misses without the store")
+
+	clock.Advance(apiKeyIndexMissRefreshFloor)
+	flood(1)
+	assert.Equal(t, 1, store.count(), "one shared refresh for the whole flood")
+
+	flood(2)
+	assert.Equal(t, 1, store.count(), "no further scan inside the floor")
+
+	clock.Advance(apiKeyIndexMissRefreshFloor)
+	flood(3)
+	assert.Equal(t, 2, store.count())
+}
+
+// TestAPIKey_CreatedOnPeer_AuthenticatesAfterIndexRefresh verifies a key minted on
+// node A becomes usable on node B once B's index refreshes — by the miss path after
+// the floor, or by the background refresher.
+func TestAPIKey_CreatedOnPeer_AuthenticatesAfterIndexRefresh(t *testing.T) {
+	serverA, serverB := setupPeerServers(t)
+	clockB := &steppingClock{now: time.Now()}
+	serverB.apiKeyClock = clockB.Now
+	serverB.apiKeyIdx.mu.Lock()
+	serverB.apiKeyIdx.lastAttemptAt = clockB.Now()
+	serverB.apiKeyIdx.mu.Unlock()
+
+	apiKey, _ := mintStoreAPIKey(t, serverA, []string{"steward:list"}, "tenant-a")
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(serverB, apiKey),
+		"inside the floor node B does not rescan for an unknown key")
+
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
+	assert.Equal(t, http.StatusOK, stewardsStatus(serverB, apiKey))
+
+	// The background refresher path: a fresh key is located with no miss-driven scan.
+	apiKey2, _ := mintStoreAPIKey(t, serverA, []string{"steward:list"}, "tenant-a")
+	require.NoError(t, serverB.refreshAPIKeyIndex(context.Background()))
+	assert.Equal(t, http.StatusOK, stewardsStatus(serverB, apiKey2))
+}
+
+// TestAPIKey_NestedTenant_DeleteRevokesOnPeer is the nested-tenant case: a key minted
+// for a child tenant ("tenant-a/child") is deleted by a caller scoped to the parent,
+// its durable record is gone, and a second node rejects it.
+func TestAPIKey_NestedTenant_DeleteRevokesOnPeer(t *testing.T) {
+	serverA, serverB := setupPeerServers(t)
+	clockB := &steppingClock{now: time.Now()}
+	serverB.apiKeyClock = clockB.Now
+
+	const tenant = "tenant-a/child"
+	apiKey, keyID := mintStoreAPIKey(t, serverA, []string{"steward:list"}, tenant)
+
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
+	require.Equal(t, http.StatusOK, stewardsStatus(serverB, apiKey), "node B loads the nested-tenant key")
+
+	rec := callDeleteAPIKey(serverA, keyID, ctxkeys.NewTenantScope("tenant-a"))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	got, err := serverA.readAPIKeyRecord(context.Background(), tenant, hashAPIKey(apiKey))
+	require.NoError(t, err)
+	assert.Nil(t, got, "the nested-tenant record must be gone from the store")
+
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(serverA, apiKey))
+	clockB.Advance(apiKeyRevalidateInterval)
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(serverB, apiKey))
+
+	// A node that never cached it rejects it too (restart case).
+	dropFromCache(serverB, apiKey)
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(serverB, apiKey))
 }
