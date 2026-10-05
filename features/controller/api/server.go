@@ -1483,6 +1483,7 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 		return
 	}
 	h.SetRequirePermFn(s.requirePermission)
+	h.SetTenantResolution(s.rootTenantID, s.selectAuthorizedTenant)
 	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
 	if err := h.RegisterWorkflowRoutes(workflowRouter); err != nil {
 		// SetRequirePermFn was just called above with a non-nil gate, so this is
