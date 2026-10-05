@@ -24,16 +24,18 @@ import (
 
 	"github.com/gorilla/mux"
 
+	_ "modernc.org/sqlite"
+
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "modernc.org/sqlite"
 )
 
 // testBlastRadiusPolicyStore is a real in-memory BlastRadiusPolicyStore (Issue #3698),
@@ -1781,4 +1783,85 @@ func TestHandleListRuns_PaginationOffsetLimit(t *testing.T) {
 	page2, ok := resp.Data.([]interface{})
 	require.True(t, ok)
 	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 run")
+}
+
+// setupCrossingRunServer is setupRunServer with a tenant-crossing store and a
+// client tenant ("msp-run", beneath the seeded root) for ADR-025 boundary tests.
+func setupCrossingRunServer(t *testing.T, stewards []fleet.StewardResult) *Server {
+	t.Helper()
+	server, _, _ := setupRunServer(t, stewards)
+	wireCrossingStore(t, server)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "msp-run", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	return server
+}
+
+func grantRunCrossing(t *testing.T, server *Server, principalID, tenantID string) {
+	t.Helper()
+	now := time.Now()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID: "grant-" + principalID, TenantID: tenantID, PrincipalID: principalID,
+		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-admin",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+}
+
+// TestRunCommand_RootScopedWithoutCrossing_Challenged guards the ADR-025 boundary on
+// ad-hoc runs: a root-scoped principal dispatching to a steward in a client tenant
+// without an active crossing gets the crossing challenge, exactly as config push
+// does — not a dispatched run.
+func TestRunCommand_RootScopedWithoutCrossing_Challenged(t *testing.T) {
+	server := setupCrossingRunServer(t, []fleet.StewardResult{{ID: "steward-msp", TenantID: "msp-run"}})
+	caller := rootScopedPrincipal("root-operator-run")
+
+	body := withEnvelopeFields(map[string]interface{}{
+		"target":  "id:steward-msp",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-msp"}))
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", caller, body)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+}
+
+// TestRunCommand_RootScopedWithCrossing_Allowed: with an active crossing on the
+// steward's tenant the run is dispatched.
+func TestRunCommand_RootScopedWithCrossing_Allowed(t *testing.T) {
+	server := setupCrossingRunServer(t, []fleet.StewardResult{{ID: "steward-msp", TenantID: "msp-run"}})
+	caller := rootScopedPrincipal("root-operator-run")
+	grantRunCrossing(t, server, caller.ID, "msp-run")
+
+	body := withEnvelopeFields(map[string]interface{}{
+		"target":  "id:steward-msp",
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", []string{"steward-msp"}))
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command", caller, body)
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole: a fleet selector
+// reaching the root tenant and an uncrossed client tenant is refused as a whole,
+// never silently narrowed to the tenants the caller may reach.
+func TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole(t *testing.T) {
+	server := setupCrossingRunServer(t, []fleet.StewardResult{
+		{ID: "steward-root", TenantID: testRootTenantID},
+		{ID: "steward-msp", TenantID: "msp-run"},
+	})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"})
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedRootTenantOnly_Allowed: a root-scoped principal acting
+// on stewards in the root tenant itself needs no crossing.
+func TestRunScript_RootScopedRootTenantOnly_Allowed(t *testing.T) {
+	server := setupCrossingRunServer(t, []fleet.StewardResult{{ID: "steward-root", TenantID: testRootTenantID}})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), map[string]interface{}{"target": "all", "script_id": "scripts/check.sh"})
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

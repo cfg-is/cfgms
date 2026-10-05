@@ -236,6 +236,50 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 	return principal, tenantID, true
 }
 
+// authorizeRunTargets applies ADR-025's tenant-crossing boundary to ad-hoc run
+// dispatch. For a caller subject to the boundary (a root-scoped principal) it
+// resolves the run's targets exactly as dispatch will — the same filter scoped to
+// the same tenant — and requires authorizeTenantAccess for every matched steward's
+// tenant: "root" itself, or a tenant covered by an active crossing. A run that
+// would reach any other tenant is refused whole, never silently narrowed: the
+// crossing challenge when a crossing would admit it, 404 otherwise. Each tenant
+// decision is evaluated (and audited) through authorizeTenantAccess, as for
+// config push. Callers not subject to the boundary are unaffected.
+//
+// It writes the response and returns false on refusal.
+func (s *Server) authorizeRunTargets(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID string, filter fleet.Filter) bool {
+	if !subjectToTenantCrossingBoundary(principal) {
+		return true
+	}
+	if s.fleetQuery == nil || s.tenantManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return false
+	}
+	filter.TenantID = tenantID
+	targets, err := s.fleetQuery.Search(r.Context(), filter)
+	if err != nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return false
+	}
+	checked := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		if checked[target.TenantID] {
+			continue
+		}
+		checked[target.TenantID] = true
+		switch s.authorizeTenantAccess(r.Context(), principal, target.TenantID) {
+		case tenantAuthAllowed:
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, target.TenantID)
+			return false
+		default:
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return false
+		}
+	}
+	return true
+}
+
 // runVisibleTo reports whether the caller may read/cancel the given run, using the
 // caller's ctxkeys.TenantScope (Issue #4335) rather than the raw tenantID string:
 // an unset scope is refused (not treated as root), root always passes, and a tenant
@@ -308,6 +352,12 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// ADR-025 tenant-crossing boundary: every steward the run would reach must be
+	// one the caller may act on.
+	if !s.authorizeRunTargets(w, r, principal, tenantID, filter) {
+		return
 	}
 
 	// Look up script metadata for per-steward parameter resolution. Non-fatal if
@@ -478,6 +528,12 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+
+	// ADR-025 tenant-crossing boundary: every steward the run would reach must be
+	// one the caller may act on.
+	if !s.authorizeRunTargets(w, r, principal, tenantID, filter) {
+		return
 	}
 
 	var commandSignature *controllerrun.CommandSignature
