@@ -1360,3 +1360,50 @@ func TestManager_GetLeader_ClusterMode_ResolvesPeerViaNodeRegistry(t *testing.T)
 	assert.Equal(t, winnerAddr, resolved.Address,
 		"the resolved NodeInfo must carry the holder's registered address")
 }
+
+// TestManager_CommandTerm_FollowerStampsCurrentLeaseToken guards Issue #4566: a
+// node that does not hold the leadership lease still stamps the lease's current
+// token on the commands it publishes. GetTerm stays 0 there (it reports local
+// authority), but CommandTerm must equal the leader's term, or every command a
+// follower publishes is rejected by a steward whose fence ratchet is set.
+func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	require.Eventually(t, func() bool { return managerA.HasLeadership() != managerB.HasLeadership() },
+		5*time.Second, 5*time.Millisecond, "exactly one node holds the lease")
+	leader, follower := managerA, managerB
+	if managerB.HasLeadership() {
+		leader, follower = managerB, managerA
+	}
+
+	leaderTerm := leader.GetTerm()
+	require.NotZero(t, leaderTerm)
+	assert.Zero(t, follower.GetTerm(), "GetTerm reports local authority only")
+	assert.Equal(t, leaderTerm, follower.CommandTerm(), "a follower stamps the lease's current token")
+	assert.Equal(t, leaderTerm, leader.CommandTerm(), "the holder stamps its own term")
+	assert.Equal(t, leaderTerm, CommandTermSource{Manager: follower}.GetTerm())
+}
+
+// TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
+// stamp, exactly as before.
+func TestManager_CommandTerm_SingleServerIsZero(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	manager, err := NewManager(cfg, logging.NewNoopLogger(), storageManager)
+	require.NoError(t, err)
+	assert.Zero(t, manager.CommandTerm())
+	assert.Zero(t, CommandTermSource{}.GetTerm())
+}

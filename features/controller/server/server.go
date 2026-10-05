@@ -1354,7 +1354,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			IsLocallyConnected: isLocallyConnected,
 			// Issue #4510: same term source as the command publisher below, so
 			// execute_script passes the steward fence like every other command.
-			TermSource: haManager,
+			TermSource: ha.CommandTermSource{Manager: haManager},
 			Logger:     logger,
 		})
 		if dispatcherErr != nil {
@@ -1468,7 +1468,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		commandPublisher, err = commands.New(&commands.Config{
 			ControlPlane: dispatchControlPlane,
 			Signer:       commandSigner,
-			TermSource:   haManager,
+			TermSource:   ha.CommandTermSource{Manager: haManager},
 			Logger:       logger,
 		})
 		if err != nil {

@@ -90,6 +90,11 @@ type Manager struct {
 	// SingleServerMode, which never consults it (Decision 4's
 	// unconditional-true short-circuit).
 	leaseManager *lease.Manager
+
+	// commandTerm caches the lease token a non-holder read for CommandTerm.
+	commandTermMu sync.Mutex
+	commandTerm   uint64
+	commandTermAt time.Time
 	// leaseRenewalInterval is the interval Start()'s background acquisition loop
 	// ticks at. Set alongside leaseManager by SetLeaseStore so the loop renews
 	// often enough relative to the lease TTL to keep leaseManager's derived
@@ -596,6 +601,68 @@ func (m *Manager) GetTerm() uint64 {
 // LeaseTermFloor offsets lease fencing tokens into a term domain above every
 // Raft term a pre-ADR-031 cluster issued. See GetTerm.
 const LeaseTermFloor uint64 = 1 << 32
+
+// commandTermCacheTTL bounds how long a non-holder reuses the lease token it read
+// for stamping commands. A token cached past a leadership change is lower than
+// the new one, so stewards that have seen the new token reject it — stale reads
+// fail closed, never open.
+const commandTermCacheTTL = 2 * time.Second
+
+// CommandTerm returns the fencing token to stamp on a controller-originated
+// command (ADR-031 Decision 5). Every controller node serves requests and
+// publishes commands (ADR-031 Decision 1), not only the lease holder, so the
+// token is the cluster leadership lease's current generation on any node:
+//   - on the holder, GetTerm (its cached local authority);
+//   - on any other node, the lease's current token read from the lease store,
+//     cached for commandTermCacheTTL.
+//
+// It returns 0 in SingleServerMode and BlueGreenMode (no lease), and when the
+// lease cannot be read — a command stamped 0 is rejected by any steward whose
+// ratchet is set, so an unreadable lease fails closed. Before this, GetTerm's 0
+// on non-holders meant every command a follower published (config push, DNA
+// sync, script runs on the steward's session node) was rejected fleet-wide
+// once a steward had seen one stamped command (Issue #4566).
+func (m *Manager) CommandTerm() uint64 {
+	if term := m.GetTerm(); term != 0 {
+		return term
+	}
+
+	m.mu.RLock()
+	leaseManager := m.leaseManager
+	m.mu.RUnlock()
+	if leaseManager == nil {
+		return 0
+	}
+
+	m.commandTermMu.Lock()
+	defer m.commandTermMu.Unlock()
+	if m.commandTerm != 0 && time.Since(m.commandTermAt) < commandTermCacheTTL {
+		return m.commandTerm
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, token, _, ok, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
+	if err != nil || !ok || token == 0 {
+		return 0
+	}
+	m.commandTerm, m.commandTermAt = LeaseTermFloor+token, time.Now()
+	return m.commandTerm
+}
+
+// CommandTermSource adapts a Manager to the GetTerm() term-source interface the
+// command publisher and script dispatcher consume, stamping CommandTerm.
+type CommandTermSource struct {
+	Manager *Manager
+}
+
+// GetTerm returns the Manager's CommandTerm.
+func (s CommandTermSource) GetTerm() uint64 {
+	if s.Manager == nil {
+		return 0
+	}
+	return s.Manager.CommandTerm()
+}
 
 // NewBackgroundLoopLease constructs a lease.SingletonJob for the cluster-
 // singleton background loop named name (ADR-031 Decision 4: leadership shrinks
