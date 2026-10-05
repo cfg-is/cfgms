@@ -142,20 +142,28 @@ func (h *WorkflowHandler) RegisterTriggerRoutes(router *mux.Router) {
 // empty tenant turned every root-scoped create into a 500. When no root tenant can
 // be resolved the request is a 400 asking for ?tenant=.
 func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http.Request) (*workflow.WorkflowStore, bool) {
+	tenantID, ok := h.workflowTenantForRequest(w, r)
+	if !ok {
+		return nil, false
+	}
+	return workflow.NewWorkflowStore(h.configStore, tenantID), true
+}
+
+// workflowTenantForRequest resolves the tenant workflowStoreForRequest scopes
+// the store to, with the same refusals. It is also the tenant an execution runs
+// under (Issue #4576), so the tenant a workflow is stored in and the tenant its
+// steps act on are always the same one.
+func (h *WorkflowHandler) workflowTenantForRequest(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
 	case scope.IsRoot():
-		tenantID, ok := h.rootScopedTenant(w, r)
-		if !ok {
-			return nil, false
-		}
-		return workflow.NewWorkflowStore(h.configStore, tenantID), true
+		return h.rootScopedTenant(w, r)
 	case scope.IsTenant() && scope.Path() != "":
-		return workflow.NewWorkflowStore(h.configStore, scope.Path()), true
+		return scope.Path(), true
 	default:
 		h.logger.Warn("Workflow request refused: caller tenant scope is unset")
 		h.sendError(w, http.StatusNotFound, "not found")
-		return nil, false
+		return "", false
 	}
 }
 
@@ -438,18 +446,26 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 		req.Variables = nil
 	}
 
-	store, ok := h.workflowStoreForRequest(w, r)
+	tenantID, ok := h.workflowTenantForRequest(w, r)
 	if !ok {
 		return
 	}
-	vw, err := store.GetLatestWorkflow(r.Context(), name)
+	vw, err := workflow.NewWorkflowStore(h.configStore, tenantID).GetLatestWorkflow(r.Context(), name)
 	if err != nil {
 		h.sendError(w, http.StatusNotFound, fmt.Sprintf("workflow %q not found", name))
 		return
 	}
 
+	// The engine takes the execution's authenticated tenant from ctxkeys.TenantID,
+	// and tenant-scoped steps act on exactly that tenant (Issue #4338). A
+	// root-scoped caller's context carries "", so without this its executions
+	// had no tenant and every tenant-scoped step refused to run. Run under the
+	// tenant the workflow was resolved in — the root tenant, or one the caller
+	// was authorized to select (Issue #4576).
+	execCtx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
+
 	nameForLog := logging.SanitizeLogValue(name)
-	execution, err := h.engine.ExecuteWorkflow(r.Context(), vw.Workflow, req.Variables)
+	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, req.Variables)
 	if err != nil {
 		h.logger.Error("Failed to execute workflow", "name", nameForLog, "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to start workflow execution")
