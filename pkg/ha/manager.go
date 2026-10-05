@@ -93,11 +93,11 @@ type Manager struct {
 
 	// commandTerm caches the lease token a non-holder read for CommandTerm (0
 	// after a failed read), valid for commandTermTTL from commandTermAt.
-	commandTermMu         sync.Mutex
-	commandTerm           uint64
-	commandTermAt         time.Time
-	commandTermTTL        time.Duration
-	commandTermRefreshing bool
+	commandTermMu   sync.Mutex
+	commandTerm     uint64
+	commandTermAt   time.Time
+	commandTermTTL  time.Duration
+	commandTermDone chan struct{} // non-nil while a refresh is in flight
 	// leaseRenewalInterval is the interval Start()'s background acquisition loop
 	// ticks at. Set alongside leaseManager by SetLeaseStore so the loop renews
 	// often enough relative to the lease TTL to keep leaseManager's derived
@@ -647,25 +647,47 @@ func (m *Manager) CommandTerm() uint64 {
 	// keep using the cached value (a stale value is lower than the current
 	// token, so it fails closed), and nobody queues behind a slow store.
 	m.commandTermMu.Lock()
-	if time.Since(m.commandTermAt) < m.commandTermTTL || m.commandTermRefreshing {
+	if time.Since(m.commandTermAt) < m.commandTermTTL {
 		term := m.commandTerm
 		m.commandTermMu.Unlock()
 		return term
 	}
-	m.commandTermRefreshing = true
+	if done := m.commandTermDone; done != nil {
+		// A refresh is in flight. With a previous value to fall back on, use it;
+		// on a cold cache (nothing read yet) wait for the refresh rather than
+		// stamping 0 on the first commands a freshly started node publishes.
+		if !m.commandTermAt.IsZero() {
+			term := m.commandTerm
+			m.commandTermMu.Unlock()
+			return term
+		}
+		m.commandTermMu.Unlock()
+		<-done
+		m.commandTermMu.Lock()
+		term := m.commandTerm
+		m.commandTermMu.Unlock()
+		return term
+	}
+	done := make(chan struct{})
+	m.commandTermDone = done
 	m.commandTermMu.Unlock()
 
 	term, ttl := uint64(0), commandTermFailureTTL
+	defer func() {
+		// Deferred so a panicking read can never leave the refresh marked in
+		// flight and freeze the cache.
+		m.commandTermMu.Lock()
+		m.commandTerm, m.commandTermAt, m.commandTermTTL, m.commandTermDone = term, time.Now(), ttl, nil
+		m.commandTermMu.Unlock()
+		close(done)
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	_, token, _, ok, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
-	cancel()
 	if err == nil && ok && token != 0 {
 		term, ttl = LeaseTermFloor+token, commandTermCacheTTL
 	}
-
-	m.commandTermMu.Lock()
-	m.commandTerm, m.commandTermAt, m.commandTermTTL, m.commandTermRefreshing = term, time.Now(), ttl, false
-	m.commandTermMu.Unlock()
 	return term
 }
 

@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1474,4 +1475,33 @@ func TestManager_CommandTerm_UnreadableLeaseIsZero(t *testing.T) {
 	store.failReads.Store(false)
 	assert.Eventually(t, func() bool { return follower.CommandTerm() == LeaseTermFloor+held.Token },
 		3*time.Second, 50*time.Millisecond, "once readable again the current token is stamped")
+}
+
+// TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp guards the #4567
+// review: on a freshly started non-holder, concurrent first publishes wait for
+// the in-flight lease read instead of stamping 0.
+func TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+	follower := newLeaseBackedClusterManager(t, "cmdterm-cold", inner)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+
+	want := LeaseTermFloor + held.Token
+	var wg sync.WaitGroup
+	terms := make([]uint64, 32)
+	for i := range terms {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			terms[i] = follower.CommandTerm()
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range terms {
+		assert.Equal(t, want, got, "caller %d stamped the current token", i)
+	}
 }
