@@ -51,11 +51,33 @@ func SynthesizeScriptRun(
 	requiredAPIScope []string,
 ) (string, error) {
 	filter.TenantID = tenantID
-
 	devices, err := fleetQuery.Search(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("synthesize script run: fleet search: %w", err)
 	}
+	return SynthesizeScriptRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		scriptRef, scriptVersion, shell, runtimeParams, scriptMeta, paramPlatformBindings, requiredAPIScope)
+}
+
+// SynthesizeScriptRunForDevices is SynthesizeScriptRun over an already-resolved
+// device list: the caller that authorized exactly these devices dispatches
+// exactly these devices, with no second fleet search in between (Issue #4554).
+// filter is recorded on the run for display only.
+func SynthesizeScriptRunForDevices(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	scriptRef, scriptVersion string,
+	shell scriptmodule.ShellType,
+	runtimeParams map[string]string,
+	scriptMeta *scriptmodule.ScriptMetadata,
+	paramPlatformBindings map[string]string,
+	requiredAPIScope []string,
+) (string, error) {
+	filter.TenantID = tenantID
 
 	runID := uuid.New().String()
 	now := time.Now().UTC()
@@ -162,11 +184,34 @@ func SynthesizeCommandRun(
 	expiresAt time.Time,
 ) (string, error) {
 	filter.TenantID = tenantID
-
 	devices, err := fleetQuery.Search(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("synthesize command run: fleet search: %w", err)
 	}
+	return SynthesizeCommandRunForDevices(ctx, manager, executionQueue, devices, tenantID, createdBy, filter,
+		inlineContent, shell, params, commandSignature, targets, nonce, expiresAt)
+}
+
+// SynthesizeCommandRunForDevices is SynthesizeCommandRun over an already-resolved
+// device list: the caller that authorized exactly these devices dispatches
+// exactly these devices, with no second fleet search in between (Issue #4554).
+// filter is recorded on the run for display only.
+func SynthesizeCommandRunForDevices(
+	ctx context.Context,
+	manager *Manager,
+	executionQueue *scriptmodule.ExecutionQueue,
+	devices []fleet.StewardResult,
+	tenantID, createdBy string,
+	filter fleet.Filter,
+	inlineContent string,
+	shell scriptmodule.ShellType,
+	params map[string]string,
+	commandSignature *CommandSignature,
+	targets []string,
+	nonce string,
+	expiresAt time.Time,
+) (string, error) {
+	filter.TenantID = tenantID
 
 	runID := uuid.New().String()
 	now := time.Now().UTC()
