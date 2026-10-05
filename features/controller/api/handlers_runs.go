@@ -236,48 +236,62 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 	return principal, tenantID, true
 }
 
-// authorizeRunTargets applies ADR-025's tenant-crossing boundary to ad-hoc run
-// dispatch. For a caller subject to the boundary (a root-scoped principal) it
-// resolves the run's targets exactly as dispatch will — the same filter scoped to
-// the same tenant — and requires authorizeTenantAccess for every matched steward's
-// tenant: "root" itself, or a tenant covered by an active crossing. A run that
-// would reach any other tenant is refused whole, never silently narrowed: the
-// crossing challenge when a crossing would admit it, 404 otherwise. Each tenant
-// decision is evaluated (and audited) through authorizeTenantAccess, as for
-// config push. Callers not subject to the boundary are unaffected.
+// resolveAuthorizedRunTargets resolves an ad-hoc run's targets — the filter
+// scoped to the caller's tenant — and returns exactly the devices to dispatch,
+// so the list authorized here is the list synthesized, with no second fleet
+// search in between (Issue #4554).
 //
-// It writes the response and returns false on refusal.
-func (s *Server) authorizeRunTargets(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID string, filter fleet.Filter) bool {
-	if !subjectToTenantCrossingBoundary(principal) {
-		return true
-	}
-	if s.fleetQuery == nil || s.tenantManager == nil {
+// For a caller subject to ADR-025's tenant-crossing boundary (a root-scoped
+// principal) every matched steward's tenant must pass authorizeTenantAccess:
+// the root tenant itself, or a tenant covered by an active crossing. A steward
+// with no tenant is denied. A run that would reach any other tenant is refused
+// whole, never silently narrowed: the crossing challenge when a crossing would
+// admit it, 404 otherwise. Each tenant decision is evaluated (and audited)
+// through authorizeTenantAccess, as for config push. Callers not subject to the
+// boundary keep their existing checks.
+//
+// It writes the response and returns ok=false on refusal.
+func (s *Server) resolveAuthorizedRunTargets(w http.ResponseWriter, r *http.Request, principal *Principal, tenantID string, filter fleet.Filter) ([]fleet.StewardResult, bool) {
+	if s.fleetQuery == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-		return false
+		return nil, false
 	}
 	filter.TenantID = tenantID
-	targets, err := s.fleetQuery.Search(r.Context(), filter)
+	devices, err := s.fleetQuery.Search(r.Context(), filter)
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
-		return false
+		return nil, false
 	}
-	checked := make(map[string]bool, len(targets))
-	for _, target := range targets {
-		if checked[target.TenantID] {
+	if !subjectToTenantCrossingBoundary(principal) {
+		return devices, true
+	}
+	if s.tenantManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet query not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	checked := make(map[string]bool, len(devices))
+	for _, device := range devices {
+		if device.TenantID == "" {
+			// authorizeTenantAccess treats an empty resource tenant as allowed; a
+			// dispatch target must belong to a tenant, so deny it here.
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			return nil, false
+		}
+		if checked[device.TenantID] {
 			continue
 		}
-		checked[target.TenantID] = true
-		switch s.authorizeTenantAccess(r.Context(), principal, target.TenantID) {
+		checked[device.TenantID] = true
+		switch s.authorizeTenantAccess(r.Context(), principal, device.TenantID) {
 		case tenantAuthAllowed:
 		case tenantAuthNeedsCrossing:
-			s.writeTenantCrossingChallenge(w, target.TenantID)
-			return false
+			s.writeTenantCrossingChallenge(w, device.TenantID)
+			return nil, false
 		default:
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return false
+			return nil, false
 		}
 	}
-	return true
+	return devices, true
 }
 
 // runVisibleTo reports whether the caller may read/cancel the given run, using the
@@ -354,9 +368,10 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ADR-025 tenant-crossing boundary: every steward the run would reach must be
-	// one the caller may act on.
-	if !s.authorizeRunTargets(w, r, principal, tenantID, filter) {
+	// Resolve the run's targets once and authorize them against ADR-025's
+	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
+	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
+	if !ok {
 		return
 	}
 
@@ -387,11 +402,11 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runID, err := controllerrun.SynthesizeScriptRun(
+	runID, err := controllerrun.SynthesizeScriptRunForDevices(
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		devices,
 		tenantID,
 		principal.ID,
 		filter,
@@ -530,9 +545,10 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ADR-025 tenant-crossing boundary: every steward the run would reach must be
-	// one the caller may act on.
-	if !s.authorizeRunTargets(w, r, principal, tenantID, filter) {
+	// Resolve the run's targets once and authorize them against ADR-025's
+	// tenant-crossing boundary; exactly this list is dispatched (Issue #4554).
+	devices, ok := s.resolveAuthorizedRunTargets(w, r, principal, tenantID, filter)
+	if !ok {
 		return
 	}
 
@@ -545,11 +561,11 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runID, err := controllerrun.SynthesizeCommandRun(
+	runID, err := controllerrun.SynthesizeCommandRunForDevices(
 		r.Context(),
 		s.runManager,
 		s.runExecutionQueue,
-		s.fleetQuery,
+		devices,
 		tenantID,
 		principal.ID,
 		filter,
