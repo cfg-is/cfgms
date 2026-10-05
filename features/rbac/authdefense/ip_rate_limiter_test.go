@@ -182,3 +182,29 @@ func TestIPRateLimiter_ExactThreshold(t *testing.T) {
 	limiter.RecordFailure(ip)
 	require.True(t, limiter.IsRateLimited(ip), "should be limited at exactly limit")
 }
+
+// TestIPRateLimiter_ConcurrentFailuresSameIP verifies concurrent failures from one
+// source are all counted and do not race on the shared per-IP ring (run with -race).
+func TestIPRateLimiter_ConcurrentFailuresSameIP(t *testing.T) {
+	clock := NewTestClock(time.Time{})
+	cfg := DefaultConfig()
+	cfg.IPRateLimit = 64
+	cfg.IPRingSize = 64
+	cfg.IPRateWindow = time.Minute
+
+	limiter := NewIPRateLimiter(cfg, clock)
+	defer limiter.Close()
+
+	const ip = "192.0.2.1"
+	var wg sync.WaitGroup
+	for i := 0; i < cfg.IPRateLimit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limiter.RecordFailure(ip)
+			_ = limiter.IsRateLimited(ip)
+		}()
+	}
+	wg.Wait()
+	assert.True(t, limiter.IsRateLimited(ip), "every concurrent failure must be counted")
+}
