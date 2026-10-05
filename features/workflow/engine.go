@@ -61,6 +61,7 @@ type Engine struct {
 	logger                        *logging.ModuleLogger
 	executions                    map[string]*WorkflowExecution
 	workflows                     map[string]Workflow
+	workflowResolver              WorkflowResolver
 	mutex                         sync.RWMutex
 	httpClient                    *HTTPClient
 	providerRegistry              *ProviderRegistry
@@ -845,8 +846,24 @@ func (e *Engine) GetDebugEngine() DebugEngine {
 	return e.debugEngine
 }
 
+// WorkflowResolver resolves a workflow that a running execution references by
+// name (a nested workflow step, an error workflow, a composite component). It is
+// given the execution's authenticated tenant and must resolve only within it
+// (Issue #4638).
+type WorkflowResolver func(ctx context.Context, tenantID, name string) (Workflow, error)
+
+// SetWorkflowResolver wires how executions resolve workflows by name. The
+// controller resolves through the execution tenant's workflow store; once a
+// resolver is set the in-memory registry is never consulted, so a name can never
+// resolve to another tenant's workflow.
+func (e *Engine) SetWorkflowResolver(resolver WorkflowResolver) {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	e.workflowResolver = resolver
+}
+
 // RegisterWorkflow adds a workflow to the engine's in-memory registry so it can
-// be resolved by name via loadWorkflowByName.
+// be resolved by name via loadWorkflowByName when no WorkflowResolver is set.
 func (e *Engine) RegisterWorkflow(workflow Workflow) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()

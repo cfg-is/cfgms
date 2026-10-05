@@ -4,13 +4,11 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // executeWorkflowStep executes a nested workflow step
@@ -29,10 +27,19 @@ func (e *Engine) executeWorkflowStep(ctx context.Context, step Step, execution *
 	logger := e.logger.WithField("step", step.Name).WithField("step_type", "workflow")
 
 	// Validate workflow specification
-	if workflowConfig.WorkflowName == "" && workflowConfig.WorkflowPath == "" {
+	if workflowConfig.WorkflowPath != "" {
 		return NewWorkflowError(
 			ErrorCodeValidation,
-			"workflow step must specify either workflow_name or workflow_path",
+			ErrFilesystemWorkflowReference.Error(),
+			step.Name,
+			step.Type,
+			ErrFilesystemWorkflowReference,
+		).WithVariableState(execution.GetVariables())
+	}
+	if workflowConfig.WorkflowName == "" {
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"workflow step must specify workflow_name",
 			step.Name,
 			step.Type,
 			fmt.Errorf("no workflow specified"),
@@ -43,35 +50,18 @@ func (e *Engine) executeWorkflowStep(ctx context.Context, step Step, execution *
 	var nestedWorkflow Workflow
 	var err error
 
-	if workflowConfig.WorkflowName != "" {
-		// Load workflow by name (this would typically load from a registry)
-		nestedWorkflow, err = e.loadWorkflowByName(workflowConfig.WorkflowName)
-		if err != nil {
-			return NewWorkflowError(
-				ErrorCodeValidation,
-				fmt.Sprintf("failed to load workflow '%s': %v", workflowConfig.WorkflowName, err),
-				step.Name,
-				step.Type,
-				err,
-			).WithVariableState(execution.GetVariables())
-		}
-		logger.Debug("Loaded workflow by name",
-			"workflow_name", workflowConfig.WorkflowName)
-	} else {
-		// Load workflow from file path
-		nestedWorkflow, err = e.loadWorkflowFromPath(workflowConfig.WorkflowPath)
-		if err != nil {
-			return NewWorkflowError(
-				ErrorCodeValidation,
-				fmt.Sprintf("failed to load workflow from path '%s': %v", workflowConfig.WorkflowPath, err),
-				step.Name,
-				step.Type,
-				err,
-			).WithVariableState(execution.GetVariables())
-		}
-		logger.Debug("Loaded workflow from path",
-			"workflow_path", workflowConfig.WorkflowPath)
+	nestedWorkflow, err = e.loadWorkflowByName(ctx, execution, workflowConfig.WorkflowName)
+	if err != nil {
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			fmt.Sprintf("failed to load workflow '%s': %v", workflowConfig.WorkflowName, err),
+			step.Name,
+			step.Type,
+			err,
+		).WithVariableState(execution.GetVariables())
 	}
+	logger.Debug("Loaded workflow by name",
+		"workflow_name", workflowConfig.WorkflowName)
 
 	// Prepare nested workflow parameters
 	nestedParameters := make(map[string]interface{})
@@ -198,26 +188,29 @@ func (e *Engine) executeNestedWorkflowAsync(ctx context.Context, workflow Workfl
 	return execution, nil
 }
 
-// loadWorkflowByName looks up a workflow by name from the engine's in-memory registry.
-func (e *Engine) loadWorkflowByName(name string) (Workflow, error) {
+// ErrFilesystemWorkflowReference refuses a workflow_path reference (Issue
+// #4638). A workflow definition is author-supplied data, so a path in it must
+// never be resolved against the controller's filesystem; composed workflows are
+// referenced by workflow_name and resolved from the execution tenant's store.
+var ErrFilesystemWorkflowReference = errors.New("workflow_path is not supported: reference a stored workflow by workflow_name")
+
+// loadWorkflowByName resolves a workflow referenced by name from within
+// execution. With a WorkflowResolver set (the controller), it resolves only in
+// the execution's authenticated tenant; otherwise it reads the in-memory
+// registry populated by RegisterWorkflow.
+func (e *Engine) loadWorkflowByName(ctx context.Context, execution *WorkflowExecution, name string) (Workflow, error) {
 	e.mutex.RLock()
+	resolver := e.workflowResolver
 	w, ok := e.workflows[name]
 	e.mutex.RUnlock()
+	if resolver != nil {
+		if execution == nil || execution.TenantID == "" {
+			return Workflow{}, fmt.Errorf("workflow '%s' cannot be resolved: execution has no authenticated tenant", name)
+		}
+		return resolver(ctx, execution.TenantID, name)
+	}
 	if !ok {
 		return Workflow{}, fmt.Errorf("workflow '%s' not found in registry", name)
-	}
-	return w, nil
-}
-
-// loadWorkflowFromPath reads a YAML workflow definition from disk and unmarshals it.
-func (e *Engine) loadWorkflowFromPath(path string) (Workflow, error) {
-	data, err := os.ReadFile(path) // #nosec G304 - Workflow engine requires loading workflow files from controlled paths
-	if err != nil {
-		return Workflow{}, fmt.Errorf("failed to read workflow file '%s': %w", path, err)
-	}
-	var w Workflow
-	if err := yaml.Unmarshal(data, &w); err != nil {
-		return Workflow{}, fmt.Errorf("failed to parse workflow file '%s': %w", path, err)
 	}
 	return w, nil
 }
@@ -240,14 +233,21 @@ func (e *Engine) executeErrorWorkflowStep(ctx context.Context, step Step, execut
 	var errorWorkflow Workflow
 	var err error
 
-	if config.WorkflowName != "" {
-		errorWorkflow, err = e.loadWorkflowByName(config.WorkflowName)
-	} else if config.WorkflowPath != "" {
-		errorWorkflow, err = e.loadWorkflowFromPath(config.WorkflowPath)
-	} else {
+	switch {
+	case config.WorkflowPath != "":
 		return NewWorkflowError(
 			ErrorCodeValidation,
-			"either workflow_name or workflow_path must be specified",
+			ErrFilesystemWorkflowReference.Error(),
+			step.Name,
+			step.Type,
+			ErrFilesystemWorkflowReference,
+		).WithVariableState(execution.GetVariables())
+	case config.WorkflowName != "":
+		errorWorkflow, err = e.loadWorkflowByName(ctx, execution, config.WorkflowName)
+	default:
+		return NewWorkflowError(
+			ErrorCodeValidation,
+			"workflow_name must be specified",
 			step.Name,
 			step.Type,
 			fmt.Errorf("no workflow specification provided"),
@@ -568,12 +568,13 @@ func (e *Engine) executeComponent(ctx context.Context, component WorkflowCompone
 	var workflow Workflow
 	var err error
 
-	if component.WorkflowName != "" {
-		workflow, err = e.loadWorkflowByName(component.WorkflowName)
-	} else if component.WorkflowPath != "" {
-		workflow, err = e.loadWorkflowFromPath(component.WorkflowPath)
-	} else {
-		return fmt.Errorf("component %s: either workflow_name or workflow_path must be specified", component.Name)
+	switch {
+	case component.WorkflowPath != "":
+		return fmt.Errorf("component %s: %w", component.Name, ErrFilesystemWorkflowReference)
+	case component.WorkflowName != "":
+		workflow, err = e.loadWorkflowByName(ctx, execution, component.WorkflowName)
+	default:
+		return fmt.Errorf("component %s: workflow_name must be specified", component.Name)
 	}
 
 	if err != nil {
