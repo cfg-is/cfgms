@@ -172,6 +172,13 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A root-scoped list without tenant_id spans every tenant: keep only the root
+	// tenant and tenants covered by an active crossing (Issue #4571), so a
+	// boundary-subject caller cannot enumerate client tenants' tokens.
+	if tenantID == "" {
+		tokens = s.filterTokensToCrossedTenants(r, tokens)
+	}
+
 	// Convert to redacted response format — list callers never receive the full secret.
 	resp := TokenListResponse{
 		Tokens: make([]TokenResponse, 0, len(tokens)),
@@ -185,6 +192,30 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode tokens response", "error", err)
 	}
+}
+
+// filterTokensToCrossedTenants keeps the tokens a caller subject to the ADR-025
+// crossing boundary may see: the root tenant's, and those of tenants covered by
+// an active crossing. Other callers get tokens unchanged.
+func (s *Server) filterTokensToCrossedTenants(r *http.Request, tokens []*registration.Token) []*registration.Token {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !subjectToTenantCrossingBoundary(principal) {
+		return tokens
+	}
+	visible := make(map[string]bool)
+	out := tokens[:0:0]
+	for _, token := range tokens {
+		allowed, decided := visible[token.TenantID]
+		if !decided {
+			allowed = token.TenantID != "" && s.tenantManager != nil &&
+				s.authorizeTenantAccess(r.Context(), principal, token.TenantID) == tenantAuthAllowed
+			visible[token.TenantID] = allowed
+		}
+		if allowed {
+			out = append(out, token)
+		}
+	}
+	return out
 }
 
 // handleGetRegistrationToken handles GET /api/v1/registration/tokens/{token}

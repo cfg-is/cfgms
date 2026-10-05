@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -145,4 +146,81 @@ func TestHypervProfile_RootScopedClientTenant_RequiresCrossing(t *testing.T) {
 
 	grantSelectedTenantCrossing(t, server, caller.ID)
 	assert.Equal(t, http.StatusCreated, create().Code)
+}
+
+func saveSelectedTenantToken(t *testing.T, store registration.Store, tenantID string) *registration.Token {
+	t.Helper()
+	token, err := registration.CreateToken(&registration.TokenCreateRequest{
+		TenantID: tenantID, ControllerURL: "grpc://controller.example.com:7443", ExpiresIn: "1d",
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SaveToken(context.Background(), token))
+	return token
+}
+
+func listTokenTenants(t *testing.T, server *Server, caller *Principal) []string {
+	t.Helper()
+	req := requestAsPrincipal(t, http.MethodGet, "/api/v1/registration/tokens", "", caller, nil)
+	rec := httptest.NewRecorder()
+	server.handleListRegistrationTokens(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp TokenListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	tenants := make([]string, 0, len(resp.Tokens))
+	for _, tok := range resp.Tokens {
+		tenants = append(tenants, tok.TenantID)
+	}
+	return tenants
+}
+
+// TestRegistrationToken_RootScopedListAll_HidesUncrossedTenants guards the #4575
+// review: a root-scoped list with no tenant_id shows the root tenant's tokens and
+// crossed tenants' only — never an uncrossed client tenant's.
+func TestRegistrationToken_RootScopedListAll_HidesUncrossedTenants(t *testing.T) {
+	server, store := setupTestServerWithTokenStore(t)
+	prepareSelectedTenantServer(t, server)
+	saveSelectedTenantToken(t, store, testRootTenantID)
+	saveSelectedTenantToken(t, store, "msp-sel")
+	caller := rootScopedPrincipal("root-operator-sel")
+
+	assert.Equal(t, []string{testRootTenantID}, listTokenTenants(t, server, caller), "uncrossed tenants' tokens are hidden")
+
+	grantSelectedTenantCrossing(t, server, caller.ID)
+	assert.ElementsMatch(t, []string{testRootTenantID, "msp-sel"}, listTokenTenants(t, server, caller))
+}
+
+// TestRegistrationToken_RootScopedTokenRoutes_RequireCrossing locks in the gate on
+// the token-addressed routes: without a crossing, get/delete/revoke on a client
+// tenant's token and rotate of a client tenant are refused and the token remains.
+func TestRegistrationToken_RootScopedTokenRoutes_RequireCrossing(t *testing.T) {
+	server, store := setupTestServerWithTokenStore(t)
+	prepareSelectedTenantServer(t, server)
+	token := saveSelectedTenantToken(t, store, "msp-sel")
+	caller := rootScopedPrincipal("root-operator-sel")
+
+	routes := []struct {
+		name    string
+		method  string
+		path    string
+		vars    map[string]string
+		handler func(http.ResponseWriter, *http.Request)
+	}{
+		{"get", http.MethodGet, "/api/v1/registration/tokens/x", map[string]string{"token": token.Token}, server.handleGetRegistrationToken},
+		{"revoke", http.MethodPost, "/api/v1/registration/tokens/x/revoke", map[string]string{"token": token.Token}, server.handleRevokeRegistrationToken},
+		{"rotate", http.MethodPost, "/api/v1/registration/tokens/msp-sel/rotate", map[string]string{"tenant_id": "msp-sel"}, server.handleRotateRegistrationToken},
+		{"delete", http.MethodDelete, "/api/v1/registration/tokens/x", map[string]string{"token": token.Token}, server.handleDeleteRegistrationToken},
+	}
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			req := mux.SetURLVars(requestAsPrincipal(t, rt.method, rt.path, "", caller, []byte("{}")), rt.vars)
+			rec := httptest.NewRecorder()
+			rt.handler(rec, req)
+			assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, rec.Code,
+				"%s on an uncrossed client tenant must be refused: %s", rt.name, rec.Body.String())
+		})
+	}
+
+	stored, err := store.GetToken(context.Background(), token.Token)
+	require.NoError(t, err, "the token survives every refused request")
+	assert.False(t, stored.Revoked, "the token was not revoked")
 }
