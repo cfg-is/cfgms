@@ -262,3 +262,60 @@ func TestComposition_DepthWithinLimit(t *testing.T) {
 	final := waitForTerminal(t, engine, execution.ID)
 	assert.Equal(t, StatusCompleted, final.Status, "error: %v", final.Error)
 }
+
+// fanOut returns a workflow named name whose steps call child n times.
+func fanOut(name, child string, n int) Workflow {
+	steps := make([]Step, n)
+	for i := range steps {
+		steps[i] = Step{Name: fmt.Sprintf("call-%s-%d", child, i), Type: StepTypeWorkflow, WorkflowCall: &WorkflowCallConfig{WorkflowName: child}}
+	}
+	return Workflow{Name: name, Steps: steps}
+}
+
+func leafWorkflow(name string) Workflow {
+	return Workflow{Name: name, Steps: []Step{{Name: "pause", Type: StepTypeDelay, Delay: &DelayConfig{Duration: time.Millisecond}}}}
+}
+
+// TestComposition_BreadthBudget guards Issue #4638: a fan-out that never repeats
+// a name and stays within the depth limit — ten calls per level, three levels
+// deep (1110 composed executions) — is refused once the execution has started
+// maxComposedWorkflowsPerExecution composed workflows, and leaves nothing running.
+func TestComposition_BreadthBudget(t *testing.T) {
+	before := runtime.NumGoroutine()
+	workflows := map[string]Workflow{
+		"w1":   fanOut("w1", "w2", 10),
+		"w2":   fanOut("w2", "w3", 10),
+		"w3":   fanOut("w3", "leaf", 10),
+		"leaf": leafWorkflow("leaf"),
+	}
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	engine.SetWorkflowResolver(mapResolver(workflows))
+
+	execution, err := engine.ExecuteWorkflow(tenantContext("acme-corp"), workflows["w1"], nil)
+	require.NoError(t, err)
+	final := waitForTerminal(t, engine, execution.ID)
+	assert.Equal(t, StatusFailed, final.Status)
+	assert.Contains(t, fmt.Sprint(final.Error), fmt.Sprintf("exceed %d composed workflows", maxComposedWorkflowsPerExecution))
+
+	assert.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+2 }, 5*time.Second, 20*time.Millisecond,
+		"no composed executions may keep running after the refusal")
+}
+
+// TestComposition_BudgetIsPerExecution guards Issue #4638: the budget belongs to
+// one top-level execution — separate executions each get their own, so a
+// workflow within the budget runs every time it is started.
+func TestComposition_BudgetIsPerExecution(t *testing.T) {
+	workflows := map[string]Workflow{
+		"parent": fanOut("parent", "leaf", 40),
+		"leaf":   leafWorkflow("leaf"),
+	}
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	engine.SetWorkflowResolver(mapResolver(workflows))
+
+	for run := 0; run < 2; run++ {
+		execution, err := engine.ExecuteWorkflow(tenantContext("acme-corp"), workflows["parent"], nil)
+		require.NoError(t, err)
+		final := waitForTerminal(t, engine, execution.ID)
+		assert.Equal(t, StatusCompleted, final.Status, "run %d: %v", run, final.Error)
+	}
+}

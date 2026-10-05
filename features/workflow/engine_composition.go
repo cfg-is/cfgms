@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -219,6 +220,28 @@ var ErrFilesystemWorkflowReference = errors.New("workflow_path is not supported:
 // otherwise grow goroutines and memory on the controller until it failed.
 const maxWorkflowNestingDepth = 8
 
+// maxComposedWorkflowsPerExecution bounds how many composed workflows one
+// top-level execution may start in total, across every nesting level and
+// branch (Issue #4638). Depth and cycle checks alone leave breadth unbounded:
+// eight distinct workflows each calling the next fifty times start 50^7
+// executions without repeating a name or exceeding the depth limit.
+const maxComposedWorkflowsPerExecution = 64
+
+// composedWorkflowBudgetKey carries the count of composed workflows started
+// under one top-level execution. The outermost ExecuteWorkflow creates it and
+// every nested execution inherits it through its context.
+type composedWorkflowBudgetKey struct{}
+
+// withComposedWorkflowBudget returns ctx carrying a composed-workflow counter,
+// creating one only when ctx has none — so a nested execution shares its
+// top-level execution's counter.
+func withComposedWorkflowBudget(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(composedWorkflowBudgetKey{}).(*atomic.Int64); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, composedWorkflowBudgetKey{}, new(atomic.Int64))
+}
+
 // workflowCallChainKey carries the names of the composed workflows an execution
 // is nested inside, outermost first. Nested executions derive their context
 // from their caller's, so the chain follows the composition.
@@ -239,6 +262,11 @@ func enterComposedWorkflow(ctx context.Context, execution *WorkflowExecution, na
 	}
 	if len(chain) >= maxWorkflowNestingDepth {
 		return ctx, fmt.Errorf("workflow '%s' would nest deeper than %d composed workflows", name, maxWorkflowNestingDepth)
+	}
+	if budget, ok := ctx.Value(composedWorkflowBudgetKey{}).(*atomic.Int64); ok {
+		if budget.Add(1) > maxComposedWorkflowsPerExecution {
+			return ctx, fmt.Errorf("workflow '%s' would exceed %d composed workflows in one execution", name, maxComposedWorkflowsPerExecution)
+		}
 	}
 	next := make([]string, 0, len(chain)+1)
 	next = append(append(next, chain...), name)

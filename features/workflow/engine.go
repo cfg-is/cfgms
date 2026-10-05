@@ -141,6 +141,7 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 	} else {
 		execCtx, cancel = context.WithCancel(ctx)
 	}
+	execCtx = withComposedWorkflowBudget(execCtx)
 
 	// Merge workflow variables with provided variables
 	mergedVars := make(map[string]interface{})
