@@ -1790,7 +1790,9 @@ Configuration drift summary report.
 
 ### Workflow Engine
 
-Workflow endpoints are registered only when a `WorkflowHandler` is wired in via `SetWorkflowHandler()`. All routes inherit the API subrouter's authentication middleware (API key or mTLS). No additional per-route permission scope is enforced beyond valid credentials.
+Workflow endpoints are registered only when a `WorkflowHandler` is wired in via `SetWorkflowHandler()`. All routes inherit the API subrouter's authentication middleware and each is gated by a `workflow:<action>` permission.
+
+**Tenant scope:** A tenant-scoped caller's workflows live in its own tenant. A root-scoped caller's workflows live in the deployment's root tenant; it may select another tenant with the `tenant` query parameter (`?tenant=<id>`) on any workflow route, and a client tenant selected that way requires an active tenant crossing (`401` with `WWW-Authenticate: ... required="tenant-crossing"` otherwise; `404` for an unknown tenant). When no root tenant can be resolved, a root-scoped request without `?tenant=` returns `400`.
 
 #### GET /api/v1/workflows
 

@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +32,12 @@ type WorkflowHandler struct {
 	// requirePermFn gates workflow routes by permission. When nil, routes are ungated (test use only).
 	// Wired from Server.requirePermission via SetRequirePermFn in SetWorkflowHandler (Issue #2725).
 	requirePermFn func(resourceType, action string) func(http.Handler) http.Handler
+	// rootTenantFn resolves the deployment's root tenant ("" when none) and
+	// authorizeTenantFn applies ADR-025's crossing to a tenant a root-scoped caller
+	// selects with ?tenant=. Both are wired from the Server in SetWorkflowHandler
+	// (Issue #4576); while unset, a root-scoped caller is refused.
+	rootTenantFn      func(ctx context.Context) string
+	authorizeTenantFn func(w http.ResponseWriter, r *http.Request, tenantID string) bool
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -62,6 +69,18 @@ func (h *WorkflowHandler) SetFleetQuery(q fleet.FleetQuery) {
 // RegisterWorkflowRoutes can gate each route without importing the concrete Server type (Issue #2725).
 func (h *WorkflowHandler) SetRequirePermFn(fn func(resourceType, action string) func(http.Handler) http.Handler) {
 	h.requirePermFn = fn
+}
+
+// SetTenantResolution wires how a root-scoped caller's tenant is resolved
+// (Issue #4576): rootTenant returns the deployment's root tenant, and authorize
+// applies the tenant-crossing boundary to an explicitly selected tenant, writing
+// the response and returning false when the caller may not use it.
+func (h *WorkflowHandler) SetTenantResolution(
+	rootTenant func(ctx context.Context) string,
+	authorize func(w http.ResponseWriter, r *http.Request, tenantID string) bool,
+) {
+	h.rootTenantFn = rootTenant
+	h.authorizeTenantFn = authorize
 }
 
 // RegisterWorkflowRoutes registers workflow CRUD and execution routes on the provided subrouter.
@@ -114,17 +133,23 @@ func (h *WorkflowHandler) RegisterTriggerRoutes(router *mux.Router) {
 
 // workflowStoreForRequest returns a WorkflowStore scoped to the caller's
 // ctxkeys.TenantScope (Issue #4335), or writes a 404 and returns ok=false when the
-// scope is unset. An unset scope must never be silently treated as the caller's own
-// isolated "" bucket: that bucket is also where a genuinely root-scoped admin's
-// workflows live (root maps to the same "" tenant key an unscoped admin has always
-// used), so collapsing "no scope was ever established" into it would let a request
-// that lost its tenant scope collide with — and potentially read or modify —
-// another caller's workflows.
+// scope is unset: a request that lost its tenant scope must never be served from
+// some default bucket another caller also uses.
+//
+// A root-scoped caller's workflows live in the deployment's root tenant, or in a
+// tenant it selects with ?tenant=, subject to the ADR-025 crossing (Issue #4576).
+// The store is never given an empty tenant: the config store requires one, so an
+// empty tenant turned every root-scoped create into a 500. When no root tenant can
+// be resolved the request is a 400 asking for ?tenant=.
 func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http.Request) (*workflow.WorkflowStore, bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
 	case scope.IsRoot():
-		return workflow.NewWorkflowStore(h.configStore, ""), true
+		tenantID, ok := h.rootScopedTenant(w, r)
+		if !ok {
+			return nil, false
+		}
+		return workflow.NewWorkflowStore(h.configStore, tenantID), true
 	case scope.IsTenant() && scope.Path() != "":
 		return workflow.NewWorkflowStore(h.configStore, scope.Path()), true
 	default:
@@ -132,6 +157,30 @@ func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http
 		h.sendError(w, http.StatusNotFound, "not found")
 		return nil, false
 	}
+}
+
+// rootScopedTenant resolves the tenant a root-scoped request operates on
+// (Issue #4576): ?tenant= when given, after the crossing check, else the
+// deployment's root tenant. It writes the response and returns false when the
+// tenant is refused or cannot be resolved.
+func (h *WorkflowHandler) rootScopedTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if h.rootTenantFn == nil || h.authorizeTenantFn == nil {
+		h.logger.Error("Workflow request refused: tenant resolution is not wired")
+		h.sendError(w, http.StatusServiceUnavailable, "workflow tenant resolution not available")
+		return "", false
+	}
+	if tenantID := r.URL.Query().Get("tenant"); tenantID != "" {
+		if !h.authorizeTenantFn(w, r, tenantID) {
+			return "", false
+		}
+		return tenantID, true
+	}
+	if tenantID := h.rootTenantFn(r.Context()); tenantID != "" {
+		return tenantID, true
+	}
+	h.sendError(w, http.StatusBadRequest,
+		"tenant is required: no root tenant could be resolved, pass ?tenant=<id>")
+	return "", false
 }
 
 // handleListWorkflows handles GET /api/v1/workflows
