@@ -290,7 +290,7 @@ func TestPasskeyLoginBegin_PerClientCap(t *testing.T) {
 	finishFrom(idsA[1])
 	rec = beginPasskeyLoginFrom(t, srv, clientA)
 	require.Equal(t, http.StatusOK, rec.Code, "client A must begin again after finish: %s", rec.Body.String())
-	idsA = append(idsA, extractCookie(rec, cookiePasskeyCeremony))
+	require.NotEmpty(t, extractCookie(rec, cookiePasskeyCeremony), "the new ceremony must set its cookie")
 
 	// Drain client B; the sweep drops its zeroed counter and keeps client A's live one.
 	finishFrom(idB)
