@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -111,4 +112,36 @@ func TestCreateTrigger_RejectsUnsafeID(t *testing.T) {
 		assert.Error(t, err, "trigger id %q must be refused", id)
 	}
 	require.NoError(t, mgr.CreateTrigger(ctx, &Trigger{ID: "nightly-backup_2", Name: "n", Type: TriggerTypeManual, WorkflowName: "wf"}))
+}
+
+// TestMarshalTriggerConfig_NoCredentialPersisted guards Issue #4641: the
+// persisted trigger configuration never contains a credential value. Every
+// string field of WebhookAuth other than the known non-secret settings is filled
+// with a marker (so a credential field added later is covered without editing
+// this test), along with the basic-auth pair, and the marker must not appear in
+// the payload.
+func TestMarshalTriggerConfig_NoCredentialPersisted(t *testing.T) {
+	const marker = "credential-marker-4641"
+	nonSecret := map[string]bool{"Type": true, "SignatureHeader": true, "APIKeyHeader": true}
+
+	auth := &WebhookAuth{Type: WebhookAuthBearer, SignatureHeader: "X-Signature", APIKeyHeader: "X-API-Key"}
+	v := reflect.ValueOf(auth).Elem()
+	filled := 0
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+		if field.Type.Kind() == reflect.String && !nonSecret[field.Name] {
+			v.Field(i).SetString(marker)
+			filled++
+		}
+	}
+	require.Positive(t, filled, "WebhookAuth must have credential fields to check")
+	auth.BasicAuth = &BasicAuth{Username: marker, Password: marker}
+
+	payload, err := marshalTriggerConfig(&Trigger{
+		ID: "hook", TenantID: "tenant-a", Type: TriggerTypeWebhook, WorkflowName: "wf",
+		Webhook: &WebhookConfig{Path: "/hook", Authentication: auth},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(payload), marker, "no credential value may be persisted in the trigger config")
+	assert.Contains(t, string(payload), string(WebhookAuthBearer), "the non-secret auth type is persisted")
 }
