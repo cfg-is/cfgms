@@ -92,7 +92,8 @@ type Server struct {
 	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
 	haManager                       *ha.Manager
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
-	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
+	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
+	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore          registration.Store                       // Registration token store for steward registration
@@ -259,7 +260,37 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+
+	// recordRef names the durable secret-store record this cache entry mirrors: the
+	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by
+	// handleCreateAPIKey or generateEphemeralKey, and every key lazy-loaded by
+	// loadAPIKeyFromStore, carries one, and authenticateMiddleware re-validates such
+	// entries against the store (Issue #4574). Empty only for the env-gated test keys
+	// seeded in New, which have no durable record to revoke.
+	recordRef string
+	// validatedAt is when this entry was last confirmed present in the secret store.
+	validatedAt time.Time
 }
+
+// apiKeyRevalidateInterval bounds how long a cached, store-backed API key is
+// trusted before authenticateMiddleware re-reads its record from the secret store
+// (Issue #4574). The store is the source of truth: a key deleted on another
+// controller node stops authenticating here at most this long after the delete.
+// The node that serves the delete evicts its own cache entry immediately.
+const apiKeyRevalidateInterval = 30 * time.Second
+
+// apiKeyMaxStaleness is the hard ceiling on serving a cached API key whose
+// re-validation failed with a store error other than not-found (Issue #4574).
+//
+// Failing closed on the first transient store error would lock every API-key
+// client out of every node for the length of any storage blip; serving
+// indefinitely would let a revoked key outlive its revocation for as long as this
+// node cannot reach the store. The compromise: while the last successful
+// validation is younger than this bound the cached entry keeps serving (and every
+// request retries the store); once it is older, the request is refused until the
+// store answers again. A not-found answer is never treated as transient — it
+// evicts the entry and rejects the request at once.
+const apiKeyMaxStaleness = 2 * time.Minute
 
 // ServerConfig contains configuration for the REST API server
 type ServerConfig struct {
