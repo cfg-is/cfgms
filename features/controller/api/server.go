@@ -431,6 +431,9 @@ func New(
 	server.authDefense = authdefense.New(
 		authdefense.DefaultConfig(),
 		logger,
+		// Issue #4573: key Tier-1 per-IP limiting on the trusted-proxy-aware,
+		// IPv6-/64-normalised client address shared with every per-IP throttle.
+		authdefense.WithIPExtractor(serverIPExtractor{s: server}),
 		authdefense.WithTenantExtractor(func(r *http.Request) string {
 			if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok {
 				return tid

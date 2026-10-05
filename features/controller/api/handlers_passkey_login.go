@@ -205,10 +205,11 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	}
 
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
 	// Per-IP throttle check (fast rejection without account resolution).
-	if sourceIP != "" {
-		if blocked, _ := s.checkPasskeyLoginThrottle("ip:" + sourceIP); blocked {
+	if ipKey != "" {
+		if blocked, _ := s.checkPasskeyLoginThrottle("ip:" + ipKey); blocked {
 			s.emitWebLoginAudit(r.Context(), "", "", "web.passkey.login.failure", business.AuditResultFailure)
 			s.writeErrorResponse(w, http.StatusTooManyRequests,
 				"Too many failed attempts — try again later", "THROTTLED")
@@ -247,8 +248,8 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		s.logger.Warn("Passkey login finish: FinishDiscoverableLogin failed",
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(finishErr.Error()))
-		if sourceIP != "" {
-			s.recordPasskeyLoginFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordPasskeyLoginFailure("ip:" + ipKey)
 		}
 		if pending.accountID != "" {
 			s.recordPasskeyLoginFailure("account:" + pending.accountID)
@@ -280,8 +281,8 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"stored_count", storedSignCount,
 			"response_count", newSignCount)
-		if sourceIP != "" {
-			s.recordPasskeyLoginFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordPasskeyLoginFailure("ip:" + ipKey)
 		}
 		s.recordPasskeyLoginFailure("account:" + acct.Username)
 		s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.failure", business.AuditResultFailure)
