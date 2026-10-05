@@ -131,6 +131,10 @@ func (s *Server) refreshAPIKeyIndexIf(ctx context.Context, onlyIfDue bool) (bool
 		prevAttempt := ix.lastAttemptAt
 		ix.lastAttemptAt = s.apiKeyNow()
 		s.apiKeyIndexWG.Add(1)
+		// #nosec G118 -- the shared scan is deliberately detached from the
+		// leader request: a client that aborts its request must not cancel the
+		// scan every waiter depends on (Issue #4574). It runs under its own
+		// timeout and Close() waits for it via apiKeyIndexWG.
 		go s.runAPIKeyIndexScan(done, prevAttempt)
 	}
 	ix.mu.Unlock()
