@@ -28,6 +28,11 @@ func NewWorkflowStore(configStore cfgconfig.ConfigStore, tenantID string) *Workf
 	}
 }
 
+// TenantID returns the tenant this store reads and writes.
+func (ws *WorkflowStore) TenantID() string {
+	return ws.tenantID
+}
+
 // Namespace constants for different workflow storage types
 const (
 	WorkflowNamespace         = "workflows"
