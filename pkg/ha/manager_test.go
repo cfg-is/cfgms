@@ -5,10 +5,12 @@ package ha
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1359,4 +1361,147 @@ func TestManager_GetLeader_ClusterMode_ResolvesPeerViaNodeRegistry(t *testing.T)
 		"GetLeader() must resolve the lease holder's NodeInfo via the shared node registry, even from a non-holding node")
 	assert.Equal(t, winnerAddr, resolved.Address,
 		"the resolved NodeInfo must carry the holder's registered address")
+}
+
+// TestManager_CommandTerm_FollowerStampsCurrentLeaseToken guards Issue #4566: a
+// node that does not hold the leadership lease still stamps the lease's current
+// token on the commands it publishes. GetTerm stays 0 there (it reports local
+// authority), but CommandTerm must equal the leader's term, or every command a
+// follower publishes is rejected by a steward whose fence ratchet is set.
+func TestManager_CommandTerm_FollowerStampsCurrentLeaseToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() {
+		assert.NoError(t, managerA.Stop(context.Background()))
+		assert.NoError(t, managerB.Stop(context.Background()))
+	})
+
+	require.Eventually(t, func() bool { return managerA.HasLeadership() != managerB.HasLeadership() },
+		5*time.Second, 5*time.Millisecond, "exactly one node holds the lease")
+	leader, follower := managerA, managerB
+	if managerB.HasLeadership() {
+		leader, follower = managerB, managerA
+	}
+
+	leaderTerm := leader.GetTerm()
+	require.NotZero(t, leaderTerm)
+	assert.Zero(t, follower.GetTerm(), "GetTerm reports local authority only")
+	assert.Equal(t, leaderTerm, follower.CommandTerm(), "a follower stamps the lease's current token")
+	assert.Equal(t, leaderTerm, leader.CommandTerm(), "the holder stamps its own term")
+	assert.Equal(t, leaderTerm, CommandTermSource{Manager: follower}.GetTerm())
+}
+
+// TestManager_CommandTerm_SingleServerIsZero: without a lease there is no token to
+// stamp, exactly as before.
+func TestManager_CommandTerm_SingleServerIsZero(t *testing.T) {
+	storageManager, err := storage.CreateTestStorageManager()
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.Mode = SingleServerMode
+	manager, err := NewManager(cfg, logging.NewNoopLogger(), storageManager)
+	require.NoError(t, err)
+	assert.Zero(t, manager.CommandTerm())
+	assert.Zero(t, CommandTermSource{}.GetTerm())
+}
+
+// TestManager_CommandTerm_ExHolderStampsNewToken guards the stale-cache claim on
+// Issue #4566: after a leadership change the former holder stamps the new lease
+// token — higher than its own old term — not a stale one.
+func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-change-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-change-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.Eventually(t, managerA.HasLeadership, 5*time.Second, 5*time.Millisecond, "A takes the lease first")
+	oldTerm := managerA.GetTerm()
+	require.NotZero(t, oldTerm)
+
+	// A stops renewing; B starts and takes the lease once it expires.
+	require.NoError(t, managerA.Stop(context.Background()))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, managerB.Stop(context.Background())) })
+	require.Eventually(t, managerB.HasLeadership, 10*time.Second, 10*time.Millisecond, "B takes over the lease")
+	newTerm := managerB.GetTerm()
+	require.Greater(t, newTerm, oldTerm, "a new holder gets a strictly higher token")
+
+	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
+	assert.Eventually(t, func() bool { return managerA.CommandTerm() == newTerm },
+		5*time.Second, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
+}
+
+// erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
+// the unreadable-lease path.
+type erroringLeaseStore struct {
+	business.LeaseStore
+	failReads atomic.Bool
+}
+
+func (s *erroringLeaseStore) GetLease(ctx context.Context, name string) (*business.LeaseState, error) {
+	if s.failReads.Load() {
+		return nil, errors.New("lease store unavailable")
+	}
+	return s.LeaseStore.GetLease(ctx, name)
+}
+
+// TestManager_CommandTerm_UnreadableLeaseIsZero: a non-holder that cannot read the
+// lease stamps 0 (fails closed), and recovers once the store answers again.
+func TestManager_CommandTerm_UnreadableLeaseIsZero(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	store := &erroringLeaseStore{LeaseStore: inner}
+	follower := newLeaseBackedClusterManager(t, "cmdterm-unreadable", store)
+
+	// Another node holds the lease, so this manager is a non-holder.
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+	require.False(t, follower.HasLeadership())
+
+	store.failReads.Store(true)
+	assert.Zero(t, follower.CommandTerm(), "an unreadable lease stamps 0")
+
+	store.failReads.Store(false)
+	assert.Eventually(t, func() bool { return follower.CommandTerm() == LeaseTermFloor+held.Token },
+		3*time.Second, 50*time.Millisecond, "once readable again the current token is stamped")
+}
+
+// TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp guards the #4567
+// review: on a freshly started non-holder, concurrent first publishes wait for
+// the in-flight lease read instead of stamping 0.
+func TestManager_CommandTerm_ColdCacheConcurrentCallersAllStamp(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+	follower := newLeaseBackedClusterManager(t, "cmdterm-cold", inner)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+
+	want := LeaseTermFloor + held.Token
+	var wg sync.WaitGroup
+	terms := make([]uint64, 32)
+	for i := range terms {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			terms[i] = follower.CommandTerm()
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range terms {
+		assert.Equal(t, want, got, "caller %d stamped the current token", i)
+	}
 }
