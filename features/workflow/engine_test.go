@@ -743,7 +743,7 @@ func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
 	}
 	engine.RegisterWorkflow(want)
 
-	got, err := engine.loadWorkflowByName(context.Background(), nil, "my-workflow")
+	got, _, err := engine.loadWorkflowByName(context.Background(), nil, "my-workflow")
 	require.NoError(t, err)
 	assert.Equal(t, want.Name, got.Name)
 	require.Len(t, got.Steps, 1)
@@ -753,7 +753,7 @@ func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
 func TestEngine_LoadWorkflowByName_Miss(t *testing.T) {
 	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
-	_, err := engine.loadWorkflowByName(context.Background(), nil, "nonexistent-workflow")
+	_, _, err := engine.loadWorkflowByName(context.Background(), nil, "nonexistent-workflow")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-workflow")
 }

@@ -50,7 +50,7 @@ func (e *Engine) executeWorkflowStep(ctx context.Context, step Step, execution *
 	var nestedWorkflow Workflow
 	var err error
 
-	nestedWorkflow, err = e.loadWorkflowByName(ctx, execution, workflowConfig.WorkflowName)
+	nestedWorkflow, ctx, err = e.loadWorkflowByName(ctx, execution, workflowConfig.WorkflowName)
 	if err != nil {
 		return NewWorkflowError(
 			ErrorCodeValidation,
@@ -137,20 +137,38 @@ func (e *Engine) executeWorkflowStep(ctx context.Context, step Step, execution *
 }
 
 // executeNestedWorkflowSync executes a nested workflow synchronously
+//
+// ExecuteWorkflow only starts an execution, so this waits for the nested
+// execution to finish (or the context to end) before returning: the caller maps
+// the nested outputs and propagates its failure (Issue #4638). It previously
+// returned at once, so outputs were read before the nested workflow ran, its
+// failure never reached the caller, and a timeout's deferred cancel stopped the
+// nested execution as soon as it started.
 func (e *Engine) executeNestedWorkflowSync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
-	// Create timeout context if specified
-	var execCtx context.Context
-	var cancel context.CancelFunc
-
+	execCtx := ctx
 	if timeout > 0 {
+		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-	} else {
-		execCtx = ctx
 	}
 
-	// Execute nested workflow
-	return e.ExecuteWorkflow(execCtx, workflow, parameters)
+	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-execution.Done:
+	case <-execCtx.Done():
+		if execution.Cancel != nil {
+			execution.Cancel()
+		}
+		return execution, execCtx.Err()
+	}
+	if execution.GetStatus() != StatusCompleted {
+		return execution, fmt.Errorf("nested workflow '%s' %s: %s", workflow.Name, execution.GetStatus(), execution.GetError())
+	}
+	return execution, nil
 }
 
 // executeNestedWorkflowAsync executes a nested workflow asynchronously
@@ -194,25 +212,69 @@ func (e *Engine) executeNestedWorkflowAsync(ctx context.Context, workflow Workfl
 // referenced by workflow_name and resolved from the execution tenant's store.
 var ErrFilesystemWorkflowReference = errors.New("workflow_path is not supported: reference a stored workflow by workflow_name")
 
+// maxWorkflowNestingDepth bounds how deep composed workflows may call one
+// another, counting the outermost workflow (Issue #4638). Together with the
+// cycle check it keeps a stored definition from recursing without bound — a
+// workflow that names itself, A→B→A, or an arbitrarily long chain would
+// otherwise grow goroutines and memory on the controller until it failed.
+const maxWorkflowNestingDepth = 8
+
+// workflowCallChainKey carries the names of the composed workflows an execution
+// is nested inside, outermost first. Nested executions derive their context
+// from their caller's, so the chain follows the composition.
+type workflowCallChainKey struct{}
+
+// enterComposedWorkflow returns ctx with name appended to the call chain, or an
+// error when name is already on the chain (a cycle) or the chain is already at
+// maxWorkflowNestingDepth.
+func enterComposedWorkflow(ctx context.Context, execution *WorkflowExecution, name string) (context.Context, error) {
+	chain, _ := ctx.Value(workflowCallChainKey{}).([]string)
+	if len(chain) == 0 && execution != nil && execution.WorkflowName != "" {
+		chain = []string{execution.WorkflowName}
+	}
+	for _, called := range chain {
+		if called == name {
+			return ctx, fmt.Errorf("workflow '%s' is already running in this call chain (%s -> %s)", name, strings.Join(chain, " -> "), name)
+		}
+	}
+	if len(chain) >= maxWorkflowNestingDepth {
+		return ctx, fmt.Errorf("workflow '%s' would nest deeper than %d composed workflows", name, maxWorkflowNestingDepth)
+	}
+	next := make([]string, 0, len(chain)+1)
+	next = append(append(next, chain...), name)
+	return context.WithValue(ctx, workflowCallChainKey{}, next), nil
+}
+
 // loadWorkflowByName resolves a workflow referenced by name from within
-// execution. With a WorkflowResolver set (the controller), it resolves only in
-// the execution's authenticated tenant; otherwise it reads the in-memory
-// registry populated by RegisterWorkflow.
-func (e *Engine) loadWorkflowByName(ctx context.Context, execution *WorkflowExecution, name string) (Workflow, error) {
+// execution, and returns the context the composed workflow must run under (the
+// call chain extended with it). With a WorkflowResolver set (the controller),
+// it resolves only in the execution's authenticated tenant; otherwise it reads
+// the in-memory registry populated by RegisterWorkflow. On error ctx is
+// returned unchanged.
+func (e *Engine) loadWorkflowByName(ctx context.Context, execution *WorkflowExecution, name string) (Workflow, context.Context, error) {
+	nestedCtx, err := enterComposedWorkflow(ctx, execution, name)
+	if err != nil {
+		return Workflow{}, ctx, err
+	}
+
 	e.mutex.RLock()
 	resolver := e.workflowResolver
 	w, ok := e.workflows[name]
 	e.mutex.RUnlock()
 	if resolver != nil {
 		if execution == nil || execution.TenantID == "" {
-			return Workflow{}, fmt.Errorf("workflow '%s' cannot be resolved: execution has no authenticated tenant", name)
+			return Workflow{}, ctx, fmt.Errorf("workflow '%s' cannot be resolved: execution has no authenticated tenant", name)
 		}
-		return resolver(ctx, execution.TenantID, name)
+		resolved, err := resolver(ctx, execution.TenantID, name)
+		if err != nil {
+			return Workflow{}, ctx, err
+		}
+		return resolved, nestedCtx, nil
 	}
 	if !ok {
-		return Workflow{}, fmt.Errorf("workflow '%s' not found in registry", name)
+		return Workflow{}, ctx, fmt.Errorf("workflow '%s' not found in registry", name)
 	}
-	return w, nil
+	return w, nestedCtx, nil
 }
 
 // executeErrorWorkflowStep executes a custom error workflow step
@@ -243,7 +305,7 @@ func (e *Engine) executeErrorWorkflowStep(ctx context.Context, step Step, execut
 			ErrFilesystemWorkflowReference,
 		).WithVariableState(execution.GetVariables())
 	case config.WorkflowName != "":
-		errorWorkflow, err = e.loadWorkflowByName(ctx, execution, config.WorkflowName)
+		errorWorkflow, ctx, err = e.loadWorkflowByName(ctx, execution, config.WorkflowName)
 	default:
 		return NewWorkflowError(
 			ErrorCodeValidation,
@@ -349,18 +411,28 @@ func (e *Engine) executeErrorWorkflowSync(ctx context.Context, workflow Workflow
 
 // executeErrorWorkflowAsync executes an error workflow asynchronously
 func (e *Engine) executeErrorWorkflowAsync(ctx context.Context, workflow Workflow, parameters map[string]interface{}, timeout time.Duration) (*WorkflowExecution, error) {
-	// Create context with timeout if specified
+	// Create context with timeout if specified. Its cancel is released when the
+	// execution finishes — a deferred cancel would stop the asynchronous error
+	// workflow as soon as this function returned.
 	execCtx := ctx
+	var cancel context.CancelFunc
 	if timeout > 0 {
-		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
 	}
 
 	// Execute the error workflow asynchronously
 	execution, err := e.ExecuteWorkflow(execCtx, workflow, parameters)
 	if err != nil {
+		if cancel != nil {
+			cancel()
+		}
 		return nil, err
+	}
+	if cancel != nil {
+		go func() {
+			<-execution.Done
+			cancel()
+		}()
 	}
 
 	// Return immediately for async execution
@@ -572,7 +644,7 @@ func (e *Engine) executeComponent(ctx context.Context, component WorkflowCompone
 	case component.WorkflowPath != "":
 		return fmt.Errorf("component %s: %w", component.Name, ErrFilesystemWorkflowReference)
 	case component.WorkflowName != "":
-		workflow, err = e.loadWorkflowByName(ctx, execution, component.WorkflowName)
+		workflow, ctx, err = e.loadWorkflowByName(ctx, execution, component.WorkflowName)
 	default:
 		return fmt.Errorf("component %s: workflow_name must be specified", component.Name)
 	}

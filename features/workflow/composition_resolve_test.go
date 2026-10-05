@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -113,14 +114,14 @@ func TestComposition_ResolverScopesNameToExecutionTenant(t *testing.T) {
 		return w, nil
 	})
 
-	got, err := engine.loadWorkflowByName(context.Background(), &WorkflowExecution{TenantID: "acme-corp"}, "child")
+	got, _, err := engine.loadWorkflowByName(context.Background(), &WorkflowExecution{TenantID: "acme-corp"}, "child")
 	require.NoError(t, err)
 	assert.Equal(t, "acme copy", got.Description, "resolved from the execution tenant, not the registry")
 
-	_, err = engine.loadWorkflowByName(context.Background(), &WorkflowExecution{TenantID: "vendor-a"}, "child")
+	_, _, err = engine.loadWorkflowByName(context.Background(), &WorkflowExecution{TenantID: "vendor-a"}, "child")
 	require.Error(t, err, "another tenant's workflow must not resolve")
 
-	_, err = engine.loadWorkflowByName(context.Background(), &WorkflowExecution{}, "child")
+	_, _, err = engine.loadWorkflowByName(context.Background(), &WorkflowExecution{}, "child")
 	require.Error(t, err, "an execution without a tenant resolves nothing")
 
 	assert.Equal(t, []string{"acme-corp/child", "vendor-a/child"}, asked)
@@ -178,4 +179,86 @@ func TestContainsFilesystemWorkflowReference(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// mapResolver resolves names from a fixed per-tenant set of workflows.
+func mapResolver(workflows map[string]Workflow) WorkflowResolver {
+	return func(_ context.Context, tenantID, name string) (Workflow, error) {
+		w, ok := workflows[name]
+		if !ok || tenantID != "acme-corp" {
+			return Workflow{}, fmt.Errorf("workflow %q not found", name)
+		}
+		return w, nil
+	}
+}
+
+func callStep(name string) Step {
+	return Step{Name: "call-" + name, Type: StepTypeWorkflow, WorkflowCall: &WorkflowCallConfig{WorkflowName: name}}
+}
+
+// TestComposition_RecursionBounded guards Issue #4638: now that composed
+// workflows resolve, a definition that calls itself, a cycle, an error workflow
+// naming itself and an over-deep chain each fail with a clear error instead of
+// recursing, and leave no goroutines running.
+func TestComposition_RecursionBounded(t *testing.T) {
+	chain := map[string]Workflow{}
+	for i := 0; i < maxWorkflowNestingDepth+2; i++ {
+		name := fmt.Sprintf("level-%d", i)
+		chain[name] = Workflow{Name: name, Steps: []Step{callStep(fmt.Sprintf("level-%d", i+1))}}
+	}
+	chain[fmt.Sprintf("level-%d", maxWorkflowNestingDepth+2)] = Workflow{Name: "leaf", Steps: []Step{{Name: "pause", Type: StepTypeDelay, Delay: &DelayConfig{Duration: time.Millisecond}}}}
+
+	cases := []struct {
+		name      string
+		workflows map[string]Workflow
+		start     string
+		wantError string
+	}{
+		{"self call", map[string]Workflow{"loop": {Name: "loop", Steps: []Step{callStep("loop")}}}, "loop", "already running in this call chain"},
+		{"A -> B -> A", map[string]Workflow{
+			"a": {Name: "a", Steps: []Step{callStep("b")}},
+			"b": {Name: "b", Steps: []Step{callStep("a")}},
+		}, "a", "already running in this call chain"},
+		{"error workflow names itself", map[string]Workflow{"self-handler": {Name: "self-handler", Steps: []Step{{
+			Name: "handle", Type: StepTypeErrorWorkflow, ErrorWorkflow: &ErrorWorkflowConfig{WorkflowName: "self-handler"},
+		}}}}, "self-handler", "already running in this call chain"},
+		{"depth limit", chain, "level-0", fmt.Sprintf("deeper than %d", maxWorkflowNestingDepth)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := runtime.NumGoroutine()
+			engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+			engine.SetWorkflowResolver(mapResolver(tc.workflows))
+
+			execution, err := engine.ExecuteWorkflow(tenantContext("acme-corp"), tc.workflows[tc.start], nil)
+			require.NoError(t, err)
+			final := waitForTerminal(t, engine, execution.ID)
+			assert.Equal(t, StatusFailed, final.Status)
+			assert.Contains(t, fmt.Sprint(final.Error), tc.wantError)
+
+			assert.Eventually(t, func() bool { return runtime.NumGoroutine() <= before+2 }, 5*time.Second, 20*time.Millisecond,
+				"no composed executions may keep running after the refusal")
+		})
+	}
+}
+
+// TestComposition_DepthWithinLimit guards Issue #4638: a chain shorter than the
+// limit still runs to completion — the bound refuses runaway composition, not
+// legitimate nesting.
+func TestComposition_DepthWithinLimit(t *testing.T) {
+	workflows := map[string]Workflow{}
+	last := maxWorkflowNestingDepth - 1
+	for i := 0; i < last; i++ {
+		name := fmt.Sprintf("level-%d", i)
+		workflows[name] = Workflow{Name: name, Steps: []Step{callStep(fmt.Sprintf("level-%d", i+1))}}
+	}
+	workflows[fmt.Sprintf("level-%d", last)] = Workflow{Name: fmt.Sprintf("level-%d", last), Steps: []Step{{Name: "pause", Type: StepTypeDelay, Delay: &DelayConfig{Duration: time.Millisecond}}}}
+
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	engine.SetWorkflowResolver(mapResolver(workflows))
+	execution, err := engine.ExecuteWorkflow(tenantContext("acme-corp"), workflows["level-0"], nil)
+	require.NoError(t, err)
+	final := waitForTerminal(t, engine, execution.ID)
+	assert.Equal(t, StatusCompleted, final.Status, "error: %v", final.Error)
 }
