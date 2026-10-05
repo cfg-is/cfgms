@@ -119,8 +119,11 @@ func TestHandleUploadInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleUploadInstallerArtifact_NoAuth verifies that a missing tenant ID returns 401.
-func TestHandleUploadInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleUploadInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleUploadInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/installer/artifacts/linux/amd64",
@@ -130,7 +133,7 @@ func TestHandleUploadInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleUploadInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- List ---
@@ -156,8 +159,11 @@ func TestHandleListInstallerArtifacts_Empty(t *testing.T) {
 	assert.Empty(t, items)
 }
 
-// TestHandleListInstallerArtifacts_NoAuth verifies the list endpoint returns 401 without auth.
-func TestHandleListInstallerArtifacts_NoAuth(t *testing.T) {
+// TestHandleListInstallerArtifacts_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleListInstallerArtifacts_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts", nil)
@@ -165,7 +171,7 @@ func TestHandleListInstallerArtifacts_NoAuth(t *testing.T) {
 
 	server.handleListInstallerArtifacts(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Get single ---
@@ -213,8 +219,11 @@ func TestHandleGetInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleGetInstallerArtifact_NoAuth verifies that GET single without auth returns 401.
-func TestHandleGetInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleGetInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleGetInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/artifacts/linux/amd64", nil)
@@ -223,7 +232,7 @@ func TestHandleGetInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleGetInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Delete ---
@@ -256,8 +265,11 @@ func TestHandleDeleteInstallerArtifact_InvalidArch(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestHandleDeleteInstallerArtifact_NoAuth verifies that DELETE without auth returns 401.
-func TestHandleDeleteInstallerArtifact_NoAuth(t *testing.T) {
+// TestHandleDeleteInstallerArtifact_NoTenantScope verifies that a request reaching the handler with neither a tenant nor a
+// root scope is refused with 403, never 401: unauthenticated requests are rejected
+// by the auth middleware first, and the web console reads a 401 from an
+// authenticated session as an expired login (Issue #4634).
+func TestHandleDeleteInstallerArtifact_NoTenantScope(t *testing.T) {
 	server, _ := setupTestServerWithBlobStore(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/installer/artifacts/linux/amd64", nil)
@@ -266,7 +278,7 @@ func TestHandleDeleteInstallerArtifact_NoAuth(t *testing.T) {
 
 	server.handleDeleteInstallerArtifact(rec, req)
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 // --- Round-trip ---
@@ -539,7 +551,7 @@ func TestHandleDownloadInstallPackage_WithCA(t *testing.T) {
 	artifactContent := []byte("fake-linux-amd64-installer-binary")
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader(artifactContent),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -580,7 +592,7 @@ func TestHandleDownloadInstallPackage_WithoutCA(t *testing.T) {
 	artifactContent := []byte("fake-windows-amd64-installer-binary")
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "windows-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "windows-amd64"},
 		bytes.NewReader(artifactContent),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -612,7 +624,7 @@ func TestHandleDownloadInstallPackage_CacheValidatorsAndRanges(t *testing.T) {
 	server, store := setupTestServerWithBlobStore(t)
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader([]byte("range-test-installer-binary")),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))
@@ -813,7 +825,7 @@ func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
 
 	require.NoError(t, store.PutBlob(
 		context.Background(),
-		blob.BlobKey{TenantID: downloadTenantID, Namespace: "installers", Name: "linux-amd64"},
+		blob.BlobKey{TenantID: testRootTenantID, Namespace: "installers", Name: "linux-amd64"},
 		bytes.NewReader([]byte("dummy")),
 		blob.BlobMeta{ContentType: "application/octet-stream"},
 	))

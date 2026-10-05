@@ -61,9 +61,8 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	tenantID, ok := s.installerTenant(w, r)
+	if !ok {
 		return
 	}
 
@@ -98,7 +97,7 @@ func (s *Server) handleUploadInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to store artifact", "STORE_ERROR")
 		return
 	}
-	if tenantID == downloadTenantID {
+	if tenantID == s.rootTenantID(r.Context()) {
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
 
@@ -130,9 +129,8 @@ func (s *Server) handleListInstallerArtifacts(w http.ResponseWriter, r *http.Req
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	tenantID, ok := s.installerTenant(w, r)
+	if !ok {
 		return
 	}
 
@@ -171,9 +169,8 @@ func (s *Server) handleGetInstallerArtifact(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	tenantID, ok := s.installerTenant(w, r)
+	if !ok {
 		return
 	}
 
@@ -232,9 +229,8 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Installer storage not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	tenantID, ok := s.installerTenant(w, r)
+	if !ok {
 		return
 	}
 
@@ -269,7 +265,7 @@ func (s *Server) handleDeleteInstallerArtifact(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete artifact", "DELETE_ERROR")
 		return
 	}
-	if tenantID == downloadTenantID {
+	if tenantID == s.rootTenantID(r.Context()) {
 		s.publicDownloadCache.invalidate(installerDownloadCacheKey(platform, arch))
 	}
 
@@ -289,9 +285,39 @@ func parseInstallerName(name string) (platform, arch string, ok bool) {
 	return "", "", false
 }
 
-// downloadTenantID is the fixed tenant used to look up installer artifacts for public download.
-// Installer artifacts intended for public distribution must be uploaded by the root tenant.
-const downloadTenantID = "root"
+// installerTenant resolves the tenant an installer-artifact request operates on
+// (Issue #4634). A tenant-scoped caller uses its own tenant. A root-scoped caller
+// uses the deployment's root tenant — whose artifacts are the ones the public
+// download serves — or a tenant it selects with ?tenant=, subject to the ADR-025
+// crossing. It writes the response and returns false when the tenant is refused
+// or cannot be resolved.
+//
+// None of those answers is a 401: the caller is authenticated, and the web
+// console treats a plain 401 as an expired session, so answering a
+// tenant-resolution problem with one sent a root admin round an endless
+// re-login loop on the Installer page.
+func (s *Server) installerTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if scope.IsRoot() {
+		if tenantID := r.URL.Query().Get("tenant"); tenantID != "" {
+			if !s.authorizeSelectedTenant(w, r, tenantID) {
+				return "", false
+			}
+			return tenantID, true
+		}
+		if tenantID := s.rootTenantID(r.Context()); tenantID != "" {
+			return tenantID, true
+		}
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"tenant is required: no root tenant could be resolved, pass ?tenant=<id>", "TENANT_REQUIRED")
+		return "", false
+	}
+	if tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string); tenantID != "" {
+		return tenantID, true
+	}
+	s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "TENANT_SCOPE_REQUIRED")
+	return "", false
+}
 
 func installerDownloadCacheKey(platform, arch string) string {
 	return "installer/" + platform + "/" + arch
@@ -383,8 +409,14 @@ func (s *Server) buildInstallPackage(
 	r *http.Request,
 	platform, arch, archiveName string,
 ) (*publicDownloadAsset, error) {
+	// Public downloads serve the root tenant's artifacts, resolved by position
+	// (Issue #4634), not a tenant literally named "root". No root, no package.
+	rootTenantID := s.rootTenantID(r.Context())
+	if rootTenantID == "" {
+		return nil, blob.ErrBlobNotFound
+	}
 	key := blob.BlobKey{
-		TenantID:  downloadTenantID,
+		TenantID:  rootTenantID,
 		Namespace: "installers",
 		Name:      platform + "-" + arch,
 	}
