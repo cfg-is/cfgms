@@ -59,9 +59,9 @@ description: A test workflow
 version: "1.0.0"
 steps:
   - name: step-one
-    action: log
-    params:
-      message: "hello"
+    type: delay
+    delay:
+      duration: 1s
 `
 	tmpDir := t.TempDir()
 	yamlFile := filepath.Join(tmpDir, "test-workflow.yaml")
@@ -112,7 +112,7 @@ steps:
 func TestWorkflowRunCmd_MissingNameField(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlFile := filepath.Join(tmpDir, "noname.yaml")
-	require.NoError(t, os.WriteFile(yamlFile, []byte("steps:\n  - action: log\n"), 0600))
+	require.NoError(t, os.WriteFile(yamlFile, []byte("steps:\n  - name: s\n    type: delay\n"), 0600))
 
 	origURL := workflowURL
 	origInsecure := workflowTLSInsecure
@@ -161,7 +161,7 @@ func TestWorkflowRunCmd_InvalidName(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			yamlFile := filepath.Join(tmpDir, "invalid.yaml")
-			body := fmt.Sprintf("name: %q\nsteps:\n  - action: log\n", tc.wfName)
+			body := fmt.Sprintf("name: %q\nsteps:\n  - name: s\n    type: delay\n", tc.wfName)
 			require.NoError(t, os.WriteFile(yamlFile, []byte(body), 0600))
 
 			err := runWorkflow(workflowRunCmd, []string{yamlFile})
@@ -195,7 +195,7 @@ func TestWorkflowRunCmd_NameEscapedInPath(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	yamlFile := filepath.Join(tmpDir, "ok.yaml")
-	body := fmt.Sprintf("name: %s\nsteps:\n  - action: log\n", wfName)
+	body := fmt.Sprintf("name: %s\nsteps:\n  - name: s\n    type: delay\n", wfName)
 	require.NoError(t, os.WriteFile(yamlFile, []byte(body), 0600))
 
 	origURL := workflowURL
@@ -236,9 +236,9 @@ func TestWorkflowRunCmd_APICreateError(t *testing.T) {
 	workflowYAML := `name: fail-workflow
 steps:
   - name: s1
-    action: log
-    params:
-      message: hi
+    type: delay
+    delay:
+      duration: 1s
 `
 	tmpDir := t.TempDir()
 	yamlFile := filepath.Join(tmpDir, "fail.yaml")
@@ -270,9 +270,9 @@ func TestWorkflowRunCmd_APIExecuteError(t *testing.T) {
 	workflowYAML := `name: exec-fail-workflow
 steps:
   - name: s1
-    action: log
-    params:
-      message: hi
+    type: delay
+    delay:
+      duration: 1s
 `
 	tmpDir := t.TempDir()
 	yamlFile := filepath.Join(tmpDir, "execfail.yaml")

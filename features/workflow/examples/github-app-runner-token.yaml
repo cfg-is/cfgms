@@ -6,7 +6,7 @@ description: >
   App credentials (app_id, installation_id, private_key_pem) are loaded automatically
   from the secrets provider — they must never appear in this file.
   See docs/development/ci-runner-github-app-setup.md for the operator setup runbook.
-version: "1.0"
+version: "1.0.0"
 
 variables:
   github_owner: "your-org"
