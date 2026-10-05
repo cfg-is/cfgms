@@ -25,7 +25,7 @@ func rootTenantWorkflowFixture(t *testing.T) (*Server, *mux.Router, cfgconfig.Co
 	server := setupTestServer(t)
 	prepareSelectedTenantServer(t, server)
 	h, configStore := newTestWorkflowHandler(t)
-	h.SetTenantResolution(server.rootTenantID, server.authorizeSelectedTenant)
+	h.SetTenantResolution(server.rootTenantID, server.selectAuthorizedTenant)
 	return server, newWorkflowRouter(h), configStore, h.engine
 }
 
@@ -130,7 +130,7 @@ func TestWorkflow_RootScoped_NoRootTenant_BadRequest(t *testing.T) {
 	h, _ := newTestWorkflowHandler(t)
 	// No tenants, or several parentless ones, resolve no root: RootTenantID's "".
 	noRoot := func(context.Context) string { return "" }
-	h.SetTenantResolution(noRoot, server.authorizeSelectedTenant)
+	h.SetTenantResolution(noRoot, server.selectAuthorizedTenant)
 	router := newWorkflowRouter(h)
 
 	rec := serveWorkflowAs(router, requestAsPrincipal(t, http.MethodPost, "/workflows", "", rootScopedPrincipal("root-operator-wf"), minimalWorkflowBody("orphan-wf")))
@@ -149,4 +149,24 @@ func TestWorkflow_RootScoped_TenantResolutionUnwired_Refused(t *testing.T) {
 
 	rec := serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows", "", rootScopedPrincipal("root-operator-wf"), nil))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+}
+
+// TestSelectAuthorizedTenant_ReturnsStoredID guards Issue #4576: the tenant a
+// handler carries onward is the stored tenant's ID, and a selected tenant that
+// does not exist is refused (404) even for a caller the crossing boundary does
+// not apply to.
+func TestSelectAuthorizedTenant_ReturnsStoredID(t *testing.T) {
+	server := setupTestServer(t)
+	prepareSelectedTenantServer(t, server)
+
+	rec := httptest.NewRecorder()
+	got, ok := server.selectAuthorizedTenant(rec, requestAsPrincipal(t, http.MethodGet, "/", "", rootScopedPrincipal("root-operator-sel"), nil), testRootTenantID)
+	require.True(t, ok, rec.Body.String())
+	assert.Equal(t, testRootTenantID, got)
+
+	tenantCaller := &Principal{ID: "tenant-user", TenantID: "msp-sel"}
+	rec = httptest.NewRecorder()
+	_, ok = server.selectAuthorizedTenant(rec, requestAsPrincipal(t, http.MethodGet, "/", "", tenantCaller, nil), "no-such-tenant")
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

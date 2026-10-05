@@ -37,7 +37,7 @@ type WorkflowHandler struct {
 	// selects with ?tenant=. Both are wired from the Server in SetWorkflowHandler
 	// (Issue #4576); while unset, a root-scoped caller is refused.
 	rootTenantFn      func(ctx context.Context) string
-	authorizeTenantFn func(w http.ResponseWriter, r *http.Request, tenantID string) bool
+	authorizeTenantFn func(w http.ResponseWriter, r *http.Request, tenantID string) (string, bool)
 }
 
 // NewWorkflowHandler creates a new WorkflowHandler.
@@ -73,11 +73,12 @@ func (h *WorkflowHandler) SetRequirePermFn(fn func(resourceType, action string) 
 
 // SetTenantResolution wires how a root-scoped caller's tenant is resolved
 // (Issue #4576): rootTenant returns the deployment's root tenant, and authorize
-// applies the tenant-crossing boundary to an explicitly selected tenant, writing
-// the response and returning false when the caller may not use it.
+// applies the tenant-crossing boundary to an explicitly selected tenant and
+// returns its stored ID, writing the response and returning false when the
+// caller may not use it.
 func (h *WorkflowHandler) SetTenantResolution(
 	rootTenant func(ctx context.Context) string,
-	authorize func(w http.ResponseWriter, r *http.Request, tenantID string) bool,
+	authorize func(w http.ResponseWriter, r *http.Request, tenantID string) (string, bool),
 ) {
 	h.rootTenantFn = rootTenant
 	h.authorizeTenantFn = authorize
@@ -175,11 +176,10 @@ func (h *WorkflowHandler) rootScopedTenant(w http.ResponseWriter, r *http.Reques
 		h.sendError(w, http.StatusServiceUnavailable, "workflow tenant resolution not available")
 		return "", false
 	}
-	if tenantID := r.URL.Query().Get("tenant"); tenantID != "" {
-		if !h.authorizeTenantFn(w, r, tenantID) {
-			return "", false
-		}
-		return tenantID, true
+	if selected := r.URL.Query().Get("tenant"); selected != "" {
+		// The stored tenant ID, not the request value, is what the store key and
+		// the execution context carry.
+		return h.authorizeTenantFn(w, r, selected)
 	}
 	if tenantID := h.rootTenantFn(r.Context()); tenantID != "" {
 		return tenantID, true
