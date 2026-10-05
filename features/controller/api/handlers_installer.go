@@ -139,7 +139,7 @@ func (s *Server) handleListInstallerArtifacts(w http.ResponseWriter, r *http.Req
 		Namespace: "installers",
 	})
 	if err != nil {
-		s.logger.Error("Failed to list installer artifacts", "error", err)
+		s.logger.Error("Failed to list installer artifacts", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list artifacts", "LIST_ERROR")
 		return
 	}
