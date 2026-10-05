@@ -65,6 +65,28 @@ func (s *Server) authorizeSelectedTenant(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
+// selectAuthorizedTenant applies authorizeSelectedTenant to a tenant the caller
+// selected and returns that tenant's stored ID (Issue #4576). Handlers carry the
+// stored ID onward — into storage keys, execution contexts and logs — never the
+// raw request value: for an existing tenant it is the same string, and a tenant
+// that does not exist is a 404 even for a caller the crossing boundary does not
+// apply to. It writes the response and returns false when the tenant is refused.
+func (s *Server) selectAuthorizedTenant(w http.ResponseWriter, r *http.Request, tenantID string) (string, bool) {
+	if !s.authorizeSelectedTenant(w, r, tenantID) {
+		return "", false
+	}
+	if s.tenantManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Tenant management not available", "SERVICE_UNAVAILABLE")
+		return "", false
+	}
+	stored, err := s.tenantManager.GetTenant(r.Context(), tenantID)
+	if err != nil || stored == nil || stored.ID == "" {
+		s.writeErrorResponse(w, http.StatusNotFound, "Tenant not found", "TENANT_NOT_FOUND")
+		return "", false
+	}
+	return stored.ID, true
+}
+
 // tenantAuthDecision explains why authorizeTenantAccess denied a caller, so handlers
 // can choose the right HTTP response: tenantAuthDenied means 404 (prevents existence
 // disclosure for an ordinary out-of-subtree tenant); tenantAuthNeedsCrossing means a

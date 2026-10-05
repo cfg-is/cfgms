@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Jordan Ritz
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gorilla/mux"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cfgis/cfgms/features/workflow"
+	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
+)
+
+// rootTenantWorkflowFixture wires a WorkflowHandler to a Server's real tenant
+// resolution (root tenant by position, ADR-025 crossing) as SetWorkflowHandler
+// does in production, with a client tenant "msp-sel" beneath the root.
+func rootTenantWorkflowFixture(t *testing.T) (*Server, *mux.Router, cfgconfig.ConfigStore, *workflow.Engine) {
+	t.Helper()
+	server := setupTestServer(t)
+	prepareSelectedTenantServer(t, server)
+	h, configStore := newTestWorkflowHandler(t)
+	h.SetTenantResolution(server.rootTenantID, server.selectAuthorizedTenant)
+	return server, newWorkflowRouter(h), configStore, h.engine
+}
+
+// executionTenant starts the named workflow through the API and returns the
+// authenticated tenant the engine recorded on the execution — the tenant every
+// tenant-scoped step acts on (Issue #4338).
+func executionTenant(t *testing.T, router *mux.Router, engine *workflow.Engine, req *http.Request) string {
+	t.Helper()
+	rec := serveWorkflowAs(router, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	execID, _ := resp["execution_id"].(string)
+	require.NotEmpty(t, execID)
+	execution, err := engine.GetExecution(execID)
+	require.NoError(t, err)
+	return execution.TenantID
+}
+
+func serveWorkflowAs(router *mux.Router, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestWorkflow_RootScoped_UsesRootTenant guards Issue #4576: a root-scoped caller's
+// create, list, get and execute work, and the workflow is stored under the
+// deployment's root tenant — never under an empty tenant, which the config store
+// rejects (the 500 the issue reports).
+func TestWorkflow_RootScoped_UsesRootTenant(t *testing.T) {
+	_, router, configStore, engine := rootTenantWorkflowFixture(t)
+	caller := rootScopedPrincipal("root-operator-wf")
+
+	rec := serveWorkflowAs(router, requestAsPrincipal(t, http.MethodPost, "/workflows", "", caller, minimalWorkflowBody("root-wf")))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	stored, err := workflow.NewWorkflowStore(configStore, testRootTenantID).GetLatestWorkflow(context.Background(), "root-wf")
+	require.NoError(t, err, "the workflow must be stored under the root tenant")
+	assert.Equal(t, "root-wf", stored.Name)
+
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows", "", caller, nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"root-wf"`, "list must return the root tenant's workflow")
+
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows/root-wf", "", caller, nil))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The execution runs under the root tenant: a root-scoped caller's own context
+	// carries no tenant, which left tenant-scoped steps with nothing to act on.
+	assert.Equal(t, testRootTenantID, executionTenant(t, router, engine,
+		requestAsPrincipal(t, http.MethodPost, "/workflows/root-wf/execute", "", caller, []byte("{}"))))
+
+	// ?tenant=<root> selects the same tenant explicitly and needs no crossing.
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows/root-wf?tenant="+testRootTenantID, "", caller, nil))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestWorkflow_RootScopedClientTenant_RequiresCrossing guards Issue #4576: a
+// root-scoped caller selecting a client tenant with ?tenant= is challenged without
+// a crossing, nothing is stored there, and the same request succeeds with one.
+func TestWorkflow_RootScopedClientTenant_RequiresCrossing(t *testing.T) {
+	server, router, configStore, engine := rootTenantWorkflowFixture(t)
+	caller := rootScopedPrincipal("root-operator-wf")
+
+	create := func() *httptest.ResponseRecorder {
+		return serveWorkflowAs(router, requestAsPrincipal(t, http.MethodPost, "/workflows?tenant=msp-sel", "", caller, minimalWorkflowBody("client-wf")))
+	}
+
+	rec := create()
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+	_, err := workflow.NewWorkflowStore(configStore, "msp-sel").GetLatestWorkflow(context.Background(), "client-wf")
+	assert.Error(t, err, "a challenged create must store nothing")
+
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows?tenant=msp-sel", "", caller, nil))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "listing a client tenant's workflows needs a crossing too")
+
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows?tenant=no-such-tenant", "", caller, nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an unknown tenant is not found, not challenged")
+
+	grantSelectedTenantCrossing(t, server, caller.ID)
+	rec = create()
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	_, err = workflow.NewWorkflowStore(configStore, "msp-sel").GetLatestWorkflow(context.Background(), "client-wf")
+	require.NoError(t, err, "with a crossing the workflow is stored under the selected tenant")
+
+	// Executing it runs under the selected tenant — the one the crossing covers —
+	// so its steps act on that tenant's devices and nothing else.
+	assert.Equal(t, "msp-sel", executionTenant(t, router, engine,
+		requestAsPrincipal(t, http.MethodPost, "/workflows/client-wf/execute?tenant=msp-sel", "", caller, []byte("{}"))))
+
+	rec = serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows", "", caller, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"client-wf"`, "without ?tenant= the root tenant's list is served")
+}
+
+// TestWorkflow_RootScoped_NoRootTenant_BadRequest guards Issue #4576: when no root
+// tenant can be resolved, a root-scoped request without ?tenant= is a 400 — never a
+// store call with an empty tenant.
+func TestWorkflow_RootScoped_NoRootTenant_BadRequest(t *testing.T) {
+	server := setupTestServer(t)
+	h, _ := newTestWorkflowHandler(t)
+	// No tenants, or several parentless ones, resolve no root: RootTenantID's "".
+	noRoot := func(context.Context) string { return "" }
+	h.SetTenantResolution(noRoot, server.selectAuthorizedTenant)
+	router := newWorkflowRouter(h)
+
+	rec := serveWorkflowAs(router, requestAsPrincipal(t, http.MethodPost, "/workflows", "", rootScopedPrincipal("root-operator-wf"), minimalWorkflowBody("orphan-wf")))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp["error"], "tenant is required")
+}
+
+// TestWorkflow_RootScoped_TenantResolutionUnwired_Refused guards Issue #4576: a
+// handler whose tenant resolution was never wired refuses root-scoped requests
+// rather than falling back to an empty tenant.
+func TestWorkflow_RootScoped_TenantResolutionUnwired_Refused(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	rec := serveWorkflowAs(router, requestAsPrincipal(t, http.MethodGet, "/workflows", "", rootScopedPrincipal("root-operator-wf"), nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+}
+
+// TestSelectAuthorizedTenant_ReturnsStoredID guards Issue #4576: the tenant a
+// handler carries onward is the stored tenant's ID, and a selected tenant that
+// does not exist is refused (404) even for a caller the crossing boundary does
+// not apply to.
+func TestSelectAuthorizedTenant_ReturnsStoredID(t *testing.T) {
+	server := setupTestServer(t)
+	prepareSelectedTenantServer(t, server)
+
+	rec := httptest.NewRecorder()
+	got, ok := server.selectAuthorizedTenant(rec, requestAsPrincipal(t, http.MethodGet, "/", "", rootScopedPrincipal("root-operator-sel"), nil), testRootTenantID)
+	require.True(t, ok, rec.Body.String())
+	assert.Equal(t, testRootTenantID, got)
+
+	tenantCaller := &Principal{ID: "tenant-user", TenantID: "msp-sel"}
+	rec = httptest.NewRecorder()
+	_, ok = server.selectAuthorizedTenant(rec, requestAsPrincipal(t, http.MethodGet, "/", "", tenantCaller, nil), "no-such-tenant")
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
