@@ -1,7 +1,7 @@
 workflow:
   name: "loop-constructs-demo"
   description: "Demonstrates for, while, and foreach loop constructs"
-  version: "1.0"
+  version: "1.0.0"
   variables:
     max_count: 5
     servers: ["web-01", "web-02", "db-01"]

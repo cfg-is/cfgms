@@ -17,7 +17,7 @@ description: >
   the same shape as github-app-runner-token.yaml. App credentials and the
   steward secret token come from the secrets provider — never this file.
   See docs/development/ci-runner-github-app-setup.md for operator setup.
-version: "1.0"
+version: "1.0.0"
 
 # The whole sequence is bounded by the workflow-level timeout; the await step's
 # poll loop is bound by this and by max_iterations, never a fixed sleep.
