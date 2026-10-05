@@ -1245,8 +1245,8 @@ func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 
 	// The secret is stored under the tenant-A key; tenant-B's key for the same
 	// trigger ID and field must not exist.
-	keyA := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-A", "t-iso")
-	keyB := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-B", "t-iso")
+	keyA := triggerCredentialRef("t-iso", "bearer")
+	keyB := triggerCredentialRef("t-iso", "bearer")
 
 	secretA, err := ss.GetSecret(ctxA, "tenant-A/"+keyA)
 	require.NoError(t, err, "tenant-A secret must be retrievable")
@@ -1338,11 +1338,11 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 
 	// Verify secrets were stored.
 	refKeys := []string{
-		"trigger-tenant-del-t-del-bearer",
-		"trigger-tenant-del-t-del-hmac-secret",
-		"trigger-tenant-del-t-del-api-key",
-		"trigger-tenant-del-t-del-basic-user",
-		"trigger-tenant-del-t-del-basic-pass",
+		"trigger-t-del-bearer",
+		"trigger-t-del-hmac-secret",
+		"trigger-t-del-api-key",
+		"trigger-t-del-basic-user",
+		"trigger-t-del-basic-pass",
 	}
 	for _, k := range refKeys {
 		_, err := ss.GetSecret(ctx, "tenant-del/"+k)

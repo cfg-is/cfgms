@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -205,6 +206,23 @@ func (tm *TriggerManagerImpl) Stop(ctx context.Context) error {
 	return nil
 }
 
+// triggerCredentialRef names a trigger credential within its tenant's secrets
+// (Issue #4641). The tenant is not part of the name: the credential is stored
+// with the trigger's tenant, and a tenant ID may itself contain "/", which in
+// the name would make the combined "<tenant>/<ref>" key ambiguous.
+func triggerCredentialRef(triggerID, kind string) string {
+	return "trigger-" + triggerID + "-" + kind
+}
+
+// validateTriggerID refuses a trigger ID that could not be used safely as part
+// of a secret name or a path: one containing a path separator or "..".
+func validateTriggerID(id string) error {
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("invalid trigger id %q: must not contain '/', '\\' or '..'", id)
+	}
+	return nil
+}
+
 // triggerSecretKey is the secret-store key a trigger credential is read and
 // deleted by: the credential is stored with the trigger's tenant, and the secret
 // store addresses tenant-owned secrets as "<tenant_id>/<key>" (Issue #4641). A
@@ -240,6 +258,9 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 	// Generate ID if not provided
 	if trigger.ID == "" {
 		trigger.ID = tm.generateTriggerID()
+	}
+	if err := validateTriggerID(trigger.ID); err != nil {
+		return err
 	}
 
 	// The tenant always comes from the authenticated context, never from the
@@ -742,12 +763,21 @@ func (tm *TriggerManagerImpl) validateSIEMConfig(config *SIEMConfig) error {
 func (tm *TriggerManagerImpl) registerTriggerWithHandler(ctx context.Context, trigger *Trigger) error {
 	switch trigger.Type {
 	case TriggerTypeSchedule:
+		if tm.scheduler == nil {
+			return fmt.Errorf("no scheduler to register trigger %s with", trigger.ID)
+		}
 		return tm.scheduler.ScheduleWorkflow(ctx, trigger)
 
 	case TriggerTypeWebhook:
+		if tm.webhookHandler == nil {
+			return fmt.Errorf("no webhook handler to register trigger %s with", trigger.ID)
+		}
 		return tm.webhookHandler.RegisterWebhook(ctx, trigger)
 
 	case TriggerTypeSIEM:
+		if tm.siemIntegration == nil {
+			return fmt.Errorf("no SIEM integration to register trigger %s with", trigger.ID)
+		}
 		return tm.siemIntegration.RegisterSIEMTrigger(ctx, trigger)
 
 	case TriggerTypeManual:
@@ -898,6 +928,17 @@ func (tm *TriggerManagerImpl) loadTriggersFromStorage(ctx context.Context) error
 			// Degraded load: skip trigger whose creds cannot be recovered; warn already emitted inside.
 			continue
 		}
+		// A restored trigger must fire, not just be listed: re-register every
+		// active trigger with its scheduler / webhook / SIEM handler (Issue
+		// #4641). One that cannot be registered is marked errored rather than
+		// shown as active while nothing would ever run it.
+		if trigger.Status == TriggerStatusActive {
+			if regErr := tm.registerTriggerWithHandler(ctx, trigger); regErr != nil {
+				tm.logger.WarnCtx(ctx, "failed to register restored trigger",
+					"trigger_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(regErr.Error()))
+				trigger.Status = TriggerStatusError
+			}
+		}
 		tm.triggers[record.ID] = trigger
 	}
 
@@ -931,7 +972,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 				if tm.secretStore == nil {
 					return fmt.Errorf("secret store required to persist trigger credentials")
 				}
-				refKey := fmt.Sprintf("trigger-%s-%s-bearer", trigger.TenantID, trigger.ID)
+				refKey := triggerCredentialRef(trigger.ID, "bearer")
 				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
 					Key:      refKey,
 					Value:    auth.BearerToken,
@@ -946,7 +987,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 				if tm.secretStore == nil {
 					return fmt.Errorf("secret store required to persist trigger credentials")
 				}
-				refKey := fmt.Sprintf("trigger-%s-%s-hmac-secret", trigger.TenantID, trigger.ID)
+				refKey := triggerCredentialRef(trigger.ID, "hmac-secret")
 				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
 					Key:      refKey,
 					Value:    auth.Secret,
@@ -961,7 +1002,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 				if tm.secretStore == nil {
 					return fmt.Errorf("secret store required to persist trigger credentials")
 				}
-				refKey := fmt.Sprintf("trigger-%s-%s-api-key", trigger.TenantID, trigger.ID)
+				refKey := triggerCredentialRef(trigger.ID, "api-key")
 				if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
 					Key:      refKey,
 					Value:    auth.APIKey,
@@ -977,7 +1018,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 					if tm.secretStore == nil {
 						return fmt.Errorf("secret store required to persist trigger credentials")
 					}
-					refKey := fmt.Sprintf("trigger-%s-%s-basic-user", trigger.TenantID, trigger.ID)
+					refKey := triggerCredentialRef(trigger.ID, "basic-user")
 					if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
 						Key:      refKey,
 						Value:    auth.BasicAuth.Username,
@@ -992,7 +1033,7 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 					if tm.secretStore == nil {
 						return fmt.Errorf("secret store required to persist trigger credentials")
 					}
-					refKey := fmt.Sprintf("trigger-%s-%s-basic-pass", trigger.TenantID, trigger.ID)
+					refKey := triggerCredentialRef(trigger.ID, "basic-pass")
 					if err := tm.secretStore.StoreSecret(ctx, &secretsif.SecretRequest{
 						Key:      refKey,
 						Value:    auth.BasicAuth.Password,
@@ -1005,15 +1046,13 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 			}
 		}
 
-		// Serialize webhook config with Authentication zeroed out — no cleartext credentials in storage.
-		webhookClone := *trigger.Webhook
-		webhookClone.Authentication = nil
-		configBytes, err := json.Marshal(&webhookClone)
-		if err != nil {
-			return fmt.Errorf("failed to marshal webhook config: %w", err)
-		}
-		record.ConfigPayload = configBytes
 	}
+
+	configBytes, err := marshalTriggerConfig(trigger)
+	if err != nil {
+		return err
+	}
+	record.ConfigPayload = configBytes
 
 	return tm.triggerStore.StoreTrigger(ctx, record)
 }
@@ -1058,6 +1097,66 @@ func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, trig
 	return nil
 }
 
+// triggerConfigPayloadVersion marks a ConfigPayload holding the whole trigger
+// configuration (Issue #4641). Payloads without it hold only a webhook config —
+// the format written before schedule and SIEM configuration were persisted.
+const triggerConfigPayloadVersion = 2
+
+type triggerConfigPayload struct {
+	Version int      `json:"v"`
+	Trigger *Trigger `json:"trigger"`
+}
+
+// marshalTriggerConfig serializes trigger's configuration for every trigger
+// type, with webhook credentials zeroed — they live in the secret store, and the
+// record holds only references to them.
+func marshalTriggerConfig(trigger *Trigger) ([]byte, error) {
+	clone := *trigger
+	if clone.Webhook != nil {
+		webhook := *clone.Webhook
+		if webhook.Authentication != nil {
+			// Keep the non-secret authentication settings (type, header names) —
+			// without the type a restored webhook rejects every request — and
+			// clear every credential value.
+			auth := *webhook.Authentication
+			auth.Secret = ""
+			auth.APIKey = ""
+			auth.BearerToken = ""
+			auth.BasicAuth = nil
+			webhook.Authentication = &auth
+		}
+		clone.Webhook = &webhook
+	}
+	data, err := json.Marshal(triggerConfigPayload{Version: triggerConfigPayloadVersion, Trigger: &clone})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal trigger config: %w", err)
+	}
+	return data, nil
+}
+
+// applyTriggerConfig restores trigger's configuration from payload and returns
+// its webhook config (nil when it has none) for credential restoration.
+// Identity, status and timestamps come from the record columns, never the payload.
+func applyTriggerConfig(trigger *Trigger, payload []byte) (*WebhookConfig, error) {
+	var envelope triggerConfigPayload
+	if err := json.Unmarshal(payload, &envelope); err == nil && envelope.Version == triggerConfigPayloadVersion && envelope.Trigger != nil {
+		stored := envelope.Trigger
+		trigger.Description = stored.Description
+		trigger.Variables = stored.Variables
+		trigger.Schedule = stored.Schedule
+		trigger.SIEM = stored.SIEM
+		trigger.Timeout = stored.Timeout
+		trigger.Concurrency = stored.Concurrency
+		trigger.Conditions = stored.Conditions
+		return stored.Webhook, nil
+	}
+	var webhook WebhookConfig
+	if err := json.Unmarshal(payload, &webhook); err != nil {
+		return nil, err
+	}
+	return &webhook, nil
+}
+
 // restoreTriggerFromRecord reconstructs a Trigger from a stored TriggerRecord, recovering
 // credential values from the secretStore. Returns an error (and emits a WARN log) for any
 // ref that cannot be resolved; callers should skip the trigger on error (degraded load).
@@ -1077,8 +1176,8 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		return trigger, nil
 	}
 
-	var webhookConfig WebhookConfig
-	if err := json.Unmarshal(record.ConfigPayload, &webhookConfig); err != nil {
+	webhookConfig, err := applyTriggerConfig(trigger, record.ConfigPayload)
+	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config payload for trigger %s: %w", record.ID, err)
 	}
 
@@ -1088,7 +1187,13 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 		return nil, fmt.Errorf("trigger %s has credential refs but no secret store is configured", record.ID)
 	}
 
+	// Start from the persisted non-secret authentication settings and add the
+	// credential values recovered from the secret store.
 	auth := &WebhookAuth{}
+	if webhookConfig != nil && webhookConfig.Authentication != nil {
+		stored := *webhookConfig.Authentication
+		auth = &stored
+	}
 	hasAuth := false
 
 	if record.BearerTokenRef != "" {
@@ -1151,9 +1256,12 @@ func (tm *TriggerManagerImpl) restoreTriggerFromRecord(ctx context.Context, reco
 	}
 
 	if hasAuth {
+		if webhookConfig == nil {
+			return nil, fmt.Errorf("trigger %s has webhook credentials but no webhook config", record.ID)
+		}
 		webhookConfig.Authentication = auth
 	}
-	trigger.Webhook = &webhookConfig
+	trigger.Webhook = webhookConfig
 
 	return trigger, nil
 }
