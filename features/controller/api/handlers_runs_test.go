@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,16 +25,18 @@ import (
 
 	"github.com/gorilla/mux"
 
+	_ "modernc.org/sqlite"
+
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	controllerrun "github.com/cfgis/cfgms/features/controller/run"
 	scriptmodule "github.com/cfgis/cfgms/features/modules/stdlib/script"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/operatorpayload"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	_ "modernc.org/sqlite"
 )
 
 // testBlastRadiusPolicyStore is a real in-memory BlastRadiusPolicyStore (Issue #3698),
@@ -1781,4 +1784,199 @@ func TestHandleListRuns_PaginationOffsetLimit(t *testing.T) {
 	page2, ok := resp.Data.([]interface{})
 	require.True(t, ok)
 	assert.Len(t, page2, 1, "offset=2 must return the remaining 1 run")
+}
+
+// fixedStewardProvider feeds the real fleet.MemoryQuery a fixed steward list, so
+// run targets resolve through the production filter logic (IDs, selectors,
+// tenant scope).
+type fixedStewardProvider []fleet.StewardData
+
+func (p fixedStewardProvider) GetAllStewards() []fleet.StewardData { return p }
+
+// countingFleetQuery counts searches against a real FleetQuery, so a test can
+// prove the run's targets are resolved once — the authorized list is the
+// dispatched list (Issue #4554).
+type countingFleetQuery struct {
+	fleet.FleetQuery
+	searches atomic.Int32
+}
+
+func (q *countingFleetQuery) Search(ctx context.Context, f fleet.Filter) ([]fleet.StewardResult, error) {
+	q.searches.Add(1)
+	return q.FleetQuery.Search(ctx, f)
+}
+
+// setupCrossingRunServer is a run server over the real fleet.MemoryQuery with a
+// tenant-crossing store and a client tenant ("msp-run", beneath the seeded root)
+// for ADR-025 boundary tests.
+func setupCrossingRunServer(t *testing.T, stewards []fleet.StewardData) (*Server, *controllerrun.Manager, *countingFleetQuery) {
+	t.Helper()
+	server, manager, _ := setupRunServer(t, nil)
+	counting := &countingFleetQuery{FleetQuery: fleet.NewMemoryQuery(fixedStewardProvider(stewards))}
+	server.fleetQuery = counting
+	wireCrossingStore(t, server)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "msp-run", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	return server, manager, counting
+}
+
+// assertNoRunCreated proves a refused run left nothing behind.
+func assertNoRunCreated(t *testing.T, manager *controllerrun.Manager) {
+	t.Helper()
+	runs, err := manager.ListRuns(context.Background(), "", 100, 0)
+	require.NoError(t, err)
+	assert.Empty(t, runs, "a refused run must create no run record or jobs")
+}
+
+func grantRunCrossing(t *testing.T, server *Server, principalID, tenantID string) {
+	t.Helper()
+	now := time.Now()
+	require.NoError(t, server.tenantCrossingStore.CreateTenantCrossing(context.Background(), &business.TenantCrossing{
+		ID: "grant-" + principalID, TenantID: tenantID, PrincipalID: principalID,
+		Kind: business.TenantCrossingKindGrant, GrantedBy: "msp-admin",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+}
+
+func signedCommandBody(t *testing.T, server *Server, target string, targets []string) map[string]interface{} {
+	t.Helper()
+	return withEnvelopeFields(map[string]interface{}{
+		"target":  target,
+		"content": base64.StdEncoding.EncodeToString([]byte("hostname")),
+		"shell":   "pwsh",
+	}, signedOperatorEnvelopeFields(t, server, []byte("hostname"), "pwsh", targets))
+}
+
+func runScriptBody(target string) map[string]interface{} {
+	return map[string]interface{}{"target": target, "script_id": "scripts/check.sh"}
+}
+
+var (
+	runStewardRoot = fleet.StewardData{ID: "steward-root", TenantID: testRootTenantID}
+	runStewardMSP  = fleet.StewardData{ID: "steward-msp", TenantID: "msp-run"}
+)
+
+// TestRunCommand_RootScopedWithoutCrossing_Challenged guards the ADR-025 boundary on
+// ad-hoc runs: a root-scoped principal dispatching to a steward in a client tenant
+// without an active crossing gets the crossing challenge, exactly as config push
+// does, and no run is created.
+func TestRunCommand_RootScopedWithoutCrossing_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), `required="tenant-crossing"`)
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunCommand_RootScopedSelector_Challenged: a fleet selector for /runs/command
+// reaching an uncrossed client tenant is refused whole.
+func TestRunCommand_RootScopedSelector_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		rootScopedPrincipal("root-operator-run"), signedCommandBody(t, server, "all", []string{"steward-root", "steward-msp"}))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunCommand_RootScopedWithCrossing_Allowed: with an active crossing on the
+// steward's tenant the run is dispatched to exactly the authorized steward, and the
+// targets are resolved once.
+func TestRunCommand_RootScopedWithCrossing_Allowed(t *testing.T) {
+	server, manager, counting := setupCrossingRunServer(t, []fleet.StewardData{runStewardMSP})
+	caller := rootScopedPrincipal("root-operator-run")
+	grantRunCrossing(t, server, caller.ID, "msp-run")
+
+	rec := postRunWithPrincipal(t, server.handlePostRunCommand, "/api/v1/runs/command",
+		caller, signedCommandBody(t, server, "id:steward-msp", []string{"steward-msp"}))
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, int32(1), counting.searches.Load(), "the authorized target list is the dispatched list: one fleet search")
+	runs, err := manager.ListRuns(context.Background(), "", 100, 0)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	jobs, err := manager.ListRunJobs(context.Background(), runs[0].RunID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	assert.Equal(t, "steward-msp", jobs[0].DeviceID)
+}
+
+// TestRunScript_RootScopedExplicitID_Challenged: an explicit id: target for
+// /runs/script in an uncrossed client tenant is challenged; nothing is created.
+func TestRunScript_RootScopedExplicitID_Challenged(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("id:steward-msp"))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole: a fleet selector
+// reaching the root tenant and an uncrossed client tenant is refused as a whole,
+// never silently narrowed to the tenants the caller may reach.
+func TestRunScript_RootScopedSelectorSpanningTenants_RefusedWhole(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot, runStewardMSP})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedRootTenantOnly_Allowed: a root-scoped principal acting
+// on stewards in the root tenant itself needs no crossing.
+func TestRunScript_RootScopedRootTenantOnly_Allowed(t *testing.T) {
+	server, _, _ := setupCrossingRunServer(t, []fleet.StewardData{runStewardRoot})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedZeroMatches_Allowed: a selector matching no stewards
+// reaches no tenant, so there is nothing to refuse.
+func TestRunScript_RootScopedZeroMatches_Allowed(t *testing.T) {
+	server, _, _ := setupCrossingRunServer(t, nil)
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestRunScript_RootScopedEmptyTenantSteward_Denied: a matched steward with no
+// tenant is denied rather than treated as the root tenant.
+func TestRunScript_RootScopedEmptyTenantSteward_Denied(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{{ID: "steward-orphan"}})
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_RootScopedAmbiguousRoot_Denied: with two top-level tenants the
+// root is ambiguous, so root-scoped dispatch to either is denied.
+func TestRunScript_RootScopedAmbiguousRoot_Denied(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, []fleet.StewardData{{ID: "steward-legacy", TenantID: "legacy-top"}})
+	seedLegacyTopLevelTenant(t, server, "legacy-top")
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
+}
+
+// TestRunScript_FleetSearchError_ServiceUnavailable: a failed target resolution
+// refuses the run with 503 and creates nothing.
+func TestRunScript_FleetSearchError_ServiceUnavailable(t *testing.T) {
+	server, manager, _ := setupCrossingRunServer(t, nil)
+	server.fleetQuery = &failingFleetQuery{}
+	rec := postRunWithPrincipal(t, server.handlePostRunScript, "/api/v1/runs/script",
+		rootScopedPrincipal("root-operator-run"), runScriptBody("all"))
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assertNoRunCreated(t, manager)
 }
