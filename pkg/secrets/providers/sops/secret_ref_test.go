@@ -199,3 +199,16 @@ func TestListSecrets_KeyPrefixFiltersByName(t *testing.T) {
 	assert.Equal(t, "abc123", list[0].Key)
 	assert.Equal(t, "tenant-a", list[0].TenantID)
 }
+
+// TestFlatfileBackend_RejectsSlashInSecretName pins the assumption resolveSecretRef's
+// leftmost-first order relies on: the flatfile backend refuses a "/" in a secret
+// name, so a record named "b/<k>" under tenant "a" can never shadow tenant "a/b"'s
+// "<k>" there.
+func TestFlatfileBackend_RejectsSlashInSecretName(t *testing.T) {
+	base := t.TempDir()
+	store := newTestSOPSStore(t, filepath.Join(base, "data"), writeTestKey(t, base))
+	err := store.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key: "child/k1", Value: "v", TenantID: "tenant-a",
+	})
+	require.Error(t, err, "flatfile must reject a secret name containing '/'")
+}

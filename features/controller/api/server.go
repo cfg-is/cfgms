@@ -95,6 +95,8 @@ type Server struct {
 	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
 	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
 	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
+	apiKeyIndexWG                   sync.WaitGroup                           // Issue #4574: tracks detached API-key index scans so Close() can wait for them before secretStore.Close()
+	apiKeyTombstones                map[string]time.Time                     // Issue #4574: key hash → deletion time for keys deleted on this node (guarded by mu, lazily made); blocks a racing load from re-caching a deleted key
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore          registration.Store                       // Registration token store for steward registration
@@ -281,7 +283,8 @@ type APIKey struct {
 const apiKeyRevalidateInterval = 30 * time.Second
 
 // apiKeyMaxStaleness is the hard ceiling on serving a cached API key whose
-// re-validation failed with a store error other than not-found (Issue #4574).
+// re-validation failed because the store was unavailable (Issue #4574). A record that
+// is gone, expired, or cannot be decrypted is not an outage and is never covered by it.
 //
 // Failing closed on the first transient store error would lock every API-key
 // client out of every node for the length of any storage blip; serving
@@ -289,8 +292,8 @@ const apiKeyRevalidateInterval = 30 * time.Second
 // node cannot reach the store. The compromise: while the last successful
 // validation is younger than this bound the cached entry keeps serving (and every
 // request retries the store); once it is older, the request is refused until the
-// store answers again. A not-found answer is never treated as transient — it
-// evicts the entry and rejects the request at once.
+// store answers again. A not-found, expired or undecryptable record is never treated
+// as transient — it evicts the entry and rejects the request at once.
 const apiKeyMaxStaleness = 2 * time.Minute
 
 // ServerConfig contains configuration for the REST API server
@@ -1299,6 +1302,8 @@ func (s *Server) Close(ctx context.Context) error {
 		certBindingDone := make(chan struct{})
 		go func() {
 			s.certBindingLastUsedWG.Wait()
+			// Issue #4574: detached API-key index scans read the same store.
+			s.apiKeyIndexWG.Wait()
 			close(certBindingDone)
 		}()
 		select {

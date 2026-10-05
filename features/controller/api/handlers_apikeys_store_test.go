@@ -513,3 +513,150 @@ func TestAPIKey_NestedTenant_DeleteRevokesOnPeer(t *testing.T) {
 	clockB.Advance(apiKeyIndexMissRefreshFloor)
 	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(serverB, apiKey))
 }
+
+// gatedListSecretStore wraps a real SecretStore; ListSecrets signals entered and then
+// blocks until release is closed, so a test can act while a scan is in flight.
+type gatedListSecretStore struct {
+	secretsif.SecretStore
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *gatedListSecretStore) ListSecrets(ctx context.Context, filter *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
+	s.once.Do(func() { close(s.entered) })
+	<-s.release
+	return s.SecretStore.ListSecrets(ctx, filter)
+}
+
+// TestAPIKeyIndex_LeaderCancelDoesNotCancelSharedScan verifies the request that starts
+// a shared index scan cannot cancel it: the leader's client aborts mid-scan, and a
+// concurrent request for a key created on another node still authenticates once the
+// scan completes.
+func TestAPIKeyIndex_LeaderCancelDoesNotCancelSharedScan(t *testing.T) {
+	serverA, serverB := setupPeerServers(t)
+	clockB := &steppingClock{now: time.Now()}
+	serverB.apiKeyClock = clockB.Now
+	clockB.Advance(apiKeyIndexMissRefreshFloor)
+
+	apiKey, _ := mintStoreAPIKey(t, serverA, []string{"steward:list"}, "tenant-a")
+
+	gate := &gatedListSecretStore{SecretStore: serverB.secretStore, entered: make(chan struct{}), release: make(chan struct{})}
+	serverB.secretStore = gate
+
+	// Leader: an unknown key starts the scan; its client then goes away.
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil).WithContext(leaderCtx)
+		req.Header.Set("X-API-Key", "leader-unknown-key")
+		rec := httptest.NewRecorder()
+		serverB.router.ServeHTTP(rec, req)
+		leaderDone <- rec.Code
+	}()
+	<-gate.entered
+	cancelLeader()
+	assert.Equal(t, http.StatusUnauthorized, <-leaderDone)
+
+	// Waiter: arrives while the scan is still in flight and joins it.
+	waiterDone := make(chan int, 1)
+	go func() { waiterDone <- stewardsStatus(serverB, apiKey) }()
+	require.Eventually(t, func() bool { return serverB.apiKeyIdx.refreshing() }, time.Second, time.Millisecond)
+	close(gate.release)
+
+	assert.Equal(t, http.StatusOK, <-waiterDone, "the shared scan survived the leader's cancellation")
+}
+
+// readGatedSecretStore wraps a real SecretStore; GetSecret performs the real read,
+// signals, and holds its result until release is closed.
+type readGatedSecretStore struct {
+	secretsif.SecretStore
+	readDone chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func (s *readGatedSecretStore) GetSecret(ctx context.Context, key string) (*secretsif.Secret, error) {
+	rec, err := s.SecretStore.GetSecret(ctx, key)
+	s.once.Do(func() { close(s.readDone) })
+	<-s.release
+	return rec, err
+}
+
+// TestAPIKey_LoadRacingSameNodeDelete_DoesNotRecache verifies a load that read the
+// record before a same-node delete cannot re-cache the deleted key afterwards.
+func TestAPIKey_LoadRacingSameNodeDelete_DoesNotRecache(t *testing.T) {
+	server := setupTestServer(t)
+	apiKey, keyID := mintStoreAPIKey(t, server, []string{"steward:list"}, "tenant-a")
+	dropFromCache(server, apiKey)
+
+	gate := &readGatedSecretStore{SecretStore: server.secretStore, readDone: make(chan struct{}), release: make(chan struct{})}
+	server.secretStore = gate
+
+	loadDone := make(chan int, 1)
+	go func() { loadDone <- stewardsStatus(server, apiKey) }()
+	<-gate.readDone // the load has read the (still present) record
+
+	rec := callDeleteAPIKey(server, keyID, ctxkeys.NewTenantScope("tenant-a"))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	close(gate.release)
+	assert.Equal(t, http.StatusUnauthorized, <-loadDone, "the racing load must not authenticate a deleted key")
+	assert.False(t, isCached(server, apiKey), "the racing load must not re-cache a deleted key")
+}
+
+// TestAPIKey_Revalidation_ExpiredRecord_FailsClosedAtOnce verifies a record the store
+// reports expired is not treated as an outage: the cached key is rejected at the
+// next re-validation, not served for apiKeyMaxStaleness.
+func TestAPIKey_Revalidation_ExpiredRecord_FailsClosedAtOnce(t *testing.T) {
+	server := setupTestServer(t)
+	clock := &steppingClock{now: time.Now()}
+	server.apiKeyClock = clock.Now
+	apiKey, keyID := mintStoreAPIKey(t, server, []string{"steward:list"}, "tenant-a")
+	require.Equal(t, http.StatusOK, stewardsStatus(server, apiKey))
+
+	// Rewrite the durable record with an expiry already in the past.
+	require.NoError(t, server.secretStore.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key: hashAPIKey(apiKey), Value: hashAPIKey(apiKey), TenantID: "tenant-a", TTL: time.Nanosecond,
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+			"permissions":                   "steward:list",
+		},
+	}))
+	time.Sleep(2 * time.Millisecond)
+
+	clock.Advance(apiKeyRevalidateInterval)
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(server, apiKey))
+	assert.False(t, isCached(server, apiKey))
+}
+
+// TestAPIKey_Revalidation_UndecryptableRecord_FailsClosedAtOnce verifies a record that
+// cannot be decrypted (here: rewritten under a different encryption key) is not
+// treated as an outage: the cached key is rejected at the next re-validation.
+func TestAPIKey_Revalidation_UndecryptableRecord_FailsClosedAtOnce(t *testing.T) {
+	server := setupTestServer(t)
+	repoPath := os.Getenv("CFGMS_SECRETS_REPO_PATH")
+	clock := &steppingClock{now: time.Now()}
+	server.apiKeyClock = clock.Now
+	apiKey, keyID := mintStoreAPIKey(t, server, []string{"steward:list"}, "tenant-a")
+	require.Equal(t, http.StatusOK, stewardsStatus(server, apiKey))
+
+	// A store instance on the same data under a different encryption key.
+	setTestSecretsEnv(t)
+	t.Setenv("CFGMS_SECRETS_REPO_PATH", repoPath)
+	foreign, err := NewSecretStore(server.cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = foreign.Close() })
+	require.NoError(t, foreign.StoreSecret(context.Background(), &secretsif.SecretRequest{
+		Key: hashAPIKey(apiKey), Value: hashAPIKey(apiKey), TenantID: "tenant-a",
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			"id":                            keyID,
+		},
+	}))
+
+	clock.Advance(apiKeyRevalidateInterval)
+	assert.Equal(t, http.StatusUnauthorized, stewardsStatus(server, apiKey))
+	assert.False(t, isCached(server, apiKey))
+}

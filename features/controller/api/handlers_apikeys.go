@@ -360,7 +360,11 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.evictCachedAPIKeyByID(keyID)
+	keyHash := ""
+	if rec != nil {
+		keyHash = rec.Key
+	}
+	s.evictCachedAPIKeyByID(keyID, keyHash)
 
 	s.logger.Info("Deleted API key",
 		"id", logging.SanitizeLogValue(keyID),
@@ -429,10 +433,16 @@ func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxk
 	return nil, local, nil
 }
 
-// evictCachedAPIKeyByID drops every cache entry for the key with the given ID.
-func (s *Server) evictCachedAPIKeyByID(keyID string) {
+// evictCachedAPIKeyByID drops every cache entry for the key with the given ID and,
+// for a store-backed key (keyHash != ""), leaves a tombstone so a load that read the
+// record before the delete cannot re-cache it afterwards. Tombstone and eviction
+// happen under one hold of s.mu, the same lock cacheAPIKeyUnlessDeleted checks under.
+func (s *Server) evictCachedAPIKeyByID(keyID, keyHash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if keyHash != "" {
+		s.tombstoneAPIKeyLocked(keyHash, s.apiKeyNow())
+	}
 	for keyString, key := range s.apiKeys {
 		if key.ID == keyID {
 			delete(s.apiKeys, keyString)

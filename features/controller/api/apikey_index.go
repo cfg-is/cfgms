@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -89,47 +90,79 @@ func (ix *apiKeyIndex) remove(keyHash string) {
 	}
 }
 
-// attemptedWithin reports whether a refresh started less than d before now.
-func (ix *apiKeyIndex) attemptedWithin(now time.Time, d time.Duration) bool {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	return !ix.lastAttemptAt.IsZero() && now.Sub(ix.lastAttemptAt) < d
+// apiKeyIndexRefreshTimeout bounds one index scan. The scan runs detached from any
+// request (see refreshAPIKeyIndex), so this — not a caller — decides when it gives up.
+const apiKeyIndexRefreshTimeout = 30 * time.Second
+
+// refreshAPIKeyIndex rebuilds the index from one listing of every API-key record and
+// waits for the result. Concurrent callers share a single in-flight scan rather than
+// starting scans of their own.
+//
+// The scan runs on its own detached context with apiKeyIndexRefreshTimeout, never on
+// a caller's: a client that aborts the request which happened to start the scan must
+// not cancel it for everyone waiting on it. A caller whose own ctx ends stops waiting
+// (and gets ctx.Err()) while the scan carries on. A scan that ends in a context error
+// does not count as an attempt for apiKeyIndexMissRefreshFloor, so it cannot hold
+// off the next refresh.
+func (s *Server) refreshAPIKeyIndex(ctx context.Context) error {
+	_, err := s.refreshAPIKeyIndexIf(ctx, false)
+	return err
 }
 
-// refreshAPIKeyIndex rebuilds the index from one listing of every API-key record.
-// Concurrent callers share a single in-flight refresh (and its result) rather than
-// starting scans of their own.
-func (s *Server) refreshAPIKeyIndex(ctx context.Context) error {
+// refreshAPIKeyIndexIf is refreshAPIKeyIndex for the miss path when onlyIfDue is set:
+// it joins a scan already in flight, starts one only if none started within
+// apiKeyIndexMissRefreshFloor, and otherwise returns ran == false without touching
+// the store. The decision is taken under the index lock, so a burst of misses can
+// never start a second scan inside the floor.
+func (s *Server) refreshAPIKeyIndexIf(ctx context.Context, onlyIfDue bool) (bool, error) {
 	ix := s.apiKeyIdx
 	ix.mu.Lock()
-	if ix.inflight != nil {
-		wait := ix.inflight
+	done := ix.inflight
+	if done == nil && onlyIfDue && !ix.lastAttemptAt.IsZero() &&
+		s.apiKeyNow().Sub(ix.lastAttemptAt) < apiKeyIndexMissRefreshFloor {
 		ix.mu.Unlock()
-		select {
-		case <-wait:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		ix.mu.Lock()
-		err := ix.inflightErr
-		ix.mu.Unlock()
-		return err
+		return false, nil
 	}
-	done := make(chan struct{})
-	ix.inflight = done
-	ix.pendingPuts = make(map[string]apiKeyIndexEntry)
-	ix.pendingRemoves = make(map[string]struct{})
-	ix.lastAttemptAt = s.apiKeyNow()
+	if done == nil {
+		done = make(chan struct{})
+		ix.inflight = done
+		ix.pendingPuts = make(map[string]apiKeyIndexEntry)
+		ix.pendingRemoves = make(map[string]struct{})
+		prevAttempt := ix.lastAttemptAt
+		ix.lastAttemptAt = s.apiKeyNow()
+		s.apiKeyIndexWG.Add(1)
+		go s.runAPIKeyIndexScan(done, prevAttempt)
+	}
 	ix.mu.Unlock()
 
-	records, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return true, ctx.Err()
+	}
+	ix.mu.Lock()
+	err := ix.inflightErr
+	ix.mu.Unlock()
+	return true, err
+}
+
+// runAPIKeyIndexScan performs the shared scan started by refreshAPIKeyIndex.
+func (s *Server) runAPIKeyIndexScan(done chan struct{}, prevAttempt time.Time) {
+	defer s.apiKeyIndexWG.Done()
+	ix := s.apiKeyIdx
+
+	scanCtx, cancel := context.WithTimeout(context.Background(), apiKeyIndexRefreshTimeout)
+	defer cancel()
+	records, err := s.secretStore.ListSecrets(scanCtx, &secretsif.SecretFilter{
 		Metadata: map[string]string{
 			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
 		},
 	})
 
 	ix.mu.Lock()
-	if err == nil {
+	defer ix.mu.Unlock()
+	switch {
+	case err == nil:
 		byHash := make(map[string]apiKeyIndexEntry, len(records))
 		for _, rec := range records {
 			byHash[rec.Key] = apiKeyIndexEntry{TenantID: rec.TenantID, ID: rec.Metadata["id"]}
@@ -141,13 +174,20 @@ func (s *Server) refreshAPIKeyIndex(ctx context.Context) error {
 			delete(byHash, h)
 		}
 		ix.byHash = byHash
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		ix.lastAttemptAt = prevAttempt
 	}
 	ix.inflightErr = err
 	ix.inflight = nil
 	ix.pendingPuts, ix.pendingRemoves = nil, nil
 	close(done)
-	ix.mu.Unlock()
-	return err
+}
+
+// refreshing reports whether an index scan is in flight.
+func (ix *apiKeyIndex) refreshing() bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return ix.inflight != nil
 }
 
 // locateAPIKey returns the index entry for keyHash. On a miss it refreshes the index
@@ -156,11 +196,12 @@ func (s *Server) locateAPIKey(ctx context.Context, keyHash string) (apiKeyIndexE
 	if e, ok := s.apiKeyIdx.get(keyHash); ok {
 		return e, true, nil
 	}
-	if s.apiKeyIdx.attemptedWithin(s.apiKeyNow(), apiKeyIndexMissRefreshFloor) {
-		return apiKeyIndexEntry{}, false, nil
-	}
-	if err := s.refreshAPIKeyIndex(ctx); err != nil {
+	ran, err := s.refreshAPIKeyIndexIf(ctx, true)
+	if err != nil {
 		return apiKeyIndexEntry{}, false, err
+	}
+	if !ran {
+		return apiKeyIndexEntry{}, false, nil
 	}
 	e, ok := s.apiKeyIdx.get(keyHash)
 	return e, ok, nil
@@ -171,12 +212,47 @@ func (s *Server) locateAPIKeyByID(ctx context.Context, keyID string) (string, ap
 	if h, e, ok := s.apiKeyIdx.findByID(keyID); ok {
 		return h, e, true, nil
 	}
-	if s.apiKeyIdx.attemptedWithin(s.apiKeyNow(), apiKeyIndexMissRefreshFloor) {
-		return "", apiKeyIndexEntry{}, false, nil
-	}
-	if err := s.refreshAPIKeyIndex(ctx); err != nil {
+	ran, err := s.refreshAPIKeyIndexIf(ctx, true)
+	if err != nil {
 		return "", apiKeyIndexEntry{}, false, err
+	}
+	if !ran {
+		return "", apiKeyIndexEntry{}, false, nil
 	}
 	h, e, ok := s.apiKeyIdx.findByID(keyID)
 	return h, e, ok, nil
+}
+
+// apiKeyTombstoneTTL is how long a key deleted on this node stays tombstoned. It must
+// be at least apiKeyRevalidateInterval: a load that read the record just before the
+// delete completes long before then, and after it any cached copy would be dropped by
+// re-validation anyway.
+const apiKeyTombstoneTTL = 2 * apiKeyRevalidateInterval
+
+// tombstoneAPIKeyLocked records that the key with this hash was deleted at now and
+// prunes tombstones older than apiKeyTombstoneTTL. The caller holds s.mu.
+func (s *Server) tombstoneAPIKeyLocked(keyHash string, now time.Time) {
+	if s.apiKeyTombstones == nil {
+		s.apiKeyTombstones = make(map[string]time.Time)
+	}
+	for h, at := range s.apiKeyTombstones {
+		if now.Sub(at) >= apiKeyTombstoneTTL {
+			delete(s.apiKeyTombstones, h)
+		}
+	}
+	s.apiKeyTombstones[keyHash] = now
+}
+
+// cacheAPIKeyUnlessDeleted caches key under apiKey unless the key was deleted on this
+// node within apiKeyTombstoneTTL, and reports whether it cached it. It closes the
+// race where a load reads the record, a same-node delete then evicts the cache, and
+// the load would otherwise insert the deleted key for a full revalidation interval.
+func (s *Server) cacheAPIKeyUnlessDeleted(apiKey, keyHash string, key *APIKey) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at, dead := s.apiKeyTombstones[keyHash]; dead && s.apiKeyNow().Sub(at) < apiKeyTombstoneTTL {
+		return false
+	}
+	s.apiKeys[apiKey] = key
+	return true
 }

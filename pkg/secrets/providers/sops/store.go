@@ -568,6 +568,13 @@ func secretRefSplits(ref string) [][2]string {
 	return out
 }
 
+// Shadowing assumption: leftmost-first means a record under tenant "a" named "b/<k>"
+// would shadow tenant "a/b" key "<k>". That cannot arise on the flatfile backend, the
+// one SOPS stores on by default, because flatfile rejects "/" in a config name (pinned
+// by TestFlatfileBackend_RejectsSlashInSecretName). On a backend that accepts "/" in
+// names, a caller that knows the tenant should use TenantSecretAccessor, which never
+// resolves a combined reference — the API-key paths do.
+//
 // resolveSecretRef finds the (tenant, key) reading of ref whose record exists,
 // trying split points left to right — so every reference that resolved under the
 // former first-separator split resolves identically, and "tenant-a/child/<key>"
@@ -731,13 +738,13 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 func (s *SOPSSecretStore) decodeSecretEntry(configEntry *cfgconfig.ConfigEntry, tenantID, key string) (*secretsif.Secret, error) {
 	plaintext, err := s.decrypt(configEntry.Data, tenantID, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt secret: %w", err)
+		return nil, fmt.Errorf("failed to decrypt secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
 	}
 
 	// Parse the authenticated plaintext only after decryption succeeds.
 	var secret secretsif.Secret
 	if err := json.Unmarshal(plaintext, &secret); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
 	}
 	// The encrypted payload's own Version field is stamped once at write time and
 	// never updated on subsequent writes (writeSecretEntry always marshals
@@ -749,7 +756,7 @@ func (s *SOPSSecretStore) decodeSecretEntry(configEntry *cfgconfig.ConfigEntry, 
 
 	// Check expiration
 	if s.isExpired(&secret) {
-		return nil, fmt.Errorf("secret expired: %s", key)
+		return nil, fmt.Errorf("secret expired: %s: %w", key, secretsif.ErrSecretExpired)
 	}
 
 	return &secret, nil

@@ -16,6 +16,15 @@ var ErrTenantRequired = errors.New("TenantID is required for multi-tenant secret
 // ErrSecretNotFound is returned when a requested secret key does not exist in the store.
 var ErrSecretNotFound = errors.New("secret not found")
 
+// ErrSecretExpired is returned by a direct read of a secret whose expiry has passed.
+// The record exists but must not be used; it is not a storage fault (Issue #4574).
+var ErrSecretExpired = errors.New("secret expired")
+
+// ErrSecretUndecryptable is returned by a direct read of a record that exists but
+// cannot be decrypted or parsed — tampered, corrupt, or written under another key.
+// Retrying will not help; it is not a storage fault (Issue #4574).
+var ErrSecretUndecryptable = errors.New("secret cannot be decrypted")
+
 // SecretStore defines the interface for storing and retrieving secrets
 // All implementations MUST encrypt secrets at rest - no cleartext storage allowed
 type SecretStore interface {
