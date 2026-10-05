@@ -43,7 +43,7 @@ func triggerTenantFixtureWithStore(t *testing.T) (*Server, *mux.Router, *trigger
 	h, _ := newTestWorkflowHandler(t)
 	h.triggerAPI = trigger.NewAPIHandler(mgr)
 	h.triggerManager = mgr
-	h.SetTenantResolution(server.rootTenantID, server.authorizeSelectedTenant)
+	h.SetTenantResolution(server.rootTenantID, server.selectAuthorizedTenant)
 
 	router := mux.NewRouter()
 	h.RegisterTriggerRoutes(router.PathPrefix("/triggers").Subrouter())
