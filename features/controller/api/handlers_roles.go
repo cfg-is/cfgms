@@ -88,6 +88,11 @@ func (s *Server) resolveRoleTenant(w http.ResponseWriter, r *http.Request) (stri
 			"tenant is required: a global admin must pass ?tenant=<id> (role configs are stored per tenant)", "TENANT_REQUIRED")
 		return "", false
 	}
+	// A role config injects resources into every matching steward in the tenant,
+	// so selecting a client tenant needs a crossing (Issue #4571).
+	if !s.authorizeSelectedTenant(w, r, tenantID) {
+		return "", false
+	}
 	return tenantID, true
 }
 

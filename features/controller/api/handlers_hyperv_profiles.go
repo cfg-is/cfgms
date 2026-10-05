@@ -104,6 +104,10 @@ func (s *Server) resolveHypervProfileTenant(w http.ResponseWriter, r *http.Reque
 				"tenant is required: a global admin must pass ?tenant=<id> (hyperv profiles are stored per tenant)", "TENANT_REQUIRED")
 			return "", false
 		}
+		// Profiles drive VM provisioning in the tenant (Issue #4571).
+		if !s.authorizeSelectedTenant(w, r, tenantID) {
+			return "", false
+		}
 		return tenantID, true
 	default:
 		s.writeErrorResponse(w, http.StatusForbidden, "Tenant scope required", "FORBIDDEN")

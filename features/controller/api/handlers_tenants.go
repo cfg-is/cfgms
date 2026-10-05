@@ -36,6 +36,35 @@ func (s *Server) rootTenantID(ctx context.Context) string {
 	return s.tenantManager.RootTenantID(ctx)
 }
 
+// authorizeSelectedTenant applies ADR-025's tenant-crossing boundary to a tenant
+// the caller selected in the request (query parameter, body field or a stored
+// record's tenant) rather than through a tenant path variable the boundary
+// middleware sees (Issue #4571). For a caller subject to the boundary (a
+// root-scoped principal) the tenant must be the root tenant itself or one covered
+// by an active crossing: otherwise the crossing challenge is written when a
+// crossing would admit it, 404 when not, and false returned. The decision is
+// evaluated and audited through authorizeTenantAccess. Other callers, and an
+// empty tenant (handlers reject or scope that themselves), pass unchanged.
+func (s *Server) authorizeSelectedTenant(w http.ResponseWriter, r *http.Request, tenantID string) bool {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if tenantID == "" || !subjectToTenantCrossingBoundary(principal) {
+		return true
+	}
+	if s.tenantManager == nil {
+		s.writeTenantCrossingChallenge(w, tenantID)
+		return false
+	}
+	switch s.authorizeTenantAccess(r.Context(), principal, tenantID) {
+	case tenantAuthAllowed:
+		return true
+	case tenantAuthNeedsCrossing:
+		s.writeTenantCrossingChallenge(w, tenantID)
+	default:
+		s.writeErrorResponse(w, http.StatusNotFound, "Tenant not found", "TENANT_NOT_FOUND")
+	}
+	return false
+}
+
 // tenantAuthDecision explains why authorizeTenantAccess denied a caller, so handlers
 // can choose the right HTTP response: tenantAuthDenied means 404 (prevents existence
 // disclosure for an ordinary out-of-subtree tenant); tenantAuthNeedsCrossing means a

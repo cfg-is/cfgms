@@ -60,6 +60,9 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+		return
+	}
 
 	if err := s.ipTrustStore.AddTrustedRange(r.Context(), req.TenantID, req.CIDR, req.PreSeeded); err != nil {
 		s.logger.Error("Failed to add IP trust range",
@@ -104,6 +107,9 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+		return
+	}
 
 	if err := s.ipTrustStore.RevokeTrustedRange(r.Context(), tenantID, cidr); err != nil {
 		if err == business.ErrIPTrustEntryNotFound {
@@ -144,6 +150,9 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 		tenantID = r.URL.Query().Get("tenant_id")
 		if tenantID == "" {
 			http.Error(w, "tenant_id query parameter is required for unscoped callers", http.StatusBadRequest)
+			return
+		}
+		if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
 			return
 		}
 	case scope.IsTenant() && scope.Path() != "":

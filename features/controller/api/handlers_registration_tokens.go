@@ -89,6 +89,9 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+		return
+	}
 
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
@@ -151,6 +154,9 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 	switch {
 	case scope.IsRoot():
 		tenantID = r.URL.Query().Get("tenant_id")
+		if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+			return
+		}
 	case scope.IsTenant() && scope.Path() != "":
 		tenantID = scope.Path()
 	default:
@@ -166,6 +172,13 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// A root-scoped list without tenant_id spans every tenant: keep only the root
+	// tenant and tenants covered by an active crossing (Issue #4571), so a
+	// boundary-subject caller cannot enumerate client tenants' tokens.
+	if tenantID == "" {
+		tokens = s.filterTokensToCrossedTenants(r, tokens)
+	}
+
 	// Convert to redacted response format — list callers never receive the full secret.
 	resp := TokenListResponse{
 		Tokens: make([]TokenResponse, 0, len(tokens)),
@@ -179,6 +192,30 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.logger.Error("Failed to encode tokens response", "error", err)
 	}
+}
+
+// filterTokensToCrossedTenants keeps the tokens a caller subject to the ADR-025
+// crossing boundary may see: the root tenant's, and those of tenants covered by
+// an active crossing. Other callers get tokens unchanged.
+func (s *Server) filterTokensToCrossedTenants(r *http.Request, tokens []*registration.Token) []*registration.Token {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	if !subjectToTenantCrossingBoundary(principal) {
+		return tokens
+	}
+	visible := make(map[string]bool)
+	out := tokens[:0:0]
+	for _, token := range tokens {
+		allowed, decided := visible[token.TenantID]
+		if !decided {
+			allowed = token.TenantID != "" && s.tenantManager != nil &&
+				s.authorizeTenantAccess(r.Context(), principal, token.TenantID) == tenantAuthAllowed
+			visible[token.TenantID] = allowed
+		}
+		if allowed {
+			out = append(out, token)
+		}
+	}
+	return out
 }
 
 // handleGetRegistrationToken handles GET /api/v1/registration/tokens/{token}
@@ -221,6 +258,9 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !s.isAuthorizedForTenant(scope, token.TenantID, "GET /api/v1/registration/tokens/{token}") {
 		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
 		return
 	}
 
@@ -275,6 +315,9 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !s.isAuthorizedForTenant(scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}") {
 		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
 		return
 	}
 
@@ -344,6 +387,9 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Token not found", http.StatusNotFound)
 		return
 	}
+	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+		return
+	}
 
 	// Revoke the token
 	token.Revoke()
@@ -393,6 +439,9 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/registration/tokens/{tenant_id}/rotate") {
 		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		return
+	}
+	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
 		return
 	}
 
