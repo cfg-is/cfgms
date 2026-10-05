@@ -91,10 +91,13 @@ type Manager struct {
 	// unconditional-true short-circuit).
 	leaseManager *lease.Manager
 
-	// commandTerm caches the lease token a non-holder read for CommandTerm.
-	commandTermMu sync.Mutex
-	commandTerm   uint64
-	commandTermAt time.Time
+	// commandTerm caches the lease token a non-holder read for CommandTerm (0
+	// after a failed read), valid for commandTermTTL from commandTermAt.
+	commandTermMu         sync.Mutex
+	commandTerm           uint64
+	commandTermAt         time.Time
+	commandTermTTL        time.Duration
+	commandTermRefreshing bool
 	// leaseRenewalInterval is the interval Start()'s background acquisition loop
 	// ticks at. Set alongside leaseManager by SetLeaseStore so the loop renews
 	// often enough relative to the lease TTL to keep leaseManager's derived
@@ -608,6 +611,12 @@ const LeaseTermFloor uint64 = 1 << 32
 // fail closed, never open.
 const commandTermCacheTTL = 2 * time.Second
 
+// commandTermFailureTTL is how long a failed lease read (or a vacant lease) is
+// cached as 0, so a hung or failing lease store costs one read per interval
+// rather than one per published command. A command stamped 0 is rejected anyway,
+// so caching the failure changes nothing about correctness.
+const commandTermFailureTTL = 500 * time.Millisecond
+
 // CommandTerm returns the fencing token to stamp on a controller-originated
 // command (ADR-031 Decision 5). Every controller node serves requests and
 // publishes commands (ADR-031 Decision 1), not only the lease holder, so the
@@ -634,20 +643,30 @@ func (m *Manager) CommandTerm() uint64 {
 		return 0
 	}
 
+	// The lease read runs outside the lock: one caller refreshes while the others
+	// keep using the cached value (a stale value is lower than the current
+	// token, so it fails closed), and nobody queues behind a slow store.
 	m.commandTermMu.Lock()
-	defer m.commandTermMu.Unlock()
-	if m.commandTerm != 0 && time.Since(m.commandTermAt) < commandTermCacheTTL {
-		return m.commandTerm
+	if time.Since(m.commandTermAt) < m.commandTermTTL || m.commandTermRefreshing {
+		term := m.commandTerm
+		m.commandTermMu.Unlock()
+		return term
+	}
+	m.commandTermRefreshing = true
+	m.commandTermMu.Unlock()
+
+	term, ttl := uint64(0), commandTermFailureTTL
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, token, _, ok, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
+	cancel()
+	if err == nil && ok && token != 0 {
+		term, ttl = LeaseTermFloor+token, commandTermCacheTTL
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, token, _, ok, err := leaseManager.CurrentHolder(ctx, clusterLeadershipLeaseName)
-	if err != nil || !ok || token == 0 {
-		return 0
-	}
-	m.commandTerm, m.commandTermAt = LeaseTermFloor+token, time.Now()
-	return m.commandTerm
+	m.commandTermMu.Lock()
+	m.commandTerm, m.commandTermAt, m.commandTermTTL, m.commandTermRefreshing = term, time.Now(), ttl, false
+	m.commandTermMu.Unlock()
+	return term
 }
 
 // CommandTermSource adapts a Manager to the GetTerm() term-source interface the

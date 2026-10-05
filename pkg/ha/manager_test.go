@@ -5,6 +5,7 @@ package ha
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -1406,4 +1407,71 @@ func TestManager_CommandTerm_SingleServerIsZero(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, manager.CommandTerm())
 	assert.Zero(t, CommandTermSource{}.GetTerm())
+}
+
+// TestManager_CommandTerm_ExHolderStampsNewToken guards the stale-cache claim on
+// Issue #4566: after a leadership change the former holder stamps the new lease
+// token — higher than its own old term — not a stale one.
+func TestManager_CommandTerm_ExHolderStampsNewToken(t *testing.T) {
+	store := newTestLeaseStore(t)
+	managerA := newLeaseBackedClusterManager(t, "cmdterm-change-a", store)
+	managerB := newLeaseBackedClusterManager(t, "cmdterm-change-b", store)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	require.NoError(t, managerA.Start(ctx))
+	require.Eventually(t, managerA.HasLeadership, 5*time.Second, 5*time.Millisecond, "A takes the lease first")
+	oldTerm := managerA.GetTerm()
+	require.NotZero(t, oldTerm)
+
+	// A stops renewing; B starts and takes the lease once it expires.
+	require.NoError(t, managerA.Stop(context.Background()))
+	require.NoError(t, managerB.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, managerB.Stop(context.Background())) })
+	require.Eventually(t, managerB.HasLeadership, 10*time.Second, 10*time.Millisecond, "B takes over the lease")
+	newTerm := managerB.GetTerm()
+	require.Greater(t, newTerm, oldTerm, "a new holder gets a strictly higher token")
+
+	assert.Zero(t, managerA.GetTerm(), "the former holder no longer has local authority")
+	assert.Eventually(t, func() bool { return managerA.CommandTerm() == newTerm },
+		5*time.Second, 50*time.Millisecond, "the former holder stamps the new token once its cache refreshes")
+}
+
+// erroringLeaseStore is a real business.LeaseStore whose reads fail on demand, for
+// the unreadable-lease path.
+type erroringLeaseStore struct {
+	business.LeaseStore
+	failReads atomic.Bool
+}
+
+func (s *erroringLeaseStore) GetLease(ctx context.Context, name string) (*business.LeaseState, error) {
+	if s.failReads.Load() {
+		return nil, errors.New("lease store unavailable")
+	}
+	return s.LeaseStore.GetLease(ctx, name)
+}
+
+// TestManager_CommandTerm_UnreadableLeaseIsZero: a non-holder that cannot read the
+// lease stamps 0 (fails closed), and recovers once the store answers again.
+func TestManager_CommandTerm_UnreadableLeaseIsZero(t *testing.T) {
+	inner := newTestLeaseStore(t)
+	store := &erroringLeaseStore{LeaseStore: inner}
+	follower := newLeaseBackedClusterManager(t, "cmdterm-unreadable", store)
+
+	// Another node holds the lease, so this manager is a non-holder.
+	held, err := inner.AcquireOrRenew(context.Background(), clusterLeadershipLeaseName, "other-node", time.Hour)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, follower.Start(ctx))
+	t.Cleanup(func() { assert.NoError(t, follower.Stop(context.Background())) })
+	require.False(t, follower.HasLeadership())
+
+	store.failReads.Store(true)
+	assert.Zero(t, follower.CommandTerm(), "an unreadable lease stamps 0")
+
+	store.failReads.Store(false)
+	assert.Eventually(t, func() bool { return follower.CommandTerm() == LeaseTermFloor+held.Token },
+		3*time.Second, 50*time.Millisecond, "once readable again the current token is stamped")
 }
