@@ -514,7 +514,12 @@ func (h *WorkflowHandler) handleExecuteWorkflow(w http.ResponseWriter, r *http.R
 	// had no tenant and every tenant-scoped step refused to run. Run under the
 	// tenant the workflow was resolved in — the root tenant, or one the caller
 	// was authorized to select (Issue #4576).
-	execCtx := context.WithValue(r.Context(), ctxkeys.TenantID, store.TenantID())
+	// ExecuteWorkflow is asynchronous and derives the execution's context from
+	// this one, and the server cancels the request context as soon as the handler
+	// returns — so the execution keeps the request's values (tenant, identity)
+	// but not its cancellation, or every execution that outlives its request is
+	// cancelled (Issue #4658).
+	execCtx := context.WithValue(context.WithoutCancel(r.Context()), ctxkeys.TenantID, store.TenantID())
 
 	nameForLog := logging.SanitizeLogValue(name)
 	execution, err := h.engine.ExecuteWorkflow(execCtx, vw.Workflow, req.Variables)

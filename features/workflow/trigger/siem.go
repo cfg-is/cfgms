@@ -718,11 +718,9 @@ func (sp *SIEMProcessor) fireTrigger(ctx context.Context, triggerID string, trig
 		// who owns this trigger is who debug_engine.StartDebugSession must match
 		// against later (Issue #4326).
 		execCtx := context.WithValue(context.Background(), ctxkeys.TenantID, trigger.TenantID)
-		if trigger.Timeout > 0 {
-			var cancel context.CancelFunc
-			execCtx, cancel = context.WithTimeout(execCtx, trigger.Timeout)
-			defer cancel()
-		}
+		// trigger.Timeout is applied by the WorkflowTrigger as the execution's own
+		// timeout: a context timeout here, cancelled when this goroutine returns,
+		// ended the asynchronous execution almost as soon as it started (Issue #4658).
 
 		execution, err := sp.workflowTrigger.TriggerWorkflow(execCtx, trigger, triggerData)
 		if err != nil {
