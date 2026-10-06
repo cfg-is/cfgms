@@ -8,12 +8,15 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 )
 
@@ -144,4 +147,80 @@ func TestMarshalTriggerConfig_NoCredentialPersisted(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(payload), marker, "no credential value may be persisted in the trigger config")
 	assert.Contains(t, string(payload), string(WebhookAuthBearer), "the non-secret auth type is persisted")
+}
+
+// TestNestedTenantTriggerCredential_RestoreAndDelete guards Issue #4641 for a
+// hierarchical tenant ID ("root/msp-a"): the credential of an authenticated
+// webhook trigger is recovered after a restart — the trigger fires — and is
+// removed when the trigger is deleted. The combined "<tenant>/<ref>" key the
+// plain SecretStore API takes is ambiguous for such a tenant; the manager
+// addresses the secret by (tenant, ref) through secretsif.TenantSecretAccessor.
+func TestNestedTenantTriggerCredential_RestoreAndDelete(t *testing.T) {
+	const tenant = "root/msp-a"
+	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "triggers.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sm.Close() })
+	triggerStore := sm.GetTriggerStore()
+	inner := newTestSecretStore(t)
+	accessor, ok := inner.(secretsif.TenantSecretAccessor)
+	require.True(t, ok, "the SOPS store must address secrets by tenant")
+	secrets := &countingTenantSecretStore{SecretStore: inner, accessor: accessor}
+
+	token := make([]byte, 16)
+	_, err = rand.Read(token)
+	require.NoError(t, err)
+	bearer := hex.EncodeToString(token)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenant)
+
+	first := NewControllerTriggerManager(nil, NewTestWorkflowTrigger())
+	first.SetPersistence(triggerStore, secrets)
+	require.NoError(t, first.Start(context.Background()))
+	require.NoError(t, first.CreateTrigger(ctx, &Trigger{
+		ID: "msp-hook", Name: "msp-hook", Type: TriggerTypeWebhook, Status: TriggerStatusActive, WorkflowName: "deploy",
+		Webhook: &WebhookConfig{Path: "/msp-hook", Authentication: &WebhookAuth{Type: WebhookAuthBearer, BearerToken: bearer}},
+	}))
+	require.NoError(t, first.Stop(context.Background()))
+
+	workflows := NewTestWorkflowTrigger()
+	restarted := NewControllerTriggerManager(nil, workflows)
+	restarted.SetPersistence(triggerStore, secrets)
+	require.NoError(t, restarted.Start(context.Background()))
+	t.Cleanup(func() { _ = restarted.Stop(context.Background()) })
+
+	reloaded, err := restarted.GetTrigger(ctx, "msp-hook")
+	require.NoError(t, err, "the nested tenant's trigger must be reloaded with its credential")
+	assert.Equal(t, TriggerStatusActive, reloaded.Status)
+	_, err = restarted.webhookHandler.HandleWebhook(ctx, "msp-hook", []byte(`{}`), map[string]string{"Authorization": "Bearer " + bearer})
+	require.NoError(t, err, "the restored trigger must accept its credential")
+	require.Eventually(t, func() bool { return len(workflows.GetExecutions()) == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	ref := triggerCredentialRef("msp-hook", "bearer")
+	_, err = accessor.GetTenantSecret(context.Background(), tenant, ref)
+	require.NoError(t, err)
+	require.NoError(t, restarted.DeleteTrigger(ctx, "msp-hook"))
+	_, err = accessor.GetTenantSecret(context.Background(), tenant, ref)
+	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound, "deleting the trigger must remove its credential")
+
+	assert.Positive(t, secrets.gets.Load(), "credentials must be read by (tenant, ref)")
+	assert.Positive(t, secrets.deletes.Load(), "credentials must be deleted by (tenant, ref)")
+}
+
+// countingTenantSecretStore is the real SOPS store, counting the tenant-explicit
+// calls so the test pins that the manager addresses credentials by (tenant, ref)
+// rather than through the combined key.
+type countingTenantSecretStore struct {
+	secretsif.SecretStore
+	accessor secretsif.TenantSecretAccessor
+	gets     atomic.Int64
+	deletes  atomic.Int64
+}
+
+func (s *countingTenantSecretStore) GetTenantSecret(ctx context.Context, tenantID, key string) (*secretsif.Secret, error) {
+	s.gets.Add(1)
+	return s.accessor.GetTenantSecret(ctx, tenantID, key)
+}
+
+func (s *countingTenantSecretStore) DeleteTenantSecret(ctx context.Context, tenantID, key string) error {
+	s.deletes.Add(1)
+	return s.accessor.DeleteTenantSecret(ctx, tenantID, key)
 }
