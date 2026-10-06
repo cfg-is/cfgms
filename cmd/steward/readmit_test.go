@@ -315,6 +315,47 @@ func TestRunSteward_RejectedReadmissionKeepsAsking(t *testing.T) {
 	assert.GreaterOrEqual(t, attempts.Load(), int32(2), "a rejected steward keeps asking")
 }
 
+// TestRunSteward_PendingReadmissionPollsShortly guards Issue #4669: while a
+// re-admission is queued for operator approval the connect loop checks again at
+// the short fixed poll interval — not the exponential backoff, whose first step
+// alone (5s) exceeds this test's budget — and stops once the approval lands.
+func TestRunSteward_PendingReadmissionPollsShortly(t *testing.T) {
+	t.Setenv("CFGMS_LOG_DIR", t.TempDir())
+	saved := ControllerURL
+	ControllerURL = "https://ctrl.test:4433"
+	defer func() { ControllerURL = saved }()
+	prevPoll := pendingReadmissionPoll
+	pendingReadmissionPoll = 20 * time.Millisecond
+	defer func() { pendingReadmissionPoll = prevPoll }()
+
+	var attempts atomic.Int32
+	pending := connectFuncT(func(context.Context, string, string, TrustSource, string, *identity.FileKeyStore, bool, logging.Logger) (*client.TransportClient, error) {
+		attempts.Add(1)
+		return nil, &registration.RefreshPendingError{PendingID: "pending-1"}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, runStewardInternal(ctx, "tok_test_pending", "", "", pending))
+	assert.GreaterOrEqual(t, attempts.Load(), int32(5),
+		"a pending re-admission is re-checked at the short poll interval, not after the exponential backoff")
+}
+
+// TestPendingReadmissionWait_Jittered guards Issue #4669: each pending poll is
+// jittered within ±20% of the interval, so stewards re-admitting together spread
+// their checks instead of polling in lockstep.
+func TestPendingReadmissionWait_Jittered(t *testing.T) {
+	const poll = 10 * time.Second
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 200; i++ {
+		w := pendingReadmissionWait(poll)
+		require.GreaterOrEqual(t, w, poll*4/5)
+		require.Less(t, w, poll*6/5)
+		seen[w] = true
+	}
+	assert.Greater(t, len(seen), 1, "waits must vary")
+}
+
 // TestRegisterAndConnect_UnreachableForBudgetReadmits guards Issue #4532: a stored
 // identity whose controller stays unreachable for the whole connect budget, while
 // the controller's HTTPS side answers, leads to re-admission with the device key
