@@ -76,6 +76,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/controlplane/internaldelivery"
 	grpcCP "github.com/cfgis/cfgms/pkg/controlplane/providers/grpc" // gRPC control plane provider
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	dataplaneInterfaces "github.com/cfgis/cfgms/pkg/dataplane/interfaces"
 	dataplaneGRPC "github.com/cfgis/cfgms/pkg/dataplane/providers/grpc" // Register gRPC data plane provider; exported for ServerOptions
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
@@ -2459,18 +2460,18 @@ func initializeWorkflowHandler(
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor)
 
 	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
-	// Triggers resolve workflows by name from the default tenant store.
+	// Triggers resolve workflows by name from their own tenant's store.
 	adapter := &workflowEngineAdapter{
 		engine:      workflowEngine,
 		configStore: configStore,
 	}
 
-	storageProvider, err := interfaces.GetStorageProvider("flatfile")
-	if err != nil {
-		logger.Warn("Failed to get flatfile storage provider for trigger manager", "error", err)
-		return nil, nil
-	}
-	triggerMgr := workflowtrigger.NewControllerTriggerManager(storageProvider, adapter)
+	// Triggers persist in the storage manager's trigger store, their credentials
+	// in the controller's secret store (Issue #4641). The flatfile provider the
+	// manager was built from implements no trigger store, which left triggers in
+	// memory only: every trigger was lost on restart.
+	triggerMgr := workflowtrigger.NewControllerTriggerManager(nil, adapter)
+	triggerMgr.SetPersistence(storageManager.GetTriggerStore(), secrets)
 
 	handler := api.NewWorkflowHandler(workflowEngine, configStore, triggerMgr, logger)
 
@@ -2485,7 +2486,11 @@ type workflowEngineAdapter struct {
 }
 
 func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workflowtrigger.Trigger, data map[string]interface{}) (*workflow.WorkflowExecution, error) {
-	// Resolve workflow from storage using a system-level (empty) tenant scope.
+	// The trigger manager always records the tenant a trigger was created in
+	// (never an empty one); its workflow resolves in that tenant's store.
+	if trig.TenantID == "" {
+		return nil, fmt.Errorf("trigger %q has no tenant", trig.ID)
+	}
 	store := workflow.NewWorkflowStore(a.configStore, trig.TenantID)
 	vw, err := store.GetLatestWorkflow(ctx, trig.WorkflowName)
 	if err != nil {
@@ -2501,7 +2506,13 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workf
 		vars[k] = v
 	}
 
-	exec, err := a.engine.ExecuteWorkflow(ctx, vw.Workflow, vars)
+	// Run under the trigger's tenant: the engine takes the execution's
+	// authenticated tenant from ctxkeys.TenantID and tenant-scoped steps act on
+	// exactly that tenant. Scheduled and webhook triggers fire without any
+	// caller context, so without this every tenant-scoped step in a triggered
+	// workflow refused to run (Issue #4640).
+	execCtx := context.WithValue(ctx, ctxkeys.TenantID, trig.TenantID)
+	exec, err := a.engine.ExecuteWorkflow(execCtx, vw.Workflow, vars)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
 	}

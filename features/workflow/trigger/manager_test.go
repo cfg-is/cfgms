@@ -4,6 +4,8 @@ package trigger
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -35,7 +37,7 @@ type triggerHarness struct {
 	siemProcessor   *SIEMProcessor
 	workflowTrigger *TestWorkflowTrigger
 	triggerStore    *inMemoryTriggerStore
-	secretStore     *inMemorySecretStore
+	secretStore     secretsif.SecretStore
 }
 
 // newTriggerHarness builds a fully wired trigger manager from real components.
@@ -44,7 +46,7 @@ func newTriggerHarness(t *testing.T) *triggerHarness {
 
 	storage := NewTestStorageProvider()
 	workflowTrigger := NewTestWorkflowTrigger()
-	secretStore := newInMemorySecretStore()
+	secretStore := newTestSecretStore(t)
 
 	// Components need the manager and the manager needs the components, so the
 	// manager is constructed first and the components are attached afterwards
@@ -1032,94 +1034,35 @@ func (s *inMemoryTriggerStore) ListTriggers(_ context.Context, filter business.T
 
 func (s *inMemoryTriggerStore) Close() error { return nil }
 
-// inMemorySecretStore is a thread-safe in-memory SecretStore for testing.
-type inMemorySecretStore struct {
-	mu      sync.RWMutex
-	secrets map[string]string // key → plaintext value
+// newTestSecretStore returns a real SOPS secret store in a temp directory with a
+// generated key. Trigger credentials are read and deleted by "<tenant>/<ref>"
+// exactly as production stores address them (Issue #4641); an in-memory stand-in
+// that accepted bare refs hid that the manager never addressed them that way.
+func newTestSecretStore(t *testing.T) secretsif.SecretStore {
+	t.Helper()
+	base := t.TempDir()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	keyPath := filepath.Join(base, "secrets.key")
+	require.NoError(t, os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(key)), 0o600))
+	store, err := secretsif.CreateSecretStoreFromConfig("sops", map[string]interface{}{
+		"storage_provider": "flatfile",
+		"storage_config":   map[string]interface{}{"root": filepath.Join(base, "data")},
+		"cache_enabled":    false,
+		"key_file":         keyPath,
+	})
+	require.NoError(t, err, "create SOPS test store")
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
-
-func newInMemorySecretStore() *inMemorySecretStore {
-	return &inMemorySecretStore{secrets: make(map[string]string)}
-}
-
-func (s *inMemorySecretStore) StoreSecret(_ context.Context, req *secretsif.SecretRequest) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.secrets[req.Key] = req.Value
-	return nil
-}
-
-func (s *inMemorySecretStore) GetSecret(_ context.Context, key string) (*secretsif.Secret, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.secrets[key]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
-	}
-	return &secretsif.Secret{Key: key, Value: v}, nil
-}
-
-func (s *inMemorySecretStore) CompareAndSwapSecret(_ context.Context, _ string, _ int, req *secretsif.SecretRequest) (int, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.secrets[req.Key] = req.Value
-	return 1, true, nil
-}
-
-func (s *inMemorySecretStore) DeleteSecret(_ context.Context, key string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.secrets[key]; !ok {
-		return fmt.Errorf("%w: %s", secretsif.ErrSecretNotFound, key)
-	}
-	delete(s.secrets, key)
-	return nil
-}
-
-func (s *inMemorySecretStore) ListSecrets(_ context.Context, _ *secretsif.SecretFilter) ([]*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecrets(_ context.Context, keys []string) (map[string]*secretsif.Secret, error) {
-	result := make(map[string]*secretsif.Secret)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, k := range keys {
-		if v, ok := s.secrets[k]; ok {
-			result[k] = &secretsif.Secret{Key: k, Value: v}
-		}
-	}
-	return result, nil
-}
-func (s *inMemorySecretStore) StoreSecrets(ctx context.Context, secrets map[string]*secretsif.SecretRequest) error {
-	for _, req := range secrets {
-		if err := s.StoreSecret(ctx, req); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (s *inMemorySecretStore) GetSecretVersion(_ context.Context, _ string, _ int) (*secretsif.Secret, error) {
-	return nil, errors.New("versioning not supported")
-}
-func (s *inMemorySecretStore) ListSecretVersions(_ context.Context, _ string) ([]*secretsif.SecretVersion, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) GetSecretMetadata(_ context.Context, _ string) (*secretsif.SecretMetadata, error) {
-	return nil, nil
-}
-func (s *inMemorySecretStore) UpdateSecretMetadata(_ context.Context, _ string, _ map[string]string) error {
-	return nil
-}
-func (s *inMemorySecretStore) RotateSecret(_ context.Context, _ string, _ string) error { return nil }
-func (s *inMemorySecretStore) ExpireSecret(_ context.Context, _ string) error           { return nil }
-func (s *inMemorySecretStore) HealthCheck(_ context.Context) error                      { return nil }
-func (s *inMemorySecretStore) Close() error                                             { return nil }
 
 // newManagerWithPersistence creates a TriggerManagerImpl wired to real in-memory
 // TriggerStore and SecretStore. Used by persistence-focused tests.
-func newManagerWithPersistence(tenantID string) (*TriggerManagerImpl, *inMemoryTriggerStore, *inMemorySecretStore) {
+func newManagerWithPersistence(t *testing.T, tenantID string) (*TriggerManagerImpl, *inMemoryTriggerStore, secretsif.SecretStore) {
+	t.Helper()
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	mgr := &TriggerManagerImpl{
 		logger:       logging.ForModule("workflow.trigger.manager.test"),
 		triggerStore: ts,
@@ -1142,7 +1085,7 @@ func contextWithTenant(tenantID string) context.Context {
 // ---------------------------------------------------------------------------
 
 func TestTriggerManagerSaveRedactsAllCredentials(t *testing.T) {
-	mgr, ts, _ := newManagerWithPersistence("tenant-save")
+	mgr, ts, _ := newManagerWithPersistence(t, "tenant-save")
 	ctx := contextWithTenant("tenant-save")
 
 	trigger := &Trigger{
@@ -1200,7 +1143,7 @@ func TestTriggerManagerPersistenceRoundTrip(t *testing.T) {
 	// Save a trigger with full credentials, then simulate manager restart
 	// by creating a fresh manager pointing at the same stores.
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 
 	ctx := contextWithTenant("tenant-rt")
 
@@ -1264,7 +1207,7 @@ func TestTriggerManagerPersistenceRoundTrip(t *testing.T) {
 func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 	// Two managers sharing one secret store but different tenants.
 	// A secret written by tenant A must not be readable via tenant B's key namespace.
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	tsA := newInMemoryTriggerStore()
 	tsB := newInMemoryTriggerStore()
 
@@ -1302,14 +1245,14 @@ func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 
 	// The secret is stored under the tenant-A key; tenant-B's key for the same
 	// trigger ID and field must not exist.
-	keyA := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-A", "t-iso")
-	keyB := fmt.Sprintf("trigger-%s-%s-bearer", "tenant-B", "t-iso")
+	keyA := triggerCredentialRef("t-iso", "bearer")
+	keyB := triggerCredentialRef("t-iso", "bearer")
 
-	secretA, err := ss.GetSecret(ctxA, keyA)
+	secretA, err := ss.GetSecret(ctxA, "tenant-A/"+keyA)
 	require.NoError(t, err, "tenant-A secret must be retrievable")
 	assert.Equal(t, "secret-A", secretA.Value)
 
-	_, err = ss.GetSecret(ctxB, keyB)
+	_, err = ss.GetSecret(ctxB, "tenant-B/"+keyB)
 	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
 		"tenant-B must not be able to retrieve tenant-A's secret via its own key namespace")
 
@@ -1321,7 +1264,7 @@ func TestTriggerSecretKeyTenantIsolation(t *testing.T) {
 
 func TestTriggerManagerDegradedLoad(t *testing.T) {
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	ctx := contextWithTenant("tenant-dg")
 
 	// Populate store directly: two valid triggers + one with a deleted bearer ref.
@@ -1362,7 +1305,7 @@ func TestTriggerManagerDegradedLoad(t *testing.T) {
 
 func TestTriggerDeleteCleansSecrets(t *testing.T) {
 	ts := newInMemoryTriggerStore()
-	ss := newInMemorySecretStore()
+	ss := newTestSecretStore(t)
 	ctx := contextWithTenant("tenant-del")
 
 	mgr := &TriggerManagerImpl{
@@ -1395,14 +1338,14 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 
 	// Verify secrets were stored.
 	refKeys := []string{
-		"trigger-tenant-del-t-del-bearer",
-		"trigger-tenant-del-t-del-hmac-secret",
-		"trigger-tenant-del-t-del-api-key",
-		"trigger-tenant-del-t-del-basic-user",
-		"trigger-tenant-del-t-del-basic-pass",
+		"trigger-t-del-bearer",
+		"trigger-t-del-hmac-secret",
+		"trigger-t-del-api-key",
+		"trigger-t-del-basic-user",
+		"trigger-t-del-basic-pass",
 	}
 	for _, k := range refKeys {
-		_, err := ss.GetSecret(ctx, k)
+		_, err := ss.GetSecret(ctx, "tenant-del/"+k)
 		require.NoError(t, err, "secret %q must exist before delete", k)
 	}
 
@@ -1410,7 +1353,7 @@ func TestTriggerDeleteCleansSecrets(t *testing.T) {
 
 	// After deletion, all five secret refs must be gone.
 	for _, k := range refKeys {
-		_, err := ss.GetSecret(ctx, k)
+		_, err := ss.GetSecret(ctx, "tenant-del/"+k)
 		assert.ErrorIs(t, err, secretsif.ErrSecretNotFound,
 			"secret %q must be removed after trigger deletion", k)
 	}
