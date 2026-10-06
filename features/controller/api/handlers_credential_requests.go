@@ -443,9 +443,10 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 	// go/log-injection + storage-key safety guard, matching handleCreateAccount.
 	req.TenantID = strings.ReplaceAll(strings.ReplaceAll(req.TenantID, "\n", ""), "\r", "")
 
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, req.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "target tenant is outside caller's tenant subtree", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), req.TenantID, "POST /api/v1/enrolment-tokens"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "target tenant is outside caller's tenant subtree", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -515,9 +516,10 @@ func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Reque
 	}
 	// Tenant subtree enforcement before any state disclosure (404, not 403 — no
 	// existence disclosure across tenants), matching handleRevokeRegistrationToken.
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, tok.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tok.TenantID, "POST /api/v1/enrolment-tokens/{id}/revoke"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tok.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
+		}
 		return
 	}
 	if tok.SpentAt != nil {
@@ -789,9 +791,10 @@ func (s *Server) handleDenyCredentialRequest(w http.ResponseWriter, r *http.Requ
 		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, reqRecord.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqRecord.TenantID, "POST /api/v1/credential-requests/{id}/deny"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, reqRecord.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+		}
 		return
 	}
 	if reqRecord.Status != credentialRequestStatusPending {

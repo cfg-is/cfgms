@@ -1101,15 +1101,32 @@ through `TenantScope`.
   with neither a root flag nor a tenant (`NO_TENANT_SCOPE`) before it reaches a handler. An
   unbound session with an empty tenant — the pre-amendment form — is refused with
   `SESSION_SCOPE_INVALID`; reconnecting issues a bound session.
-- **The crossing boundary applies to stored records.** A root scope is not unconditional.
-  For a principal subject to Decision 1's boundary, the record-tenant check every
-  record-by-ID route passes through (an account, a registration or token, a rollout, a run,
-  an API key, a role or RBAC subject, a steward's config) is judged by the same
-  `authorizeTenantAccess` decision as a tenant path variable: the root tenant's own records
-  are reachable, a record owned by a tenant below root needs an active grant or break-glass
-  crossing and otherwise answers with the crossing challenge (Decision 3). Before this
-  amendment such a principal's session was refused on these routes outright; root's reads
-  on list endpoints keep their existing breadth.
+- **The crossing boundary applies to actions on stored records.** A root scope is not
+  unconditional. For a principal subject to Decision 1's boundary, every route that acts
+  on a record a request names by ID, or on the stewards a fleet selector matches, is judged
+  by the same `authorizeTenantAccess` decision as a tenant path variable, through one
+  function (`tenantAccessForScope`): creating, changing, deleting, approving, revoking or
+  provisioning an account, certificate, cert binding, enrolment token, credential request,
+  registration or registration token, API key, role or RBAC subject, rollout, run, rollback
+  or steward config, and dispatching a batch job, upgrade, osquery query or signed operator
+  payload. The root tenant's own records are reachable; a record owned by a tenant below
+  root needs an active grant or break-glass crossing and otherwise answers with the
+  crossing challenge (Decision 3). Bulk actions (approve-all, approve-by-CIDR) skip the
+  records the caller may not act on, as A2.5 reads bulk lists. Routes that were open to a
+  root session only by its unset scope before this amendment are judged the same way, so
+  none of them widens.
+- **Read breadth is unchanged.** List endpoints, and by-ID reads of records a list already
+  shows (a steward, an account, a command, a job, a push or upgrade record, a certificate),
+  keep root's existing fleet-wide breadth: such a read is no stricter than the list it
+  drills into. Whether root reads of a client tenant's data should themselves require a
+  crossing, as Decision 4 implies for business data, is a separate decision this amendment
+  does not take.
+- **Enforced by an architecture rule.** In `features/controller/api`, any root-allow
+  decision made outside `tenantAccessForScope` — a `TenantScope.IsRoot()` branch, or an
+  `isWithinTenantScope` call fed the root caller's empty filter — must carry
+  `//architecture:allow-root-scope -- <reason>` on the same line
+  (`TestRootScopeDecisionsGoThroughTenantAccess`). Handlers that are not `*Server`
+  (the rollback handler) are given the server's decision function rather than a copy of it.
 - **No substituted tenant.** Where an operation needs a tenant the caller did not name, it
   uses the caller's own authenticated tenant — the root tenant for a root caller — never a
   literal fallback such as `default` (Issue #4543): a per-steward config read, write or

@@ -1373,8 +1373,7 @@ func withSessionPrincipal(req *http.Request, tenantID string) *http.Request {
 		GlobalScope: true,
 		TenantID:    tenantID,
 	}
-	ctx := context.WithValue(req.Context(), principalContextKey, p)
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
+	ctx := context.WithValue(withCallerTenant(req.Context(), tenantID), principalContextKey, p)
 	return req.WithContext(ctx)
 }
 

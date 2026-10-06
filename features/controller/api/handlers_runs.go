@@ -345,7 +345,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// within its own subtree. selector.Parse populates filter.IDs (comma-OR list);
 	// filter.DeviceID is the legacy query-param path only.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !scope.IsRoot() {
+	if !scope.IsRoot() { //architecture:allow-root-scope -- a root caller's targets pass the crossing in resolveAuthorizedRunTargets below
 		for _, targetID := range filter.IDs {
 			switch s.enforceExecTenantScopeForCallerScope(r.Context(), targetID, scope) {
 			case execScopeForbidden:
@@ -849,7 +849,7 @@ const (
 // fleet-lookup/prefix logic as enforceExecTenantScope.
 func (s *Server) enforceExecTenantScopeForCallerScope(ctx context.Context, deviceID string, scope ctxkeys.TenantScope) execTenantScopeDecision {
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root callers are decided by their caller, which applies resolveAuthorizedRunTargets
 		return execScopeAllowed
 	case scope.IsTenant() && scope.Path() != "":
 		return s.enforceExecTenantScope(ctx, deviceID, scope.Path())

@@ -1500,6 +1500,7 @@ func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 		return ""
 	}
 	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
+	rollbackHandler.tenantAccess = s.tenantAccessForScope
 	rollbackRouter := s.apiRouter.PathPrefix("/rollback").Subrouter()
 	// Require config/rollback permission for all rollback endpoints — same gate pattern
 	// as every other mutating endpoint in this server.

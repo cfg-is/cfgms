@@ -338,9 +338,10 @@ func (s *Server) handleRevokeCredentialsByEnrolmentToken(w http.ResponseWriter, 
 		s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, tok.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tok.TenantID, "POST /api/v1/enrolment-tokens/{id}/revoke-issued-credentials"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tok.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
+		}
 		return
 	}
 
@@ -404,9 +405,10 @@ func (s *Server) handleCancelCredentialRequest(w http.ResponseWriter, r *http.Re
 		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, reqRecord.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqRecord.TenantID, "POST /api/v1/credential-requests/{id}/cancel"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, reqRecord.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+		}
 		return
 	}
 
@@ -475,7 +477,7 @@ func (s *Server) handleListOrphanedCredentials(w http.ResponseWriter, r *http.Re
 	result := make([]OrphanedCredentialInfo, 0)
 	for _, m := range metas {
 		req := pendingCredentialRequestFromMetadata(m)
-		if !isWithinTenantScope(callerTenant, req.TenantID) {
+		if !isWithinTenantScope(callerTenant, req.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			continue
 		}
 		if req.CollectedSerial == "" || req.BoundAccountID == "" {
@@ -556,9 +558,10 @@ func (s *Server) handleRevokeOrphanedCredential(w http.ResponseWriter, r *http.R
 		s.writeErrorResponse(w, http.StatusNotFound, "No collected credential request found for this serial", "REQUEST_NOT_FOUND")
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, req.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "No collected credential request found for this serial", "REQUEST_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), req.TenantID, "POST /api/v1/credential-requests/orphaned/{serial}/revoke"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "No collected credential request found for this serial", "REQUEST_NOT_FOUND")
+		}
 		return
 	}
 

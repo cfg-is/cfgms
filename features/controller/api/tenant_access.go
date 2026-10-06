@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
@@ -94,3 +95,50 @@ func (s *Server) selectListTenant(w http.ResponseWriter, r *http.Request, route 
 	}
 	return stored.ID, true
 }
+
+// authorizeFleetTargets applies tenantAccessForScope to the tenant of every
+// steward an action would reach — a batch job, an upgrade, a signed operator
+// payload — so a root caller subject to the ADR-025 boundary cannot act on a
+// client tenant's stewards through a fleet selector without a crossing (Issue
+// #4665). On refusal it writes the crossing challenge, or 404 for a tenant the
+// caller may not reach at all, and returns false.
+func (s *Server) authorizeFleetTargets(w http.ResponseWriter, r *http.Request, targets []fleet.StewardResult, route string) bool {
+	scope := callerTenantScope(r)
+	seen := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		if seen[target.TenantID] {
+			continue
+		}
+		seen[target.TenantID] = true
+		if access := s.tenantAccessForScope(r.Context(), scope, target.TenantID, route); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, target.TenantID) {
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// tenantAccessFilter returns a predicate reporting whether the caller may act on
+// a record in a given tenant, for bulk operations that act on many records at
+// once (Issue #4665). A bulk request has no single resource to attach a crossing
+// challenge to, so it skips records the caller may not act on rather than
+// refusing the whole request — the same reading ADR-025 A2.5 gives bulk lists.
+// Decisions are memoized per tenant for the life of the request.
+func (s *Server) tenantAccessFilter(r *http.Request, route string) func(tenant string) bool {
+	scope := callerTenantScope(r)
+	decided := make(map[string]bool)
+	return func(tenant string) bool {
+		allowed, ok := decided[tenant]
+		if !ok {
+			allowed = s.tenantAccessForScope(r.Context(), scope, tenant, route) == tenantAuthAllowed
+			decided[tenant] = allowed
+		}
+		return allowed
+	}
+}
+
+// tenantAccessFunc is the signature of Server.tenantAccessForScope, injected into
+// handlers that are not *Server so they make the same tenant decision.
+type tenantAccessFunc func(ctx context.Context, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision

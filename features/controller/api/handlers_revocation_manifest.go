@@ -488,7 +488,7 @@ func webauthnCredentialAuthorizedForSteward(credential AuthorizedWebAuthnCredent
 	if credential.TenantID == "" || stewardTenant == "" {
 		return false
 	}
-	return isWithinTenantScope(credential.TenantID, stewardTenant)
+	return isWithinTenantScope(credential.TenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
 }
 
 // handleGetStewardRevocationManifest handles GET /api/v1/public/steward-revocation-manifest

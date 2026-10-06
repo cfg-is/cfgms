@@ -144,7 +144,7 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tenantID string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing
 		tenantID = r.URL.Query().Get("tenant_id")
 		if tenantID == "" {
 			http.Error(w, "tenant_id query parameter is required for unscoped callers", http.StatusBadRequest)

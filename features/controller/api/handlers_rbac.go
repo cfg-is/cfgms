@@ -71,7 +71,7 @@ func isControlRune(r rune) bool {
 // with subtree scope and the unscoped ("") admin mTLS path, so a role can never be
 // fetched by ID that the same caller cannot see in the list.
 func roleReadableByTenant(role *common.Role, callerTenant string) bool {
-	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId))
+	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId)) //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 }
 
 // loadRoleForWrite loads roleID and confirms callerTenant may act on it, writing the

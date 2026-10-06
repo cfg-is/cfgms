@@ -119,10 +119,12 @@ func (s *Server) handleStartRollout(w http.ResponseWriter, r *http.Request) {
 	// mirrors the cross-tenant guard in handlers_upgrade.go (Issue #2340).
 	tenantID := callerTenantID
 	if req.TenantID != "" && req.TenantID != callerTenantID {
-		if !isWithinTenantScope(callerTenantID, req.TenantID) {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Cannot start a rollout for another tenant",
-				"CROSS_TENANT")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), req.TenantID, "POST /api/v1/rollout"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Cannot start a rollout for another tenant",
+					"CROSS_TENANT")
+			}
 			return
 		}
 		tenantID = req.TenantID

@@ -81,7 +81,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tid string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- selector resolution follows list breadth; callers that act on the result apply authorizeFleetTargets
 		// Unrestricted: tid stays "".
 	case scope.IsTenant() && scope.Path() != "":
 		tid = scope.Path()

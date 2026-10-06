@@ -134,9 +134,11 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	// the caller's subtree; absent prefix defaults to callerTenantID and all
 	// descendants. An empty callerTenantID (mTLS admin) is unrestricted.
 	if parsedTenantPath != "" {
-		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/stewards/upgrade"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			}
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
@@ -156,6 +158,11 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"No stewards match the given selector within the caller's tenant scope",
 			"CROSS_TENANT")
+		return
+	}
+	// An upgrade replaces every matched steward's binary: each one's tenant must
+	// pass the caller's tenant decision, crossing included (Issue #4665).
+	if !s.authorizeFleetTargets(w, r, stewards, "POST /api/v1/stewards/upgrade") {
 		return
 	}
 
@@ -423,7 +430,7 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
 	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
 	// (Issue #4091) — mirrors the genuine not-found response above.
-	if !isWithinTenantScope(callerTenantID, record.TenantID) {
+	if !isWithinTenantScope(callerTenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}
@@ -477,8 +484,10 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
 	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
 	// (Issue #4091) — mirrors the genuine not-found response above.
-	if !isWithinTenantScope(callerTenantID, original.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), original.TenantID, "POST /api/v1/stewards/upgrade/{upgrade_id}/rollback"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, original.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
+		}
 		return
 	}
 	// Record tenant: the rollback record is attributed to the original record's tenant for

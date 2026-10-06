@@ -286,7 +286,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	for _, steward := range stewards {
 		// A tenant-scoped caller must not see other tenants' stewards. The
 		// node-local map is unscoped, so this filter applies to it too.
-		if !isWithinTenantScope(tenantID, steward.TenantID) {
+		if !isWithinTenantScope(tenantID, steward.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			continue
 		}
 		seen[steward.ID] = true
@@ -451,7 +451,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
 	callerTenant := callerTenantFilter(r.Context())
-	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) {
+	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.logger.Info("Cross-tenant steward get refused",
 			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),

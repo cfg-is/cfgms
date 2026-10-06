@@ -2150,7 +2150,7 @@ func TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNot
 	// Inject a Strong-assurance principal scoped to client-1 directly into the
 	// context. We call the handler method directly (bypassing requirePermission)
 	// because certificate:revoke is AssuranceStrong and no API key can satisfy that.
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx := withCallerTenant(context.Background(), "client-1")
 	ctx = context.WithValue(ctx, principalContextKey, &Principal{
 		ID:        "scoped-admin",
 		Name:      "mtls-cert:scoped-admin",
@@ -2195,7 +2195,7 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx := withCallerTenant(context.Background(), "client-1")
 	ctx = context.WithValue(ctx, principalContextKey, &Principal{
 		ID:        "scoped-admin",
 		Name:      "mtls-cert:scoped-admin",
@@ -2222,10 +2222,7 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 // An empty tenantID builds a root admin caller — explicitly, with GlobalScope and
 // a root TenantScope as the middleware gives one (Issue #4665).
 func scopedRevokeContext(tenantID string) context.Context {
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
-	if tenantID == "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
-	}
+	ctx := withCallerTenant(context.Background(), tenantID)
 	return context.WithValue(ctx, principalContextKey, &Principal{
 		ID:          "revoke-caller",
 		Name:        "mtls-cert:revoke-caller",

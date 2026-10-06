@@ -151,7 +151,7 @@ func (s *Server) handleListRegistrationTokens(w http.ResponseWriter, r *http.Req
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tenantID string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing (an omitted one lists every tenant)
 		tenantID = r.URL.Query().Get("tenant_id")
 		if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
 			return

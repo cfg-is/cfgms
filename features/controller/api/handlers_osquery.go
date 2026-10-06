@@ -92,12 +92,14 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 	// handleResolveSelector and handleDispatchUpgrade.
 	callerTenantID := callerTenantFilter(r.Context())
 	if parsedTenantPath != "" {
-		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
-			s.logger.Info("Osquery selector tenant outside caller subtree",
-				"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
-				"caller_tenant", logging.SanitizeLogValue(callerTenantID))
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/osquery/query"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
+				s.logger.Info("Osquery selector tenant outside caller subtree",
+					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+					"caller_tenant", logging.SanitizeLogValue(callerTenantID))
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			}
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
@@ -115,6 +117,12 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("Fleet query failed during osquery dispatch",
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to resolve fleet selector", "INTERNAL_ERROR")
+		return
+	}
+
+	// A query runs on every matched steward: each one's tenant must pass the
+	// caller's tenant decision, crossing included (Issue #4665).
+	if !s.authorizeFleetTargets(w, r, stewards, "POST /api/v1/osquery/query") {
 		return
 	}
 

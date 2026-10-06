@@ -369,7 +369,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	if !isWithinTenantScope(tenantID, record.TenantID) {
+	if !isWithinTenantScope(tenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,21 +21,31 @@ import (
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
-// tenantScopeAuthorizes reports whether scope permits access to resourceTenant, using
-// the same three-state semantics as Server.isAuthorizedForTenant (middleware.go, Issue
-// #4316): root scope always allows; a tenant scope is checked via subtree containment
-// (isWithinTenantScope); the unset zero value (or a tenant scope with an empty path)
-// always denies. RollbackHandler and WorkflowHandler are not *Server, so they cannot
-// call Server.isAuthorizedForTenant directly — this package-level equivalent is shared
-// by both (Issue #4335).
-func tenantScopeAuthorizes(scope ctxkeys.TenantScope, resourceTenant string) bool {
+// tenantScopeDecision is the tenant decision for handlers that are not *Server
+// (RollbackHandler): it delegates to access — the server's tenantAccessForScope,
+// injected at construction — so the decision, ADR-025 crossing included, is the
+// same one every Server handler makes (Issue #4665). Without an injected decision
+// (handler unit tests) it fails closed for a root caller subject to the crossing
+// boundary, since no crossing can be evaluated; a tenant scope is checked by
+// subtree containment and an unset scope is refused, exactly as
+// tenantAccessForScope does.
+func tenantScopeDecision(ctx context.Context, access tenantAccessFunc, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision {
+	if access != nil {
+		return access(ctx, scope, resourceTenant, route)
+	}
 	switch {
-	case scope.IsRoot():
-		return true
+	case scope.IsRoot(): //architecture:allow-root-scope -- no server decision injected: only a root caller outside the crossing boundary is let through
+		if principal, _ := ctx.Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) {
+			return tenantAuthNeedsCrossing
+		}
+		return tenantAuthAllowed
 	case scope.IsTenant() && scope.Path() != "":
-		return isWithinTenantScope(scope.Path(), resourceTenant)
+		if isWithinTenantScope(scope.Path(), resourceTenant) { //architecture:allow-root-scope -- tenant-scope subtree check, mirroring tenantAccessForScope
+			return tenantAuthAllowed
+		}
+		return tenantAuthDenied
 	default:
-		return false
+		return tenantAuthDenied
 	}
 }
 
@@ -44,21 +55,38 @@ func callerTenantScope(r *http.Request) ctxkeys.TenantScope {
 	return scope
 }
 
-// authorizedForTargetTenant resolves targetID's owning tenant via stewardTenantLookup
-// and checks it against the caller's ctxkeys.TenantScope (Issue #4335), mirroring
-// ExecuteRollback's existing cross-tenant gate. When the lookup is unavailable
+// targetTenantAccess resolves targetID's owning tenant via stewardTenantLookup and
+// decides it against the caller's ctxkeys.TenantScope (Issue #4335) with the
+// server's tenant decision, crossing included (Issue #4665). It returns the
+// decision and the resolved tenant. When the lookup is unavailable
 // (stewardTenantLookup is nil — e.g. in unit tests) or returns no result (unknown
-// target), the check is skipped and the underlying manager call decides — the same
-// resolvedTenant != "" guard ExecuteRollback already uses.
-func (h *RollbackHandler) authorizedForTargetTenant(r *http.Request, targetID string) bool {
+// target), the target is allowed and the underlying manager call decides — the
+// same resolvedTenant != "" guard ExecuteRollback uses.
+func (h *RollbackHandler) targetTenantAccess(r *http.Request, targetID, route string) (tenantAuthDecision, string) {
 	if h.stewardTenantLookup == nil {
-		return true
+		return tenantAuthAllowed, ""
 	}
 	resolvedTenant := h.stewardTenantLookup(targetID)
 	if resolvedTenant == "" {
-		return true
+		return tenantAuthAllowed, ""
 	}
-	return tenantScopeAuthorizes(callerTenantScope(r), resolvedTenant)
+	return tenantScopeDecision(r.Context(), h.tenantAccess, callerTenantScope(r), resolvedTenant, route), resolvedTenant
+}
+
+// refuseTarget answers a refused targetTenantAccess decision: the ADR-025 crossing
+// challenge when only a crossing is missing, deny otherwise. It reports whether
+// the target was refused.
+func (h *RollbackHandler) refuseTarget(w http.ResponseWriter, r *http.Request, targetID, route string, deny func()) bool {
+	decision, tenant := h.targetTenantAccess(r, targetID, route)
+	switch decision {
+	case tenantAuthAllowed:
+		return false
+	case tenantAuthNeedsCrossing:
+		writeTenantCrossingChallenge(w, tenant)
+	default:
+		deny()
+	}
+	return true
 }
 
 // RollbackHandler handles rollback-related API requests
@@ -66,8 +94,11 @@ type RollbackHandler struct {
 	rollbackManager     rollback.RollbackManager
 	PrincipalExtractor  func(r *http.Request) *Principal
 	stewardTenantLookup func(stewardID string) string
-	auditManager        *audit.Manager
-	logger              logging.Logger
+	// tenantAccess is the server's tenant decision (Server.tenantAccessForScope),
+	// set by the server when it wires the handler (Issue #4665).
+	tenantAccess tenantAccessFunc
+	auditManager *audit.Manager
+	logger       logging.Logger
 }
 
 // executeRollbackRequest extends RollbackRequest with handler-local cross-tenant check fields.
@@ -145,10 +176,11 @@ func (h *RollbackHandler) ListRollbackPoints(w http.ResponseWriter, r *http.Requ
 	// Tenant scope check (Issue #4335): an out-of-scope target returns the same
 	// empty-list response as a target with no recorded rollback points, so the
 	// endpoint cannot be used to probe cross-tenant existence.
-	if !h.authorizedForTargetTenant(r, targetID) {
+	if h.refuseTarget(w, r, targetID, "GET /api/v1/rollback/points", func() {
 		h.sendJSON(w, http.StatusOK, map[string]interface{}{
 			"rollback_points": []rollback.RollbackPoint{},
 		})
+	}) {
 		return
 	}
 
@@ -181,11 +213,12 @@ func (h *RollbackHandler) PreviewRollback(w http.ResponseWriter, r *http.Request
 	request.DryRun = true
 
 	// Tenant scope check (Issue #4335), mirroring ExecuteRollback's cross-tenant gate.
-	if !h.authorizedForTargetTenant(r, request.TargetID) {
+	if h.refuseTarget(w, r, request.TargetID, "POST /api/v1/rollback/preview", func() {
 		h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"code":    "CROSS_TENANT_ROLLBACK",
 			"message": "target version belongs to a different tenant",
 		})
+	}) {
 		return
 	}
 
@@ -234,7 +267,19 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	if scopeTenant == "" && principal != nil && !principal.GlobalScope {
 		scopeTenant = principal.TenantID
 	}
-	if scopeTenant != "" {
+	if scopeTenant == "" {
+		// An explicitly root caller: the target steward's tenant passes the server's
+		// tenant decision, so a root caller subject to the ADR-025 boundary needs a
+		// crossing to roll back a client tenant's steward (Issue #4665).
+		if h.refuseTarget(w, r, req.TargetID, "POST /api/v1/rollback/execute", func() {
+			h.sendJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"code":    "CROSS_TENANT_ROLLBACK",
+				"message": "target version belongs to a different tenant",
+			})
+		}) {
+			return
+		}
+	} else {
 		var resolvedTenant string
 		if h.stewardTenantLookup != nil {
 			resolvedTenant = h.stewardTenantLookup(req.TargetID)
@@ -361,8 +406,9 @@ func (h *RollbackHandler) GetRollbackStatus(w http.ResponseWriter, r *http.Reque
 	// Tenant scope check (Issue #4335): an out-of-scope operation returns the same
 	// 404 as a genuinely unknown rollback ID, so the endpoint cannot be used to
 	// probe cross-tenant existence.
-	if !h.authorizedForTargetTenant(r, operation.Request.TargetID) {
+	if h.refuseTarget(w, r, operation.Request.TargetID, "GET /api/v1/rollback/{rollback_id}/status", func() {
 		h.sendError(w, http.StatusNotFound, "Rollback operation not found")
+	}) {
 		return
 	}
 
@@ -403,8 +449,9 @@ func (h *RollbackHandler) CancelRollback(w http.ResponseWriter, r *http.Request)
 		h.sendError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if !h.authorizedForTargetTenant(r, operation.Request.TargetID) {
+	if h.refuseTarget(w, r, operation.Request.TargetID, "POST /api/v1/rollback/{rollback_id}/cancel", func() {
 		h.sendError(w, http.StatusNotFound, "Rollback operation not found")
+	}) {
 		return
 	}
 
@@ -456,10 +503,11 @@ func (h *RollbackHandler) ListRollbackHistory(w http.ResponseWriter, r *http.Req
 	// Tenant scope check (Issue #4335): an out-of-scope target returns the same
 	// empty-list response as a target with no recorded rollback history, so the
 	// endpoint cannot be used to probe cross-tenant existence.
-	if !h.authorizedForTargetTenant(r, targetID) {
+	if h.refuseTarget(w, r, targetID, "GET /api/v1/rollback/history", func() {
 		h.sendJSON(w, http.StatusOK, map[string]interface{}{
 			"rollback_operations": []rollback.RollbackOperation{},
 		})
+	}) {
 		return
 	}
 

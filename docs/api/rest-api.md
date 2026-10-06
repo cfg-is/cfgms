@@ -44,7 +44,7 @@ Each endpoint requires a specific permission scope. Scopes follow the format `re
 
 Every authenticated caller is either **root** (a `root_scope` account, or the bootstrap admin certificate) or **bound to one tenant**. A root caller's identity carries the deployment's root tenant; its reach comes from the root flag, never from an empty tenant. A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE` before any handler runs.
 
-A tenant-scoped caller reaches its own tenant's records. A root caller reaches the root tenant's records; for a root caller subject to the tenant-crossing boundary (ADR-025), a record owned by a tenant below root — whether the route names that tenant or names the record by ID (an account, a token, a registration, a rollout, a run, an API key, a role) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
+A tenant-scoped caller reaches its own tenant's records. A root caller's lists, and its by-ID reads of records those lists show, span every tenant. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
 
 ```json
 {
@@ -53,6 +53,8 @@ A tenant-scoped caller reaches its own tenant's records. A root caller reaches t
   "break_glass_endpoint": "/api/v1/tenants/<tenant>/break-glass"
 }
 ```
+
+Bulk approvals (approve-all, approve-by-CIDR) skip registrations the caller may not act on instead of returning the challenge.
 
 Where an operation needs a tenant the request does not name, it uses the caller's own tenant — the root tenant for a root caller — never a fallback tenant.
 

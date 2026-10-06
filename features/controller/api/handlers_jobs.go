@@ -99,9 +99,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// the caller's subtree; absent prefix defaults to tenantID and all descendants.
 	// Global-scope callers (empty tenantID) are unrestricted.
 	if parsedTenantPath != "" {
-		if !isWithinTenantScope(tenantID, parsedTenantPath) {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/jobs"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			}
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
@@ -113,6 +115,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error("Fleet query failed during job creation", "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to query fleet", "INTERNAL_ERROR")
+		return
+	}
+	// A batch job writes to every matched steward: each one's tenant must pass the
+	// caller's tenant decision, crossing included (Issue #4665).
+	if !s.authorizeFleetTargets(w, r, results, "POST /api/v1/jobs") {
 		return
 	}
 
@@ -203,7 +210,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tenantFilter string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		tenantFilter = ""
 	case scope.IsTenant() && scope.Path() != "":
 		tenantFilter = scope.Path()
@@ -281,7 +288,7 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isWithinTenantScope(tenantID, job.TenantID) {
+	if !isWithinTenantScope(tenantID, job.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing job existence across tenants
 		// (Issue #4091) — mirrors the genuine not-found response above so a caller
 		// cannot distinguish "absent" from "exists in another tenant".

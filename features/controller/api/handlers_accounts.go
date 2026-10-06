@@ -991,8 +991,10 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	// Issue #2974: enforce tenant-subtree scope before revealing any link state.
 	// An out-of-subtree caller receives 403 regardless of whether a link is
 	// outstanding — checking link state first would create an enrollment-state oracle.
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/enrollment-link/revoke"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 	if !enrollmentLinkOutstanding(acct) {
@@ -1235,7 +1237,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
 	// not 403 — to avoid disclosing that the account exists in another tenant.
 	callerTenant := callerTenantFilter(r.Context())
-	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+	if !isWithinTenantScope(callerTenant, acct.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}

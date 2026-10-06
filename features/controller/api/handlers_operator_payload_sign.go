@@ -242,6 +242,12 @@ func (s *Server) handleOperatorPayloadSignBegin(w http.ResponseWriter, r *http.R
 			"selector matched no stewards", "NO_TARGETS_MATCHED")
 		return
 	}
+	// The signed envelope authorizes a payload on every matched steward: each
+	// one's tenant must pass the caller's tenant decision, crossing included,
+	// before the target list is frozen into it (Issue #4665).
+	if !s.authorizeFleetTargets(w, r, results, "POST /api/v1/operator-payload/sign/begin") {
+		return
+	}
 	targets := make([]string, 0, len(results))
 	for _, res := range results {
 		targets = append(targets, res.ID)

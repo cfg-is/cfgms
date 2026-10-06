@@ -301,6 +301,12 @@ func (s *Server) isCallerAuthorizedForTenant(ctx context.Context, principal *Pri
 // path forward. "tenant-crossing" is not a session.AssuranceLevel: this does not touch
 // the assurance enum or resolveAssuranceRequirement, only the response shape.
 func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
+	writeTenantCrossingChallenge(w, resourceTenant)
+}
+
+// writeTenantCrossingChallenge is Server.writeTenantCrossingChallenge for handlers
+// that are not *Server (RollbackHandler).
+func writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
 	w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="tenant-crossing"`)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)

@@ -86,7 +86,7 @@ func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) str
 func (s *Server) installerBlobTenantForCallerScope(r *http.Request) (tenantID string, ok bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- steward binaries are published to the fleet-wide namespace
 		return "default", true
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true
