@@ -118,6 +118,12 @@ const (
 // controller refused waits before asking again (Issue #4532).
 var rejectedReadmissionRetry = time.Hour
 
+// pendingReadmissionPoll is how often a steward whose re-admission is queued for
+// operator approval checks for the outcome (Issue #4669). It is short and fixed:
+// the connection is not failing, so an approval should take effect within
+// seconds rather than after the connect loop's exponential backoff.
+var pendingReadmissionPoll = 15 * time.Second
+
 // connectFuncT is the signature of the controller connect function, injectable
 // for testing so tests can simulate a controller-unreachable condition without
 // touching the network. Production code always uses registerAndConnect. (Issue #2034)
@@ -494,6 +500,7 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 		// Read once, before the goroutine starts: the loop below can outlive
 		// runStewardInternal's caller, so it must not re-read the package var.
 		rejectedRetry := rejectedReadmissionRetry
+		pendingPoll := pendingReadmissionPoll
 		go func() {
 			backoff := 5 * time.Second
 			const maxBackoff = 5 * time.Minute
@@ -527,6 +534,21 @@ func runStewardInternal(ctx context.Context, regToken, controllerURL, configPath
 					case <-runCtx.Done():
 						return
 					case <-time.After(rejectedRetry):
+					}
+					continue
+				}
+				if errors.Is(connErr, registration.ErrRefreshPending) {
+					// Re-admission is queued for operator approval: nothing is wrong
+					// with the connection, so check for the outcome at a short fixed
+					// interval and leave the backoff for genuine failures — an approval
+					// then takes effect within seconds (Issue #4669).
+					logger.Info("Re-admission awaiting operator approval; checking again shortly",
+						"operation", "connect_pending",
+						"retry_in", pendingPoll)
+					select {
+					case <-runCtx.Done():
+						return
+					case <-time.After(pendingPoll):
 					}
 					continue
 				}
