@@ -7,12 +7,25 @@ import (
 	"time"
 )
 
+// The steward's re-admission messages (cmd/steward/main.go, Issue #4532).
+const (
+	readmissionApproved = "Re-admission approved; storing new certificate"
+	readmissionRefused  = "Controller refused re-admission"
+)
+
+// readmissionPending are the steward's messages for a re-admission waiting on
+// operator approval: queued on the first request, pending on later checks.
+var readmissionPending = []string{
+	"Re-admission queued for operator approval",
+	"Re-admission is pending operator approval",
+}
+
 // TestFleetRegistrationRefresh exercises the full registration-refresh flow in the
 // real fleet docker-compose harness (Linux containers). Three scenarios:
 //
 //  1. AutoAccept   — cert expires offline → steward reconnects via refresh handshake
 //     (same steward ID, no full re-registration, new cert with future expiry).
-//  2. Revoked      — steward marked revoked → restart → 403, "refresh rejected" in log,
+//  2. Revoked      — steward marked revoked → restart → 403, re-admission refused in log,
 //     steward does NOT reconnect.
 //  3. Archived     — steward marked archived → restart → 202 queued, pending entry
 //     created → approve via API → steward reconnects on retry.
@@ -74,7 +87,9 @@ func (s *FleetTestSuite) testRefreshAutoAccept(t *testing.T) {
 	deviceID := s.getDeviceIDFromContainer(t, container)
 	t.Logf("AutoAccept: device_id=%s steward_id=%s", deviceID, stewardID)
 
-	// Stop the container and replace its client cert with an expired one.
+	// Stop the container and replace its client cert with an expired one. The
+	// approval count is captured first: the steward's logs survive restarts.
+	approvedBefore := s.stewardLogCount(t, container, readmissionApproved)
 	s.containerStop(t, container)
 	s.expireStewardCerts(t, container)
 
@@ -83,9 +98,8 @@ func (s *FleetTestSuite) testRefreshAutoAccept(t *testing.T) {
 	// (policy=auto_accept) and issues a new cert.
 	s.containerStart(t, container, 90*time.Second)
 
-	// Wait for the steward to reconnect via the refresh path. The log will contain
-	// "Registration refresh approved" before "Steward registered and connected".
-	if !s.waitForStewardLogEntry(t, container, "Registration refresh approved", 60*time.Second) {
+	// Wait for the steward to reconnect via the re-admission path (Issue #4532).
+	if !s.waitForNewStewardLogEntry(t, container, approvedBefore, 60*time.Second, readmissionApproved) {
 		log, _ := s.readStewardLog(t, container)
 		t.Fatalf("AutoAccept: steward did not log refresh approval within 60s\nlog tail:\n%s", lastLines(log, 40))
 	}
@@ -176,6 +190,7 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	}
 
 	// Restart — steward attempts refresh challenge, controller returns 403 (revoked-before-PoP).
+	refusedBefore := s.stewardLogCount(t, container, readmissionRefused)
 	s.containerStart(t, container, 60*time.Second)
 
 	// AC: steward must log the rejection message. The docker-compose retry loop
@@ -188,10 +203,10 @@ func (s *FleetTestSuite) testRefreshRevoked(t *testing.T) {
 	// idle/handshake timeouts (90s idle / 30s handshake), so on a contended runner
 	// the rejection can be logged well after a 60s bound (observed 66s). Wait 120s
 	// with the same margin as the disconnection wait above (Issue #2592);
-	// waitForStewardLogEntry polls and returns as soon as the line appears.
-	if !s.waitForStewardLogEntry(t, container, "Registration refresh rejected", 120*time.Second) {
+	// waitForNewStewardLogEntry polls and returns as soon as the line appears.
+	if !s.waitForNewStewardLogEntry(t, container, refusedBefore, 120*time.Second, readmissionRefused) {
 		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("Revoked: steward did not log 'Registration refresh rejected' within 120s\nlog tail:\n%s",
+		t.Fatalf("Revoked: steward did not log %q within 120s\nlog tail:\n%s", readmissionRefused,
 			lastLines(log, 40))
 	}
 	t.Log("Revoked: steward logged refresh rejection as expected")
@@ -266,12 +281,14 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	t.Logf("Archived: set refresh policy for %s to auto_accept", tenantID)
 
 	// Start the container.
+	pendingBefore := s.stewardLogCount(t, container, readmissionPending...)
+	approvedBefore := s.stewardLogCount(t, container, readmissionApproved)
 	s.containerStart(t, container, 60*time.Second)
 
 	// AC: steward must log the pending message.
-	if !s.waitForStewardLogEntry(t, container, "Registration refresh pending", 60*time.Second) {
+	if !s.waitForNewStewardLogEntry(t, container, pendingBefore, 60*time.Second, readmissionPending...) {
 		log, _ := s.readStewardLog(t, container)
-		t.Fatalf("Archived: steward did not log 'Registration refresh pending' within 60s\nlog tail:\n%s",
+		t.Fatalf("Archived: steward did not log a pending re-admission within 60s\nlog tail:\n%s",
 			lastLines(log, 40))
 	}
 	t.Log("Archived: steward logged refresh queued as expected")
@@ -312,7 +329,7 @@ func (s *FleetTestSuite) testRefreshArchived(t *testing.T) {
 	// The approve handler re-promotes the status, but marking archived first ensures
 	// the claim bundle delivery path is exercised on the steward's next retry.
 	// (The steward polls until it gets the approved cert bundle.)
-	if !s.waitForStewardLogEntry(t, container, "Registration refresh approved", 90*time.Second) {
+	if !s.waitForNewStewardLogEntry(t, container, approvedBefore, 90*time.Second, readmissionApproved) {
 		log, _ := s.readStewardLog(t, container)
 		t.Fatalf("Archived: steward did not log refresh approval within 90s after admin approve\nlog tail:\n%s",
 			lastLines(log, 40))

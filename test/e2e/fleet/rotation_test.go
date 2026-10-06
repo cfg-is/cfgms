@@ -187,6 +187,58 @@ func (s *FleetTestSuite) stewardLogsContain(t *testing.T, container, want string
 	return false
 }
 
+// stewardLogCount copies all steward log files from the container and returns how
+// many times any of wants occurs across them. Log files persist across container
+// restarts and subtests, so a wait for an event captures this count before the
+// action that should produce it and waits for it to grow (Issue #4671).
+func (s *FleetTestSuite) stewardLogCount(t *testing.T, container string, wants ...string) int {
+	t.Helper()
+	tmpDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := exec.CommandContext(ctx, "docker", "cp",
+		container+":/tmp/cfgms/.", tmpDir).CombinedOutput(); err != nil {
+		return 0
+	}
+	entries, _ := os.ReadDir(tmpDir)
+	count := 0
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(tmpDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		for _, want := range wants {
+			count += strings.Count(string(content), want)
+		}
+	}
+	return count
+}
+
+// waitForNewStewardLogEntry waits until any of wants occurs more often than the
+// before count captured with stewardLogCount — that is, until the event is logged
+// anew, not merely present from an earlier run (Issue #4671).
+func (s *FleetTestSuite) waitForNewStewardLogEntry(t *testing.T, container string, before int, timeout time.Duration, wants ...string) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.stewardLogCount(t, container, wants...) > before {
+			return true
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return false
+}
+
+// stewardSessionMarkers are the steward log lines written when a control session
+// to the controller is established (cmd/steward/main.go).
+var stewardSessionMarkers = []string{
+	"Connected to controller via gRPC transport",
+	"Reconnected to controller via stored identity",
+}
+
 // TestFleetRotation is the ordered entry point for all signing-cert rotation scenarios.
 //
 // Prerequisite stories:
