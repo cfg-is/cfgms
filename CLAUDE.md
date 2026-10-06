@@ -124,6 +124,7 @@ other, so the same change is not scanned twice — read the "Real run" column.
 | `zizmor` | both (no stub) | Workflow security — action pins, cache poisoning, injection |
 | `frontend-checks` | both (no stub) | `web/` typecheck, lint, and tests |
 | `CLA signature check` | both (no stub) | Contributor licence agreement |
+| `fleet-e2e-tests` | merge queue (PR stubbed) | Docker fleet suite: controller + stewards end to end (~10 min) |
 
 Four shapes sit behind that column:
 
@@ -132,6 +133,10 @@ Four shapes sit behind that column:
   `trivy-scan`. Their PR-side stub is a `*-pr-stub` job in the check's own
   workflow; on a docs-only PR, where that workflow is paths-ignored entirely,
   `documentation.yml` posts the context instead.
+  `fleet-e2e-tests` is a fifth queue-only check, shaped like `unit-tests`'
+  mirror image: `fleet-e2e.yml` triggers only on `merge_group`, and its PR-side
+  stub lives in the separate `pull_request`-only `fleet-e2e-pr-stub.yml`, which
+  has no path filter and posts on every PR, docs-only included.
   `unit-tests` is the inverse — real on the PR (an aggregator over matrix legs),
   stubbed in the queue by the `merge_group`-only `unit-tests-queue-stub.yml`.
   Unlike the four, `unit-tests`' docs-only-PR case is not covered by

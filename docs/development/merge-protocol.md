@@ -12,7 +12,7 @@ This replaced the `strict_required_status_checks_policy` (strict mode, Story #79
 
 1. A PR is marked for merge (`gh pr merge --squash` or the GitHub UI)
 2. GitHub creates a temporary branch: `develop` tip + the PR's changes
-3. All 10 required checks run against that combined state:
+3. All 11 required checks run against that combined state:
    - `unit-tests`
    - `integration-tests`
    - `Build Gate`
@@ -23,6 +23,7 @@ This replaced the `strict_required_status_checks_policy` (strict mode, Story #79
    - `zizmor`
    - `frontend-checks`
    - `CLA signature check`
+   - `fleet-e2e-tests`
 
    Read the set from the ruleset rather than trusting this list:
 
