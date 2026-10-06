@@ -300,6 +300,9 @@ management, and a fleet-wide tenant-containment hardening pass. See
     WARN (Issue #4667). Re-upload public installers as root; the fallback is removed in 0.10.6. On
     a deployment where a non-root tenant is itself named `root`, that tenant's installers are
     served publicly through the fallback until then.
+  - A steward waiting on operator approval of its re-admission checks about every 15 seconds
+    (jittered), so an approval takes effect promptly instead of after up to five minutes of connect
+    backoff (Issue #4669).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
