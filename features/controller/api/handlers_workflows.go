@@ -225,6 +225,11 @@ type CreateWorkflowRequest struct {
 	Steps       []workflow.Step        `json:"steps"`
 	Variables   map[string]interface{} `json:"variables,omitempty"`
 	Timeout     time.Duration          `json:"timeout,omitempty"`
+	// OnFailure and ErrorWorkflows are the workflow-level failure policy
+	// (Issue #4577): dropping them stored a workflow that behaved differently
+	// from the definition that was submitted.
+	OnFailure      workflow.FailureAction         `json:"on_failure,omitempty"`
+	ErrorWorkflows []workflow.ErrorWorkflowConfig `json:"error_workflows,omitempty"`
 }
 
 // handleCreateWorkflow handles POST /api/v1/workflows
@@ -261,12 +266,14 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 
 	vw := &workflow.VersionedWorkflow{
 		Workflow: workflow.Workflow{
-			Name:        req.Name,
-			Description: req.Description,
-			Version:     version,
-			Steps:       req.Steps,
-			Variables:   req.Variables,
-			Timeout:     req.Timeout,
+			Name:           req.Name,
+			Description:    req.Description,
+			Version:        version,
+			Steps:          req.Steps,
+			Variables:      req.Variables,
+			Timeout:        req.Timeout,
+			OnFailure:      req.OnFailure,
+			ErrorWorkflows: req.ErrorWorkflows,
 		},
 		SemanticVersion: *semver,
 	}
@@ -350,12 +357,14 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 
 	vw := &workflow.VersionedWorkflow{
 		Workflow: workflow.Workflow{
-			Name:        name,
-			Description: req.Description,
-			Version:     version,
-			Steps:       req.Steps,
-			Variables:   req.Variables,
-			Timeout:     req.Timeout,
+			Name:           name,
+			Description:    req.Description,
+			Version:        version,
+			Steps:          req.Steps,
+			Variables:      req.Variables,
+			Timeout:        req.Timeout,
+			OnFailure:      req.OnFailure,
+			ErrorWorkflows: req.ErrorWorkflows,
 		},
 		SemanticVersion: *semver,
 	}

@@ -1,6 +1,6 @@
 name: "msp-customer-onboarding-automation"
 description: "Complete MSP customer onboarding workflow integrating M365, a PSA/ticketing provider, and a documentation provider"
-version: "1.0"
+version: "1.0.0"
 
 # Tenant scope: this workflow must only ever be triggered/executed under a
 # CFGMS execution scoped to the one client tenant it targets (e.g.

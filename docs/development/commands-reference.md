@@ -1477,6 +1477,16 @@ session token, even if one happens to be active.
 
 `cfg workflow` subcommands manage workflow definitions and their executions on the controller.
 
+### cfg workflow run
+
+Submits a workflow definition file to the controller and starts an execution, printing the execution ID.
+
+```bash
+cfg workflow run features/workflow/examples/simple-file-deployment.yaml --url=https://controller.example.com
+```
+
+The file is decoded into the workflow engine's own definition type, in either of two forms: flat (`name`, `steps`, … at the top level) or nested under a top-level `workflow:` key. Durations are duration strings (`2s`, `5m`, `1h30m`). `version`, when present, must be a semantic version (`MAJOR.MINOR.PATCH`); the controller defaults it to `1.0.0`. Unknown fields are rejected rather than dropped. The files in `features/workflow/examples/` are valid inputs.
+
 ### cfg workflow list
 
 List all workflow definitions registered on the controller.

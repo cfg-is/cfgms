@@ -18,9 +18,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cfgis/cfgms/features/controller/clusterregistry"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
+
+	"github.com/cfgis/cfgms/features/controller/clusterregistry"
+	wfpkg "github.com/cfgis/cfgms/features/workflow"
 )
 
 //go:embed templates/promote-hv-role.yaml
@@ -64,6 +66,10 @@ var workflowRunCmd = &cobra.Command{
 	Long: `Read a workflow definition YAML file, submit it to the controller, and trigger execution.
 
 The command prints the execution ID returned by the controller and exits.
+
+The file may be flat (name, steps, ... at the top level) or nested under a
+top-level "workflow:" key. Durations are duration strings (2s, 5m); version,
+when present, must be MAJOR.MINOR.PATCH. Unknown fields are rejected.
 
 Examples:
   # Run a workflow against a local controller
@@ -194,12 +200,57 @@ func init() {
 
 // workflowDefinition is the local representation of a workflow YAML file.
 // Fields mirror CreateWorkflowRequest on the server; kept local to avoid importing the server package.
-type workflowDefinition struct {
-	Name        string                   `yaml:"name"        json:"name"`
-	Description string                   `yaml:"description" json:"description,omitempty"`
-	Version     string                   `yaml:"version"     json:"version,omitempty"`
-	Steps       []map[string]interface{} `yaml:"steps"       json:"steps"`
-	Variables   map[string]interface{}   `yaml:"variables"   json:"variables,omitempty"`
+// workflowDefinition is the workflow engine's own Workflow type (Issue #4577):
+// decoding a file into it applies the engine's field names and types — "2s"
+// durations become time.Duration — and its JSON encoding is exactly what POST
+// /api/v1/workflows decodes, durations included. A CLI-local shape forwarded
+// YAML values unchanged, so the controller rejected human-readable durations.
+type workflowDefinition = wfpkg.Workflow
+
+// parseWorkflowFile decodes a workflow definition in either form the repo uses:
+// flat (name, steps, ... at the top level — what the engine loads) or nested
+// under a top-level "workflow:" key. Unknown fields are rejected, so a
+// misspelled key fails here rather than being dropped on the way to the
+// controller. The version must be a semantic version, as the controller
+// requires; an absent version defaults to 1.0.0 there.
+func parseWorkflowFile(data []byte) (workflowDefinition, error) {
+	var probe map[string]interface{}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return workflowDefinition{}, fmt.Errorf("failed to parse workflow YAML: %w", err)
+	}
+
+	var def workflowDefinition
+	if _, wrapped := probe["workflow"]; wrapped && len(probe) == 1 {
+		var wrapper workflowFileWrapper
+		if err := decodeWorkflowStrict(data, &wrapper); err != nil {
+			return workflowDefinition{}, err
+		}
+		def = wrapper.Workflow
+	} else if err := decodeWorkflowStrict(data, &def); err != nil {
+		return workflowDefinition{}, err
+	}
+
+	if def.Name == "" {
+		return workflowDefinition{}, fmt.Errorf("workflow YAML must include a non-empty 'name' field")
+	}
+	if !workflowNameRE.MatchString(def.Name) {
+		return workflowDefinition{}, fmt.Errorf("workflow name %q invalid: must match %s (alphanumerics, dot, underscore, hyphen; length 1–128)", def.Name, workflowNameRE.String())
+	}
+	if def.Version != "" {
+		if _, err := wfpkg.ParseSemanticVersion(def.Version); err != nil {
+			return workflowDefinition{}, fmt.Errorf("workflow version %q invalid: %w (use MAJOR.MINOR.PATCH, e.g. 1.0.0)", def.Version, err)
+		}
+	}
+	return def, nil
+}
+
+func decodeWorkflowStrict(data []byte, out interface{}) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		return fmt.Errorf("failed to parse workflow YAML: %w", err)
+	}
+	return nil
 }
 
 // workflowListEntry is a single workflow entry returned by GET /api/v1/workflows.
@@ -304,16 +355,9 @@ func runWorkflow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read workflow file %q: %w", filePath, err)
 	}
 
-	var def workflowDefinition
-	if err := yaml.Unmarshal(data, &def); err != nil {
-		return fmt.Errorf("failed to parse workflow YAML: %w", err)
-	}
-
-	if def.Name == "" {
-		return fmt.Errorf("workflow YAML must include a non-empty 'name' field")
-	}
-	if !workflowNameRE.MatchString(def.Name) {
-		return fmt.Errorf("workflow name %q invalid: must match %s (alphanumerics, dot, underscore, hyphen; length 1–128)", def.Name, workflowNameRE.String())
+	def, err := parseWorkflowFile(data)
+	if err != nil {
+		return err
 	}
 
 	client, err := getWorkflowClient()
@@ -386,8 +430,7 @@ func deriveHVPromoteCluster(steward StewardInfo, clusterOverride string) (string
 }
 
 // workflowFileWrapper wraps the top-level "workflow:" key used by the
-// promote-hv-role.yaml template so yaml.Unmarshal populates workflowDefinition
-// correctly.
+// promote-hv-role.yaml template and the nested-form examples.
 type workflowFileWrapper struct {
 	Workflow workflowDefinition `yaml:"workflow"`
 }
@@ -416,11 +459,10 @@ func runWorkflowPromoteHVRole(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	var wrapper workflowFileWrapper
-	if err := yaml.Unmarshal(promoteHVRoleTemplateData, &wrapper); err != nil {
+	def, err := parseWorkflowFile(promoteHVRoleTemplateData)
+	if err != nil {
 		return fmt.Errorf("failed to parse embedded promote-hv-role template: %w", err)
 	}
-	def := wrapper.Workflow
 
 	variables := map[string]interface{}{
 		"vm_name":      vmName,
