@@ -7,6 +7,7 @@
 package api
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -129,6 +130,12 @@ type passkeyLoginSession struct {
 	expires      time.Time
 	accountID    string // account username; empty for discoverable (usernameless) flow
 	discoverable bool
+
+	// Issue #4572: the begin caller's s.clientIPKey and the per-client pending counter
+	// its slot was reserved on; released on finish or sweep. clientSlot is nil for a
+	// session stored without a reservation.
+	clientKey  string
+	clientSlot *atomic.Int64
 }
 
 // PasskeyLoginBeginRequest is the optional POST /api/v1/web/passkey/login/begin body.
