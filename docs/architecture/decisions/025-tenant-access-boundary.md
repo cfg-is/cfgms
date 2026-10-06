@@ -14,6 +14,11 @@ A1.3 resolved (explicit root-scope marker, never inferred from an empty tenant);
 for a principal resolved from a durable account record, the boundary now binds on
 `GlobalScope` (`acct.RootScope`), not the assurance-gated `RootScoped` marker — reversing
 A2.2's rejection of `GlobalScope`, whose reasoning no longer matches the code.
+**Amended:** 2026-10-06 — [Amendment 6](#amendment-6-2026-10-06--billing-visibility-across-the-boundary):
+`root` sees each MSP's name, tech count, endpoint count, anonymized platform metrics, and
+per-client sizes under opaque labels — never client names — without a grant; the MSP sees
+the same report for its own clients with real names. Supersedes A2.5's "bulk list silently
+omits" rule for MSP-level rows.
 
 **Deciders:** Founder, Architecture
 
@@ -972,3 +977,85 @@ three from a single function change.
   authenticated" (Amendment 4 A4.2: deny) now supplies it here too.
 - `handleUpdateStewardConfig` gains a Decision 1 check for `callerTenant == ""` for the first
   time, matching the guard every other tenant-targeting route already carries.
+
+---
+
+## Amendment 6 (2026-10-06) — Billing visibility across the boundary
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** Decision 4, A2.5 ·
+**Related:** Epic [#4579](https://github.com/cfg-is/cfgms/issues/4579) (tenant admin tree
+boundary rows), `docs/design/mockups/tenant-admin.html`
+
+### A6.1 — Decision: what `root` sees about a walled-off MSP without a grant
+
+Decision 4 already lets `root` see billing and subscription state across the boundary. This
+amendment fixes exactly which facts that covers. For every MSP directly under `root`, with
+no client grant and no break-glass session, `root` may see:
+
+- **The MSP's name and tenant ID.**
+- **Tech count** — the number of operator accounts in the MSP's subtree.
+- **Endpoint count** — the number of registered stewards in the MSP's subtree.
+- **Anonymized platform metrics** — aggregate health and load figures for the subtree, as
+  already carved out by Decision 4. No host names, no device identifiers, no config content.
+- **Per-client size** — for each client tenant in the MSP's subtree, its endpoint count and
+  tech count, keyed by an **opaque client label**, never by the client's name or tenant ID.
+
+Nothing else crosses. Config, scripts, workflows, ordinary audit trail, device-level data and
+client names stay behind the boundary until the MSP grants access or `root` invokes
+break-glass (Decision 2), exactly as before.
+
+### A6.2 — Client names never cross, so the label cannot be the tenant ID
+
+A tenant ID is derived from the tenant's name (`generateTenantID` in
+`features/tenant/manager.go`), so exposing a client's tenant ID to `root` would expose its
+name. The opaque client label is therefore:
+
+- **Random, not derived.** It is generated once per tenant from a cryptographic random
+  source and stored with the tenant. It must not be a hash of the name or ID: client names
+  are guessable, so a hash could be reversed by trying likely names.
+- **Stable.** The same client keeps the same label for its whole life, so `root` can trend a
+  client's size over time and reconcile invoices without learning who it is.
+- **Scoped to `root`'s billing view only.** It is never used as an identifier on any other
+  API surface, and possessing a label grants nothing — it cannot be passed to a tenant
+  endpoint to reach the client.
+
+### A6.3 — The MSP sees the same report, for its own clients, with real names
+
+The MSP-side billing report shows the same facts `root` sees (A6.1), with two differences:
+
+- **Scope:** it covers only the caller's own subtree. An MSP never sees another MSP's data,
+  and a client tenant never sees its siblings.
+- **Names:** clients appear under their real names, not opaque labels. The MSP already owns
+  those names; anonymizing them for their owner would make the report unusable.
+
+This is what satisfies Decision 4's "no silent, root-only visibility" for billing data: the
+MSP can always see exactly what `root` can see about it. Routine reads of the billing
+summary by `root` are therefore **not** individually logged to the MSP's audit view — the
+visibility is standing and disclosed, not an event. Break-glass and grant usage keep their
+existing per-use audit records (Decision 2).
+
+### A6.4 — Supersedes A2.5's silent omission for MSP-level rows
+
+A2.5 says a bulk tenant list silently omits tenants the caller holds no crossing for. For a
+`root` caller, the tenant list now returns each walled-off MSP as a **boundary row** carrying
+only the A6.1 MSP-level facts (name, ID, tech count, endpoint count), marked as not
+accessible. Client tenants below a walled-off MSP are still omitted from the tree entirely;
+their sizes appear only in the billing view under opaque labels (A6.2).
+
+The reason is operational: break-glass (Decision 2b) needs a target. Hiding every MSP forces
+an operator to already know and type an MSP's ID during an incident, while the MSP's
+existence is visible to `root` through billing anyway. Showing the row protects nothing less
+and makes the emergency path usable.
+
+### Consequences
+
+- The tenant list response for a `root` caller gains boundary rows; existing callers that
+  assumed walled-off MSPs were absent must treat a boundary row as present but not
+  accessible.
+- Each tenant record gains a stored opaque billing label, generated at creation and
+  backfilled for existing tenants. This is a storage field addition across every tenant
+  store provider.
+- Two report surfaces exist with one data source: `root`'s cross-MSP billing view (opaque
+  client labels) and each MSP's own-subtree report (real names). They must be built from the
+  same aggregation so the two can never disagree.
+- Per-client tech counts can be zero; a client with no accounts of its own is normal.
