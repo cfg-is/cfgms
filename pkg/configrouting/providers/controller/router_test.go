@@ -34,7 +34,7 @@ func newTenantStore(t *testing.T, tenants ...*business.TenantData) business.Tena
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
 	for _, td := range tenants {
-		require.NoError(t, store.CreateTenant(context.Background(), td))
+		require.NoError(t, store.CreateTenant(ctxkeys.WithSystem(context.Background()), td))
 	}
 	return store
 }
@@ -42,7 +42,7 @@ func newTenantStore(t *testing.T, tenants ...*business.TenantData) business.Tena
 // addTenant persists a tenant in the real store.
 func addTenant(t *testing.T, ts business.TenantStore, id, parentID string, metadata map[string]string) {
 	t.Helper()
-	require.NoError(t, ts.CreateTenant(context.Background(), &business.TenantData{
+	require.NoError(t, ts.CreateTenant(ctxkeys.WithSystem(context.Background()), &business.TenantData{
 		ID:       id,
 		Name:     id,
 		ParentID: parentID,
@@ -111,7 +111,7 @@ func (r *recordingConfigStore) GetConfigStats(_ context.Context) (*cfgconfig.Con
 
 // ctxWithTenant returns a context carrying the given tenant ID.
 func ctxWithTenant(tenantID string) context.Context {
-	return context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	return context.WithValue(ctxkeys.WithSystem(context.Background()), ctxkeys.TenantID, tenantID)
 }
 
 // --- unit tests ---
@@ -121,7 +121,7 @@ func TestGetEffectiveConfigSource_DefaultController(t *testing.T) {
 	addTenant(t, ts, "root", "", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	info, err := router.GetEffectiveConfigSource(context.Background(), "root")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "root")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
@@ -134,7 +134,7 @@ func TestGetEffectiveConfigSource_InheritsParent(t *testing.T) {
 	addTenant(t, ts, "child", "root", nil) // child has no metadata — inherits root
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	info, err := router.GetEffectiveConfigSource(context.Background(), "child")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "child")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
@@ -151,7 +151,7 @@ func TestGetEffectiveConfigSource_ChildOverridesParent(t *testing.T) {
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
 	// The child-level entry is resolved first because we walk leaf-to-root.
-	info, err := router.GetEffectiveConfigSource(context.Background(), "child")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "child")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
@@ -163,7 +163,7 @@ func TestGetEffectiveConfigSource_EmptyTenantIDRoutesToController(t *testing.T) 
 
 	// GetConfig with empty TenantID must route to controllerStore without a cross-tenant error.
 	key := &cfgconfig.ConfigKey{TenantID: "", Namespace: "ns", Name: "cfg"}
-	_, err := router.GetConfig(context.Background(), key)
+	_, err := router.GetConfig(ctxkeys.WithSystem(context.Background()), key)
 	// ErrConfigNotFound is expected (recordingConfigStore returns it) — not a routing error.
 	assert.ErrorIs(t, err, cfgconfig.ErrConfigNotFound)
 	assert.Equal(t, int64(1), cs.calls(), "store must be called for empty TenantID")
@@ -236,7 +236,7 @@ func TestConfigSourceRouter_CacheInvalidatedOnTenantUpdate(t *testing.T) {
 	addTenant(t, ts, "root", "", nil)
 
 	r := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// Prime the cache.
 	info1, err := r.GetEffectiveConfigSource(ctx, "root")
@@ -270,7 +270,7 @@ func TestSnapshotSources_AtomicResolution(t *testing.T) {
 	addTenant(t, ts, "client", "msp", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	tenantPath := []string{"root", "msp", "client"}
 	snapshot, err := router.SnapshotSources(ctx, tenantPath)
@@ -289,7 +289,7 @@ func TestSnapshotSources_DeepCopyNoSharedRefs(t *testing.T) {
 	addTenant(t, ts, "root", "", nil)
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	snapshot, err := router.SnapshotSources(ctx, []string{"root"})
 	require.NoError(t, err)
@@ -309,7 +309,7 @@ func TestWriteMethodsAlwaysUseControllerStore(t *testing.T) {
 	ts := newTenantStore(t)
 
 	router := NewControllerRouter(cs, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	entry := &cfgconfig.ConfigEntry{
 		Key:  &cfgconfig.ConfigKey{TenantID: "t", Namespace: "ns", Name: "cfg"},
@@ -330,7 +330,7 @@ func TestGetEffectiveConfigSource_Cached(t *testing.T) {
 	ts := &callCountingTenantStore{TenantStore: inner, pathCalls: &pathCallCount}
 
 	router := NewControllerRouter(&recordingConfigStore{}, ts).(*controllerRouter)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// First call must hit the tenant store.
 	_, err := router.GetEffectiveConfigSource(ctx, "root")
@@ -375,7 +375,7 @@ func TestIntegration_RouterWith3LevelHierarchy(t *testing.T) {
 	require.NoError(t, err)
 
 	router := NewControllerRouter(cs, ts)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	// Write via the write path (always controllerStore).
 	entry := &cfgconfig.ConfigEntry{

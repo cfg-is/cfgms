@@ -59,7 +59,7 @@ func roleTenantFromRequest(r *http.Request, scope ctxkeys.TenantScope) (tenantID
 	switch {
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing (resolveRoleTenant applies authorizeSelectedTenant)
 		return strings.TrimSpace(r.URL.Query().Get("tenant")), true
 	default:
 		return "", false

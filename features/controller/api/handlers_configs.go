@@ -6,26 +6,17 @@ import (
 	"net/http"
 
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
 // handleListConfigs handles GET /api/v1/configs
-// Scope is always the authenticated tenant from context; the optional ?tenant_id=
-// query param must match the authenticated tenant and is used as a no-op filter
-// (it cannot broaden scope beyond the context tenant). This mirrors the pattern
-// in handleListStewards and prevents cross-tenant enumeration.
+// Scope is the authenticated tenant from context — the root tenant for a root
+// caller (Issue #4665) — or a tenant named with ?tenant_id= that the caller is
+// authorized for (selectListTenant), so the filter can never broaden scope past
+// the caller's authority. This prevents cross-tenant enumeration.
 func (s *Server) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	// Authenticated tenant is always the source of truth for scope.
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
-	}
-
-	// If tenant_id query param is provided, it must match the authenticated tenant.
-	if qp := r.URL.Query().Get("tenant_id"); qp != "" && qp != tenantID {
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"tenant_id filter must match authenticated tenant", "TENANT_MISMATCH")
+	tenantID, ok := s.selectListTenant(w, r, "GET /api/v1/configs")
+	if !ok {
 		return
 	}
 

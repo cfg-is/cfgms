@@ -66,7 +66,7 @@ func TestDatabaseRBACStore_DeleteRole_DoesNotDeadlockOnClosedDB(t *testing.T) {
 	require.NoError(t, db.Close())
 
 	store := &DatabaseRBACStore{db: db, schemas: NewDatabaseSchemas()}
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	err = callWithTimeout(t, 5*time.Second, func() error {
 		return store.DeleteRole(ctx, "any-id")
@@ -78,7 +78,7 @@ func TestDatabaseRBACStore_DeleteRole_DoesNotDeadlockOnClosedDB(t *testing.T) {
 // DeleteRole must return (not hang) for a role that exists in the caller's tenant.
 func TestDatabaseRBACStore_DeleteRole_Succeeds(t *testing.T) {
 	store := newDeleteRoleTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	role := &common.Role{
 		Id:       "delete-role-succeeds",
@@ -102,7 +102,7 @@ func TestDatabaseRBACStore_DeleteRole_Succeeds(t *testing.T) {
 // role) would hang too.
 func TestDatabaseRBACStore_DeleteRole_ReleasesLock(t *testing.T) {
 	store := newDeleteRoleTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	role := &common.Role{
 		Id:       "delete-role-releases-lock",
@@ -137,7 +137,7 @@ func TestDatabaseRBACStore_DeleteRole_ReleasesLock(t *testing.T) {
 // non-deadlocking.
 func TestDatabaseRBACStore_DeleteRole_CrossTenantDenied(t *testing.T) {
 	store := newDeleteRoleTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	role := &common.Role{
 		Id:       "cross-tenant-delete-role",
@@ -157,4 +157,18 @@ func TestDatabaseRBACStore_DeleteRole_CrossTenantDenied(t *testing.T) {
 	got, err := store.GetRole(ctx, role.Id)
 	require.NoError(t, err)
 	assert.Equal(t, role.Id, got.Id)
+}
+
+// TestDatabaseRBACStore_NoCallerContextDenied guards Issue #4665: a context with
+// neither a caller nor the ctxkeys.WithSystem mark is refused for a tenant's
+// role, instead of being read as an internal component with unrestricted reach.
+func TestDatabaseRBACStore_NoCallerContextDenied(t *testing.T) {
+	store := newDeleteRoleTestStore(t)
+	role := &common.Role{Id: "no-caller-role", Name: "Tenant Role", TenantId: "tenant-a"}
+	require.NoError(t, store.StoreRole(ctxkeys.WithSystem(context.Background()), role))
+
+	err := store.StoreRole(context.Background(), &common.Role{Id: "no-caller-role-2", Name: "Other", TenantId: "tenant-a"})
+	assert.ErrorIs(t, err, ErrCrossTenantAccessDenied)
+	_, err = store.GetRole(context.Background(), role.Id)
+	assert.ErrorIs(t, err, ErrCrossTenantAccessDenied)
 }

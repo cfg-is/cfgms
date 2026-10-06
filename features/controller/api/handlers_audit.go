@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -35,7 +34,7 @@ func (s *Server) handleListAuditEntries(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tenantID := callerTenantFilter(r.Context())
 
 	requestedLimit := 50
 

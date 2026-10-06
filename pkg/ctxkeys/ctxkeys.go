@@ -4,6 +4,8 @@
 // defined here to avoid cross-feature imports.
 package ctxkeys
 
+import "context"
+
 // tenantIDKeyType is unexported to prevent external construction and key aliasing.
 type tenantIDKeyType struct{}
 
@@ -88,15 +90,16 @@ func NewTenantScope(path string) TenantScope {
 // NewRootScope returns a TenantScope with unrestricted, cross-tenant access.
 //
 // Restricted caller (Issue #4316): only features/controller/api/middleware.go's
-// authentication middleware may call this, and only after it has independently
-// verified the caller's mTLS certificate carries the CFGMS admin marker (see
-// pkg/cert.HasAdminMarker / extractAdminPrincipal). This is enforced by
-// TestNewRootScope_RestrictedCaller in architecture_linux_test.go, following the same
-// restricted-caller pattern as pkg/cert's TestSetAdminMarker_Architecture and
-// TestSetRootScopeMarker_Architecture. Do not call this from any other package, and do
-// not add a new call site to that test's allow-list without an equivalent
-// verified-certificate check guarding it — the allow-list is the enforcement, not a
-// formality.
+// authentication middleware may call this, and only for an authenticated root
+// principal — one whose explicit GlobalScope flag comes from a verified CFGMS admin
+// certificate (pkg/cert.HasAdminMarker / extractAdminPrincipal) or from a credential
+// bound to a root-scope account (Issue #4665); never from an empty tenant. This is
+// enforced by TestNewRootScope_RestrictedCaller in architecture_linux_test.go,
+// following the same restricted-caller pattern as pkg/cert's
+// TestSetAdminMarker_Architecture and TestSetRootScopeMarker_Architecture. Do not
+// call this from any other package, and do not add a new call site to that test's
+// allow-list without an equivalent authenticated-root-principal check guarding it —
+// the allow-list is the enforcement, not a formality.
 func NewRootScope() TenantScope {
 	return TenantScope{kind: tenantScopeRoot}
 }
@@ -123,4 +126,85 @@ func (s TenantScope) Path() string {
 		return ""
 	}
 	return s.path
+}
+
+// TenantRestriction reports which tenant's data the caller in ctx may reach
+// (Issue #4665). It is the one place an "all tenants" decision is made, so an
+// empty tenant ID is never read as root anywhere:
+//
+//   - a root-scoped caller (TenantScope root) is unrestricted;
+//   - a tenant-scoped caller is confined to its tenant;
+//   - a context carrying only a non-empty TenantID (no TenantScope) is confined to
+//     that tenant — confinement only narrows, so it needs no explicit scope;
+//   - a context marked system-internal by WithSystem — a background job, a startup
+//     task, the steward data plane — is unrestricted;
+//   - any other context — no caller and no system mark, an empty TenantID with no
+//     scope, or an empty-path or unset tenant scope — is refused: ok is false. A
+//     context that merely lost its caller (a stray context.Background() on a
+//     request path) therefore fails closed instead of reaching every tenant.
+//
+// For an unrestricted caller tenant is "", meaning "no tenant filter"; callers
+// that need the root caller's own tenant (to store something under it) read
+// ctxkeys.TenantID, which carries the deployment's root tenant ID for a root
+// caller.
+func TenantRestriction(ctx contextValuer) (tenant string, unrestricted bool, ok bool) {
+	scope, hasScope := ctx.Value(TenantScopeKey).(TenantScope)
+	switch {
+	case hasScope && scope.IsRoot():
+		return "", true, true
+	case hasScope && scope.IsTenant() && scope.Path() != "":
+		return scope.Path(), false, true
+	case hasScope:
+		return "", false, false
+	}
+	if tenant, hasTenant := ctx.Value(TenantID).(string); hasTenant {
+		if tenant != "" {
+			return tenant, false, true
+		}
+		return "", false, false
+	}
+	if IsSystem(ctx) {
+		return "", true, true
+	}
+	return "", false, false
+}
+
+// contextValuer is the subset of context.Context TenantRestriction needs.
+type contextValuer interface {
+	Value(key any) any
+}
+
+// systemKey marks a context as system-internal (WithSystem).
+type systemKey struct{}
+
+// WithSystem returns ctx marked as system-internal work with fleet-wide reach:
+// any caller identity it carried (TenantID, TenantScopeKey) reads as absent, and
+// TenantRestriction reports it unrestricted. Cancellation, deadline and every
+// other value are kept.
+//
+// It is the only way to obtain an unrestricted context without a root caller, so
+// each use is a deliberate, greppable decision (Issue #4665): background jobs,
+// startup tasks, the steward data plane (whose caller is a steward, not a tenant
+// principal), and controller-wide work an authorized request starts — such as
+// signing-CA rotation, which must reach every steward.
+func WithSystem(ctx context.Context) context.Context {
+	return systemContext{ctx}
+}
+
+// IsSystem reports whether ctx was marked by WithSystem.
+func IsSystem(ctx contextValuer) bool {
+	marked, _ := ctx.Value(systemKey{}).(bool)
+	return marked
+}
+
+type systemContext struct{ context.Context }
+
+func (c systemContext) Value(key any) any {
+	switch key {
+	case TenantID, TenantScopeKey:
+		return nil
+	case systemKey{}:
+		return true
+	}
+	return c.Context.Value(key)
 }

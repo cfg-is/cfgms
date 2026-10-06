@@ -383,9 +383,10 @@ func TestHandleCreateAPIKey_TenantScope_SiblingTenant_Returns403(t *testing.T) {
 
 // TestHandleCreateAPIKey_TenantScope_CannotDefaultOutsideOwnSubtree is the
 // [REQUIRED TEST] for Issue #4334 covering AC3: a tenant-scoped caller cannot mint a
-// key that resolves to the catch-all "default" tenant outside its own subtree by
-// simply omitting tenant_id — the equivalent, for API keys, of a tenant-scoped caller
-// being unable to create a root-scoped account.
+// key outside its own subtree by simply omitting tenant_id — the equivalent, for API
+// keys, of a tenant-scoped caller being unable to create a root-scoped account.
+// Since Issue #4665 (with #4543) an omitted tenant resolves to the caller's own
+// tenant rather than a catch-all "default" tenant, so the key lands in tenant-a.
 func TestHandleCreateAPIKey_TenantScope_CannotDefaultOutsideOwnSubtree(t *testing.T) {
 	server := setupTestServer(t)
 
@@ -393,7 +394,14 @@ func TestHandleCreateAPIKey_TenantScope_CannotDefaultOutsideOwnSubtree(t *testin
 	body := []byte(`{"name":"default-tenant-key","permissions":["steward:read"]}`)
 	rec := callHandleCreateAPIKeyAsPrincipal(server, body, "tenant-a", caller)
 
-	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Data struct {
+			TenantID string `json:"tenant_id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "tenant-a", resp.Data.TenantID, "an omitted tenant must resolve to the caller's own tenant, never \"default\"")
 }
 
 // TestHandleCreateAPIKey_UnsetScope_Returns403 verifies the fail-closed contract

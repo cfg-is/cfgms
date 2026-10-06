@@ -615,7 +615,7 @@ func (s *Server) handleApproveCliLoginRequest(w http.ResponseWriter, r *http.Req
 		token string
 	)
 	if principal.RootScoped {
-		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, cliLoginConnectionName)
+		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, cliLoginConnectionName, principal.TenantID)
 	} else {
 		sess, token, err = s.sessionManager.Issue(r.Context(), principal.ID, cliLoginConnectionName, principal.TenantID)
 	}

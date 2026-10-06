@@ -81,7 +81,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 	scope, _ := ctx.Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tid string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- selector resolution follows list breadth; callers that act on the result apply authorizeFleetTargets
 		// Unrestricted: tid stays "".
 	case scope.IsTenant() && scope.Path() != "":
 		tid = scope.Path()
@@ -175,10 +175,10 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 // plus all descendant tenants), consistent with handleResolveSelector.
 // Admin callers (empty TenantID) see the full fleet.
 func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
-	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tid := callerTenantFilter(r.Context())
 
 	filter := fleet.Filter{}
-	if tid != "" {
+	if tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		filter.TenantSubtree = tid
 	}
 

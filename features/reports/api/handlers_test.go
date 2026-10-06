@@ -214,8 +214,9 @@ func (s *reportsStack) addTenantOwnedDevice(t *testing.T, deviceID, tenantID str
 }
 
 // request builds a request carrying the authenticated caller's tenant exactly as
-// the API auth middleware supplies it. An empty callerTenant models a
-// root/unscoped caller; a nil body builds a GET-style request.
+// the API auth middleware supplies it. An empty callerTenant models a root caller
+// (explicit root scope, bound to the root tenant — Issue #4665); a nil body builds
+// a GET-style request.
 func request(method, target, callerTenant string, body []byte) *http.Request {
 	var req *http.Request
 	if body == nil {
@@ -224,10 +225,15 @@ func request(method, target, callerTenant string, body []byte) *http.Request {
 		req = httptest.NewRequest(method, target, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if callerTenant != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenant))
+	ctx := req.Context()
+	if callerTenant == "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, "root")
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	} else {
+		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenant)
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(callerTenant))
 	}
-	return req
+	return req.WithContext(ctx)
 }
 
 // testTimeRange is a 1-day range, well inside the engine's 30-day limit, that

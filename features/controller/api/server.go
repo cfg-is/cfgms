@@ -608,7 +608,9 @@ func New(
 				AppliedAt: time.Now().UTC(),
 				Source:    "save-deploy",
 			}
-			allStewards := controllerService.ListFleetStewards(context.Background())
+			// Fleet-wide read filtered to tenantID below; system-internal, since a
+			// save=deploy fanout has no caller of its own (Issue #4665).
+			allStewards := controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
 			var tenantStewards []*service.StewardInfo
 			for _, st := range allStewards {
 				if st.TenantID == tenantID {
@@ -663,9 +665,10 @@ type controllerServiceAdapter struct {
 }
 
 func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
-	// context.Background: tenant scoping is applied downstream by MemoryQuery.Search via
-	// Filter.TenantSubtree/TenantID, not at the provider level.
-	infos := a.svc.ListFleetStewards(context.Background())
+	// System-internal (ctxkeys.WithSystem, Issue #4665): tenant scoping is applied
+	// downstream by MemoryQuery.Search via Filter.TenantSubtree/TenantID, not at
+	// the provider level, and a bare context would be refused.
+	infos := a.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		// ListFleetStewards already copies Tags from the tag store.
@@ -1488,15 +1491,18 @@ func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 	// Resolve the steward's registered tenant from the controller registry.
 	// This is the authoritative cross-tenant check — it cannot be bypassed by
 	// the caller supplying a fabricated steward_tenant_path in the request body.
+	// The live registry is per-node, so a steward that is offline or attached to a
+	// peer controller is resolved from its durable record (stewardOwnerTenant), as
+	// every other steward-scoped handler does (Issue #4665).
 	stewardTenantLookup := func(stewardID string) string {
-		if s.controllerService != nil {
-			if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
-				return info.TenantID
-			}
+		if s.controllerService == nil {
+			return ""
 		}
-		return ""
+		tenant, _ := s.stewardOwnerTenant(context.Background(), stewardID)
+		return tenant
 	}
 	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
+	rollbackHandler.tenantAccess = s.tenantAccessForScope
 	rollbackRouter := s.apiRouter.PathPrefix("/rollback").Subrouter()
 	// Require config/rollback permission for all rollback endpoints — same gate pattern
 	// as every other mutating endpoint in this server.
@@ -2113,9 +2119,9 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 			s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 			return
 		}
-		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+		callerTenant := callerTenantFilter(r.Context())
 		info, exists := s.controllerService.GetStewardInfo(stewardID)
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- telemetry stream is a read; root read breadth (ADR-025 A7.2)
 			stewardTenant := ""
 			if exists {
 				stewardTenant = info.TenantID

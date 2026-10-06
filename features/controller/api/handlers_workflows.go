@@ -171,7 +171,7 @@ func (h *WorkflowHandler) workflowStoreForRequest(w http.ResponseWriter, r *http
 	var tenantID string
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing, or it is the root tenant itself
 		resolved, ok := h.rootScopedTenant(w, r)
 		if !ok {
 			return nil, false

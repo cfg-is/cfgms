@@ -662,10 +662,11 @@ func runAccountList(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Accounts (%d):\n\n", len(accounts))
 	for i, a := range accounts {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  [%d] %s\n", i+1, a.Username)
+		if a.RootScope {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Scope:       root\n")
+		}
 		if a.TenantID != "" {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Tenant:      %s\n", a.TenantID)
-		} else if a.RootScope {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Scope:       root\n")
 		}
 		if a.Disabled {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "      Disabled:    true\n")
@@ -894,10 +895,11 @@ func runAccountRotateCert(cmd *cobra.Command, args []string) error {
 // printAccountInfo writes the standard account info block to cmd's output.
 func printAccountInfo(cmd *cobra.Command, a *apiAccountInfo) {
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  ID:          %s\n", a.ID)
+	if a.RootScope {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Scope:       root\n")
+	}
 	if a.TenantID != "" {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Tenant:      %s\n", a.TenantID)
-	} else if a.RootScope {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Scope:       root\n")
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Disabled:    %v\n", a.Disabled)
 	if len(a.Permissions) > 0 {

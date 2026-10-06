@@ -94,8 +94,10 @@ func (s *Server) handleConfigSourceTest(w http.ResponseWriter, r *http.Request) 
 	// rather than relying solely on the gate. Same 404 as a genuinely unknown
 	// tenant, so the response cannot be used as an existence oracle.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/tenants/{id}/config-source/test") {
-		s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, "POST /api/v1/tenants/{id}/config-source/test"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
+		}
 		return
 	}
 

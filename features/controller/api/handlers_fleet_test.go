@@ -23,7 +23,7 @@ import (
 // ── handleFleetHealth ─────────────────────────────────────────────────────────
 
 func getFleetHealth(server *Server) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil)
+	req := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil), "")
 	rec := httptest.NewRecorder()
 	server.handleFleetHealth(rec, req)
 	return rec
@@ -31,9 +31,7 @@ func getFleetHealth(server *Server) *httptest.ResponseRecorder {
 
 func getFleetHealthWithTenant(server *Server, tenantID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/fleet/health", nil)
-	if tenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), tenantID))
 	rec := httptest.NewRecorder()
 	server.handleFleetHealth(rec, req)
 	return rec

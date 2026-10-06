@@ -287,12 +287,12 @@ func TestHandleCreateTenant_ScopeGuard(t *testing.T) {
 		// principal and any principal whose scope was simply never established.
 		// It passes the guard; the tenant manager then refuses a second tenant with
 		// no parent, since setupTestServer seeded the root (Issue #4542).
-		rec := createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial"},
+		rec := createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial", GlobalScope: true},
 			map[string]string{"id": "guard-unscoped-root"})
 		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "TOP_LEVEL_TENANT_EXISTS")
 
-		rec = createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial"},
+		rec = createAs(t, server, &Principal{ID: "superadmin", CertSerial: "test-admin-cert-serial", GlobalScope: true},
 			map[string]string{"id": "guard-unscoped-child", "parent_id": testRootTenantID})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})

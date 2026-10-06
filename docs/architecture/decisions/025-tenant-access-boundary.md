@@ -972,3 +972,109 @@ three from a single function change.
   authenticated" (Amendment 4 A4.2: deny) now supplies it here too.
 - `handleUpdateStewardConfig` gains a Decision 1 check for `callerTenant == ""` for the first
   time, matching the guard every other tenant-targeting route already carries.
+
+---
+
+## Amendment 7 (2026-10-06) — Root principals are bound to the root tenant; an empty tenant is never root
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** A1.3, A3, A4, Issue #4316 ·
+**Related:** Issue [#4665](https://github.com/cfg-is/cfgms/issues/4665)
+
+### A7.1 — Context
+
+Root principals were represented by an empty tenant ID, and an empty tenant was read as
+"unrestricted" across the controller — in about sixty handler decisions, the fleet query,
+reports, the config router and the RBAC store. A request that lost its tenant, or a
+principal that never had one, was therefore indistinguishable from root. At the same time
+the root `TenantScope` was granted only to an admin certificate, so a root-scope account
+signed in with a passkey or `cfg connect` was refused by every handler that recognised root
+through `TenantScope`.
+
+### A7.2 — Decision
+
+- **Identity.** A root-scope account's principal (any credential) and the bootstrap admin
+  certificate's principal carry the deployment's root tenant — the single parentless tenant
+  (Issue #4542) — as `TenantID`. Account responses report it as `tenant_id`; sessions are
+  issued for it.
+- **Authority.** A principal is root only by its explicit `GlobalScope` flag (the account's
+  `root_scope`, or the bootstrap admin certificate), surfaced per request as root
+  `TenantScope`. Proof strength stays a separate layer: `requirePermission` still applies
+  each permission's assurance floor, so AssuranceStrong permissions still require step-up.
+- **One decision point.** `ctxkeys.TenantRestriction` is the only place an "all tenants"
+  decision is made: root scope, or a context explicitly marked system-internal with
+  `ctxkeys.WithSystem`, is unrestricted; a tenant caller is confined to its tenant; anything
+  else is refused — including a context that simply carries no caller, such as a stray
+  `context.Background()` on a request path. Background jobs, startup tasks and fleet-wide
+  reads that apply their own tenant filter (the fleet query, signing-CA rotation) take the
+  mark at their entry point, so every unrestricted context is a deliberate, greppable
+  decision. An empty tenant ID never grants reach.
+- **Fail closed at the edge.** Every credential path in the authentication middleware —
+  admin certificate, bearer session, web session, API key and relay — refuses a principal
+  with neither a root flag nor a tenant (`NO_TENANT_SCOPE`) before it reaches a handler. An
+  unbound session with an empty tenant — the pre-amendment form — is refused with
+  `SESSION_SCOPE_INVALID`; reconnecting issues a bound session.
+- **The crossing boundary applies to actions on stored records.** A root scope is not
+  unconditional. For a principal subject to Decision 1's boundary, every route that acts
+  on a record a request names by ID, or on the stewards a fleet selector matches, is judged
+  by the same `authorizeTenantAccess` decision as a tenant path variable, through one
+  function (`tenantAccessForScope`): creating, changing, deleting, approving, revoking or
+  provisioning an account, certificate, cert binding, enrolment token, credential request,
+  registration, registration token or refresh, API key, role or RBAC subject, case, session,
+  rollout, run, rollback or steward config; moving, hiding or decommissioning a steward;
+  pushing configuration; and dispatching a batch job, upgrade, osquery query or signed
+  operator payload. A rollback target whose owner cannot be established is refused for such
+  a caller, since no crossing can be evaluated for it. The root tenant's own records are reachable; a record owned by a tenant below
+  root needs an active grant or break-glass crossing and otherwise answers with the
+  crossing challenge (Decision 3). Bulk actions (approve-all, approve-by-CIDR) skip the
+  records the caller may not act on, as A2.5 reads bulk lists. Routes that were open to a
+  root session only by its unset scope before this amendment are judged the same way, so
+  none of them widens.
+- **Provisioned certificates are steward leaves.** Certificate provisioning, for every
+  caller, stamps the steward Organization, refuses any other, and refuses an identity that
+  names a controller cluster node, so the endpoint can never mint a controller peer
+  identity. Signing-CA rotation stays with a certificate-authenticated root principal; a
+  root web or Bearer session cannot perform it.
+- **Read breadth is unchanged.** List endpoints, and by-ID reads of records a list already
+  shows (a steward, an account, a command, a job, a push or upgrade record, a certificate),
+  keep root's existing fleet-wide breadth: such a read is no stricter than the list it
+  drills into. Whether root reads of a client tenant's data should themselves require a
+  crossing, as Decision 4 implies for business data, is a separate decision this amendment
+  does not take.
+- **Enforced by an architecture rule.** In `features/controller/api`, any root-allow
+  decision made outside `tenantAccessForScope` — a `TenantScope.IsRoot()` branch, an
+  `isWithinTenantScope` call fed the root caller's empty filter, or a hand-written
+  comparison of that filter with `""` — must carry
+  `//architecture:allow-root-scope -- <reason>` on the same line
+  (`TestRootScopeDecisionsGoThroughTenantAccess`). Handlers that are not `*Server`
+  (the rollback handler) are given the server's decision function rather than a copy of it.
+- **No substituted tenant.** Where an operation needs a tenant the caller did not name, it
+  uses the caller's own authenticated tenant — the root tenant for a root caller — never a
+  literal fallback such as `default` (Issue #4543): a per-steward config read, write or
+  delete uses the steward's own tenant (registry, then durable record), falling back to the
+  caller's tenant only for a steward known nowhere; config and deployment listings read the
+  caller's tenant or one it names with `?tenant_id` and is authorized for; an API key or a
+  non-root account created without a tenant belongs to the caller's tenant. Data a root
+  caller previously wrote under `default` is reachable through `?tenant_id=default` where
+  `default` exists as a tenant.
+
+### A7.3 — Consequences
+
+- Per-tenant assurance overrides now apply to root callers: `requirePermission` resolves a
+  root caller's assurance requirement against the root tenant's override chain, where it
+  previously resolved against no tenant and used only the global floor. An override declared
+  on the root tenant therefore binds root operators as well — the intended reading of an
+  override on that tenant.
+- The steward data plane, the registration path and other controller-internal consumers
+  that resolve a tenant from their own context (`features/controller/service`) are tracked
+  separately under Issue #4543; they serve stewards rather than tenant principals and are
+  outside this amendment.
+
+### A7.4 — Unchanged
+
+- The steward operator-roster wire format: root entries keep their existing representation,
+  so deployed stewards verify them as before.
+- Account storage routing: a root account's record stays in the system storage namespace;
+  only the stored routing key is empty, and it is never read as an authorization signal.
+- The steward-binary `default` namespace: root publishes there because deployed stewards'
+  self-fetch falls back to it.
+

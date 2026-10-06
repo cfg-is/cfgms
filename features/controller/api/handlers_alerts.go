@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -45,7 +44,7 @@ func (s *Server) handleAcknowledgeAlert(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	principalID := ""
 	if principal != nil {
@@ -95,7 +94,7 @@ func (s *Server) handleSilenceAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	principalID := ""
 	if principal != nil {

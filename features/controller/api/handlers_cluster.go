@@ -49,7 +49,7 @@ func clusterLifecycleScopeAllowed(r *http.Request, principal *Principal) bool {
 		return true
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	return scope.IsRoot()
+	return scope.IsRoot() //architecture:allow-root-scope -- controller cluster membership has no tenant to bound
 }
 
 // clusterNodeDrainResponse is the JSON body for a successful drain request.

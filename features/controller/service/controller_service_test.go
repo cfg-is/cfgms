@@ -480,7 +480,7 @@ func TestRegisterSteward_Idempotent(t *testing.T) {
 	// Second call with same ID overwrites (idempotent)
 	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-a", "addr-2", "quarantined"))
 
-	all := svc.ListFleetStewards(context.Background())
+	all := svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	assert.Len(t, all, 1)
 	assert.Equal(t, "quarantined", all[0].Status)
 }
@@ -491,7 +491,7 @@ func TestRegisterSteward_MultipleStewards(t *testing.T) {
 	require.NoError(t, svc.RegisterSteward("steward-1", "tenant-a", "addr-1", "registered"))
 	require.NoError(t, svc.RegisterSteward("steward-2", "tenant-b", "addr-2", "registered"))
 
-	all := svc.ListFleetStewards(context.Background())
+	all := svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	assert.Len(t, all, 2)
 
 	ids := make(map[string]bool)
@@ -829,7 +829,7 @@ func TestListFleetStewards_ReturnsDNACopies(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
-	all := svc.ListFleetStewards(context.Background())
+	all := svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	require.Len(t, all, 1)
 
 	require.NotEmpty(t, all[0].DNA.GetFragments(), "copy must carry the host:os fragment")
@@ -1127,19 +1127,19 @@ func TestSetStewardHidden_Success(t *testing.T) {
 	require.NoError(t, svc.RegisterSteward("s-hide", "tenant-a", "addr", "active"))
 
 	// Default: not hidden.
-	all := svc.ListFleetStewards(context.Background())
+	all := svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	require.Len(t, all, 1)
 	assert.False(t, all[0].Hidden, "freshly registered steward must not be hidden")
 
 	// Hide it.
 	require.NoError(t, svc.SetStewardHidden("s-hide", true))
-	all = svc.ListFleetStewards(context.Background())
+	all = svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	require.Len(t, all, 1)
 	assert.True(t, all[0].Hidden, "ListFleetStewards must reflect hidden=true after SetStewardHidden")
 
 	// Un-hide it.
 	require.NoError(t, svc.SetStewardHidden("s-hide", false))
-	all = svc.ListFleetStewards(context.Background())
+	all = svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	require.Len(t, all, 1)
 	assert.False(t, all[0].Hidden, "ListFleetStewards must reflect hidden=false after SetStewardHidden")
 }
@@ -1626,7 +1626,7 @@ func TestListFleetStewards_CrossInstance(t *testing.T) {
 
 	// ListFleetStewards must include the peer's steward on the very first call —
 	// no restart, no separate refresh/warm-up step required.
-	cluster := svc2.ListFleetStewards(ctx)
+	cluster := svc2.ListFleetStewards(ctxkeys.WithSystem(ctx))
 	ids := make(map[string]bool)
 	for _, s := range cluster {
 		ids[s.ID] = true
@@ -1661,7 +1661,7 @@ func TestListFleetStewards_LiveStewardTakesPrecedence(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
-	cluster := svc.ListFleetStewards(ctx)
+	cluster := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
 	require.Len(t, cluster, 1)
 	assert.Equal(t, "active", cluster[0].Status,
 		"live status must win over stale durable record")
@@ -1690,10 +1690,12 @@ func TestListFleetStewards_TenantScoping(t *testing.T) {
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), storage)
 
-	// Admin (no tenant in context) sees all three stewards.
-	adminCtx := context.Background()
-	all := svc.ListFleetStewards(adminCtx)
-	assert.Len(t, all, 3, "admin must see the whole fleet")
+	// A system-internal context sees all three stewards; a context with no caller
+	// and no system mark sees none (Issue #4665).
+	all := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
+	assert.Len(t, all, 3, "a system-internal read must see the whole fleet")
+	assert.Empty(t, svc.ListFleetStewards(context.Background()),
+		"a context with no caller must not be read as fleet-wide")
 
 	// root-tenant caller sees root + child, not other-tenant.
 	rootCtx := context.WithValue(ctx, ctxkeys.TenantID, "root")
@@ -1724,7 +1726,7 @@ func TestListFleetStewards_IncludesTags(t *testing.T) {
 	svc.SetTagStore(tagStore)
 	require.NoError(t, tagStore.Set(ctx, "dev-tags", []string{"prod", "eu-west"}))
 
-	cluster := svc.ListFleetStewards(ctx)
+	cluster := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
 	require.Len(t, cluster, 1)
 	assert.Equal(t, []string{"prod", "eu-west"}, cluster[0].Tags,
 		"controller-assigned tags must appear in the fleet-wide result")
@@ -1738,7 +1740,7 @@ func TestListFleetStewards_IncludesTags(t *testing.T) {
 func TestListFleetStewards_EmptyWhenNoStorageOrLiveStewards(t *testing.T) {
 	svc := NewControllerService(logging.NewNoopLogger())
 
-	result := svc.ListFleetStewards(context.Background())
+	result := svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	assert.Empty(t, result, "no storage and no live stewards must yield an empty (not nil-panicking) result")
 
 	svc.mu.Lock()
@@ -1748,7 +1750,7 @@ func TestListFleetStewards_EmptyWhenNoStorageOrLiveStewards(t *testing.T) {
 	}
 	svc.mu.Unlock()
 
-	result = svc.ListFleetStewards(context.Background())
+	result = svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	require.Len(t, result, 1, "live stewards must appear even with nil durable storage")
 	assert.Equal(t, "dev-live", result[0].ID)
 }
@@ -1772,7 +1774,7 @@ func TestListFleetStewards_ConcurrentReadsSafe(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			_ = svc.ListFleetStewards(ctx)
+			_ = svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
 		}()
 	}
 	wg.Wait()
@@ -1875,7 +1877,7 @@ func TestListFleetStewards_TenantMapUnavailableSkipsDNAOnlyDevice(t *testing.T) 
 
 	dropDeviceTenantTable(t, dataDir)
 
-	assert.Empty(t, svc.ListFleetStewards(ctx),
+	assert.Empty(t, svc.ListFleetStewards(ctxkeys.WithSystem(ctx)),
 		"with the authoritative device_tenant mapping unreadable and no fleet registry record, "+
 			"the dna_history tenant must not be used to publish the device")
 }
@@ -1900,13 +1902,13 @@ func TestListFleetStewards_TenantMapLossWithoutStewardStoreFallbackDropsDevice(t
 
 	svc := NewControllerServiceWithStorage(logging.NewNoopLogger(), mgr)
 
-	first := svc.ListFleetStewards(ctx)
+	first := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
 	require.Len(t, first, 1, "precondition: the device resolves while device_tenant is readable")
 	require.Equal(t, "tenant-a", first[0].TenantID)
 
 	dropDeviceTenantTable(t, dataDir)
 
-	second := svc.ListFleetStewards(ctx)
+	second := svc.ListFleetStewards(ctxkeys.WithSystem(ctx))
 	assert.Empty(t, second,
 		"a device_tenant read failure with no StewardStore fallback must drop the device from this call's "+
 			"result — ListFleetStewards reads durable storage directly and has no cache to retain a prior answer in")

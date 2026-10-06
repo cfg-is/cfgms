@@ -1419,7 +1419,8 @@ func (s *ControllerService) extractTenantID(ctx context.Context) string {
 }
 
 // clusterTenantInScope reports whether resourceTenant falls within the subtree
-// rooted at callerTenant. Empty callerTenant means no scope restriction (admin).
+// rooted at callerTenant. An empty callerTenant means no restriction — callers
+// pass "" only for a context ctxkeys.TenantRestriction reports unrestricted.
 // Mirrors the isWithinTenantScope logic in the api package but kept here to
 // avoid a circular import.
 func clusterTenantInScope(callerTenant, resourceTenant string) bool {
@@ -1466,7 +1467,16 @@ func clusterTenantInScope(callerTenant, resourceTenant string) bool {
 // stewards within that tenant's subtree. An unscoped (admin) context returns
 // the full fleet.
 func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInfo {
-	callerTenant, _ := ctx.Value(ctxkeys.TenantID).(string)
+	// The caller's reach comes from ctxkeys.TenantRestriction: a root-scoped or
+	// system-internal context sees the whole fleet, a tenant caller its tenant,
+	// and a context with no usable scope nothing (Issue #4665).
+	callerTenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	if !ok {
+		return nil
+	}
+	if unrestricted {
+		callerTenant = ""
+	}
 
 	liveSnap := s.liveStewardsSnapshot()
 

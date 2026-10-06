@@ -83,7 +83,7 @@ func TestManagerIssueRootScoped(t *testing.T) {
 	mgr, store := newTestManager(t, cfg, clock)
 	ctx := context.Background()
 
-	sess, token, err := mgr.IssueRootScoped(ctx, "root-operator-1", "my-ctrl")
+	sess, token, err := mgr.IssueRootScoped(ctx, "root-operator-1", "my-ctrl", "root")
 	if err != nil {
 		t.Fatalf("IssueRootScoped: %v", err)
 	}
@@ -96,8 +96,8 @@ func TestManagerIssueRootScoped(t *testing.T) {
 	if !sess.RootScoped {
 		t.Error("IssueRootScoped: RootScoped = false, want true")
 	}
-	if sess.TenantID != "" {
-		t.Errorf("IssueRootScoped: TenantID = %q, want \"\" (a root-scoped session is unscoped)", sess.TenantID)
+	if sess.TenantID != "root" {
+		t.Errorf("IssueRootScoped: TenantID = %q, want %q (a root-scoped session is bound to the root tenant, Issue #4665)", sess.TenantID, "root")
 	}
 	if sess.Assurance != session.AssuranceBasic {
 		t.Errorf("IssueRootScoped: Assurance = %v, want AssuranceBasic (root scope is not a strong factor)", sess.Assurance)

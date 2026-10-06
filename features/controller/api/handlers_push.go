@@ -17,6 +17,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/pkg/audit"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
 	configstorewriter "github.com/cfgis/cfgms/pkg/entitygraph/writers/configstore"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
@@ -76,10 +77,18 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Authorize caller: tenant-scoped callers may only push configs labelled with
-	// their own tenant. Admin callers (TenantID == "") may push any cfg.TenantID,
-	// but the fan-out is still scoped to that specific tenant — never left empty.
-	if tenantID != "" && tenantID != cfg.TenantID {
+	// their own tenant. A root caller may push any cfg.TenantID that passes its
+	// tenant decision — a root caller subject to the ADR-025 boundary needs a
+	// crossing for a tenant below root (Issue #4665) — and the fan-out is still
+	// scoped to that specific tenant, never left empty.
+	if tenantID != "" && tenantID != cfg.TenantID { //architecture:allow-root-scope -- tenant-scoped callers: exact tenant match
 		s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
+		return
+	}
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), cfg.TenantID, "POST /api/v1/config/push"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, cfg.TenantID) {
+			s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
+		}
 		return
 	}
 
@@ -131,9 +140,11 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	// tenant — see handleConfigPush's doc comment). Passing r.Context() here
 	// would additionally scope by the caller's tenant and could silently drop
 	// a legitimately matched steward for a caller whose own tenant sits above
-	// cfg.TenantID in the hierarchy.
+	// cfg.TenantID in the hierarchy. The read is marked system-internal
+	// explicitly: a bare context.Background() carries no caller and is refused
+	// (Issue #4665).
 	targeted := make([]*service.StewardInfo, 0, len(matchedIDs))
-	for _, st := range s.controllerService.ListFleetStewards(context.Background()) {
+	for _, st := range s.controllerService.ListFleetStewards(ctxkeys.WithSystem(r.Context())) {
 		if _, hit := matchedIDs[st.ID]; hit {
 			targeted = append(targeted, st)
 		}
@@ -333,7 +344,7 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 //
 // Retrieves a single push record by ID. Returns 404 for unknown IDs or records
 // owned by a different tenant — returning 403 would disclose that the push ID
-// exists (mirrors runVisibleTo in handlers_runs.go). Returns 503 when the push
+// exists (mirrors runAccess in handlers_runs.go). Returns 503 when the push
 // store is unavailable.
 func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	if s.pushStore == nil {
@@ -366,7 +377,7 @@ func (s *Server) handleGetConfigPush(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: return 404 (not 403) on mismatch to avoid leaking
 	// cross-tenant push existence. requirePermission path-var isolation does not
 	// cover push-ID path vars (middleware.go:775), so this check is explicit here.
-	if !isWithinTenantScope(tenantID, record.TenantID) {
+	if !isWithinTenantScope(tenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.respondError(w, http.StatusNotFound, "push not found")
 		return
 	}

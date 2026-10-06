@@ -66,10 +66,11 @@ type Session struct {
 	LastProvenAt time.Time
 	// RootScoped marks this session as belonging to a root-scoped SaaS-operator
 	// principal (ADR-025 Amendment 1 A1.3), a distinct and narrower category than an
-	// ordinary unscoped superadmin session — both present TenantID == "", but only a
-	// RootScoped session is subject to ADR-025 Decision 1's root<->MSP boundary. Set
-	// only by IssueRootScoped, never inferred from TenantID being empty and never
-	// mutable after issuance.
+	// ordinary root superadmin session — both carry the deployment's root tenant as
+	// TenantID (Issue #4665), but only a RootScoped session is subject to ADR-025
+	// Decision 1's root<->MSP boundary. Set only by IssueRootScoped, never inferred
+	// from TenantID and never mutable after issuance. An empty TenantID never means
+	// root.
 	RootScoped bool
 	// Channel is the issuing-channel identity for this session (Issue #3310, ADR-014 §2).
 	// Set by manager.issue from Config.Channel at issuance time; never mutable after
@@ -165,12 +166,13 @@ func SourceIPFromContext(ctx context.Context) string {
 // GraceWindow to let concurrent requests complete cleanly.
 type Manager interface {
 	Issue(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error)
-	// IssueRootScoped mints a new unscoped (TenantID == "") session marked RootScoped
-	// (ADR-025 Amendment 1 A1.3) rather than an ordinary unscoped superadmin session.
+	// IssueRootScoped mints a new session for tenantID — the deployment's root tenant —
+	// marked RootScoped (ADR-025 Amendment 1 A1.3) rather than an ordinary root
+	// superadmin session (Issue #4665).
 	// Only an issuance path that has independently verified the caller is a legitimate
 	// root-scoped SaaS operator may call this — never in response to a request-supplied
 	// flag, and there is deliberately no method to flip RootScoped on an existing session.
-	IssueRootScoped(ctx context.Context, principalID, connectionName string) (*Session, string, error)
+	IssueRootScoped(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error)
 	Validate(ctx context.Context, token string) (*Session, error)
 	Renew(ctx context.Context, token string) (*Session, string, error)
 	Revoke(ctx context.Context, id string) error

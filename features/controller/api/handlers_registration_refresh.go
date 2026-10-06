@@ -20,7 +20,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -862,7 +861,7 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 
 	// TenantID is always taken from the authenticated context for scoped callers;
 	// unscoped admins (TenantID=="") may use the query param to filter.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	tenantID := callerTenant
 	if tenantID == "" {
 		tenantID = r.URL.Query().Get("tenant_id")
@@ -928,8 +927,8 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers only; a root caller passes authorizeTenantAccess below, refused as 404 like every other outcome
 		sameTenant := entry.TenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {
@@ -1092,14 +1091,9 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
-		sameTenant := entry.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
-			return
-		}
+	if !s.isAuthorizedForTenant(r.Context(), callerTenantScope(r), entry.TenantID, "POST /api/v1/stewards/refresh/{pending_id}/reject") {
+		http.Error(w, "pending refresh not found", http.StatusNotFound)
+		return
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusRejected); err != nil {
@@ -1127,8 +1121,8 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {
@@ -1164,8 +1158,8 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {

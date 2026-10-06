@@ -492,35 +492,18 @@ func (s *Server) authorizeStewardRebootWindowTenant(w http.ResponseWriter, r *ht
 
 	// Migrated to ctxkeys.TenantScope (Issue #4335): an unset scope is refused, not
 	// silently treated as unrestricted the way a raw callerTenant=="" comparison would.
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	// tenantAccessForScope also applies the ADR-025 crossing boundary to a root caller
+	// subject to it (Issue #4665): the route carries a steward ID, so this is the only
+	// guard.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, stewardTenant, "/api/v1/stewards/{id}/reboot-window") {
-		s.logger.Info("Cross-tenant steward reboot_window access refused",
-			"steward_id", logging.SanitizeLogValue(stewardID),
-			"steward_tenant", logging.SanitizeLogValue(stewardTenant))
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-		return "", false
-	}
-
-	// The boundary's own predicate (GlobalScope for an account-bound principal, Issue
-	// #4337): the route carries a steward ID, so this inline check is the only guard.
-	if subjectToTenantCrossingBoundary(principal) {
-		if s.tenantManager == nil {
-			// No ancestry source wired: fail closed exactly as if no crossing were
-			// active, matching authorizeRootScopedTenantAccess's nil-store stance.
-			s.writeTenantCrossingChallenge(w, stewardTenant)
-			return "", false
-		}
-		switch s.authorizeTenantAccess(r.Context(), principal, stewardTenant) {
-		case tenantAuthAllowed:
-			// Root itself, or a tenant covered by an active crossing.
-		case tenantAuthNeedsCrossing:
-			s.writeTenantCrossingChallenge(w, stewardTenant)
-			return "", false
-		default:
+	if access := s.tenantAccessForScope(r.Context(), scope, stewardTenant, "/api/v1/stewards/{id}/reboot-window"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, stewardTenant) {
+			s.logger.Info("Cross-tenant steward reboot_window access refused",
+				"steward_id", logging.SanitizeLogValue(stewardID),
+				"steward_tenant", logging.SanitizeLogValue(stewardTenant))
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return "", false
 		}
+		return "", false
 	}
 
 	return stewardTenant, true

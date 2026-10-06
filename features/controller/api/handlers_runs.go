@@ -228,8 +228,8 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
-	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	if tenantID == "" && principal.Assurance == session.AssuranceMachine {
+	tenantID = callerTenantFilter(r.Context())
+	if tenantID == "" && principal.Assurance == session.AssuranceMachine { //architecture:allow-root-scope -- refuses a machine credential with no tenant; not a grant
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
@@ -294,13 +294,15 @@ func (s *Server) resolveAuthorizedRunTargets(w http.ResponseWriter, r *http.Requ
 	return devices, true
 }
 
-// runVisibleTo reports whether the caller may read/cancel the given run, using the
+// runAccess decides whether the caller may read/cancel the given run, using the
 // caller's ctxkeys.TenantScope (Issue #4335) rather than the raw tenantID string:
-// an unset scope is refused (not treated as root), root always passes, and a tenant
-// scope is checked via subtree containment. Callers return 404 (not 403) on false to
-// avoid leaking cross-tenant run existence (Issue #1990).
-func (s *Server) runVisibleTo(scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) bool {
-	return s.isAuthorizedForTenant(scope, run.TenantID, route)
+// an unset scope is refused (not treated as root), a tenant scope is checked via
+// subtree containment, and a root caller subject to the ADR-025 crossing boundary
+// needs a crossing for a run in a tenant below root (Issue #4665). Callers answer
+// tenantAuthDenied with 404 (not 403) to avoid leaking cross-tenant run existence
+// (Issue #1990), and tenantAuthNeedsCrossing with the crossing challenge.
+func (s *Server) runAccess(ctx context.Context, scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) tenantAuthDecision {
+	return s.tenantAccessForScope(ctx, scope, run.TenantID, route)
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.
@@ -343,7 +345,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// within its own subtree. selector.Parse populates filter.IDs (comma-OR list);
 	// filter.DeviceID is the legacy query-param path only.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !scope.IsRoot() {
+	if !scope.IsRoot() { //architecture:allow-root-scope -- a root caller's targets pass the crossing in resolveAuthorizedRunTargets below
 		for _, targetID := range filter.IDs {
 			switch s.enforceExecTenantScopeForCallerScope(r.Context(), targetID, scope) {
 			case execScopeForbidden:
@@ -394,7 +396,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
 	var paramPlatformBindings map[string]string
 	var requiredAPIScope []string
-	if s.privilegeStore != nil && tenantID != "" {
+	if s.privilegeStore != nil && tenantID != "" { //architecture:allow-root-scope -- skips per-tenant privilege metadata for root; not a grant
 		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
 		if loadErr == nil && meta != nil {
 			paramPlatformBindings = meta.ParamPlatformBindings
@@ -514,13 +516,13 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
-	// steward.tenant_path. Applied only when the principal has a non-empty TenantID
-	// (API key users). Admin mTLS principals (TenantID="") have global access.
+	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
+	// caller has fleet-wide reach (Issue #4665).
 	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
 	// legacy query-param path only.
-	if principal.TenantID != "" {
+	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
 		for _, targetID := range filter.IDs {
-			switch s.enforceExecTenantScope(r.Context(), targetID, principal.TenantID) {
+			switch s.enforceExecTenantScope(r.Context(), targetID, execTenant) {
 			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")
@@ -533,7 +535,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if filter.DeviceID != "" {
-			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID) {
+			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, execTenant) {
 			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")
@@ -678,8 +680,10 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant isolation: return 404 (not 403) to avoid leaking existence across tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -717,8 +721,10 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}/jobs") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}/jobs"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -768,8 +774,10 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "DELETE /api/v1/runs/{run_id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "DELETE /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -841,7 +849,7 @@ const (
 // fleet-lookup/prefix logic as enforceExecTenantScope.
 func (s *Server) enforceExecTenantScopeForCallerScope(ctx context.Context, deviceID string, scope ctxkeys.TenantScope) execTenantScopeDecision {
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root callers are decided by their caller, which applies resolveAuthorizedRunTargets
 		return execScopeAllowed
 	case scope.IsTenant() && scope.Path() != "":
 		return s.enforceExecTenantScope(ctx, deviceID, scope.Path())

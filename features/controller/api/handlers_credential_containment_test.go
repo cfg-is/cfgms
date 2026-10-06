@@ -37,6 +37,7 @@ func cancelCredentialRequest(t *testing.T, server *Server, principal *Principal,
 func denyCredentialRequestDirect(t *testing.T, server *Server, id string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/credential-requests/"+id+"/deny", nil)
+	req = withPrincipal(req, testAdminPrincipal())
 	req = withVars(req, map[string]string{"id": id})
 	rec := httptest.NewRecorder()
 	server.handleDenyCredentialRequest(rec, req)
@@ -68,9 +69,10 @@ func decodeRevokeByTokenResponse(t *testing.T, rec *httptest.ResponseRecorder) R
 func listOrphanedCredentials(t *testing.T, server *Server, principal *Principal) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests/orphaned", nil)
-	if principal != nil {
-		req = withPrincipal(req, principal)
+	if principal == nil {
+		principal = testAdminPrincipal()
 	}
+	req = withPrincipal(req, principal)
 	rec := httptest.NewRecorder()
 	server.handleListOrphanedCredentials(rec, req)
 	return rec

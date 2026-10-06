@@ -48,7 +48,7 @@ func TestDatabaseRBACStore_DeleteSubject_DoesNotDeadlockOnClosedDB(t *testing.T)
 	require.NoError(t, db.Close())
 
 	store := &DatabaseRBACStore{db: db, schemas: NewDatabaseSchemas()}
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	err = callWithTimeout(t, 5*time.Second, func() error {
 		return store.DeleteSubject(ctx, "any-id")
@@ -61,7 +61,7 @@ func TestDatabaseRBACStore_DeleteSubject_DoesNotDeadlockOnClosedDB(t *testing.T)
 // the caller's tenant.
 func TestDatabaseRBACStore_DeleteSubject_Succeeds(t *testing.T) {
 	store := newDeleteSubjectTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	subject := &common.Subject{
 		Id:          "delete-subject-succeeds",
@@ -87,7 +87,7 @@ func TestDatabaseRBACStore_DeleteSubject_Succeeds(t *testing.T) {
 // one on an unrelated subject) would hang too.
 func TestDatabaseRBACStore_DeleteSubject_ReleasesLock(t *testing.T) {
 	store := newDeleteSubjectTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	subject := &common.Subject{
 		Id:          "delete-subject-releases-lock",
@@ -126,7 +126,7 @@ func TestDatabaseRBACStore_DeleteSubject_ReleasesLock(t *testing.T) {
 // refused, not just made non-deadlocking.
 func TestDatabaseRBACStore_DeleteSubject_CrossTenantDenied(t *testing.T) {
 	store := newDeleteSubjectTestStore(t)
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	subject := &common.Subject{
 		Id:          "cross-tenant-delete-subject",

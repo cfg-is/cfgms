@@ -9,7 +9,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -86,8 +85,8 @@ func (s *Server) handleGetCommandRecord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, record.TenantID) {
+	callerTenant := callerTenantFilter(r.Context())
+	if !isWithinTenantScope(callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.respondError(w, http.StatusNotFound, "command record not found")
 		return
 	}
@@ -142,8 +141,8 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, stewardTenant) {
+	callerTenant := callerTenantFilter(r.Context())
+	if !isWithinTenantScope(callerTenant, stewardTenant) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		s.respondError(w, http.StatusNotFound, "steward not found")
 		return
 	}

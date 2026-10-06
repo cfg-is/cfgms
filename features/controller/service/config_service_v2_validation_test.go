@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	storageifaces "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -99,7 +100,7 @@ func TestSetConfiguration_InfraOnlyError_ReturnsSentinel(t *testing.T) {
 	svc := newServiceWithFailingTenantLookup(t)
 	cfg := createTestStewardConfig("infra-only-steward")
 
-	err := svc.SetConfiguration(context.Background(), "some-tenant", "infra-only-steward", cfg)
+	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "some-tenant", "infra-only-steward", cfg)
 
 	require.Error(t, err)
 
@@ -125,7 +126,7 @@ func TestSetConfiguration_MixedErrors_StripsInfra(t *testing.T) {
 	cfg := createTestStewardConfig("mixed-error-steward")
 	cfg.Resources[1].Name = cfg.Resources[0].Name
 
-	err := svc.SetConfiguration(context.Background(), "some-tenant", "mixed-error-steward", cfg)
+	err := svc.SetConfiguration(ctxkeys.WithSystem(context.Background()), "some-tenant", "mixed-error-steward", cfg)
 
 	require.Error(t, err)
 

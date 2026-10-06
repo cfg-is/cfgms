@@ -202,9 +202,10 @@ func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.R
 		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
 		return
 	}
-	callerTenant := s.callerTenantID(r)
-	if !isWithinTenantScope(callerTenant, reqRecord.TenantID) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqRecord.TenantID, "POST /api/v1/credential-requests/{id}/approve"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, reqRecord.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
+		}
 		return
 	}
 	if reqRecord.Status != credentialRequestStatusPending {
@@ -250,8 +251,14 @@ func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.R
 			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
 			return
 		}
-		if acct == nil || !isWithinTenantScope(callerTenant, acct.TenantID) {
+		if acct == nil {
 			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+			return
+		}
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/credential-requests/{id}/approve"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+				s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+			}
 			return
 		}
 		if acct.Disabled {
@@ -268,8 +275,10 @@ func (s *Server) handleApproveCredentialRequest(w http.ResponseWriter, r *http.R
 		if targetTenant == "" {
 			targetTenant = reqRecord.TenantID
 		}
-		if !isWithinTenantScope(callerTenant, targetTenant) {
-			s.writeErrorResponse(w, http.StatusForbidden, "Target tenant is outside caller's tenant subtree", "FORBIDDEN")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), targetTenant, "POST /api/v1/credential-requests/{id}/approve"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, targetTenant) {
+				s.writeErrorResponse(w, http.StatusForbidden, "Target tenant is outside caller's tenant subtree", "FORBIDDEN")
+			}
 			return
 		}
 		existing, err := s.getAccount(r.Context(), body.NewAccountUsername)

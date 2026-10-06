@@ -208,7 +208,7 @@ func (s *Server) handleCockpitWatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// loadCallerCase applies the cross-tenant check; returns nil + error response on failure.
-	c := s.loadCallerCase(w, r, id)
+	c := s.loadCallerCase(w, r, id, "GET /api/v1/cases/{id}/watch", false)
 	if c == nil {
 		return
 	}

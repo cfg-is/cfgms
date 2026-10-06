@@ -48,11 +48,12 @@ func (s *Server) stewardBinaryTrust() trust.TrustStore {
 	return store
 }
 
-// installerBlobTenant maps a caller tenant to the tenant namespace used for steward-binary
-// blob storage. The blob store requires a non-empty tenant (blob.ErrBlobTenantRequired), so
-// an admin mTLS principal with global scope (empty tenant) writes/reads under the "default"
-// namespace — the same fallback handlers_configs.go uses for admin writes (middleware.go:170,
-// Issue #1999). Scoped (non-admin) callers always carry their own non-empty tenant.
+// installerBlobTenant maps a caller's tenant restriction (callerTenantFilter: "" only
+// for an explicitly root caller) to the steward-binary blob namespace. A root caller
+// publishes to and reads from "default" — the fleet-wide namespace every steward's
+// self-fetch falls back to after its own tenant (client_transport_upgrade.go), so it is
+// a wire contract with deployed stewards, not an empty-tenant fallback (Issue #4665).
+// Scoped callers use their own tenant.
 func installerBlobTenant(callerTenantID string) string {
 	if callerTenantID == "" {
 		return "default"
@@ -76,16 +77,16 @@ func stewardBinaryDownloadCacheKey(tenantID, version, platform, arch string) str
 }
 
 // installerBlobTenantForCallerScope derives the steward-binary blob namespace from
-// the caller's ctxkeys.TenantScope (Issue #4335): root maps to the "default"
-// namespace (the same fallback installerBlobTenant(callerTenantID) uses for an
-// unscoped admin), a tenant scope maps to its own path, and an unset scope is
+// the caller's ctxkeys.TenantScope (Issue #4335): root maps to the fleet-wide
+// "default" namespace (see installerBlobTenant), a tenant scope maps to its own
+// path, and an unset scope is
 // refused (ok=false) rather than silently falling back to "default" — closing the
 // gap where a caller whose context lost its tenant scope could reach the same
 // namespace a genuine root-scoped admin publishes into.
 func (s *Server) installerBlobTenantForCallerScope(r *http.Request) (tenantID string, ok bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- steward binaries are published to the fleet-wide namespace
 		return "default", true
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true

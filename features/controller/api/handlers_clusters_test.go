@@ -69,8 +69,7 @@ func clusterFragment(t *testing.T, clusterName string, owners map[string]string)
 // withClusterTenant returns a copy of req with callerTenant injected via ctxkeys.TenantID,
 // mirroring what authenticationMiddleware does for API-key callers.
 func withClusterTenant(req *http.Request, callerTenant string) *http.Request {
-	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, callerTenant)
-	return req.WithContext(ctx)
+	return req.WithContext(withCallerTenant(req.Context(), callerTenant))
 }
 
 // TestHandleListClusters_HappyPath verifies the list endpoint returns all clusters
@@ -83,8 +82,9 @@ func TestHandleListClusters_HappyPath(t *testing.T) {
 	seedClusterSteward(t, server, "steward-b", "default", nil,
 		clusterFragment(t, "cfg-lab", map[string]string{"csv": "CFG-70-02"}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil)
-	// No tenant in context → root admin scope (sees everything).
+	// An explicit root caller sees everything (Issue #4665: a context with no
+	// caller at all is refused, not root).
+	req := withClusterTenant(httptest.NewRequest(http.MethodGet, "/api/v1/clusters", nil), "")
 	rec := httptest.NewRecorder()
 	server.handleListClusters(rec, req)
 
@@ -176,7 +176,7 @@ func TestHandleGetCluster_HappyPath(t *testing.T) {
 			"cno": "CFG-AB-02",
 		}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab", nil)
+	req := withClusterTenant(httptest.NewRequest(http.MethodGet, "/api/v1/clusters/cfg-lab", nil), "")
 	req = withVars(req, map[string]string{"name": "cfg-lab"})
 	rec := httptest.NewRecorder()
 	server.handleGetCluster(rec, req)
@@ -620,7 +620,7 @@ func TestStewardsInTenantScope_PeerAttachedSteward(t *testing.T) {
 
 	// ListFleetStewards reads durable storage directly — no refresh step needed.
 	found := false
-	for _, s := range peerSvc.ListFleetStewards(ctx) {
+	for _, s := range peerSvc.ListFleetStewards(ctxkeys.WithSystem(ctx)) {
 		if s.ID == "peer-steward" {
 			found = true
 		}

@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -658,8 +659,8 @@ func TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials(
 
 // TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded verifies the
 // per-steward filter is fail-closed on an account with neither root scope nor a tenant
-// path. handleCreateAccount accepts root_scope:false with no tenant_id (it only rejects
-// the root_scope+tenant_id combination), so this entry shape is reachable; treating its
+// path. A record written before Issue #4665 can carry this shape (handleCreateAccount
+// then accepted root_scope:false with no tenant_id), so it stays reachable; treating its
 // empty TenantID as "unrestricted" would have disclosed its credential ID, public key
 // and existence to every steward in the fleet. The steward's own
 // entryAuthorizedForTenant denies this shape, and the server filter must not admit more
@@ -670,13 +671,30 @@ func TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded(t *te
 	const stewardID = "steward-untenanted-entry"
 	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
 
-	// No TenantID, no RootScope — accepted by handleCreateAccount today.
+	// No TenantID, no RootScope. handleCreateAccount no longer produces this shape
+	// (an omitted tenant resolves to the caller's own, Issue #4665), but a record
+	// written by an earlier build can still carry it, so persist one directly,
+	// modelled on a freshly created account.
 	createManifestAccount(t, server, AccountRequest{
-		Username:    "manifest-user-untenanted",
+		Username:    "manifest-user-template",
 		Permissions: []string{OperatorPayloadSignGrant},
 	})
+	template, err := server.getAccount(context.Background(), "manifest-user-template")
+	require.NoError(t, err)
+	require.NotNil(t, template)
+	legacy := *template
+	legacy.ID = "manifest-user-untenanted-id"
+	legacy.Username = "manifest-user-untenanted"
+	legacy.TenantID = ""
+	require.NoError(t, server.persistAccount(context.Background(), &legacy, "test-setup"))
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, "manifest-user-untenanted", []byte("manifest-cred-untenanted"), pubKey, 0)
+	stored, err := server.getAccount(context.Background(), "manifest-user-untenanted")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	// The store files a tenantless record under its system namespace; either way it
+	// names no tenant path the steward sits under, and carries no root scope.
+	require.False(t, stored.RootScope)
 
 	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())

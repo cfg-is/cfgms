@@ -430,7 +430,7 @@ func TestAccounts_RootScope_NotDefaultedToDefault(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	info, ok := resp.Data.(map[string]interface{})
 	require.True(t, ok)
-	assert.Equal(t, "", info["tenant_id"], "root-scoped account must have empty tenant_id, not 'default'")
+	assert.Equal(t, testRootTenantID, info["tenant_id"], "a root-scoped account belongs to the root tenant, never 'default' (Issue #4665)")
 	assert.Equal(t, true, info["root_scope"], "root_scope must be true in the response")
 	assert.Equal(t, "root-admin", info["username"])
 
@@ -528,7 +528,7 @@ func TestAccounts_RootScope_AppearsInList(t *testing.T) {
 	}
 	require.NotNil(t, found, "root-scoped account must appear in list")
 	assert.True(t, found.RootScope, "root_scope must be true in list response")
-	assert.Equal(t, "", found.TenantID, "tenant_id must be empty in list response for root-scoped account")
+	assert.Equal(t, testRootTenantID, found.TenantID, "a root-scoped account lists under the root tenant (Issue #4665)")
 }
 
 // ---- Issue #3137: tenant-subtree scope enforcement on GET /api/v1/accounts ----

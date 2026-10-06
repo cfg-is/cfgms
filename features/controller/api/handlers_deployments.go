@@ -9,7 +9,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -28,10 +27,11 @@ func (s *Server) handleGetConfigDeployments(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Authenticated tenant is the scope for the query — prevents cross-tenant enumeration.
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
+	// Authenticated tenant (or an authorized ?tenant_id=) is the scope for the
+	// query — prevents cross-tenant enumeration.
+	tenantID, ok := s.selectListTenant(w, r, "GET /api/v1/configs/{id}/deployments")
+	if !ok {
+		return
 	}
 
 	if s.pushStore == nil {

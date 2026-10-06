@@ -37,7 +37,7 @@ func moduleApprovalScopeAllowed(r *http.Request, principal *Principal) bool {
 		return true
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	return scope.IsRoot()
+	return scope.IsRoot() //architecture:allow-root-scope -- module approval is one fleet-wide decision with no resource tenant
 }
 
 // moduleApprovalEntry is a single pending bundle entry in the list response.

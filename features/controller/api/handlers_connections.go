@@ -67,8 +67,8 @@ func (s *Server) handleGetStewardConnection(w http.ResponseWriter, r *http.Reque
 
 	// Tenant isolation: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && stewardInfo.TenantID != callerTenant {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" && stewardInfo.TenantID != callerTenant { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
@@ -113,7 +113,7 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	// Build the set of steward IDs visible to the caller using the fleet-wide source
 	// (ADR-031 Decision 3, Issue #3764) so stewards attached to peer nodes are included
@@ -121,9 +121,12 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 	// registry (reg.GetAll()), which is node-local by design. (Issue #3495: intended
 	// behavior change — peer-attached steward IDs now appear in allowedIDs, improving
 	// tenant-scoping correctness.)
-	clusterCtx := context.Background()
-	if callerTenant != "" {
-		clusterCtx = context.WithValue(clusterCtx, ctxkeys.TenantID, callerTenant)
+	// "" from callerTenantFilter means an explicitly root caller, whose
+	// fleet-wide read is marked system-internal: a bare context is refused
+	// (Issue #4665).
+	clusterCtx := ctxkeys.WithSystem(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		clusterCtx = context.WithValue(r.Context(), ctxkeys.TenantID, callerTenant)
 	}
 	allStewards := s.controllerService.ListFleetStewards(clusterCtx)
 	allowedIDs := make(map[string]bool, len(allStewards))
