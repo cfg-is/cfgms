@@ -1679,3 +1679,47 @@ func TestInitializeSessionStore_ClusterMode_BadDSN(t *testing.T) {
 	require.NoError(t, err, "fallback store must serve reads; a broken-Postgres store would fail Get")
 	assert.Equal(t, sess.ID, got.ID)
 }
+
+// TestInstallerS3Config_YAMLWithEnvOverrides guards Issue #4662: the cluster
+// installer blob store uses storage.cluster.s3 from the configuration — which
+// was documented but ignored — and each CFGMS_S3_INSTALLER_* variable overrides
+// its key; cluster startup accepts a bucket set only in YAML.
+func TestInstallerS3Config_YAMLWithEnvOverrides(t *testing.T) {
+	t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+	t.Setenv("CFGMS_S3_INSTALLER_REGION", "")
+	t.Setenv("CFGMS_S3_INSTALLER_ENDPOINT_URL", "")
+	cfg := &config.Config{Storage: &config.StorageConfig{Cluster: &config.ClusterStorageConfig{S3: map[string]interface{}{
+		"bucket":            "yaml-bucket",
+		"region":            "eu-west-1",
+		"endpoint_url":      "http://minio.internal:9000",
+		"access_key_id":     "resolved-from-file",
+		"secret_access_key": "resolved-from-file",
+	}}}}
+
+	got := installerS3Config(cfg)
+	assert.Equal(t, "yaml-bucket", got["bucket"])
+	assert.Equal(t, "eu-west-1", got["region"])
+	assert.Equal(t, "http://minio.internal:9000", got["endpoint_url"])
+	assert.Equal(t, "resolved-from-file", got["access_key_id"], "credentials in storage.cluster.s3 reach the provider")
+
+	t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "env-bucket")
+	t.Setenv("CFGMS_S3_INSTALLER_ENDPOINT_URL", "http://env-endpoint:9000")
+	got = installerS3Config(cfg)
+	assert.Equal(t, "env-bucket", got["bucket"], "the environment overrides the YAML bucket")
+	assert.Equal(t, "http://env-endpoint:9000", got["endpoint_url"], "the environment overrides the YAML endpoint")
+	assert.Equal(t, "eu-west-1", got["region"], "keys without an override keep their YAML value")
+	assert.Equal(t, "yaml-bucket", cfg.Storage.Cluster.S3["bucket"], "the configuration itself is not modified")
+
+	assert.Equal(t, "env-bucket", installerS3Config(nil)["bucket"], "with no configuration the environment alone configures the store")
+
+	t.Run("cluster startup accepts a YAML-only bucket", func(t *testing.T) {
+		t.Setenv("CFGMS_S3_INSTALLER_BUCKET", "")
+		clusterProvider := &testClusterProvider{}
+		interfaces.RegisterStorageProvider(clusterProvider)
+		t.Cleanup(func() { interfaces.UnregisterStorageProvider("test-cluster") })
+		//nolint:staticcheck // CreateAllStoresFromConfig is retained for single-provider and test use
+		sm, err := interfaces.CreateAllStoresFromConfig("test-cluster", nil)
+		require.NoError(t, err)
+		assert.NoError(t, assertClusterBackendsReady(cfg, sm), "a bucket in storage.cluster.s3 satisfies cluster startup")
+	})
+}

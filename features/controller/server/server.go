@@ -1645,22 +1645,14 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize installer artifact blob store (Issue #1702).
 	// Cluster mode: S3-compatible blob store so all nodes share one installer
-	// repository (bucket from CFGMS_S3_INSTALLER_BUCKET, credentials from the
-	// default AWS credential chain). Single-node: filesystem blob store with the
-	// node-local path resolved from config (Issue #2118).
+	// repository, configured by storage.cluster.s3 with CFGMS_S3_INSTALLER_*
+	// overrides (installerS3Config, Issue #4662). Single-node: filesystem blob
+	// store with the node-local path resolved from config (Issue #2118).
 	var installerBlobStore blob.BlobStore
 	var blobErr error
 	if isClusterMode {
-		bucket := os.Getenv("CFGMS_S3_INSTALLER_BUCKET") // guaranteed non-empty by assertClusterBackendsReady
-		s3Cfg := map[string]interface{}{
-			"bucket": bucket,
-		}
-		if region := os.Getenv("CFGMS_S3_INSTALLER_REGION"); region != "" {
-			s3Cfg["region"] = region
-		}
-		if endpoint := os.Getenv("CFGMS_S3_INSTALLER_ENDPOINT_URL"); endpoint != "" {
-			s3Cfg["endpoint_url"] = endpoint
-		}
+		s3Cfg := installerS3Config(cfg)
+		bucket, _ := s3Cfg["bucket"].(string) // guaranteed non-empty by assertClusterBackendsReady
 		installerBlobStore, blobErr = blob.CreateBlobStoreFromConfig("s3", s3Cfg)
 		if blobErr != nil {
 			return nil, fmt.Errorf("failed to initialize S3 installer blob store: %w", blobErr)
@@ -4833,15 +4825,39 @@ func storageProviderName(cfg *config.Config) string {
 //
 // Gates (in order):
 //  1. Storage provider must be cluster-capable (shared state across controller nodes).
-//  2. CFGMS_S3_INSTALLER_BUCKET must be set (S3-compatible blob store for installer
-//     artifacts).
+//  2. An installer blob-store bucket must be configured — storage.cluster.s3.bucket
+//     or CFGMS_S3_INSTALLER_BUCKET (S3-compatible blob store for installer artifacts).
 func assertClusterBackendsReady(cfg *config.Config, storageManager *interfaces.StorageManager) error {
 	if p := storageManager.GetProvider(); p != nil && !p.ClusterCapable() {
 		return fmt.Errorf("cluster mode requires a cluster-capable storage backend; provider %q does not support cluster coordination", storageManager.GetProviderName())
 	}
-	if os.Getenv("CFGMS_S3_INSTALLER_BUCKET") == "" {
-		return fmt.Errorf("cluster mode requires S3-compatible blob storage: set CFGMS_S3_INSTALLER_BUCKET")
+	if bucket, _ := installerS3Config(cfg)["bucket"].(string); bucket == "" {
+		return fmt.Errorf("cluster mode requires S3-compatible blob storage: set storage.cluster.s3.bucket or CFGMS_S3_INSTALLER_BUCKET")
 	}
-	_ = cfg // reserved for future per-config gate extensions
 	return nil
+}
+
+// installerS3Config is the cluster installer blob store's S3 configuration
+// (Issue #4662): storage.cluster.s3 from the controller configuration — whose
+// ${VAR} references are resolved at load, including the <VAR>_FILE
+// sealed-credential form — with each CFGMS_S3_INSTALLER_* environment variable
+// overriding its key. Credentials not given here come from the AWS default
+// chain. storage.cluster.s3 was previously documented but ignored.
+func installerS3Config(cfg *config.Config) map[string]interface{} {
+	s3Cfg := map[string]interface{}{}
+	if cfg != nil && cfg.Storage != nil && cfg.Storage.Cluster != nil {
+		for key, value := range cfg.Storage.Cluster.S3 {
+			s3Cfg[key] = value
+		}
+	}
+	for key, env := range map[string]string{
+		"bucket":       "CFGMS_S3_INSTALLER_BUCKET",
+		"region":       "CFGMS_S3_INSTALLER_REGION",
+		"endpoint_url": "CFGMS_S3_INSTALLER_ENDPOINT_URL",
+	} {
+		if value := os.Getenv(env); value != "" {
+			s3Cfg[key] = value
+		}
+	}
+	return s3Cfg
 }
