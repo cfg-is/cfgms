@@ -2514,8 +2514,18 @@ func (a *workflowEngineAdapter) TriggerWorkflow(ctx context.Context, trig *workf
 	// exactly that tenant. Scheduled and webhook triggers fire without any
 	// caller context, so without this every tenant-scoped step in a triggered
 	// workflow refused to run (Issue #4640).
-	execCtx := context.WithValue(ctx, ctxkeys.TenantID, trig.TenantID)
-	exec, err := a.engine.ExecuteWorkflow(execCtx, vw.Workflow, vars)
+	//
+	// The execution is detached from the caller's cancellation: a manual
+	// execution's caller is an HTTP request the server cancels on return, and
+	// the scheduler/webhook/SIEM callbacks return as soon as the asynchronous
+	// start does (Issue #4658). The trigger's timeout bounds the execution as the
+	// workflow's own timeout, which the engine enforces and releases.
+	execCtx := context.WithValue(context.WithoutCancel(ctx), ctxkeys.TenantID, trig.TenantID)
+	wf := vw.Workflow
+	if trig.Timeout > 0 && (wf.Timeout == 0 || trig.Timeout < wf.Timeout) {
+		wf.Timeout = trig.Timeout
+	}
+	exec, err := a.engine.ExecuteWorkflow(execCtx, wf, vars)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start workflow %q: %w", trig.WorkflowName, err)
 	}
