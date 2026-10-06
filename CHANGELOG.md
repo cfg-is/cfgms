@@ -262,7 +262,12 @@ management, and a fleet-wide tenant-containment hardening pass. See
     `on_failure` and `error_workflows` (Issue #4577).
   - Workflow triggers work for root-scoped admins, triggered executions carry the trigger's
     tenant (Issue #4640), and triggers persist in the durable trigger store with credentials in
-    the secret store, re-arming on restart (Issue #4641).
+    the secret store, re-arming on restart (Issue #4641); every cluster node reconciles its
+    trigger registrations with the shared store, so a trigger created, changed or deleted
+    through one node takes effect on all of them (Issue #4660).
+  - Workflow executions started through the API or a trigger run to completion instead of being
+    cancelled when the starting request or callback returns; a trigger timeout bounds the
+    execution it starts (Issue #4658).
   - The web console Installer page no longer loops on passkey re-login; installer artifacts
     resolve a root admin's tenant instead of answering `401` (Issue #4634).
   - Passkey enrollment and login work against a real controller (Issue #4505); `cfg` runs the
