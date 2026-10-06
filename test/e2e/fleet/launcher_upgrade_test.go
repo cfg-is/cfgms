@@ -86,7 +86,7 @@ func installLauncherLayout(t *testing.T, container, initialVersion string) {
 	stateJSON := fmt.Sprintf(`{"current":%q}`, initialVersion)
 	script := strings.Join([]string{
 		"mkdir -p " + versionDir,
-		"cp /app/steward " + stewardPath,
+		"cp --remove-destination /app/steward " + stewardPath,
 		"chmod 755 " + stewardPath,
 		"chown -R cfgms:cfgms " + launcherRoot + "/versions",
 		fmt.Sprintf("echo '%s' > %s/state.json", stateJSON, launcherRoot),
