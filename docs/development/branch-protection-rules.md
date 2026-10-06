@@ -11,7 +11,7 @@ CFGMS uses GitHub Rulesets to protect branches in a GitFlow-style branching mode
 | Branch | Purpose | Required checks | Ruleset ID |
 |--------|---------|-----------------|------------|
 | `main` | Production-ready releases | 4 | 11647678 |
-| `develop` | Integration branch | **10** | 11647684 |
+| `develop` | Integration branch | **11** | 11647684 |
 | `release/*` | Release candidates | 0 | 11647689 |
 
 The column was previously a "Protection Level" of Strict / Moderate / Standard,
@@ -63,7 +63,7 @@ gh api repos/cfg-is/cfgms/rulesets/11647678 \
 ```
 
 **Note**: `main` is reached only by a `develop → main` release PR, so the content
-has already cleared develop's ten checks. These four re-validate the merge
+has already cleared develop's eleven checks. These four re-validate the merge
 commit; they are not the whole of what gated the change.
 
 ---
@@ -88,7 +88,7 @@ commit; they are not the whole of what gated the change.
 | Status checks required | ✅ Yes | CI checks must pass |
 | Merge queue | ✅ Enabled | Serialized merge with post-rebase validation (replaces strict mode) |
 
-### Required Status Checks (10 total)
+### Required Status Checks (11 total)
 
 - `unit-tests` - Core functionality validation
 - `integration-tests` - Fast comprehensive + production-critical tests
@@ -100,6 +100,7 @@ commit; they are not the whole of what gated the change.
 - `zizmor` - Workflow security (action pins, cache poisoning, injection)
 - `frontend-checks` - `web/` typecheck, lint and tests
 - `CLA signature check` - Contributor licence agreement
+- `fleet-e2e-tests` - Docker fleet end-to-end suite (merge queue; PR-side stub)
 
 Read the list from the ruleset rather than trusting this page:
 
@@ -126,7 +127,7 @@ Enabled in Story #801. The merge queue replaces the previous `strict_required_st
 **How it works:**
 1. A PR marked for merge enters a serial queue
 2. GitHub creates a temporary merge-queue branch: current develop tip + the PR's changes
-3. All 10 required checks run against that combined (post-rebase) state
+3. All 11 required checks run against that combined (post-rebase) state
 4. If checks pass, the PR is squash-merged into develop
 5. If checks fail, the PR is ejected from the queue and the author is notified
 
@@ -172,7 +173,7 @@ gh api repos/cfg-is/cfgms/rulesets/11647689 \
 ```
 
 **This is a deliberate accepted risk, not an oversight** (decided 2026-08-05,
-recorded in #3199). Release branches are cut from `develop`, whose ten checks
+recorded in #3199). Release branches are cut from `develop`, whose eleven checks
 have already run on every commit, so content reaching `release/*` has been
 validated. The residual gap is only what happens to the branch *after* the cut —
 a cherry-pick, hotfix, force-merge or mistaken push is gated by nothing.
@@ -194,7 +195,7 @@ required context whose workflow never runs blocks the branch permanently.
 The context name is the job's `name:`, not its key — these were measured by
 grepping `name: <context>` across `.github/workflows/`.
 
-**Required on `develop`** (all ten):
+**Required on `develop`** (all eleven):
 
 | Context name | Real run | Stub |
 |---|---|---|
@@ -208,6 +209,7 @@ grepping `name: <context>` across `.github/workflows/`.
 | `zizmor` | `zizmor.yml` | none |
 | `frontend-checks` | `frontend-ci.yml` | none |
 | `CLA signature check` | `cla-check.yml` | none |
+| `fleet-e2e-tests` | `fleet-e2e.yml` (`merge_group` only) | `fleet-e2e-pr-stub.yml` (`pull_request` only) |
 
 **Advisory, not required** — these fail on findings but do not block a merge:
 
