@@ -3617,6 +3617,65 @@ GHEOF
     rm -rf "$tmp_dir"
 }
 
+test_create_clone_pr_release_base() {
+    log_test "Testing create-clone-pr: a release-line PR is refused before git clone (Issue #4693)..."
+
+    local dispatch_script
+    dispatch_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.claude/scripts/agent-dispatch.sh"
+
+    local case_name head base expect
+    for case_name in release_pr backport_pr; do
+        case "$case_name" in
+            release_pr)  head="release/v9.9.9";       base="main";           expect="FIX_REFUSED:9998:base_not_develop_main" ;;
+            backport_pr) head="backport/4242-v9.9.9"; base="release/v9.9.9"; expect="FIX_REFUSED:9998:base_not_develop_release/v9.9.9" ;;
+        esac
+
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        local worktree_dir="${tmp_dir}/worktrees"
+        mkdir -p "$worktree_dir"
+
+        # Mock gh: an internal author's open PR whose base is not develop.
+        cat > "${tmp_dir}/gh" << GHEOF
+#!/usr/bin/env bash
+if [[ "\$1" == "pr" && "\$2" == "view" ]]; then
+    printf '{"headRefName":"${head}","baseRefName":"${base}","body":"","labels":[],"author":{"login":"internal-user"}}\\n'
+else
+    printf '{}\\n'
+fi
+exit 0
+GHEOF
+        chmod +x "${tmp_dir}/gh"
+
+        local fake_repo="${tmp_dir}/repo"
+        git -C "${tmp_dir}" init -q repo
+        git -C "${fake_repo}" remote add origin "https://github.com/cfg-is/cfgms.git"
+
+        local output exit_code=0
+        output=$(
+            PATH="${tmp_dir}:${PATH}" \
+            CFGMS_TEST_REPO_ROOT="$fake_repo" \
+            CFGMS_TEST_WORKTREE_BASE="$worktree_dir" \
+            CFGMS_TEST_COLLAB_PERM="push" \
+            bash "$dispatch_script" create-clone-pr 9998 2>&1
+        ) || exit_code=$?
+
+        if [[ $exit_code -eq 3 ]] && echo "$output" | grep -qF "$expect"; then
+            log_pass "create_clone_pr_${case_name}: refused with ${expect}"
+        else
+            log_fail "create_clone_pr_${case_name}: expected exit 3 and '${expect}', got ${exit_code}: ${output}"
+        fi
+
+        if [[ ! -d "${worktree_dir}/pr-fix-9998" ]]; then
+            log_pass "create_clone_pr_${case_name}: clone directory not created"
+        else
+            log_fail "create_clone_pr_${case_name}: clone directory must not exist when refused"
+        fi
+
+        rm -rf "$tmp_dir"
+    done
+}
+
 test_dispatch_fix_external_author() {
     log_test "Testing po-act.sh dispatch-fix: external-author gate refuses before container launch..."
 
@@ -5672,6 +5731,7 @@ DISPATCH_TABLE=(
     "test_cleanup_issue_item_mode:claude-tooling"
     "test_review_pr_item_branch:claude-tooling"
     "test_create_clone_pr_external_author:claude-tooling"
+    "test_create_clone_pr_release_base:claude-tooling"
     "test_dispatch_fix_external_author:claude-tooling"
     "test_enqueue_external_author_toctou:claude-tooling"
     "test_entrypoint_set_pr_call:devinfra"
