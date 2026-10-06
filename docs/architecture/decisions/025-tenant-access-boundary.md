@@ -995,8 +995,10 @@ no client grant and no break-glass session, `root` may see:
 - **The MSP's name and tenant ID.**
 - **Tech count** — the number of operator accounts in the MSP's subtree.
 - **Endpoint count** — the number of registered stewards in the MSP's subtree.
-- **Anonymized platform metrics** — aggregate health and load figures for the subtree, as
-  already carved out by Decision 4. No host names, no device identifiers, no config content.
+- **Anonymized platform metrics** — aggregate counts over the subtree's steward records:
+  online/offline counts, operating-system platform mix, and steward version mix. These fall
+  under Decision 4's platform-metrics carve-out. No host names, no device identifiers, no
+  config content.
 - **Per-client size** — for each client tenant in the MSP's subtree, its endpoint count and
   tech count, keyed by an **opaque client label**, never by the client's name or tenant ID.
 
@@ -1038,8 +1040,9 @@ existing per-use audit records (Decision 2).
 
 A2.5 says a bulk tenant list silently omits tenants the caller holds no crossing for. For a
 `root` caller, the tenant list now returns each walled-off MSP as a **boundary row** carrying
-only the A6.1 MSP-level facts (name, ID, tech count, endpoint count), marked as not
-accessible. Client tenants below a walled-off MSP are still omitted from the tree entirely;
+only the A6.1 MSP-level facts (name, ID, tech count, endpoint count) plus its client tenant
+count, marked as not accessible. The client count discloses nothing new: A6.1 already gives
+`root` one per-client size row per client. Client tenants below a walled-off MSP are still omitted from the tree entirely;
 their sizes appear only in the billing view under opaque labels (A6.2).
 
 The reason is operational: break-glass (Decision 2b) needs a target. Hiding every MSP forces
