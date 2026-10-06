@@ -202,7 +202,7 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	// Apply tenant-scope filter: scoped callers only see certs for stewards
 	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
 	// skips filtering; every scoped caller requires an evaluable steward store.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		if s.stewardStore == nil {
 			// Without the steward store, subtree membership cannot be evaluated at
@@ -336,7 +336,7 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 	// certificates whose owning steward lives within that subtree.
 	// Unscoped admins (callerTenant == "") see everything.
 	// Controller-internal certs (ClientID == "") have no tenant owner and are always visible.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" && certData.ClientID != "" {
 		if s.stewardStore == nil {
 			s.logger.Error("certificate get failed: steward store not configured",
@@ -413,7 +413,7 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 	// for another tenant's steward. Both are denied with the same 404 used for
 	// out-of-scope certs so no cross-tenant existence is leaked. Only an
 	// unscoped admin (empty caller tenant) may revoke those.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		if certData.ClientID == "" {
 			s.logger.Warn("Denied tenant-scoped revoke of unattributable certificate",

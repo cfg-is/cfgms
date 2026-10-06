@@ -480,7 +480,7 @@ func TestPrincipalHasCertifiedRootScope_RootScopedSessionRefused(t *testing.T) {
 	mgr := session.NewManager(bearerCfg, store, time.Now)
 	srv.SetSessionManager(mgr)
 
-	_, token, err := mgr.IssueRootScoped(context.Background(), "root-cli-op", "cfg-cli")
+	_, token, err := mgr.IssueRootScoped(context.Background(), "root-cli-op", "cfg-cli", testRootTenantID)
 	require.NoError(t, err)
 
 	var captured *Principal

@@ -62,7 +62,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		err   error
 	)
 	if principal.RootScoped {
-		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, req.ConnectionName)
+		sess, token, err = s.sessionManager.IssueRootScoped(r.Context(), principal.ID, req.ConnectionName, principal.TenantID)
 	} else {
 		sess, token, err = s.sessionManager.Issue(r.Context(), principal.ID, req.ConnectionName, principal.TenantID)
 	}
@@ -132,9 +132,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	callerTenant := callerTenantFilter(r.Context())
 	items := make([]sessionListItem, 0, len(all))
 	for _, sess := range all {
-		if principal.TenantID != "" && sess.TenantID != principal.TenantID {
+		if callerTenant != "" && sess.TenantID != callerTenant {
 			continue
 		}
 		items = append(items, sessionListItem{
@@ -192,10 +193,10 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Tenant-scope check: a scoped caller (TenantID != "") may only revoke sessions in
-	// their own tenant. An unscoped caller retains cross-tenant reach, matching the rule
+	// Tenant-scope check: a tenant-scoped caller may only revoke sessions in its own
+	// tenant. A root caller retains cross-tenant reach, matching the rule
 	// handleSessionList already applies.
-	if principal.TenantID != "" && target.TenantID != principal.TenantID {
+	if callerTenant := callerTenantFilter(r.Context()); callerTenant != "" && target.TenantID != callerTenant {
 		s.logger.Warn("Cross-tenant session revoke denied",
 			"session_id", logging.SanitizeLogValue(sessionID),
 			"session_tenant", logging.SanitizeLogValue(target.TenantID),

@@ -195,8 +195,9 @@ The registration, registration-token, and IP-trust API clusters are now
 caller-tenant-scoped. A web-session or API-key principal carrying a non-empty
 `TenantID` in context (`ctxkeys.TenantID`, set by `authenticationMiddleware`)
 can only read or mutate resources whose `TenantID` equals or is a path-prefix
-descendant of the caller's own tenant. Unscoped mTLS admin principals
-(`callerTenantID == ""`) retain global visibility and are unaffected.
+descendant of the caller's own tenant. Root principals — root `TenantScope`,
+granted only by an explicit root flag (ADR-025 Amendment 7) — retain global
+visibility and are unaffected.
 
 Specific changes:
 - `handleListPendingRegistrations`, `handleApproveAllRegistrations`,

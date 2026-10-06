@@ -228,7 +228,7 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
-	tenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
+	tenantID = callerTenantFilter(r.Context())
 	if tenantID == "" && principal.Assurance == session.AssuranceMachine {
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
@@ -514,13 +514,13 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant RBAC check for id: targets — enforce admin.tenant_path is a prefix of
-	// steward.tenant_path. Applied only when the principal has a non-empty TenantID
-	// (API key users). Admin mTLS principals (TenantID="") have global access.
+	// steward.tenant_path. Applied to every caller that is not root-scoped; a root
+	// caller has fleet-wide reach (Issue #4665).
 	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
 	// legacy query-param path only.
-	if principal.TenantID != "" {
+	if execTenant := callerTenantFilter(r.Context()); execTenant != "" {
 		for _, targetID := range filter.IDs {
-			switch s.enforceExecTenantScope(r.Context(), targetID, principal.TenantID) {
+			switch s.enforceExecTenantScope(r.Context(), targetID, execTenant) {
 			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")
@@ -533,7 +533,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if filter.DeviceID != "" {
-			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, principal.TenantID) {
+			switch s.enforceExecTenantScope(r.Context(), filter.DeviceID, execTenant) {
 			case execScopeForbidden:
 				s.writeErrorResponse(w, http.StatusForbidden,
 					"access denied: steward is not in your tenant scope", "FORBIDDEN")

@@ -13,7 +13,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -64,7 +63,7 @@ func (s *Server) handleGetSubjectRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	subjectTenant, ok := s.subjectInCallerScope(w, r, subjectID, callerTenant)
 	if !ok {
 		return
@@ -110,7 +109,7 @@ func (s *Server) handleAssignSubjectRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	subjectTenant, ok := s.subjectInCallerScope(w, r, subjectID, callerTenant)
 	if !ok {
 		return
@@ -202,7 +201,7 @@ func (s *Server) handleRevokeSubjectRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	// tenantID for the revoke call is derived from the subject's tenant (from GetSubject),
 	// never from a client-supplied body field (issue #3128 implementation note).
 	subjectTenant, ok := s.subjectInCallerScope(w, r, subjectID, callerTenant)

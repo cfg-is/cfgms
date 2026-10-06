@@ -343,7 +343,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 
 	// Issue a Basic session, then immediately elevate to Strong (ADR-021 Decision 3).
 	// A login-time passkey assertion is phishing-resistant and earns Strong directly.
-	issuedSess, _, issueErr := mgr.Issue(r.Context(), acct.ID, "web", acct.TenantID)
+	issuedSess, _, issueErr := mgr.Issue(r.Context(), acct.ID, "web", s.accountPrincipalTenant(r.Context(), acct))
 	if issueErr != nil {
 		s.logger.Error("Passkey login finish: failed to issue session",
 			"username", logging.SanitizeLogValue(acct.Username),
@@ -428,7 +428,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	s.writeResponse(w, http.StatusOK, PasskeyLoginFinishResponse{
 		OK:        true,
 		Username:  acct.Username,
-		TenantID:  acct.TenantID,
+		TenantID:  s.accountPrincipalTenant(r.Context(), acct),
 		RootScope: acct.RootScope,
 	})
 }

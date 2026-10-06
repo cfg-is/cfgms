@@ -350,7 +350,7 @@ func TestPasskeyLogin_ResponseCarriesTenantScope(t *testing.T) {
 		loginRec := doPasskeyLogin(t, srv, rootUser, "")
 		require.Equal(t, http.StatusOK, loginRec.Code, "body: %s", loginRec.Body.String())
 		tenantID, rootScope := decodeScope(t, loginRec)
-		assert.Empty(t, tenantID, "root-scoped login must return empty tenant_id")
+		assert.Equal(t, testRootTenantID, tenantID, "a root-scoped login returns the root tenant it is bound to (Issue #4665)")
 		assert.True(t, rootScope, "root-scoped login must report root_scope=true")
 	})
 }

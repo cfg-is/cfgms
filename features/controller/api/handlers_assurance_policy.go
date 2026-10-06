@@ -10,7 +10,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -68,7 +67,7 @@ func (s *Server) handleGetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant or descendants.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
@@ -108,7 +107,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant or descendants.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")

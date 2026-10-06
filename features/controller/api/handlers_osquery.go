@@ -12,7 +12,6 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/fleet/selector"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -91,7 +90,7 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 	// an absent prefix defaults to the caller's entire subtree. Admin callers
 	// (empty tenant ID, e.g. mTLS cert admins) remain unrestricted, matching
 	// handleResolveSelector and handleDispatchUpgrade.
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenantID := callerTenantFilter(r.Context())
 	if parsedTenantPath != "" {
 		if !isWithinTenantScope(callerTenantID, parsedTenantPath) {
 			s.logger.Info("Osquery selector tenant outside caller subtree",

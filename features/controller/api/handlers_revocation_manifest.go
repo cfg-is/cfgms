@@ -13,7 +13,6 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -308,7 +307,7 @@ func (s *Server) webAuthnRelyingPartyBinding() *WebAuthnRelyingParty {
 func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Request) {
 	// Authorization before resource state: a scoped caller learns nothing about
 	// controller configuration from this endpoint.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		s.logger.Warn("Denied tenant-scoped access to fleet-wide revocation manifest",
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))

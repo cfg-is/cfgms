@@ -14,7 +14,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/pkg/audit"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -60,7 +59,7 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 	}
 
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	// "root" is the SaaS operator's own scope, not an MSP that can consent to being
 	// supported (ADR-025 Decision 1). A crossing recorded on "root" would sit on every
@@ -268,7 +267,7 @@ func (s *Server) handleListTenantCrossings(w http.ResponseWriter, r *http.Reques
 	}
 
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {

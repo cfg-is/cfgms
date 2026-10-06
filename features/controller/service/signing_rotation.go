@@ -157,9 +157,10 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// to the subtree named by ctxkeys.TenantID, and Rotate runs on an HTTP request
 		// context whose tenant is the calling admin's own tenant — so passing ctx
 		// through unchanged would silently skip every steward outside that subtree and
-		// strand them on the retired cert. Clear the scope (empty tenant == whole
-		// fleet) while keeping the request's cancellation and deadline.
-		fleetCtx := context.WithValue(ctx, ctxkeys.TenantID, "")
+		// strand them on the retired cert. Drop the caller's tenant identity — a
+		// system-internal context reaches the whole fleet — while keeping the
+		// request's cancellation and deadline (Issue #4665).
+		fleetCtx := ctxkeys.WithoutCaller(ctx)
 		stewards := controllerSvc.ListFleetStewards(fleetCtx)
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{

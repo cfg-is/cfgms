@@ -387,7 +387,9 @@ func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, requ
 	}
 
 	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
-	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	// The RBAC lookup's tenant: "" for a root-scoped or system-internal caller,
+	// the caller's tenant otherwise (Issue #4665).
+	tenantID, _, _ := ctxkeys.TenantRestriction(ctx)
 
 	if request.Emergency || request.RollbackType == RollbackTypeEmergency {
 		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{

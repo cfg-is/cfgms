@@ -184,7 +184,7 @@ func TestRouterSessionCreate_BasicAssuranceReturns401(t *testing.T) {
 
 	// Issue a real session token — the auth middleware will validate it and create a
 	// Basic-assurance principal (session.AssuranceBasic), matching the cfg-CLI Bearer path.
-	_, token, err := mgr.Issue(context.Background(), "web-user", "test-conn", "")
+	_, token, err := mgr.Issue(context.Background(), "web-user", "test-conn", testRootTenantID)
 	require.NoError(t, err, "must be able to issue a session token for the test")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewBufferString(`{"connection_name":"test"}`))
@@ -493,7 +493,7 @@ func TestHandleSessionRevoke_UnscopedCanRevokeCrossTenant(t *testing.T) {
 func TestSessionTokenAuthMiddleware_ValidToken(t *testing.T) {
 	srv, mgr, _ := setupTestServerWithSession(t)
 
-	_, token, err := mgr.Issue(context.Background(), "carol", "ctrl", "")
+	_, token, err := mgr.Issue(context.Background(), "carol", "ctrl", testRootTenantID)
 	if err != nil {
 		t.Fatalf("Issue: %v", err)
 	}
@@ -946,11 +946,11 @@ func TestCrossChannelValidation_InMemoryCachePath(t *testing.T) {
 	ctx := context.Background()
 
 	// Issue a CLI session — it is in the CLI manager's memory but not the web manager's.
-	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", testRootTenantID)
 	require.NoError(t, err)
 
 	// Issue a web session.
-	_, webToken, err := webMgr.Issue(ctx, "alice", "web-ctrl", "")
+	_, webToken, err := webMgr.Issue(ctx, "alice", "web-ctrl", testRootTenantID)
 	require.NoError(t, err)
 
 	// CLI token as Bearer → uses CLI manager → validates OK (same channel, in-memory).
@@ -1014,9 +1014,9 @@ func TestCrossChannelValidation_PostRestartStoreRehydrationPath(t *testing.T) {
 	// Issue sessions with both managers.
 	cliMgr := session.NewManager(cliCfg, store, time.Now)
 	webMgr := session.NewManager(webCfg, store, time.Now)
-	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", "")
+	_, cliToken, err := cliMgr.Issue(ctx, "alice", "cli-ctrl", testRootTenantID)
 	require.NoError(t, err)
-	_, webToken, err := webMgr.Issue(ctx, "bob", "web-ctrl", "")
+	_, webToken, err := webMgr.Issue(ctx, "bob", "web-ctrl", testRootTenantID)
 	require.NoError(t, err)
 
 	// Simulate restart: fresh managers with empty in-memory maps over the same store.

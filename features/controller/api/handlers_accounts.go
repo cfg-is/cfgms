@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -176,10 +177,12 @@ type AccountCreateResponse struct {
 }
 
 // accountStorageTenant returns the tenant key to use in the secret store
-// for an account. Root-scoped accounts (logicalTenantID == "") are stored
-// under the system sentinel because the secret store requires non-empty TenantID.
-// The metadata field "root_scope" is the authoritative indicator; this mapping is
-// only for storage routing (Issue #2919).
+// for an account. A root-scope account's stored record carries no tenant and is
+// stored under the system sentinel because the secret store requires a
+// non-empty TenantID. This is storage routing only: the metadata field
+// "root_scope" (account.RootScope) is the authority on root scope, and a root
+// account's tenant is the deployment's root tenant (accountPrincipalTenant,
+// Issue #4665) — an empty stored tenant is never read as root (Issue #2919).
 func accountStorageTenant(logicalTenantID string) string {
 	if logicalTenantID == "" {
 		return audit.SystemTenantID
@@ -932,7 +935,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.TenantID == "",
+		"root_scope", logging.SanitizeLogValue(strconv.FormatBool(acct.RootScope)),
 		"enrollment_link_minted", rawToken != "",
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
@@ -940,7 +943,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		AccountInfo: AccountInfo{
 			ID:                           acct.ID,
 			Username:                     acct.Username,
-			TenantID:                     acct.TenantID,
+			TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
 			RootScope:                    acct.RootScope,
 			Permissions:                  acct.Permissions,
 			Disabled:                     acct.Disabled, // Issue #3126: a reset retains the disable
@@ -1042,7 +1045,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
@@ -1072,11 +1075,11 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Issue #2919: root-scoped accounts are stored under the system sentinel;
-		// restore the logical empty TenantID for the response.
+		// a root account belongs to the deployment's root tenant (Issue #4665).
 		rootScope := meta.Metadata["root_scope"] == "true"
 		tenantID := meta.TenantID
 		if rootScope {
-			tenantID = ""
+			tenantID = s.rootTenantID(r.Context())
 		}
 		// Issue #2974: determine whether an outstanding enrollment link exists.
 		// Check hash, expiry, and revoked flag from stored metadata.
@@ -1219,7 +1222,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
 	// not 403 — to avoid disclosing that the account exists in another tenant.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !isWithinTenantScope(callerTenant, acct.TenantID) {
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
@@ -1228,7 +1231,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, AccountInfo{
 		ID:                           acct.ID,
 		Username:                     acct.Username,
-		TenantID:                     acct.TenantID,
+		TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
 		RootScope:                    acct.RootScope,
 		Permissions:                  acct.Permissions,
 		Disabled:                     acct.Disabled,
@@ -1592,7 +1595,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Web admin account offboarded and deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.TenantID == "",
+		"root_scope", acct.RootScope,
 		"certs_revoked", certsRevoked,
 		"cli_sessions_revoked", cliSessionsRevoked,
 		"web_sessions_revoked", webSessionsRevoked,

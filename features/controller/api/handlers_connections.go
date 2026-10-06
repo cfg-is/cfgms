@@ -67,7 +67,7 @@ func (s *Server) handleGetStewardConnection(w http.ResponseWriter, r *http.Reque
 
 	// Tenant isolation: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" && stewardInfo.TenantID != callerTenant {
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
@@ -113,7 +113,7 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	// Build the set of steward IDs visible to the caller using the fleet-wide source
 	// (ADR-031 Decision 3, Issue #3764) so stewards attached to peer nodes are included

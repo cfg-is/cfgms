@@ -119,7 +119,7 @@ func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
 	tenantID := ""
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+	if tid := callerTenantFilter(r.Context()); tid != "" {
 		tenantID = tid
 	}
 
@@ -450,7 +450,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) {
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.logger.Info("Cross-tenant steward get refused",
@@ -549,7 +549,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		info, ok := s.controllerService.GetStewardInfo(stewardID)
 		stewardTenant := ""
@@ -1134,7 +1134,7 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
@@ -1283,7 +1283,7 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
@@ -1396,14 +1396,8 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 
 	// Cross-tenant check: the caller's tenant must be a prefix of or equal to the
 	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
-	// mTLS admin principals have empty TenantID (global access), so check is skipped for them.
-	adminPrincipal := s.extractAdminPrincipal(r)
-	var callerTenantID string
-	if adminPrincipal != nil {
-		callerTenantID = adminPrincipal.TenantID
-	} else {
-		callerTenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	}
+	// A root caller has fleet-wide reach; anyone else is confined (Issue #4665).
+	callerTenantID := callerTenantFilter(r.Context())
 	if callerTenantID != "" {
 		tenantMatch := stewardInfo.TenantID == callerTenantID ||
 			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
@@ -1530,7 +1524,7 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	info, exists := s.controllerService.GetStewardInfo(stewardID)
 	if callerTenant != "" {
 		stewardTenant := ""
@@ -1737,7 +1731,7 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 	// Extract the caller's principal and scope from context once so they are available
 	// throughout authorization, audit, and the success path.
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenantID := callerTenantFilter(r.Context())
 
 	// Dual-admin authorization (Issue #2342).
 	// An unscoped (root) admin (callerTenantID == "") is always permitted; the move is

@@ -2219,13 +2219,19 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 
 // scopedRevokeContext builds a Strong-assurance principal context scoped to the
 // given tenant. An empty tenant models an unscoped mTLS admin.
+// An empty tenantID builds a root admin caller — explicitly, with GlobalScope and
+// a root TenantScope as the middleware gives one (Issue #4665).
 func scopedRevokeContext(tenantID string) context.Context {
 	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	if tenantID == "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	}
 	return context.WithValue(ctx, principalContextKey, &Principal{
-		ID:        "revoke-caller",
-		Name:      "mtls-cert:revoke-caller",
-		Assurance: session.AssuranceStrong,
-		TenantID:  tenantID,
+		ID:          "revoke-caller",
+		Name:        "mtls-cert:revoke-caller",
+		Assurance:   session.AssuranceStrong,
+		TenantID:    tenantID,
+		GlobalScope: tenantID == "",
 	})
 }
 

@@ -9,7 +9,6 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -86,7 +85,7 @@ func (s *Server) handleGetCommandRecord(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !isWithinTenantScope(callerTenant, record.TenantID) {
 		s.respondError(w, http.StatusNotFound, "command record not found")
 		return
@@ -142,7 +141,7 @@ func (s *Server) handleListPendingDeliveries(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !isWithinTenantScope(callerTenant, stewardTenant) {
 		s.respondError(w, http.StatusNotFound, "steward not found")
 		return

@@ -32,7 +32,7 @@ type stubManager struct{}
 func (s *stubManager) Issue(_ context.Context, _, _, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
-func (s *stubManager) IssueRootScoped(_ context.Context, _, _ string) (*session.Session, string, error) {
+func (s *stubManager) IssueRootScoped(_ context.Context, _, _, _ string) (*session.Session, string, error) {
 	return nil, "", nil
 }
 func (s *stubManager) Validate(_ context.Context, _ string) (*session.Session, error) {

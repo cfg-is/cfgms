@@ -3871,7 +3871,7 @@ func TestListStewards_RootScopedSession_SeesAllTenants(t *testing.T) {
 	// Root-scoped session: no TenantID in context (empty string).
 	// The handler reads ctxkeys.TenantID; when absent or empty, tenantID stays "".
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, ""))
+	req = withTenant(req, "") // a root caller: explicit root scope (Issue #4665)
 	rec := httptest.NewRecorder()
 	server.handleListStewards(rec, req)
 

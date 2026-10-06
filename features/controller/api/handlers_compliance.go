@@ -11,7 +11,6 @@ import (
 	"github.com/gorilla/mux"
 
 	reportinterfaces "github.com/cfgis/cfgms/features/reports/interfaces"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -159,7 +158,7 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	// Cross-tenant guard: a caller scoped to tenant A must not see tenant B's
 	// steward compliance data. 404 (not 403) avoids disclosing steward existence
 	// across tenants — matching tenantScopedTerminalWrapper behavior.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		stewardTenant := stewardInfo.TenantID
 		sameTenant := stewardTenant == callerTenant
@@ -253,7 +252,7 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 
 	// Cross-tenant guard: mirroring tenantScopedTerminalWrapper — 404 to avoid
 	// disclosing steward existence across tenants.
-	callerTenantR, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenantR := callerTenantFilter(r.Context())
 	if callerTenantR != "" {
 		stewardTenant := stewardInfo.TenantID
 		sameTenant := stewardTenant == callerTenantR
@@ -345,7 +344,7 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 
 	// TenantID is always taken from the authenticated context for scoped callers;
 	// unscoped admins (callerTenant == "") may use the tenant_id query param to filter.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	tenantFilter := r.URL.Query().Get("tenant_id")
 
 	// Collect steward IDs while applying tenant scoping from the steward registry.

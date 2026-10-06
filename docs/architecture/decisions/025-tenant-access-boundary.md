@@ -1062,3 +1062,47 @@ and makes the emergency path usable.
   client labels) and each MSP's own-subtree report (real names). They must be built from the
   same aggregation so the two can never disagree.
 - Per-client tech counts can be zero; a client with no accounts of its own is normal.
+
+## Amendment 7 (2026-10-06) — Root principals are bound to the root tenant; an empty tenant is never root
+
+**Status:** Accepted · **Deciders:** Founder, Architecture · **Amends:** A1.3, A3, A4, Issue #4316 ·
+**Related:** Issue [#4665](https://github.com/cfg-is/cfgms/issues/4665)
+
+### A7.1 — Context
+
+Root principals were represented by an empty tenant ID, and an empty tenant was read as
+"unrestricted" across the controller — in about sixty handler decisions, the fleet query,
+reports, the config router and the RBAC store. A request that lost its tenant, or a
+principal that never had one, was therefore indistinguishable from root. At the same time
+the root `TenantScope` was granted only to an admin certificate, so a root-scope account
+signed in with a passkey or `cfg connect` was refused by every handler that recognised root
+through `TenantScope`.
+
+### A7.2 — Decision
+
+- **Identity.** A root-scope account's principal (any credential) and the bootstrap admin
+  certificate's principal carry the deployment's root tenant — the single parentless tenant
+  (Issue #4542) — as `TenantID`. Account responses report it as `tenant_id`; sessions are
+  issued for it.
+- **Authority.** A principal is root only by its explicit `GlobalScope` flag (the account's
+  `root_scope`, or the bootstrap admin certificate), surfaced per request as root
+  `TenantScope`. Proof strength stays a separate layer: `requirePermission` still applies
+  each permission's assurance floor, so AssuranceStrong permissions still require step-up.
+- **One decision point.** `ctxkeys.TenantRestriction` is the only place an "all tenants"
+  decision is made: root scope or a context with no caller at all (system-internal work) is
+  unrestricted; a tenant caller is confined to its tenant; anything else is refused. An
+  empty tenant ID never grants reach.
+- **Fail closed at the edge.** A principal with neither a root flag nor a tenant is refused
+  by the authentication middleware. An unbound session with an empty tenant — the
+  pre-amendment form — is refused with `SESSION_SCOPE_INVALID`; reconnecting issues a bound
+  session.
+
+### A7.3 — Unchanged
+
+- The steward operator-roster wire format: root entries keep their existing representation,
+  so deployed stewards verify them as before.
+- Account storage routing: a root account's record stays in the system storage namespace;
+  only the stored routing key is empty, and it is never read as an authorization signal.
+- The steward-binary `default` namespace: root publishes there because deployed stewards'
+  self-fetch falls back to it.
+

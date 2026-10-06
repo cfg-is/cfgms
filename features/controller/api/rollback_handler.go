@@ -219,9 +219,10 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 		principal = h.PrincipalExtractor(r)
 	}
 
-	// Cross-tenant enforcement. For a tenant-scoped principal (non-empty TenantID), we
-	// must verify the target steward belongs to the principal's tenant or a child.
-	// An empty TenantID (mTLS admin) bypasses this check and has unrestricted access.
+	// Cross-tenant enforcement. A caller confined to a tenant — by the request's tenant
+	// scope, or by its principal when the request carries no scope — must target a
+	// steward in that tenant or a child. Only an explicitly root caller (root
+	// TenantScope; GlobalScope principal) bypasses this check (Issue #4665).
 	//
 	// Two-phase check with segment-boundary comparison (prevents "root/msp-ab" from
 	// matching "root/msp-a" — only self and children like "root/msp-a/client-1" pass):
@@ -229,7 +230,11 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	//     this is always used in production and cannot be bypassed by the caller.
 	//   Phase 2 (fallback): caller-supplied steward_tenant_path field — used when
 	//     stewardTenantLookup is nil (e.g. handler unit tests).
-	if principal != nil && principal.TenantID != "" {
+	scopeTenant := callerTenantFilter(r.Context())
+	if scopeTenant == "" && principal != nil && !principal.GlobalScope {
+		scopeTenant = principal.TenantID
+	}
+	if scopeTenant != "" {
 		var resolvedTenant string
 		if h.stewardTenantLookup != nil {
 			resolvedTenant = h.stewardTenantLookup(req.TargetID)
@@ -237,7 +242,7 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 			resolvedTenant = req.StewardTenantPath
 		}
 		if resolvedTenant != "" {
-			scope := strings.TrimRight(principal.TenantID, "/")
+			scope := strings.TrimRight(scopeTenant, "/")
 			sameOrChild := resolvedTenant == scope ||
 				strings.HasPrefix(resolvedTenant, scope+"/")
 			if !sameOrChild {

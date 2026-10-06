@@ -433,7 +433,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		// context must match the steward's tenant. The data-plane sync path
 		// (steward authenticated by its mTLS CN) carries no tenant context and
 		// is trusted to resolve to the steward's own tenant. (Issue #1572)
-		if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+		if reqTenant, denied := tenantGuardDenies(ctx, stewardInfo.TenantID); denied {
 			s.logger.Warn("Configuration request cross-tenant access denied",
 				"steward_id", logging.SanitizeLogValue(req.StewardId),
 				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -617,7 +617,7 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
 	if stewardID != "" && s.controllerSvc != nil {
 		if stewardInfo, exists := s.controllerSvc.GetStewardInfo(stewardID); exists {
-			if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+			if reqTenant, denied := tenantGuardDenies(ctx, stewardInfo.TenantID); denied {
 				s.logger.Warn("Effective configuration request cross-tenant access denied",
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -900,4 +900,21 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 // GetStorageStats returns storage statistics
 func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return s.configManager.GetConfigurationStats(ctx)
+}
+
+// tenantGuardDenies reports whether the caller in ctx may not act on a steward in
+// stewardTenant (Issue #4665): a root-scoped or system-internal context (the
+// data-plane sync path carries no caller) may; a tenant caller only in its own
+// tenant; a context with no usable scope never. reqTenant names the caller's
+// tenant for logging.
+func tenantGuardDenies(ctx context.Context, stewardTenant string) (reqTenant string, denied bool) {
+	tenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	switch {
+	case !ok:
+		return "(no tenant scope)", true
+	case unrestricted:
+		return "", false
+	default:
+		return tenant, tenant != stewardTenant
+	}
 }

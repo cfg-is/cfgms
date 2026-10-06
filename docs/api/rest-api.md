@@ -2938,6 +2938,10 @@ and collect the enrollment link for it. Checked independently of the tenant chec
 | `username` | string | 3–64 chars, starting alphanumeric, then `[a-zA-Z0-9._-]` |
 | `root_scope` | bool | Grant cross-tenant root scope. Mutually exclusive with `tenant_id`. |
 | `tenant_id` | string | Scope account to this tenant subtree. Mutually exclusive with `root_scope`. |
+
+A root-scope account belongs to the deployment's root tenant (the single tenant with no
+parent): responses report that tenant's ID in `tenant_id` alongside `root_scope: true`.
+Root authority comes only from `root_scope`; an empty tenant never means root.
 | `permissions` | array | Permission IDs (e.g. `"steward:list"`). Unknown IDs are rejected. |
 
 **Response (201 Created or 200 OK on reset):**
@@ -2947,7 +2951,7 @@ and collect the enrollment link for it. Checked independently of the tenant chec
   "data": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "username": "alice",
-    "tenant_id": "",
+    "tenant_id": "root",
     "root_scope": true,
     "permissions": ["steward:list", "steward:read"],
     "created_at": "2026-01-12T10:30:00Z",
@@ -3024,7 +3028,7 @@ rejected). Root/unscoped callers see every tenant's accounts.
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "username": "alice",
-      "tenant_id": "",
+      "tenant_id": "root",
       "root_scope": true,
       "permissions": ["steward:list", "steward:read"],
       "created_at": "2026-01-12T10:30:00Z"

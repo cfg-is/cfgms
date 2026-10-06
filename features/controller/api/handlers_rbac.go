@@ -268,7 +268,7 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 
 	// Validate that the request body's TenantId is within the caller's subtree.
 	// 400 (not 404): there is no existing resource whose existence to conceal.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" && !isWithinTenantScope(callerTenant, roleInfo.TenantID) {
 		s.logger.Info("Cross-tenant role create refused",
 			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
@@ -355,7 +355,7 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// Tenant scoping: a role outside the caller's subtree must not be readable by ID
 	// unless it is a system role (visible to every tenant, matching ListRoles).
 	// Reported as 404 so the response does not confirm that the role exists.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !roleReadableByTenant(resp.Role, callerTenant) {
 		s.logger.Warn("Blocked cross-tenant role read",
 			"role_id", logging.SanitizeLogValue(roleID),
@@ -408,7 +408,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant scoping: the role must exist inside the caller's subtree (or the caller
 	// is an unscoped admin) and must not be a system role before any field is written.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	existing, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "modified")
 	if !ok {
 		return
@@ -491,7 +491,7 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant scoping: only a role inside the caller's subtree (or an unscoped admin)
 	// may be deleted, and system roles may never be deleted.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if _, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "deleted"); !ok {
 		return
 	}

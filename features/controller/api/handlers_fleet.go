@@ -175,7 +175,7 @@ func (s *Server) handleResolveSelector(w http.ResponseWriter, r *http.Request) {
 // plus all descendant tenants), consistent with handleResolveSelector.
 // Admin callers (empty TenantID) see the full fleet.
 func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
-	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	tid := callerTenantFilter(r.Context())
 
 	filter := fleet.Filter{}
 	if tid != "" {

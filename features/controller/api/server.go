@@ -2113,7 +2113,7 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 			s.writeErrorResponse(w, http.StatusBadRequest, "Steward ID is required", "MISSING_STEWARD_ID")
 			return
 		}
-		callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+		callerTenant := callerTenantFilter(r.Context())
 		info, exists := s.controllerService.GetStewardInfo(stewardID)
 		if callerTenant != "" {
 			stewardTenant := ""

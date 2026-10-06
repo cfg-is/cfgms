@@ -254,9 +254,12 @@ func (r *controllerRouter) checkCrossTenant(ctx context.Context, tenantID string
 	if tenantID == "" {
 		return nil // empty TenantID is handled as "route to controllerStore" elsewhere
 	}
-	ctxTenant, ok := ctx.Value(ctxkeys.TenantID).(string)
-	if !ok || ctxTenant == "" {
-		return nil // no authenticated context tenant — backward-compat passthrough
+	ctxTenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	if !ok {
+		return fmt.Errorf("cross-tenant access denied: caller has no tenant scope for tenant %q", tenantID)
+	}
+	if unrestricted {
+		return nil // root-scoped caller or system-internal context (Issue #4665)
 	}
 	if ctxTenant == tenantID {
 		return nil

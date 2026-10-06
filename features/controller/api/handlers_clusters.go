@@ -150,7 +150,7 @@ func dnaHostname(dna *commonpb.DNA) string {
 // authenticated context limits which stewards' DNA is scanned. An admin mTLS
 // principal (empty TenantID) has no scope restriction.
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, _ := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)
@@ -187,7 +187,7 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, _ := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)
@@ -241,7 +241,7 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, hostnameOwners := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)

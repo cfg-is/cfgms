@@ -20,7 +20,6 @@ import (
 	"github.com/cfgis/cfgms/features/controller/registration"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -862,7 +861,7 @@ func (s *Server) handleListPendingRefreshes(w http.ResponseWriter, r *http.Reque
 
 	// TenantID is always taken from the authenticated context for scoped callers;
 	// unscoped admins (TenantID=="") may use the query param to filter.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	tenantID := callerTenant
 	if tenantID == "" {
 		tenantID = r.URL.Query().Get("tenant_id")
@@ -928,7 +927,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := entry.TenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
@@ -1092,7 +1091,7 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := entry.TenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
@@ -1127,7 +1126,7 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
@@ -1164,7 +1163,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 	tenantID := mux.Vars(r)["tenant_path"]
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" {
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")

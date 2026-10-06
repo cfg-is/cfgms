@@ -50,8 +50,16 @@ func setupTestServerWithBlobStore(t *testing.T) (*Server, blob.BlobStore) {
 }
 
 // withTenant returns a copy of r with tenantID injected into the context.
+//
+// An empty tenantID means a root admin caller: the request carries an explicit
+// root TenantScope, as the authentication middleware gives a root principal —
+// an empty tenant alone grants nothing (Issue #4665).
 func withTenant(r *http.Request, tenantID string) *http.Request {
-	return r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantID, tenantID))
+	ctx := context.WithValue(r.Context(), ctxkeys.TenantID, tenantID)
+	if tenantID == "" {
+		ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewRootScope())
+	}
+	return r.WithContext(ctx)
 }
 
 // withVars returns a copy of r with gorilla/mux route variables injected.
