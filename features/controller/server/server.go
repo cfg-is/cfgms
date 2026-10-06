@@ -664,7 +664,9 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 
 	// Initialize default permissions and roles
 	logger.Info("Starting RBAC initialization...")
-	if err := rbacManager.Initialize(context.Background()); err != nil {
+	// Startup seeding and loading are system-internal: the RBAC store refuses a
+	// context with no caller (Issue #4665).
+	if err := rbacManager.Initialize(ctxkeys.WithSystem(context.Background())); err != nil {
 		logger.Warn("Failed to initialize RBAC configuration", "error", err)
 	}
 	logger.Info("RBAC initialization completed")

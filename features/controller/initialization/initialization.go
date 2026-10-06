@@ -25,6 +25,7 @@ import (
 	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsinterfaces "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	_ "github.com/cfgis/cfgms/pkg/secrets/providers/openbao" // register OpenBao provider for cluster CA
@@ -232,7 +233,9 @@ func Run(cfg *config.Config, logger logging.Logger) (*Result, error) {
 	rbacStore := storageManager.GetRBACStore()
 
 	rbacManager := rbac.NewManagerWithStorage(auditStore, clientTenantStore, rbacStore)
-	if err := rbacManager.Initialize(context.Background()); err != nil {
+	// Startup seeding and loading are system-internal: the RBAC store refuses a
+	// context with no caller (Issue #4665).
+	if err := rbacManager.Initialize(ctxkeys.WithSystem(context.Background())); err != nil {
 		logger.Warn("RBAC initialization warning (non-fatal)", "error", err.Error())
 	}
 	logger.Info("RBAC initialized")
