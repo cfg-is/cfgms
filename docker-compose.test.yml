@@ -1121,7 +1121,11 @@ services:
       # Issue #1948: same test publisher key as fleet-controller so E2E upgrade tests
       # can sign binaries with the zero-seed private key and have them verify on the steward.
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    # The wrapper is PID 1, which a SIGKILL from inside the container cannot stop,
+    # so it holds off restarting ./steward while /tmp/cfgms-bare-hold exists. The
+    # launcher E2E tests create the hold to run a launcher-supervised steward alone
+    # and remove it to restore the bare steward (Issue #4680).
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward1_data:/app/data
     tmpfs:
@@ -1157,7 +1161,11 @@ services:
       CFGMS_LOG_PROVIDER: "file"
       CFGMS_LOG_DIR: "/tmp/cfgms"
       CFGMS_TEST_STEWARD_PUBLISHER_KEY: "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
-    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
+    # The wrapper is PID 1, which a SIGKILL from inside the container cannot stop,
+    # so it holds off restarting ./steward while /tmp/cfgms-bare-hold exists. The
+    # launcher E2E tests create the hold to run a launcher-supervised steward alone
+    # and remove it to restore the bare steward (Issue #4680).
+    command: ["sh", "-c", "mkdir -p /tmp/cfgms && while true; do if [ -e /tmp/cfgms-bare-hold ]; then sleep 1; continue; fi; ./steward --regtoken $$CFGMS_REGISTRATION_TOKEN && break; echo 'steward exited, retrying in 5s...'; sleep 5; done"]
     volumes:
       - fleet_steward2_data:/app/data
     tmpfs:

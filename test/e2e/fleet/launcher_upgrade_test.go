@@ -52,23 +52,50 @@ const (
 	launcherUpgradeWindow = 90 * time.Second
 )
 
-// killBareStewdAndWrapper kills the bare steward process and its docker-compose
-// restart wrapper in container. Errors are logged but not fatal: pkill -f with a
-// pattern that appears in the sh -c cmdline will send SIGKILL to the executing
-// shell as well as the targets (exit 137). The targets (steward + wrapper) have
-// lower PIDs and are killed first, so the operation is effective. The exit-137
-// from the sh process itself is expected and does not indicate a real failure.
-func killBareStewdAndWrapper(t *testing.T, container string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// bareHoldFile pauses the container's bare-steward wrapper (docker-compose.test.yml)
+// while it exists. The wrapper is the container's PID 1, which the kernel protects
+// from a SIGKILL sent inside the container, so killing it is not an option: before
+// the hold existed it restarted a bare steward 5 s after every kill, leaving two
+// stewards with one identity beside the launcher's (Issue #4680).
+const bareHoldFile = "/tmp/cfgms-bare-hold"
+
+// launcherLogPath receives the launcher's stdout and stderr, including its
+// supervision and rollback decisions.
+const launcherLogPath = "/tmp/cfgms/launcher.log"
+
+// containerShell runs script in container as root and returns its combined output.
+// Process patterns inside script must not match the script's own command line
+// (use pkill -x, or the [c]haracter-class idiom with -f): pkill -f with a plain
+// pattern kills the shell running the script and silently skips everything after.
+func containerShell(container, script string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "docker", "exec", "--user", "root", container,
-		"sh", "-c",
-		"pkill -9 -f './steward' 2>/dev/null; pkill -9 -f '/app/steward' 2>/dev/null; pkill -9 -f 'while true' 2>/dev/null; sleep 0.5; true",
-	).CombinedOutput()
-	if err != nil {
-		t.Logf("killBareStewdAndWrapper in %s: %v (output: %s)", container, err, string(out))
-	}
+		"sh", "-c", script).CombinedOutput()
+	return string(out), err
+}
+
+// killBareSteward holds the container's bare-steward wrapper and kills the bare
+// steward, then requires that no bare steward is left running. A steward the
+// wrapper was just starting when the hold appeared is caught by the retry.
+func killBareSteward(t *testing.T, container string) {
+	t.Helper()
+	script := "touch " + bareHoldFile + "; " +
+		"for i in $(seq 1 20); do " +
+		"pkill -9 -x steward; sleep 0.5; " +
+		"if ! pgrep -x steward >/dev/null; then sleep 1; pgrep -x steward >/dev/null || exit 0; fi; " +
+		"done; exit 1"
+	out, err := containerShell(container, script, 30*time.Second)
+	require.NoError(t, err, "bare steward in %s must stay stopped once held: %s", container, out)
+}
+
+// requireNoBareSteward fails the test if a bare (non-launcher) steward is running
+// in container, so a command can only reach the launcher-supervised steward.
+func requireNoBareSteward(t *testing.T, container string) {
+	t.Helper()
+	out, err := containerShell(container, "pgrep -a -x steward; true", 10*time.Second)
+	require.NoError(t, err)
+	require.Empty(t, strings.TrimSpace(out), "no bare steward may run beside the launcher's in %s", container)
 }
 
 // installLauncherLayout creates the launcher's versioned binary tree under
@@ -95,22 +122,34 @@ func installLauncherLayout(t *testing.T, container, initialVersion string) {
 	dockerExecRoot(t, container, "sh", "-c", script)
 }
 
-// startLauncherSupervised starts cfgms-steward-launcher run in detached (-d) mode
-// inside container as the cfgms user. The launcher supervises from launcherRoot
-// and forwards --child-args to the supervised steward.
+// startLauncherSupervised starts cfgms-steward-launcher run in the background
+// inside container as the cfgms user, with its output in launcherLogPath. The
+// launcher supervises from launcherRoot and forwards --child-args to the
+// supervised steward.
 func startLauncherSupervised(t *testing.T, container, regtoken string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	cmd := fmt.Sprintf("exec %s run --root %s --child-args '--regtoken %s' >>%s 2>&1",
+		launcherBin, launcherRoot, regtoken, launcherLogPath)
 	out, err := exec.CommandContext(ctx, "docker", "exec",
 		"-d", "--user", "cfgms",
 		container,
-		launcherBin, "run",
-		"--root", launcherRoot,
-		"--child-args", "--regtoken "+regtoken,
+		"sh", "-c", cmd,
 	).CombinedOutput()
 	require.NoError(t, err, "start launcher in %s failed: %s", container, string(out))
-	t.Logf("Launcher started in %s (detached)", container)
+	t.Logf("Launcher started in %s (detached, log %s)", container, launcherLogPath)
+}
+
+// launcherDiagnostics returns the launcher's log tail, the steward's log tail and
+// the container's steward processes, for a failed launcher assertion.
+func (s *FleetTestSuite) launcherDiagnostics(t *testing.T, container string) string {
+	t.Helper()
+	launcherLog, _ := containerShell(container, "tail -n 60 "+launcherLogPath+" 2>&1", 10*time.Second)
+	procs, _ := containerShell(container, "pgrep -a -f '[s]teward'; true", 10*time.Second)
+	stewardLog, _ := s.readStewardLog(t, container)
+	return fmt.Sprintf("launcher log tail:\n%s\nsteward processes:\n%s\nsteward log tail:\n%s",
+		launcherLog, procs, lastLines(stewardLog, 60))
 }
 
 // getLauncherCurrentVersion reads the launcher's state.json and returns the
@@ -150,40 +189,23 @@ func waitForLauncherCurrentVersion(t *testing.T, container, wantVersion string, 
 	return false
 }
 
-// restoreBareStewdInContainer kills the launcher and its supervised steward, then
-// starts the original bare-steward retry wrapper. Used in t.Cleanup to return
-// fleet-steward-1 to its docker-compose baseline state so subsequent tests are
-// not affected. All docker exec errors are logged (not silently swallowed) so
-// any cleanup failure is visible in test output.
+// restoreBareStewdInContainer returns container to its docker-compose baseline:
+// it kills the launcher and its supervised steward, empties launcherRoot (the
+// image ships it empty, and a later test must not inherit launcher version state),
+// and releases the hold so the PID 1 wrapper restarts the one bare steward. Used
+// in t.Cleanup; failures are logged so a broken cleanup is visible.
 func restoreBareStewdInContainer(t *testing.T, container string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "exec", "--user", "root", container,
-		"sh", "-c",
-		"pkill -9 -f 'cfgms-steward-launcher' 2>/dev/null; "+
-			"pkill -9 -f 'cfgms-launcher' 2>/dev/null; "+
-			"pkill -9 -f 'cfgms-steward' 2>/dev/null; "+
-			"true",
-	).CombinedOutput()
-	if err != nil {
-		t.Logf("cleanup: kill launcher/steward in %s failed: %v (output: %s)", container, err, string(out))
+	script := "pkill -9 -f '[c]fgms-launcher'; pkill -9 -f '[c]fgms-steward'; " +
+		"for i in $(seq 1 20); do pgrep -f '[c]fgms-launcher|[c]fgms-steward' >/dev/null || break; sleep 0.5; done; " +
+		"find " + launcherRoot + " -mindepth 1 -delete; " +
+		"rm -f " + bareHoldFile + "; " +
+		"for i in $(seq 1 30); do pgrep -x steward >/dev/null && exit 0; sleep 0.5; done; exit 1"
+	if out, err := containerShell(container, script, 30*time.Second); err != nil {
+		t.Logf("cleanup: restore bare steward in %s failed: %v (output: %s)", container, err, out)
+		return
 	}
-	time.Sleep(400 * time.Millisecond)
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel2()
-	out2, err2 := exec.CommandContext(ctx2, "docker", "exec",
-		"-d", "--user", "cfgms",
-		container,
-		"sh", "-c",
-		"mkdir -p /tmp/cfgms && while true; do /app/steward --regtoken dockertest_fleet_child_a && break; echo 'steward exited, retrying in 5s...'; sleep 5; done",
-	).CombinedOutput()
-	if err2 != nil {
-		t.Logf("cleanup: restart bare steward in %s failed: %v (output: %s)", container, err2, string(out2))
-	} else {
-		t.Logf("Restored bare steward in %s", container)
-	}
+	t.Logf("Restored bare steward in %s", container)
 }
 
 // TestFleetLauncherManagedUpgradeHappyPath runs a steward under cfgms-steward-launcher
@@ -218,7 +240,7 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// dead stream. Wait for the launcher-supervised steward's own new session first
 	// (Issue #4671).
 	sessionsBefore := suite.stewardLogCount(t, launcherTestContainer, stewardSessionMarkers...)
-	killBareStewdAndWrapper(t, launcherTestContainer)
+	killBareSteward(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
 	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
@@ -228,6 +250,7 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// (see lifecycle.go:execOnce); we just wait for the steward to reconnect.
 	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
 		"launcher-supervised steward must reconnect within 60 s using same identity")
+	requireNoBareSteward(t, launcherTestContainer)
 	t.Logf("Launcher-supervised steward connected (steward_id=%s)", stewardID)
 
 	// ── Step 2: Publish the real steward binary as a higher version ───────────────
@@ -240,6 +263,7 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	t.Logf("Published %s (%d bytes)", launcherHappyVersion, len(binaryContent))
 
 	// ── Step 3: Dispatch upgrade and wait for committed ───────────────────────────
+	sessionsBeforeUpgrade := suite.stewardLogCount(t, launcherTestContainer, stewardSessionMarkers...)
 	upgradeID := dispatchUpgrade(t, client, stewardID, launcherHappyVersion)
 	t.Logf("Launcher-managed upgrade dispatched: upgrade_id=%s steward_id=%s", upgradeID, stewardID)
 
@@ -254,8 +278,18 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// ── Step 4: Verify the launcher swapped to the new version ───────────────────
 	// state.json must point at launcherHappyVersion: proof that the swap ran and
 	// the launcher will re-exec the new binary after the steward self-exits.
-	require.True(t, waitForLauncherCurrentVersion(t, launcherTestContainer, launcherHappyVersion, 30*time.Second),
-		"launcher state.json must point at %s after committed", launcherHappyVersion)
+	if !waitForLauncherCurrentVersion(t, launcherTestContainer, launcherHappyVersion, 30*time.Second) {
+		t.Fatalf("launcher state.json must point at %s after committed\n%s",
+			launcherHappyVersion, suite.launcherDiagnostics(t, launcherTestContainer))
+	}
+
+	// The swap alone rewrites state.json, so it does not prove the re-exec: the
+	// steward must exit and the launcher must start the new binary, which opens a
+	// new control session (Issue #4680).
+	if !suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBeforeUpgrade, 90*time.Second, stewardSessionMarkers...) {
+		t.Fatalf("launcher must re-exec the steward (a new control session) after the swap\n%s",
+			suite.launcherDiagnostics(t, launcherTestContainer))
+	}
 
 	// ── Step 5: Verify the steward reconnects on the new binary ──────────────────
 	// The steward self-exits after the grace delay; the launcher re-execs the new
@@ -314,7 +348,7 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	// dead stream. Wait for the launcher-supervised steward's own new session first
 	// (Issue #4671).
 	sessionsBefore := suite.stewardLogCount(t, launcherTestContainer, stewardSessionMarkers...)
-	killBareStewdAndWrapper(t, launcherTestContainer)
+	killBareSteward(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
 	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
@@ -322,6 +356,7 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 
 	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
 		"launcher-supervised steward must connect within 60 s")
+	requireNoBareSteward(t, launcherTestContainer)
 	t.Logf("Launcher-supervised steward connected (steward_id=%s)", stewardID)
 
 	// ── Step 2: Publish a broken binary ──────────────────────────────────────────
@@ -354,9 +389,10 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	// ── Step 4: Verify the launcher rolled back to the initial version ────────────
 	// After the broken binary exits within the startup window, the launcher
 	// auto-rolls back. state.json current must return to launcherInitialVersion.
-	require.True(t, waitForLauncherCurrentVersion(t, launcherTestContainer, launcherInitialVersion, 30*time.Second),
-		"launcher state.json must roll back to %s after broken binary exits within startup window",
-		launcherInitialVersion)
+	if !waitForLauncherCurrentVersion(t, launcherTestContainer, launcherInitialVersion, 30*time.Second) {
+		t.Fatalf("launcher state.json must roll back to %s after broken binary exits within startup window\n%s",
+			launcherInitialVersion, suite.launcherDiagnostics(t, launcherTestContainer))
+	}
 	t.Logf("Launcher rolled back to %s", launcherInitialVersion)
 
 	// ── Step 5: Verify the steward reconnects on the restored version ─────────────
