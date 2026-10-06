@@ -46,6 +46,11 @@ func TestWorkflow_FilesystemReference_Refused(t *testing.T) {
 			Steps: []workflow.Step{{Name: "s", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: time.Millisecond},
 				ErrorWorkflow: &workflow.ErrorWorkflowConfig{WorkflowPath: "/etc/cfgms/controller.cfg"}}},
 		},
+		"workflow-level error workflows": {
+			Name:           "wf-error-path",
+			Steps:          []workflow.Step{{Name: "s", Type: workflow.StepTypeDelay, Delay: &workflow.DelayConfig{Duration: time.Millisecond}}},
+			ErrorWorkflows: []workflow.ErrorWorkflowConfig{{WorkflowPath: "/etc/cfgms/controller.cfg"}},
+		},
 	}
 	for name, req := range refused {
 		t.Run(name, func(t *testing.T) {
