@@ -14,19 +14,26 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
+	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/storage/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // twoNodes starts two trigger managers over one shared trigger store and secret
 // store — two controller nodes of one cluster. Node B's periodic reconcile runs
 // every interval.
 func twoNodes(t *testing.T, interval time.Duration) (a, b *TriggerManagerImpl, bWorkflows *TestWorkflowTrigger) {
+	a, b, bWorkflows, _, _ = twoNodesWithStores(t, interval)
+	return a, b, bWorkflows
+}
+
+func twoNodesWithStores(t *testing.T, interval time.Duration) (a, b *TriggerManagerImpl, bWorkflows *TestWorkflowTrigger, store business.TriggerStore, secrets secretsif.SecretStore) {
 	t.Helper()
 	sm, err := interfaces.CreateOSSStorageManager(t.TempDir(), filepath.Join(t.TempDir(), "triggers.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sm.Close() })
-	store := sm.GetTriggerStore()
-	secrets := newTestSecretStore(t)
+	store = sm.GetTriggerStore()
+	secrets = newTestSecretStore(t)
 
 	a = NewControllerTriggerManager(nil, NewTestWorkflowTrigger())
 	a.SetPersistence(store, secrets)
@@ -39,7 +46,7 @@ func twoNodes(t *testing.T, interval time.Duration) (a, b *TriggerManagerImpl, b
 	b.syncInterval = interval
 	require.NoError(t, b.Start(context.Background()))
 	t.Cleanup(func() { _ = b.Stop(context.Background()) })
-	return a, b, bWorkflows
+	return a, b, bWorkflows, store, secrets
 }
 
 func scheduledOn(t *testing.T, m *TriggerManagerImpl) map[string]*Trigger {
@@ -119,4 +126,96 @@ func TestTriggers_PeriodicReconcileArmsSchedule(t *testing.T) {
 		_, ok := scheduledOn(t, b)["hourly"]
 		return ok
 	}, 5*time.Second, 20*time.Millisecond, "node B must arm the schedule from the store on its own")
+}
+
+// TestTriggers_ReconcileIgnoresClockSkew guards Issue #4660: a change written
+// through a node whose clock is behind this one's — so its UpdatedAt is older
+// than the copy this node holds — still reaches this node.
+func TestTriggers_ReconcileIgnoresClockSkew(t *testing.T) {
+	a, _, _, store, _ := twoNodesWithStores(t, time.Hour)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-a")
+	require.NoError(t, a.CreateTrigger(ctx, &Trigger{
+		ID: "nightly", Name: "nightly", Type: TriggerTypeSchedule, Status: TriggerStatusActive, WorkflowName: "backup",
+		Schedule: &ScheduleConfig{CronExpression: "0 2 * * *", Enabled: true},
+	}))
+	cached, err := a.GetTrigger(ctx, "nightly")
+	require.NoError(t, err)
+
+	// The store stamps updated_at with the writing node's clock. Model node A's
+	// clock running an hour ahead of the node that writes the next change: A's
+	// copy carries the later timestamp.
+	a.mutex.Lock()
+	a.triggers["nightly"].UpdatedAt = time.Now().Add(time.Hour)
+	a.mutex.Unlock()
+
+	skewed := *cached
+	skewed.Schedule = &ScheduleConfig{CronExpression: "45 5 * * *", Enabled: true}
+	other := NewControllerTriggerManager(nil, NewTestWorkflowTrigger())
+	other.triggerStore = store
+	require.NoError(t, other.saveTriggerToStorage(ctx, &skewed))
+
+	got, err := a.GetTrigger(ctx, "nightly")
+	require.NoError(t, err)
+	assert.Equal(t, "45 5 * * *", got.Schedule.CronExpression, "a change stamped by a slower clock must not be skipped")
+}
+
+// TestTriggers_FailedRestoreOfChangedTriggerFailsClosed guards Issue #4660: when
+// a known trigger's record changed but cannot be restored — here its rotated
+// credential is unreadable — the node unregisters it and marks it errored
+// instead of leaving the old registration, and the old credential, in force.
+func TestTriggers_FailedRestoreOfChangedTriggerFailsClosed(t *testing.T) {
+	a, b, _, _, secrets := twoNodesWithStores(t, time.Hour)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-a")
+	oldToken := hex.EncodeToString([]byte("old-token-4660-xx"))
+	newToken := hex.EncodeToString([]byte("new-token-4660-yy"))
+
+	require.NoError(t, a.CreateTrigger(ctx, &Trigger{
+		ID: "on-push", Name: "on-push", Type: TriggerTypeWebhook, Status: TriggerStatusActive, WorkflowName: "deploy",
+		Webhook: &WebhookConfig{Path: "/on-push", Authentication: &WebhookAuth{Type: WebhookAuthBearer, BearerToken: oldToken}},
+	}))
+	_, err := b.GetTrigger(ctx, "on-push")
+	require.NoError(t, err)
+	_, err = b.webhookHandler.HandleWebhook(ctx, "on-push", []byte(`{}`), map[string]string{"Authorization": "Bearer " + oldToken})
+	require.NoError(t, err, "precondition: node B serves the webhook with the original token")
+
+	// A rotates the token; the rotated credential is then unreadable to B.
+	rotated, err := a.GetTrigger(ctx, "on-push")
+	require.NoError(t, err)
+	update := *rotated
+	webhook := *rotated.Webhook
+	webhook.Authentication = &WebhookAuth{Type: WebhookAuthBearer, BearerToken: newToken}
+	update.Webhook = &webhook
+	require.NoError(t, a.UpdateTrigger(ctx, &update))
+	accessor, ok := secrets.(secretsif.TenantSecretAccessor)
+	require.True(t, ok)
+	require.NoError(t, accessor.DeleteTenantSecret(context.Background(), "tenant-a", triggerCredentialRef("on-push", "bearer")))
+
+	got, err := b.GetTrigger(ctx, "on-push")
+	require.NoError(t, err)
+	assert.Equal(t, TriggerStatusError, got.Status, "a changed trigger that cannot be restored is marked errored")
+	_, err = b.webhookHandler.HandleWebhook(ctx, "on-push", []byte(`{}`), map[string]string{"Authorization": "Bearer " + oldToken})
+	assert.Error(t, err, "node B must stop accepting the superseded token")
+}
+
+// TestTriggers_OwnWriteIsNotAChange guards Issue #4660: a node's own create is
+// not mistaken for a change by its next reconcile (the store keeps less time
+// precision than time.Time), so its registration is not torn down and rebuilt
+// on every read.
+func TestTriggers_OwnWriteIsNotAChange(t *testing.T) {
+	a, _, _ := twoNodes(t, time.Hour)
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "tenant-a")
+	require.NoError(t, a.CreateTrigger(ctx, &Trigger{
+		ID: "steady", Name: "steady", Type: TriggerTypeSchedule, Status: TriggerStatusActive, WorkflowName: "wf",
+		Schedule: &ScheduleConfig{CronExpression: "0 1 * * *", Enabled: true},
+	}))
+	a.mutex.RLock()
+	before := a.triggers["steady"]
+	a.mutex.RUnlock()
+
+	_, err := a.GetTrigger(ctx, "steady")
+	require.NoError(t, err)
+	a.mutex.RLock()
+	after := a.triggers["steady"]
+	a.mutex.RUnlock()
+	assert.Same(t, before, after, "the node's own write must not be restored and re-registered")
 }

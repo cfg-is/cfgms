@@ -1037,12 +1037,29 @@ func (tm *TriggerManagerImpl) reconcileFromStoreLocked(ctx context.Context) {
 	for _, record := range records {
 		inStore[record.ID] = true
 		existing, known := tm.triggers[record.ID]
-		if known && !record.UpdatedAt.After(existing.UpdatedAt) {
+		// Any difference from this node's copy is a change: the store is the
+		// source of truth, and UpdatedAt is stamped by whichever node wrote it,
+		// so "newer" would skip every edit made through a node whose clock is
+		// behind this one's.
+		if known && record.UpdatedAt.Equal(existing.UpdatedAt) {
 			continue
 		}
 		restored, restoreErr := tm.restoreTriggerFromRecord(ctx, record)
 		if restoreErr != nil {
-			continue // warned inside; keep whatever is registered now
+			// A never-seen trigger is skipped. A known one whose record changed
+			// fails closed: the change may be a deactivation or a rotated or
+			// revoked credential, so the old registration must not stay armed.
+			// Its UpdatedAt is left as it was, so the next reconcile retries.
+			if known {
+				if existing.Status == TriggerStatusActive && tm.handlersReady() {
+					if unregErr := tm.unregisterTriggerFromHandler(ctx, existing); unregErr != nil {
+						tm.logger.WarnCtx(ctx, "failed to unregister trigger that could not be restored",
+							"trigger_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(unregErr.Error()))
+					}
+				}
+				existing.Status = TriggerStatusError
+			}
+			continue
 		}
 		if known && existing.Status == TriggerStatusActive && tm.handlersReady() {
 			if unregErr := tm.unregisterTriggerFromHandler(ctx, existing); unregErr != nil {
@@ -1189,7 +1206,16 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 	}
 	record.ConfigPayload = configBytes
 
-	return tm.triggerStore.StoreTrigger(ctx, record)
+	if err := tm.triggerStore.StoreTrigger(ctx, record); err != nil {
+		return err
+	}
+	// Mirror the timestamp as the store recorded it (stores keep less precision
+	// than time.Time), so this node's copy compares equal to the record and the
+	// next reconcile does not mistake its own write for a change (Issue #4660).
+	if stored, err := tm.triggerStore.GetTrigger(ctx, record.ID); err == nil {
+		trigger.UpdatedAt = stored.UpdatedAt
+	}
+	return nil
 }
 
 func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, triggerID string) error {
