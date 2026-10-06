@@ -341,6 +341,21 @@ func TestRunSteward_PendingReadmissionPollsShortly(t *testing.T) {
 		"a pending re-admission is re-checked at the short poll interval, not after the exponential backoff")
 }
 
+// TestPendingReadmissionWait_Jittered guards Issue #4669: each pending poll is
+// jittered within ±20% of the interval, so stewards re-admitting together spread
+// their checks instead of polling in lockstep.
+func TestPendingReadmissionWait_Jittered(t *testing.T) {
+	const poll = 10 * time.Second
+	seen := map[time.Duration]bool{}
+	for i := 0; i < 200; i++ {
+		w := pendingReadmissionWait(poll)
+		require.GreaterOrEqual(t, w, poll*4/5)
+		require.Less(t, w, poll*6/5)
+		seen[w] = true
+	}
+	assert.Greater(t, len(seen), 1, "waits must vary")
+}
+
 // TestRegisterAndConnect_UnreachableForBudgetReadmits guards Issue #4532: a stored
 // identity whose controller stays unreachable for the whole connect budget, while
 // the controller's HTTPS side answers, leads to re-admission with the device key
