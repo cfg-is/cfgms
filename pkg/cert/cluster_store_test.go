@@ -174,11 +174,14 @@ func TestClusterSigningCursor_ConcurrentTransitionsConverge(t *testing.T) {
 
 	// Seed an initial signing certificate + cursor so both managers contend
 	// on the guarded (second) rotation, not the always-succeeds first one.
+	// The seed rotation records the original cert as rotating (Issue #4686);
+	// a zero-day overlap lets that window lapse at once, so the two rotations
+	// below race each other rather than both meeting the seed's window.
 	_, err := managerA.GenerateSigningCertificate(&cert.SigningCertConfig{
 		CommonName: "cfgms-config-signer", ValidityDays: 30, KeySize: 2048,
 	})
 	require.NoError(t, err)
-	seedCert, err := managerA.RotateSigningCertificate(30)
+	seedCert, err := managerA.RotateSigningCertificate(0)
 	require.NoError(t, err)
 	require.NotNil(t, seedCert)
 
@@ -218,4 +221,32 @@ func TestClusterSigningCursor_ConcurrentTransitionsConverge(t *testing.T) {
 	cursorB, err := managerB.GetSigningCursorState()
 	require.NoError(t, err)
 	assert.Equal(t, cursorA.CurrentSerial, cursorB.CurrentSerial, "both nodes must converge on one cursor, never diverge")
+}
+
+// TestClusterSigningCursor_FirstRotationRecordsReplacedCert verifies the
+// database-backed cursor records the replaced signing cert on the first
+// rotation, when no cursor row exists yet (Issue #4686).
+func TestClusterSigningCursor_FirstRotationRecordsReplacedCert(t *testing.T) {
+	db, skip := clusterTestDB(t)
+	if skip != "" {
+		t.Skip(skip)
+	}
+	dropClusterTables(t, db)
+
+	m := newClusterManager(t, db)
+	require.NoError(t, m.EnsureSigningCertificate(&cert.SigningCertConfig{
+		CommonName: "cfgms-config-signer", ValidityDays: 30, KeySize: 2048,
+	}))
+	original, err := m.GetCurrentCertForPurpose(cert.PurposeSigning)
+	require.NoError(t, err)
+
+	newCert, err := m.RotateSigningCertificate(30)
+	require.NoError(t, err)
+
+	cursor, err := m.GetSigningCursorState()
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	assert.Equal(t, newCert.SerialNumber, cursor.CurrentSerial)
+	assert.Equal(t, original.SerialNumber, cursor.RotatingSerial,
+		"the first rotation must record the replaced signing cert as rotating")
 }
