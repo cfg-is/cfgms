@@ -92,7 +92,11 @@ type Server struct {
 	healthDetailHandler             *health.Handler // Issue #4208: detailed health/metrics/alerts/trace handler; nil when constructed without a collector, alert manager and trace manager
 	haManager                       *ha.Manager
 	rateCounterStore                business.RateCounterStore                // Issue #3896, ADR-031: cluster-visible fixed-window abuse-budget counter store (nil: every consumer below uses its in-memory default)
-	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup
+	apiKeys                         map[string]*APIKey                       // In-memory cache for fast lookup; the secret store is the source of truth (Issue #4574)
+	apiKeyClock                     func() time.Time                         // Issue #4574: clock for API-key re-validation; nil → time.Now. Overridable in tests.
+	apiKeyIdx                       *apiKeyIndex                             // Issue #4574: key hash → tenant locator for the durable API-key records
+	apiKeyIndexWG                   sync.WaitGroup                           // Issue #4574: tracks detached API-key index scans so Close() can wait for them before secretStore.Close()
+	apiKeyTombstones                map[string]time.Time                     // Issue #4574: key hash → deletion time for keys deleted on this node (guarded by mu, lazily made); blocks a racing load from re-caching a deleted key
 	secretStore                     secretsif.SecretStore                    // M-AUTH-1: Central secrets provider for API keys
 	accounts                        map[string]*account                      // Issue #2490: web-admin account cache (lazy-init, guarded by mu; durable copy lives in secretStore)
 	registrationTokenStore          registration.Store                       // Registration token store for steward registration
@@ -265,7 +269,38 @@ type APIKey struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	TenantID    string     `json:"tenant_id"`
+
+	// recordRef names the durable secret-store record this cache entry mirrors: the
+	// record's key (the SHA-256 of the API key) within TenantID. Every key minted by
+	// handleCreateAPIKey or generateEphemeralKey, and every key lazy-loaded by
+	// loadAPIKeyFromStore, carries one, and authenticateMiddleware re-validates such
+	// entries against the store (Issue #4574). Empty only for the env-gated test keys
+	// seeded in New, which have no durable record to revoke.
+	recordRef string
+	// validatedAt is when this entry was last confirmed present in the secret store.
+	validatedAt time.Time
 }
+
+// apiKeyRevalidateInterval bounds how long a cached, store-backed API key is
+// trusted before authenticateMiddleware re-reads its record from the secret store
+// (Issue #4574). The store is the source of truth: a key deleted on another
+// controller node stops authenticating here at most this long after the delete.
+// The node that serves the delete evicts its own cache entry immediately.
+const apiKeyRevalidateInterval = 30 * time.Second
+
+// apiKeyMaxStaleness is the hard ceiling on serving a cached API key whose
+// re-validation failed because the store was unavailable (Issue #4574). A record that
+// is gone, expired, or cannot be decrypted is not an outage and is never covered by it.
+//
+// Failing closed on the first transient store error would lock every API-key
+// client out of every node for the length of any storage blip; serving
+// indefinitely would let a revoked key outlive its revocation for as long as this
+// node cannot reach the store. The compromise: while the last successful
+// validation is younger than this bound the cached entry keeps serving (and every
+// request retries the store); once it is older, the request is refused until the
+// store answers again. A not-found, expired or undecryptable record is never treated
+// as transient — it evicts the entry and rejects the request at once.
+const apiKeyMaxStaleness = 2 * time.Minute
 
 // ServerConfig contains configuration for the REST API server
 type ServerConfig struct {
@@ -372,6 +407,7 @@ func New(
 		registrationTokenStore:  registrationTokenStore,
 		signerCertSerial:        signerCertSerial,         // Story #378: For registration handler
 		apiKeys:                 make(map[string]*APIKey), // In-memory cache
+		apiKeyIdx:               newAPIKeyIndex(),         // Issue #4574: API-key hash → tenant locator
 		secretStore:             secretStore,              // M-AUTH-1: Central secrets provider
 		approvalHook:            &IPTrustApprovalHook{},   // Issue #1695: nil store → fail-closed (quarantine all)
 		trustedProxies:          trustedProxies,           // Issue #1695: parsed from TrustedProxies config
@@ -459,7 +495,7 @@ func New(
 
 	// M-AUTH-1: Load existing API keys from secret store
 	if err := server.loadAPIKeysFromStore(); err != nil {
-		logger.Warn("Failed to load API keys from store", "error", err)
+		logger.Warn("Failed to load API keys from store", "error", logging.SanitizeLogValue(err.Error()))
 	}
 
 	// Issue #2226: Scan for API keys holding Tier-3 permissions so operators can revoke them.
@@ -1296,6 +1332,8 @@ func (s *Server) Close(ctx context.Context) error {
 		certBindingDone := make(chan struct{})
 		go func() {
 			s.certBindingLastUsedWG.Wait()
+			// Issue #4574: detached API-key index scans read the same store.
+			s.apiKeyIndexWG.Wait()
 			close(certBindingDone)
 		}()
 		select {
@@ -2428,6 +2466,11 @@ func (s *Server) startAPIKeyCleanup() {
 		defer close(s.cleanupDone)
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
+		// Issue #4574: this goroutine is the single background refresher of the
+		// API-key index, so keys created on other controller nodes become locatable
+		// here within apiKeyRevalidateInterval without any request paying for a scan.
+		indexTicker := time.NewTicker(apiKeyRevalidateInterval)
+		defer indexTicker.Stop()
 
 		s.logger.Info("Started API key cleanup background process", "interval", "10 minutes")
 
@@ -2437,6 +2480,16 @@ func (s *Server) startAPIKeyCleanup() {
 				return
 			case <-ticker.C:
 				s.cleanupExpiredAPIKeys()
+			case <-indexTicker.C:
+				if s.secretStore == nil {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), apiKeyRevalidateInterval)
+				if err := s.refreshAPIKeyIndex(ctx); err != nil {
+					s.logger.Warn("API key index refresh failed",
+						"error", logging.SanitizeLogValue(err.Error()))
+				}
+				cancel()
 			}
 		}
 	}()
@@ -2836,13 +2889,17 @@ func NewSecretStore(cfg *config.Config) (secretsif.SecretStore, error) {
 	return store, nil
 }
 
-// M-AUTH-1: Load API keys from secret store into memory cache
+// M-AUTH-1: API keys are loaded into the memory cache lazily, on first use.
+// Issue #4574: what is built up front is the API-key index (key hash → tenant), with
+// one store listing, so a cache miss never needs a store-wide scan of its own.
 func (s *Server) loadAPIKeysFromStore() error {
-	// API keys are now stored in the central secrets provider
-	// They are loaded on-demand when authentication is performed
-	// This lazy-loading approach provides better performance and security
-
-	s.logger.Info("Secret store ready - API keys will be loaded on first access")
+	if s.secretStore == nil {
+		return nil
+	}
+	if err := s.refreshAPIKeyIndex(context.Background()); err != nil {
+		return fmt.Errorf("failed to build API key index: %w", err)
+	}
+	s.logger.Info("Secret store ready - API key index built; keys load on first access")
 	return nil
 }
 

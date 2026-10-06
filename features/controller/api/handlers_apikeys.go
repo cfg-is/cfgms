@@ -40,7 +40,9 @@ var agentDevAPIPermissions = []string{
 }
 
 // handleListAPIKeys handles GET /api/v1/api-keys
-// M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant
+// M-AUTH-1: List API keys from central secret store, filtered to the authenticated tenant.
+// Issue #4574: the store is the source of truth — a key that has never been used on this
+// node (and so is not in its cache) is listed all the same.
 func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
 	if tenantID == "" {
@@ -48,23 +50,46 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	records, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
+		TenantID: tenantID,
+		Metadata: map[string]string{
+			secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+		},
+	})
+	if err != nil {
+		s.logger.Error("Failed to list API keys from secret store",
+			"tenant_id", logging.SanitizeLogValue(tenantID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list API keys", "STORE_ERROR")
+		return
+	}
 
-	apiKeys := make([]APIKeyInfo, 0)
-	for _, key := range s.apiKeys {
-		if key.TenantID != tenantID {
+	apiKeys := make([]APIKeyInfo, 0, len(records))
+	seen := make(map[string]struct{}, len(records))
+	for _, rec := range records {
+		// Exact tenant match, as before: the store filter narrows the scan, this
+		// check is what bounds the result to the caller's own tenant.
+		if rec.TenantID != tenantID {
 			continue
 		}
-		apiKeys = append(apiKeys, APIKeyInfo{
-			ID:          key.ID,
-			Name:        key.Name,
-			Permissions: key.Permissions,
-			CreatedAt:   key.CreatedAt,
-			ExpiresAt:   key.ExpiresAt,
-			TenantID:    key.TenantID,
-		})
+		info := apiKeyInfoFromRecord(rec)
+		seen[info.ID] = struct{}{}
+		apiKeys = append(apiKeys, info)
 	}
+
+	// Local-only entries (recordRef == "": the env-gated test keys seeded in New) have
+	// no durable record, but they authenticate on this node, so they are listed too.
+	s.mu.RLock()
+	for _, key := range s.apiKeys {
+		if key.recordRef != "" || key.TenantID != tenantID {
+			continue
+		}
+		if _, dup := seen[key.ID]; dup {
+			continue
+		}
+		apiKeys = append(apiKeys, apiKeyInfoFromCache(key))
+	}
+	s.mu.RUnlock()
 
 	s.writeSuccessResponse(w, apiKeys)
 }
@@ -168,6 +193,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now().UTC(),
 		ExpiresAt:   createReq.ExpiresAt,
 		TenantID:    tenantID,
+		recordRef:   keyHash,
+		validatedAt: s.apiKeyNow(),
 	}
 
 	// Store API key in memory cache
@@ -204,6 +231,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to persist API key", "STORE_ERROR")
 		return
 	}
+	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
 
 	// Create response (includes the actual key only on creation)
 	result := APIKeyCreateResult{
@@ -249,7 +277,8 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetAPIKey handles GET /api/v1/api-keys/{id}
-// M-AUTH-1: Get API key from memory cache by ID
+// M-AUTH-1 / Issue #4574: read the key's record from the secret store, so the answer is
+// the same on every controller node whether or not the key is cached here.
 func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	keyID := vars["id"]
@@ -259,47 +288,33 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Find API key by ID in memory cache
-	var foundKey *APIKey
-	for _, key := range s.apiKeys {
-		if key.ID == keyID {
-			foundKey = key
-			break
-		}
-	}
-
-	if foundKey == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
-		return
-	}
-
 	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
 	// response so this endpoint cannot be used to probe for a key's existence across
 	// tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "GET /api/v1/api-keys/{id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
+	rec, local, err := s.findAPIKeyInScope(r.Context(), keyID, scope, "GET /api/v1/api-keys/{id}")
+	if err != nil {
+		s.logger.Error("Failed to look up API key in secret store",
+			"id", logging.SanitizeLogValue(keyID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up API key", "STORE_ERROR")
 		return
 	}
 
-	// Return key info without the actual key
-	keyInfo := APIKeyInfo{
-		ID:          foundKey.ID,
-		Name:        foundKey.Name,
-		Permissions: foundKey.Permissions,
-		CreatedAt:   foundKey.CreatedAt,
-		ExpiresAt:   foundKey.ExpiresAt,
-		TenantID:    foundKey.TenantID,
+	switch {
+	case rec != nil:
+		s.writeSuccessResponse(w, apiKeyInfoFromRecord(rec))
+	case local != nil:
+		s.writeSuccessResponse(w, apiKeyInfoFromCache(local))
+	default:
+		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
 	}
-
-	s.writeSuccessResponse(w, keyInfo)
 }
 
 // handleDeleteAPIKey handles DELETE /api/v1/api-keys/{id}
-// M-AUTH-1: Delete API key from memory cache and secret store
+// M-AUTH-1 / Issue #4574: delete the key's record from the secret store — found there
+// whether or not this node has it cached — then evict this node's cache entry. Other
+// nodes drop their cached copy on their next re-validation (apiKeyRevalidateInterval).
 func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	keyID := vars["id"]
@@ -309,61 +324,178 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Find and delete API key by ID from memory cache
-	var keyToDelete string
-	var foundKey *APIKey
-	for keyString, key := range s.apiKeys {
-		if key.ID == keyID {
-			keyToDelete = keyString
-			foundKey = key
-			break
-		}
-	}
-
-	if foundKey == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
-		return
-	}
-
 	// Issue #4334: tenant containment. Out-of-scope and not-found return the same
 	// response so this endpoint cannot be used to probe for a key's existence across
 	// tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, foundKey.TenantID, "DELETE /api/v1/api-keys/{id}") {
+	rec, local, err := s.findAPIKeyInScope(r.Context(), keyID, scope, "DELETE /api/v1/api-keys/{id}")
+	if err != nil {
+		s.logger.Error("Failed to look up API key in secret store",
+			"id", logging.SanitizeLogValue(keyID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up API key", "STORE_ERROR")
+		return
+	}
+
+	var name, tenantID string
+	switch {
+	case rec != nil:
+		if err := s.deleteAPIKeyRecord(r.Context(), rec.TenantID, rec.Key); err != nil &&
+			!errors.Is(err, secretsif.ErrSecretNotFound) {
+			// Log a category, never err.Error(): the secret ref embeds the key hash.
+			// The durable record survives, so the key still authenticates on every
+			// node: report the failure rather than claim a revocation that did not
+			// happen. (Not-found means a concurrent delete already won — success.)
+			s.logger.Warn("Failed to delete API key from secret store",
+				"reason", "secret_store_error", "id", logging.SanitizeLogValue(keyID))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete API key", "STORE_ERROR")
+			return
+		}
+		s.apiKeyIdx.remove(rec.Key)
+		name, tenantID = rec.Description, rec.TenantID
+	case local != nil:
+		name, tenantID = local.Name, local.TenantID
+	default:
 		s.writeErrorResponse(w, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND")
 		return
 	}
 
-	// Delete from memory cache
-	delete(s.apiKeys, keyToDelete)
-
-	// M-AUTH-1: Also delete from secret store
-	keyHash := hashAPIKey(keyToDelete)
-	// SecretStore lookup path, not the credential itself — see middleware.go.
-	credentialRef := fmt.Sprintf("%s/%s", foundKey.TenantID, keyHash)
-	if err := s.secretStore.DeleteSecret(r.Context(), credentialRef); err != nil {
-		// Log a category, never err.Error(): the secret ref embeds the key hash.
-		reason := "secret_store_error"
-		if errors.Is(err, secretsif.ErrSecretNotFound) {
-			reason = "not_found"
-		}
-		s.logger.Warn("Failed to delete API key from secret store (memory cache already cleared)",
-			"reason", reason, "id", logging.SanitizeLogValue(keyID))
-		// Continue anyway - key is removed from memory
+	keyHash := ""
+	if rec != nil {
+		keyHash = rec.Key
 	}
+	s.evictCachedAPIKeyByID(keyID, keyHash)
 
 	s.logger.Info("Deleted API key",
-		"id", foundKey.ID,
-		"name", foundKey.Name,
-		"tenant_id", foundKey.TenantID)
+		"id", logging.SanitizeLogValue(keyID),
+		"name", logging.SanitizeLogValue(name),
+		"tenant_id", logging.SanitizeLogValue(tenantID))
 
 	s.writeSuccessResponse(w, map[string]interface{}{
 		"id":      keyID,
 		"deleted": true,
 	})
+}
+
+// findAPIKeyInScope locates the API key with the given ID for a caller holding scope
+// (Issue #4574). The secret store is authoritative: the API-key index names the
+// record's tenant, and the record is then read from that tenant alone. The local cache
+// is consulted only for local-only entries (recordRef == ""), which have no durable
+// record. A key outside the caller's scope is reported exactly like a missing one (both
+// return nil, nil) so callers cannot distinguish the two. A store read error is
+// returned as-is; it is never treated as not-found.
+func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxkeys.TenantScope, route string) (*secretsif.SecretMetadata, *APIKey, error) {
+	keyHash, entry, found, err := s.locateAPIKeyByID(ctx, keyID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if found {
+		if !s.isAuthorizedForTenant(scope, entry.TenantID, route) {
+			return nil, nil, nil
+		}
+		// A tenant-scoped, name-filtered listing rather than GetSecret, because an
+		// expired key is still a record an operator may inspect or remove and
+		// GetSecret refuses expired records. The store skips every other record
+		// before decrypting it, so this opens exactly one record.
+		records, err := s.secretStore.ListSecrets(ctx, &secretsif.SecretFilter{
+			TenantID:       entry.TenantID,
+			KeyPrefix:      keyHash,
+			IncludeExpired: true,
+			Metadata: map[string]string{
+				secretsif.MetadataKeySecretType: string(secretsif.SecretTypeAPIKey),
+			},
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, rec := range records {
+			if rec.Key == keyHash && rec.TenantID == entry.TenantID && rec.Metadata["id"] == keyID {
+				return rec, nil, nil
+			}
+		}
+		// Indexed but gone: deleted by another node since the last refresh.
+		s.apiKeyIdx.remove(keyHash)
+		return nil, nil, nil
+	}
+
+	s.mu.RLock()
+	var local *APIKey
+	for _, key := range s.apiKeys {
+		if key.recordRef == "" && key.ID == keyID {
+			local = key
+			break
+		}
+	}
+	s.mu.RUnlock()
+	if local == nil || !s.isAuthorizedForTenant(scope, local.TenantID, route) {
+		return nil, nil, nil
+	}
+	return nil, local, nil
+}
+
+// evictCachedAPIKeyByID drops every cache entry for the key with the given ID and,
+// for a store-backed key (keyHash != ""), leaves a tombstone so a load that read the
+// record before the delete cannot re-cache it afterwards. Tombstone and eviction
+// happen under one hold of s.mu, the same lock cacheAPIKeyUnlessDeleted checks under.
+func (s *Server) evictCachedAPIKeyByID(keyID, keyHash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if keyHash != "" {
+		s.tombstoneAPIKeyLocked(keyHash, s.apiKeyNow())
+	}
+	for keyString, key := range s.apiKeys {
+		if key.ID == keyID {
+			delete(s.apiKeys, keyString)
+		}
+	}
+}
+
+// apiKeyInfoFromRecord renders a secret-store API-key record as its public view.
+func apiKeyInfoFromRecord(rec *secretsif.SecretMetadata) APIKeyInfo {
+	return APIKeyInfo{
+		ID:          rec.Metadata["id"],
+		Name:        rec.Description,
+		Permissions: parsePermissions(rec.Metadata["permissions"]),
+		CreatedAt:   rec.CreatedAt,
+		ExpiresAt:   rec.ExpiresAt,
+		TenantID:    rec.TenantID,
+	}
+}
+
+// apiKeyInfoFromCache renders a cached API key as its public view (never the key itself).
+func apiKeyInfoFromCache(key *APIKey) APIKeyInfo {
+	return APIKeyInfo{
+		ID:          key.ID,
+		Name:        key.Name,
+		Permissions: key.Permissions,
+		CreatedAt:   key.CreatedAt,
+		ExpiresAt:   key.ExpiresAt,
+		TenantID:    key.TenantID,
+	}
+}
+
+// deleteAPIKeyRecord deletes an API key's durable record, addressing it by explicit
+// tenant when the store supports it (Issue #4574).
+func (s *Server) deleteAPIKeyRecord(ctx context.Context, tenantID, keyHash string) error {
+	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
+		return acc.DeleteTenantSecret(ctx, tenantID, keyHash)
+	}
+	return s.secretStore.DeleteSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+}
+
+// apiKeyStoreRef is the secret-store path of an API key's durable record. It is a
+// lookup path, not the credential itself. Used only for a store that does not offer
+// secretsif.TenantSecretAccessor; such a store resolves the combined reference itself.
+func apiKeyStoreRef(tenantID, keyHash string) string {
+	return tenantID + "/" + keyHash
+}
+
+// apiKeyNow is the clock API-key re-validation reads (Issue #4574).
+func (s *Server) apiKeyNow() time.Time {
+	if s.apiKeyClock != nil {
+		return s.apiKeyClock()
+	}
+	return time.Now()
 }
 
 // generateEphemeralKey creates an API key with a specified TTL
@@ -389,6 +521,8 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 		CreatedAt:   time.Now().UTC(),
 		ExpiresAt:   &expiresAt,
 		TenantID:    tenantID,
+		recordRef:   keyHash,
+		validatedAt: s.apiKeyNow(),
 	}
 
 	// Store in memory cache
@@ -420,6 +554,7 @@ func (s *Server) generateEphemeralKey(name string, permissions []string, ttl tim
 		s.mu.Unlock()
 		return nil, fmt.Errorf("failed to store ephemeral key: %w", err)
 	}
+	s.apiKeyIdx.put(keyHash, apiKeyIndexEntry{TenantID: tenantID, ID: keyID})
 
 	s.logger.Info("Generated ephemeral API key",
 		"id", apiKey.ID,

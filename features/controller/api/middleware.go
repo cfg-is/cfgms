@@ -1131,9 +1131,41 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Check if key is expired
-		if keyInfo.ExpiresAt != nil && time.Now().After(*keyInfo.ExpiresAt) {
+		now := s.apiKeyNow()
+		if keyInfo.ExpiresAt != nil && now.After(*keyInfo.ExpiresAt) {
 			s.writeErrorResponse(w, http.StatusUnauthorized, "API key expired", "EXPIRED_API_KEY")
 			return
+		}
+
+		// Issue #4574: the secret store is the source of truth. A cached, store-backed
+		// entry older than apiKeyRevalidateInterval is re-read from the store so a key
+		// deleted on another controller node stops authenticating here within that
+		// bound. See apiKeyMaxStaleness for how a store outage is handled.
+		if exists && keyInfo.recordRef != "" && now.Sub(keyInfo.validatedAt) >= apiKeyRevalidateInterval {
+			refreshed, err := s.revalidateCachedAPIKey(r.Context(), apiKeyStr, keyInfo, now)
+			switch {
+			case err == nil:
+				keyInfo = refreshed
+			case errors.Is(err, errAPIKeyRevoked):
+				s.logger.Info("Cached API key no longer in secret store; evicted",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
+				s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid API key", "INVALID_API_KEY")
+				return
+			case now.Sub(keyInfo.validatedAt) < apiKeyMaxStaleness:
+				s.logger.Warn("API key re-validation failed; serving cached entry within the staleness bound",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+					"error", logging.SanitizeLogValue(err.Error()))
+			default:
+				s.logger.Error("API key re-validation failed past the staleness bound; refusing request",
+					"id", logging.SanitizeLogValue(keyInfo.ID),
+					"last_validated", keyInfo.validatedAt.Format(time.RFC3339),
+					"error", logging.SanitizeLogValue(err.Error()))
+				s.writeErrorResponse(w, http.StatusServiceUnavailable,
+					"API key could not be validated; retry later", "KEY_VALIDATION_UNAVAILABLE")
+				return
+			}
 		}
 
 		// Convert API key to Principal for uniform authorization handling.
@@ -1159,49 +1191,124 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it
-func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
-	// Hash the API key for lookup
-	keyHash := hashAPIKey(apiKey)
+// errAPIKeyRevoked reports that a cached API key's durable record is gone from the
+// secret store (deleted, or expired out of it) — Issue #4574.
+var errAPIKeyRevoked = errors.New("API key no longer present in secret store")
 
-	// Search for the API key in secret store across all tenants
-	// We need to search all tenants since we don't know which tenant the key belongs to
-	tenants := []string{"default"} // Start with default tenant
-
-	for _, tenantID := range tenants {
+// readAPIKeyRecord reads one API key's record directly by its store path (Issue
+// #4574): never a listing. It returns (nil, nil) — "no usable key" — when the record
+// does not exist, has expired, cannot be decrypted or parsed, or is not an API-key
+// record. Only a storage-unavailable error is returned, and only that kind is
+// eligible for the apiKeyMaxStaleness grace in authenticateMiddleware.
+func (s *Server) readAPIKeyRecord(ctx context.Context, tenantID, keyHash string) (*secretsif.Secret, error) {
+	var rec *secretsif.Secret
+	var err error
+	if acc, ok := s.secretStore.(secretsif.TenantSecretAccessor); ok {
+		// The tenant is known (from the index or the cache entry): address the
+		// record explicitly, with no reference resolution involved.
+		rec, err = acc.GetTenantSecret(ctx, tenantID, keyHash)
+	} else {
 		// SecretStore lookup path (tenant + key hash), not the credential itself.
-		// Named "…Ref" so CodeQL's name-based sensitive-data heuristic does not
-		// classify it as a cleartext credential source.
-		credentialRef := fmt.Sprintf("%s/%s", tenantID, keyHash)
-		secret, err := s.secretStore.GetSecret(ctx, credentialRef)
-		if err != nil {
-			continue // Try next tenant
+		rec, err = s.secretStore.GetSecret(ctx, apiKeyStoreRef(tenantID, keyHash))
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, secretsif.ErrSecretNotFound), errors.Is(err, secretsif.ErrSecretExpired):
+			return nil, nil
+		case errors.Is(err, secretsif.ErrSecretUndecryptable):
+			// The record exists but is unusable; retrying cannot fix it, so it is
+			// treated as absent (fail closed) rather than as a store outage.
+			s.logger.Warn("API key record cannot be decrypted; treating key as revoked",
+				"tenant_id", logging.SanitizeLogValue(tenantID))
+			return nil, nil
 		}
+		// Anything else is the store being unavailable (I/O, timeout, context).
+		return nil, err
+	}
+	if rec.Metadata[secretsif.MetadataKeySecretType] != string(secretsif.SecretTypeAPIKey) {
+		return nil, nil
+	}
+	return rec, nil
+}
 
-		// Found the API key! Parse metadata and create APIKey object
-		keyInfo := &APIKey{
-			ID:          secret.Metadata["id"],
-			Key:         apiKey, // Store plaintext key in memory for fast lookup
-			Name:        secret.Description,
-			Permissions: parsePermissions(secret.Metadata["permissions"]),
-			CreatedAt:   secret.CreatedAt,
-			ExpiresAt:   secret.ExpiresAt,
-			TenantID:    secret.TenantID,
-		}
+// apiKeyFromSecret builds the cache entry for apiKey from its secret-store record.
+func apiKeyFromSecret(apiKey string, rec *secretsif.Secret, validatedAt time.Time) *APIKey {
+	return &APIKey{
+		ID:          rec.Metadata["id"],
+		Key:         apiKey, // Store plaintext key in memory for fast lookup
+		Name:        rec.Description,
+		Permissions: parsePermissions(rec.Metadata["permissions"]),
+		CreatedAt:   rec.CreatedAt,
+		ExpiresAt:   rec.ExpiresAt,
+		TenantID:    rec.TenantID,
+		recordRef:   rec.Key,
+		validatedAt: validatedAt,
+	}
+}
 
-		// Cache in memory for future requests
-		s.mu.Lock()
-		s.apiKeys[apiKey] = keyInfo
-		s.mu.Unlock()
-
-		s.logger.Debug("Loaded API key from secret store",
-			"id", logging.SanitizeLogValue(keyInfo.ID),
-			"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
-
-		return keyInfo, nil
+// M-AUTH-1: loadAPIKeyFromStore loads an API key from the secret store and caches it.
+// Issue #4574: the key's tenant comes from the API-key index (no tenant name is
+// assumed), and the record itself is then read directly. An unknown key costs no store
+// access unless the index is older than apiKeyIndexMissRefreshFloor.
+func (s *Server) loadAPIKeyFromStore(ctx context.Context, apiKey string) (*APIKey, error) {
+	keyHash := hashAPIKey(apiKey)
+	entry, found, err := s.locateAPIKey(ctx, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("API key index refresh failed: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+	rec, err := s.readAPIKeyRecord(ctx, entry.TenantID, keyHash)
+	if err != nil {
+		return nil, fmt.Errorf("API key read failed: %w", err)
+	}
+	if rec == nil {
+		s.apiKeyIdx.remove(keyHash)
+		return nil, fmt.Errorf("API key not found in secret store")
 	}
 
-	return nil, fmt.Errorf("API key not found in secret store")
+	keyInfo := apiKeyFromSecret(apiKey, rec, s.apiKeyNow())
+
+	// Cache in memory for future requests — unless this node deleted the key while
+	// the record was being read (see cacheAPIKeyUnlessDeleted).
+	if !s.cacheAPIKeyUnlessDeleted(apiKey, keyHash, keyInfo) {
+		return nil, fmt.Errorf("API key not found in secret store")
+	}
+
+	s.logger.Debug("Loaded API key from secret store",
+		"id", logging.SanitizeLogValue(keyInfo.ID),
+		"tenant_id", logging.SanitizeLogValue(keyInfo.TenantID))
+
+	return keyInfo, nil
+}
+
+// revalidateCachedAPIKey re-reads a cached, store-backed key's record directly (Issue
+// #4574). On success the cache entry is replaced with one refreshed from the record
+// and stamped validated at now. When the record is gone the entry is evicted and
+// errAPIKeyRevoked is returned. Any other error leaves the cache untouched and is
+// returned for the caller to weigh against apiKeyMaxStaleness.
+func (s *Server) revalidateCachedAPIKey(ctx context.Context, apiKey string, cached *APIKey, now time.Time) (*APIKey, error) {
+	rec, err := s.readAPIKeyRecord(ctx, cached.TenantID, cached.recordRef)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		s.mu.Lock()
+		delete(s.apiKeys, apiKey)
+		s.mu.Unlock()
+		s.apiKeyIdx.remove(cached.recordRef)
+		return nil, errAPIKeyRevoked
+	}
+
+	refreshed := apiKeyFromSecret(apiKey, rec, now)
+	if !s.cacheAPIKeyUnlessDeleted(apiKey, cached.recordRef, refreshed) {
+		s.mu.Lock()
+		delete(s.apiKeys, apiKey)
+		s.mu.Unlock()
+		return nil, errAPIKeyRevoked
+	}
+	return refreshed, nil
 }
 
 // writeErrorResponse writes a standardized error response
