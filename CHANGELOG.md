@@ -244,6 +244,18 @@ management, and a fleet-wide tenant-containment hardening pass. See
   (Issues #4317, #4303), and pipeline/agent tooling including a multi-lab security-review sweep
   (Epics #3026, #3900).
 
+- An empty tenant is never root (Issue #4665, ADR-025 Amendment 7):
+  - A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE`.
+  - An API key, a non-root account or a case created without a tenant belongs to the caller's own
+    tenant rather than `default`.
+  - Per-steward config get/put/delete use the steward's own tenant.
+  - Config and deployment listings accept a `?tenant_id` the caller is authorized for.
+- Certificate provisioning always issues steward certificates. A request with a custom
+  `organization`, or a `steward_id`/`common_name` naming a controller cluster node, is refused with
+  `403`; scripts that set `organization` must drop it (Issue #4665).
+- Signing-CA rotation requires an admin certificate; a root web or `cfg` session is refused
+  (Issue #4665).
+
 ### Fixed
 
 - **RC end-to-end validation fixes** (v0.10.5 RC, 2026-10-02 – 2026-10-06):
@@ -278,6 +290,10 @@ management, and a fleet-wide tenant-containment hardening pass. See
     S3-compatible endpoint, credentials via `${VAR}`/`<VAR>_FILE`), with each
     `CFGMS_S3_INSTALLER_*` variable overriding its key; it was documented but ignored, leaving
     installers failing against the default AWS endpoint (Issue #4662).
+  - Root accounts act as root on every credential path: a root-scope account's web, passkey and
+    `cfg` sessions and the bootstrap admin certificate are bound to the deployment's root tenant
+    and carry root scope from the account's `root_scope` flag, instead of an empty tenant that
+    some handlers refused and others read as unrestricted (Issue #4665).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
@@ -363,6 +379,19 @@ management, and a fleet-wide tenant-containment hardening pass. See
 - **Security tooling** — OWASP ZAP DAST baseline (Issue #2950), OpenSSF Scorecard (Issue #2951),
   CodeQL and Dependabot for `web/` (Issue #2949), and Go native fuzz targets for config, DNA
   transport, EIDs, certificate PEM and CIM/WMI parsing (Issues #2952, #2953) (Epic #2861).
+
+- **Tenant-crossing boundary on actions** (Issue #4665):
+  - A root operator subject to the ADR-025 boundary needs an active grant or break-glass crossing
+    to act on a client tenant's records. Without one the request gets the tenant-crossing
+    challenge; bulk approvals skip those records instead.
+  - Covered: accounts, certificates and cert bindings, tokens, registrations and refreshes,
+    credential requests, API keys, roles, cases, sessions, rollouts, runs, rollbacks, steward
+    config, push, move, visibility and decommission, and selector-driven jobs, upgrades, osquery
+    and signed operator payloads.
+  - Lists and record reads keep their existing breadth.
+  - Background jobs and fleet-wide internal reads run under an explicit system context, and a
+    context with no caller is refused.
+  - An architecture rule keeps every other root-allow decision annotated with its reason.
 
 ### Removed
 
