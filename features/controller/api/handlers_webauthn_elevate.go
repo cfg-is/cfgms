@@ -58,6 +58,7 @@ type elevateThrottleRecord struct {
 	mu          sync.Mutex
 	fails       int
 	nextAllowed time.Time
+	lastFailure time.Time // Issue #4572: when fails last incremented; drives sweep retention
 }
 
 // handleStepUpBegin handles POST /api/v1/webauthn/elevate/begin.
@@ -356,6 +357,7 @@ func (s *Server) recordElevateFailure(key string) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
+	rec.lastFailure = time.Now()
 	delay := elevateBackoff(rec.fails)
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)

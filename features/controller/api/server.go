@@ -177,6 +177,12 @@ type Server struct {
 	passkeyLoginSessions            sync.Map                                 // Issue #2993: pending passkey login ceremonies; key=ceremonyID, value=*passkeyLoginSession
 	passkeyLoginThrottle            sync.Map                                 // Issue #2993: per-account/per-IP failed login throttle; key="account:<username>"|"ip:<ip>", value=*elevateThrottleRecord
 	passkeyEnrollSessions           sync.Map                                 // Issue #2966: first-passkey enrollment ceremonies; key=tokenHash, value=*webAuthnPendingSession
+	passkeyLoginPending             atomic.Int64                             // Issue #4572: count of pending passkeyLoginSessions entries; enforces the begin cap
+	passkeyLoginSessionCap          int                                      // Issue #4572: pending passkey login cap; 0 means maxPendingPasskeyLoginSessions (tests shrink it)
+	passkeyLoginPendingByClient     sync.Map                                 // Issue #4572: per-client pending passkey login count; key=clientIPKey, value=*atomic.Int64
+	passkeyLoginSessionClientCap    int                                      // Issue #4572: per-client pending cap; 0 means maxPendingPasskeyLoginSessionsPerClient (tests shrink it)
+	stopWebAuthnCeremonySweep       chan struct{}                            // Issue #4572: signals the WebAuthn ceremony expiry sweep to exit
+	webAuthnCeremonySweepDone       chan struct{}                            // Issue #4572: closed when the WebAuthn ceremony sweep goroutine exits
 	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler
 	egConfigstoreWriter             egConfigstoreIngestor                    // Issue #2879: desired-state entity-graph internal writer (nil = disabled)
 	egProvider                      egReadProvider                           // Issue #2880: entity graph read API
@@ -410,6 +416,9 @@ func New(
 		stopCliPresenceSweep:       make(chan struct{}),
 		cliPresenceSweepDone:       make(chan struct{}),
 		cliPresenceSweepLease:      cliPresenceSweepLease,
+		// Issue #4572: in-memory WebAuthn ceremony/throttle expiry sweep.
+		stopWebAuthnCeremonySweep: make(chan struct{}),
+		webAuthnCeremonySweepDone: make(chan struct{}),
 		// Issue #3761: default poll interval for runRollout to notice a halt persisted
 		// by a peer node during a ring soak; tests shrink this for determinism.
 		rolloutHaltPollInterval: defaultRolloutHaltPollInterval,
@@ -599,6 +608,10 @@ func New(
 	// Issue #4287: background sweep for expired cli-presence requests, mirroring the
 	// cli-login sweep above.
 	server.startCliPresenceRequestSweep()
+
+	// Issue #4572: background sweep for expired in-memory WebAuthn ceremony and
+	// throttle entries, so an abandoned ceremony does not stay resident forever.
+	server.startWebAuthnCeremonySweep()
 
 	return server, nil
 }
@@ -1239,6 +1252,20 @@ func (s *Server) Close(ctx context.Context) error {
 			case <-ctx.Done():
 				if firstErr == nil {
 					firstErr = fmt.Errorf("api server close: timed out waiting for cli-presence sweep goroutine: %w", ctx.Err())
+				}
+			}
+		}
+
+		// Issue #4572: signal the WebAuthn ceremony expiry sweep to exit. Guarded by a
+		// nil check for the same reason — several tests build a *Server literal directly
+		// without going through New().
+		if s.stopWebAuthnCeremonySweep != nil {
+			close(s.stopWebAuthnCeremonySweep)
+			select {
+			case <-s.webAuthnCeremonySweepDone:
+			case <-ctx.Done():
+				if firstErr == nil {
+					firstErr = fmt.Errorf("api server close: timed out waiting for WebAuthn ceremony sweep goroutine: %w", ctx.Err())
 				}
 			}
 		}

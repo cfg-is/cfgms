@@ -618,6 +618,7 @@ func (s *Server) recordSignFailure(key string) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
+	rec.lastFailure = time.Now()
 	delay := elevateBackoff(rec.fails)
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)

@@ -131,12 +131,23 @@ func (s *Server) handlePasskeyLoginBegin(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.passkeyLoginSessions.Store(ceremonyID, &passkeyLoginSession{
+	// Issue #4572: per-client then global pending-ceremony caps; refuse rather than grow memory.
+	switch s.storePasskeyLoginSession(ceremonyID, &passkeyLoginSession{
 		data:         *sessionData,
 		expires:      time.Now().Add(passkeyLoginCeremonyMaxAge * time.Second),
 		accountID:    req.Username,
 		discoverable: true,
-	})
+		clientKey:    s.clientIPKey(r),
+	}) {
+	case passkeyLoginStoreClientCapped:
+		s.writeErrorResponse(w, http.StatusTooManyRequests,
+			"Too many pending login ceremonies from this client — try again later", "CEREMONY_RATE_LIMITED")
+		return
+	case passkeyLoginStoreGlobalCapped:
+		s.writeErrorResponse(w, http.StatusServiceUnavailable,
+			"Too many pending login ceremonies — try again later", "CEREMONY_CAPACITY")
+		return
+	}
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookiePasskeyCeremony,
@@ -185,7 +196,7 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	ceremonyID := ceremonyCookie.Value
 
 	// Load and unconditionally delete the pending session (single-use enforcement).
-	rawSession, ok := s.passkeyLoginSessions.LoadAndDelete(ceremonyID)
+	rawSession, ok := s.takePasskeyLoginSession(ceremonyID)
 	if !ok {
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"No active login session — call begin first", "NO_ACTIVE_LOGIN_SESSION")
@@ -450,6 +461,7 @@ func (s *Server) recordPasskeyLoginFailure(key string) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	rec.fails++
+	rec.lastFailure = time.Now()
 	delay := elevateBackoff(rec.fails)
 	if delay > 0 {
 		rec.nextAllowed = time.Now().Add(delay)
