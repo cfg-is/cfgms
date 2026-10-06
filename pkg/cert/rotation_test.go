@@ -283,3 +283,25 @@ func TestRotateSigningCertificate_FirstRotationWithoutSigningCert(t *testing.T) 
 	assert.Equal(t, newCert.SerialNumber, cursor.CurrentSerial)
 	assert.Empty(t, cursor.RotatingSerial)
 }
+
+// A rotation that cannot load the signing cert it replaces refuses, instead of
+// proceeding without recording it — which would strand every steward offline
+// during the rotation (Issue #4686).
+func TestRotateSigningCertificate_RefusesWhenReplacedCertUnreadable(t *testing.T) {
+	m := newTestManager(t)
+	require.NoError(t, m.EnsureSigningCertificate(&SigningCertConfig{
+		CommonName:   "cfgms-config-signer",
+		ValidityDays: 30,
+		KeySize:      2048,
+	}))
+	original, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(m.store.basePath, original.SerialNumber, "cert.pem")))
+
+	_, err = m.RotateSigningCertificate(30)
+	require.Error(t, err, "rotation must refuse when it cannot name the cert it replaces")
+
+	cursor, err := m.GetSigningCursorState()
+	require.NoError(t, err)
+	assert.Nil(t, cursor, "a refused rotation must not write the cursor")
+}

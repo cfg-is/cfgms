@@ -603,9 +603,18 @@ func (m *Manager) seedSigningCursor(ctx context.Context) error {
 	if cursor != nil && cursor.CurrentSerial != "" {
 		return nil
 	}
+	valid, err := m.GetAllValidCertificatesForPurpose(PurposeSigning)
+	if err != nil {
+		return fmt.Errorf("list signing certificates to seed cursor: %w", err)
+	}
+	if len(valid) == 0 {
+		return nil
+	}
+	// A rotation that cannot name the cert it replaces must not proceed: it
+	// would strand every steward offline during it.
 	current, err := m.GetCurrentCertForPurpose(PurposeSigning)
 	if err != nil {
-		return nil
+		return fmt.Errorf("resolve current signing certificate to seed cursor: %w", err)
 	}
 	if _, err := m.cursor.TransitionCursor(ctx, current.SerialNumber, 0, false); err != nil {
 		return fmt.Errorf("seed signing cursor with current serial: %w", err)
