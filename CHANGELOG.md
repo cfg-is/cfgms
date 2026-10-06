@@ -309,6 +309,10 @@ management, and a fleet-wide tenant-containment hardening pass. See
     being dropped; the lost refresh had left such a steward rejecting every config and command
     until re-enrolled. A config transfer refused because its signer was not yet trusted is fetched
     again once a pushed signing cert is applied (Issue #4678).
+  - A controller's first signing-cert rotation records the certificate it replaces, so stewards
+    that are offline during it accept the refreshed certificate when they reconnect; previously
+    only rotations after the first did, and a steward that missed the first one was stranded. A
+    rotation that cannot load the certificate it replaces is refused (Issue #4686).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
@@ -434,6 +438,10 @@ management, and a fleet-wide tenant-containment hardening pass. See
   held in memory on the controller node that ran it: on a clustered controller, other nodes answer
   `404` for it, and a restart forgets it. Workflow definitions and triggers are shared. Tracked by
   Issue #4675.
+- **Clustered controllers: each node has its own config-signing certificate.** A steward trusts
+  the signing certificate of the node it enrolled through. On a clustered controller, keep stewards
+  connecting through the node they enrolled through, and do not rotate the signing certificate.
+  Single-node controllers are unaffected. A cluster-wide signing identity is tracked by Epic #4687.
 
 ## [0.9.7] - 2026-06-15
 
