@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/providers/internal/pendingcmd"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
@@ -179,8 +180,9 @@ type Provider struct {
 	startTime time.Time
 	now       func() time.Time
 
-	// Subscriptions (client mode)
-	commandHandler interfaces.CommandHandler
+	// Subscriptions (client mode). commands holds the subscribed command handler
+	// and any commands that arrive before it is subscribed (Issue #4678).
+	commands *pendingcmd.Queue
 
 	// Subscriptions (server mode)
 	eventHandlers     []eventSubscription
@@ -226,6 +228,7 @@ func New(mode Mode, opts ...Option) *Provider {
 		eventHandlers:     []eventSubscription{},
 		heartbeatHandlers: []interfaces.HeartbeatHandler{},
 		now:               time.Now,
+		commands:          pendingcmd.New(pendingcmd.DefaultLimit),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -335,7 +338,7 @@ func (p *Provider) Stop(ctx context.Context) error {
 		p.cancel()
 	}
 	mode, bus, stewardID := p.mode, p.bus, p.stewardID
-	p.commandHandler = nil
+	p.commands.Reset()
 	p.eventHandlers = nil
 	p.heartbeatHandlers = nil
 	p.mu.Unlock()
@@ -487,21 +490,30 @@ func (p *Provider) deliverCommand(cmd *types.SignedCommand, stewardID string) er
 func (p *Provider) receiveCommand(cmd *types.SignedCommand) {
 	p.commandsReceived.Add(1)
 
-	p.mu.RLock()
-	handler := p.commandHandler
-	ctx := p.ctx
-	p.mu.RUnlock()
-
+	// A command that arrives before SubscribeCommands is held and delivered on
+	// subscription, as the gRPC provider does (Issue #4678).
+	handler, dropped := p.commands.Admit(cmd)
+	if dropped {
+		p.logger.Warn("command dropped: received before subscription and the pending-command backlog is full",
+			"command_id", logging.SanitizeLogValue(cmd.Command.ID))
+		return
+	}
 	if handler == nil {
 		return
 	}
-	p.dispatchAsync(func() {
-		if err := handler(ctx, cmd); err != nil {
-			p.logger.Error("command handler error",
-				"command_id", logging.SanitizeLogValue(cmd.Command.ID),
-				"error", logging.SanitizeLogValue(err.Error()))
-		}
-	})
+	p.dispatchAsync(func() { p.handleCommand(handler, cmd) })
+}
+
+// handleCommand runs the subscribed command handler for one received command.
+func (p *Provider) handleCommand(handler pendingcmd.Handler, cmd *types.SignedCommand) {
+	p.mu.RLock()
+	ctx := p.ctx
+	p.mu.RUnlock()
+	if err := handler(ctx, cmd); err != nil {
+		p.logger.Error("command handler error",
+			"command_id", logging.SanitizeLogValue(cmd.Command.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // SubscribeCommands registers the client-side command handler. The stewardID
@@ -512,12 +524,15 @@ func (p *Provider) SubscribeCommands(_ context.Context, stewardID string, handle
 		return fmt.Errorf("SubscribeCommands is only available in client mode")
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if stewardID != "" && stewardID != p.stewardID {
-		return fmt.Errorf("cannot subscribe to commands for steward %s: provider identity is %s", stewardID, p.stewardID)
+	p.mu.RLock()
+	ownID := p.stewardID
+	p.mu.RUnlock()
+	if stewardID != "" && stewardID != ownID {
+		return fmt.Errorf("cannot subscribe to commands for steward %s: provider identity is %s", stewardID, ownID)
 	}
-	p.commandHandler = handler
+	if p.commands.Subscribe(handler) {
+		p.dispatchAsync(func() { p.commands.Drain(p.handleCommand) })
+	}
 	return nil
 }
 

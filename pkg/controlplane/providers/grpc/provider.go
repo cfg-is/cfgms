@@ -28,6 +28,7 @@ import (
 	controllerpb "github.com/cfgis/cfgms/api/proto/controller"
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/pkg/controlplane/interfaces"
+	"github.com/cfgis/cfgms/pkg/controlplane/providers/internal/pendingcmd"
 	"github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -151,8 +152,9 @@ type Provider struct {
 	// Injected via WithStewardTenantResolver.
 	stewardTenantResolver StewardTenantResolver
 
-	// Subscription handlers (client mode)
-	commandHandler interfaces.CommandHandler
+	// Subscription handlers (client mode). commands holds the subscribed command
+	// handler and any commands that arrive before it is subscribed (Issue #4678).
+	commands *pendingcmd.Queue
 
 	// Server-side tenant binding store. When non-nil, Register() enforces that
 	// the registration token (creds.ClientId) maps to a tenant matching creds.TenantId.
@@ -203,6 +205,7 @@ func New(mode Mode, opts ...option) *Provider {
 		maxConnections:    50000,
 		rejectedCh:        make(chan struct{}),
 		firstRecvCh:       make(chan struct{}),
+		commands:          pendingcmd.New(pendingcmd.DefaultLimit),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -702,16 +705,19 @@ func (p *Provider) clientReceiveLoop() {
 			sc := signedCommandFromProto(payload.Command)
 			p.commandsReceived.Add(1)
 
-			p.mu.RLock()
-			handler := p.commandHandler
-			p.mu.RUnlock()
-
+			// The controller sends on-connect commands (the signing-cert refresh,
+			// queued deliveries) as soon as this stream registers, which is before
+			// the steward has subscribed. Those are held and delivered on
+			// SubscribeCommands rather than dropped (Issue #4678).
+			handler, dropped := p.commands.Admit(sc)
+			if dropped {
+				p.deliveryFailures.Add(1)
+				p.logger.Warn("command dropped: received before subscription and the pending-command backlog is full",
+					"command_id", logging.SanitizeLogValue(sc.Command.ID),
+					"command_type", logging.SanitizeLogValue(string(sc.Command.Type)))
+			}
 			if handler != nil {
-				go func() {
-					if err := handler(p.ctx, sc); err != nil {
-						p.logger.Error("command handler error", "command_id", sc.Command.ID, "error", err)
-					}
-				}()
+				go p.handleCommand(handler, sc)
 			}
 		}
 	}
@@ -1032,11 +1038,22 @@ func (p *Provider) SubscribeCommands(ctx context.Context, stewardID string, hand
 		return fmt.Errorf("SubscribeCommands is only available in client mode")
 	}
 
-	p.mu.Lock()
-	p.commandHandler = handler
-	p.mu.Unlock()
+	// Commands that arrived before this subscription are delivered first, in
+	// arrival order; commands received meanwhile queue behind them (Issue #4678).
+	if p.commands.Subscribe(handler) {
+		go p.commands.Drain(p.handleCommand)
+	}
 
 	return nil
+}
+
+// handleCommand runs the subscribed command handler for one received command.
+func (p *Provider) handleCommand(handler pendingcmd.Handler, sc *types.SignedCommand) {
+	if err := handler(p.ctx, sc); err != nil {
+		p.logger.Error("command handler error",
+			"command_id", logging.SanitizeLogValue(sc.Command.ID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
 }
 
 // --- Events (Steward → Controller) ---
