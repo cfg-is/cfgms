@@ -15,7 +15,6 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/service"
 	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -43,9 +42,7 @@ func serveTerminalScope(s *Server, callerTenant, stewardID string) (*httptest.Re
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, nil)
 	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
-	if callerTenant != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenant))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), callerTenant))
 	rec := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec, req)
 	return rec, reached
@@ -98,8 +95,8 @@ func TestTerminalScope_SiblingPrefixNotAncestor(t *testing.T) {
 }
 
 // serveTerminalScopeAsRootScoped drives a request through the wrapper with a root-scoped
-// principal in context (ADR-025 Amendment 1 A1.3). callerTenant is intentionally not set
-// in context because root-scoped principals have TenantID == "".
+// principal in context (ADR-025 Amendment 1 A1.3), carrying the root scope and root
+// tenant the authentication middleware sets for it (Issue #4665).
 func serveTerminalScopeAsRootScoped(s *Server, principal *Principal, stewardID string) (*httptest.ResponseRecorder, *bool) {
 	reached := new(bool)
 	wrapped := s.tenantScopedTerminalWrapper(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -109,8 +106,7 @@ func serveTerminalScopeAsRootScoped(s *Server, principal *Principal, stewardID s
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/terminal/ws/"+stewardID, nil)
 	req = mux.SetURLVars(req, map[string]string{"steward_id": stewardID})
 	ctx := req.Context()
-	ctx = context.WithValue(ctx, principalContextKey, principal)
-	// TenantID intentionally absent: root-scoped principals have TenantID == "".
+	ctx = context.WithValue(withCallerTenant(ctx, ""), principalContextKey, principal)
 	rec := httptest.NewRecorder()
 	wrapped.ServeHTTP(rec, req.WithContext(ctx))
 	return rec, reached

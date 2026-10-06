@@ -56,11 +56,10 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not add ranges for
 	// other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, req.TenantID, "POST /api/v1/registration/ip-trust") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, req.TenantID, "POST /api/v1/registration/ip-trust"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 
@@ -103,11 +102,10 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke ranges
 	// for other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, "DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, "DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 

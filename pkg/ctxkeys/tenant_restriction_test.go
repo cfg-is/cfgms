@@ -9,7 +9,8 @@ import (
 )
 
 // TestTenantRestriction guards Issue #4665: only an explicit root scope, or a
-// context with no caller at all, is unrestricted — an empty tenant ID never is.
+// context explicitly marked system-internal, is unrestricted — an empty tenant ID
+// never is, and neither is a context that merely carries no caller.
 func TestTenantRestriction(t *testing.T) {
 	bg := context.Background()
 	cases := []struct {
@@ -26,7 +27,9 @@ func TestTenantRestriction(t *testing.T) {
 		{"unset scope", context.WithValue(bg, TenantScopeKey, TenantScope{}), "", false, false},
 		{"empty tenant ID, no scope", context.WithValue(bg, TenantID, ""), "", false, false},
 		{"tenant ID, no scope", context.WithValue(bg, TenantID, "acme-corp"), "acme-corp", false, true},
-		{"no caller (system-internal)", bg, "", true, true},
+		{"no caller and no system mark", bg, "", false, false},
+		{"system-internal", WithSystem(bg), "", true, true},
+		{"system mark over a caller", WithSystem(context.WithValue(bg, TenantScopeKey, NewTenantScope("acme-corp"))), "", true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,10 +42,10 @@ func TestTenantRestriction(t *testing.T) {
 	}
 }
 
-// TestWithoutCaller guards Issue #4665: a request context with its caller's
-// tenant identity removed reads as system-internal (fleet-wide), and keeps its
+// TestWithSystem guards Issue #4665: a request context marked system-internal
+// drops its caller's tenant identity, reads as fleet-wide, and keeps its
 // cancellation, deadline and other values.
-func TestWithoutCaller(t *testing.T) {
+func TestWithSystem(t *testing.T) {
 	type otherKey struct{}
 	deadline := time.Now().Add(time.Hour)
 	parent, cancel := context.WithDeadline(context.Background(), deadline)
@@ -50,9 +53,18 @@ func TestWithoutCaller(t *testing.T) {
 	parent = context.WithValue(parent, TenantScopeKey, NewTenantScope("acme-corp"))
 	parent = context.WithValue(parent, otherKey{}, "kept")
 
-	ctx := WithoutCaller(parent)
+	if IsSystem(parent) {
+		t.Fatal("an unmarked context must not read as system-internal")
+	}
+	ctx := WithSystem(parent)
+	if !IsSystem(ctx) {
+		t.Fatal("WithSystem must mark the context")
+	}
 	if _, unrestricted, ok := TenantRestriction(ctx); !unrestricted || !ok {
-		t.Fatalf("WithoutCaller context must be system-internal, got unrestricted=%v ok=%v", unrestricted, ok)
+		t.Fatalf("WithSystem context must be system-internal, got unrestricted=%v ok=%v", unrestricted, ok)
+	}
+	if ctx.Value(TenantID) != nil || ctx.Value(TenantScopeKey) != nil {
+		t.Fatal("the caller's tenant identity must be dropped")
 	}
 	if ctx.Value(otherKey{}) != "kept" {
 		t.Fatal("other values must be kept")

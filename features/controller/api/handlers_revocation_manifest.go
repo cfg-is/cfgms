@@ -444,8 +444,9 @@ func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID str
 // the first place.
 //
 // The rule is fail-closed on every unset tenant, deliberately: an entry with
-// TenantID == "" and RootScope == false is a reachable account state
-// (handleCreateAccount accepts root_scope:false with no tenant_id), and treating that
+// TenantID == "" and RootScope == false can still come from an account record written
+// before Issue #4665 (handleCreateAccount then accepted root_scope:false with no
+// tenant_id; it now assigns the caller's own tenant), and treating that
 // unset tenant as "unrestricted" — which is what the general-purpose
 // isWithinTenantScope("") does for an *mTLS admin caller* — would disclose that entry's
 // credential ID, public key and existence to every steward in the fleet. The unset

@@ -160,7 +160,7 @@ func (s *SigningRotationService) Rotate(ctx context.Context, operatorSerial stri
 		// strand them on the retired cert. Drop the caller's tenant identity — a
 		// system-internal context reaches the whole fleet — while keeping the
 		// request's cancellation and deadline (Issue #4665).
-		fleetCtx := ctxkeys.WithoutCaller(ctx)
+		fleetCtx := ctxkeys.WithSystem(ctx)
 		stewards := controllerSvc.ListFleetStewards(fleetCtx)
 		certPEM := base64.StdEncoding.EncodeToString(newCert.CertificatePEM)
 		params := map[string]interface{}{

@@ -3314,25 +3314,25 @@ func TestIsAuthorizedForTenant(t *testing.T) {
 
 	t.Run("unset_scope_denies", func(t *testing.T) {
 		var unset ctxkeys.TenantScope
-		assert.False(t, srv.isAuthorizedForTenant(unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("root_scope_allows", func(t *testing.T) {
 		root := ctxkeys.NewRootScope()
-		assert.True(t, srv.isAuthorizedForTenant(root, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(root, "", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("tenant_scope_allows_own_subtree", func(t *testing.T) {
 		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("tenant_scope_refused_sibling_subtree", func(t *testing.T) {
 		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
-		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
 			"trailing-separator guard: msp-a must not match msp-ab")
 	})
 
@@ -3344,7 +3344,7 @@ func TestIsAuthorizedForTenant(t *testing.T) {
 		// unchanged for its existing callers), but a TenantScope must fail
 		// closed instead of reintroducing that ambiguity through Path().
 		degenerate := ctxkeys.NewTenantScope("")
-		assert.False(t, srv.isAuthorizedForTenant(degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
 	})
 }
 
@@ -3954,11 +3954,13 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 	require.NotNil(t, captured)
 	require.True(t, captured.RootScoped, "precondition: the first request must carry the marker")
 
-	// Administratively clear the account's RootScope flag — no session mutation at all.
+	// Administratively clear the account's RootScope flag, demoting it to a tenant
+	// account — no session mutation at all. (An account left with neither root scope
+	// nor a tenant is refused outright, Issue #4665.)
 	srv.cacheAccount(&account{
 		ID:        "web-root-op-cleared",
 		Username:  "web-root-op-cleared",
-		TenantID:  "",
+		TenantID:  "tenant-a",
 		RootScope: false,
 	})
 

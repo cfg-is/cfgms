@@ -32,7 +32,7 @@ func newTestTagStore(t *testing.T) *tagstore.Store {
 	dbPath := filepath.Join(t.TempDir(), "tags.db")
 	store, err := tagstore.NewFromDSN("file:"+dbPath, logging.NewNoopLogger())
 	require.NoError(t, err)
-	require.NoError(t, store.Initialize(context.Background()))
+	require.NoError(t, store.Initialize(ctxkeys.WithSystem(context.Background())))
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
@@ -49,7 +49,7 @@ func storeRoleConfig(t *testing.T, cs cfgconfig.ConfigStore, tenantID, name, sel
 	require.NoError(t, err)
 	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
 	now := time.Now().UTC()
-	require.NoError(t, cs.StoreConfig(context.Background(), &cfgconfig.ConfigEntry{
+	require.NoError(t, cs.StoreConfig(ctxkeys.WithSystem(context.Background()), &cfgconfig.ConfigEntry{
 		Key:       &cfgconfig.ConfigKey{TenantID: tenantID, Namespace: "role-policies", Name: name},
 		Data:      data,
 		Format:    cfgconfig.ConfigFormatJSON,
@@ -64,7 +64,7 @@ func storeRoleConfig(t *testing.T, cs cfgconfig.ConfigStore, tenantID, name, sel
 // "os:windows tag:github-runner"; its github_runner resource appears in the effective config.
 // A non-matching steward does not receive it.
 func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 	ts := newTestTagStore(t)
@@ -152,7 +152,7 @@ func TestGetConfiguration_TaggedStewardReceivesRoleResource(t *testing.T) {
 // TestGetConfiguration_UntaggingRemovesRoleResource verifies that removing a tag causes
 // the role's resources to be absent on the next GetConfiguration call.
 func TestGetConfiguration_UntaggingRemovesRoleResource(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 	ts := newTestTagStore(t)
@@ -231,7 +231,7 @@ func findResource(t *testing.T, resources []stewardtypes.ResourceConfig, name st
 // real roleConfigAdapter + clusterRegistryAdapter wired by NewConfigurationServiceV2
 // (Issue #2546 — no test stubs; real components only).
 func TestGetConfiguration_RolePrecedence_DeviceBeatsRoleBeatsCluster(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 	ts := newTestTagStore(t)
@@ -313,7 +313,7 @@ func TestGetConfiguration_RolePrecedence_DeviceBeatsRoleBeatsCluster(t *testing.
 // role still applies and device-level config still appears. This is the real-component
 // equivalent of the resolver's "role provider hiccup is non-fatal" contract (Issue #2546).
 func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 	ts := newTestTagStore(t)
@@ -379,7 +379,7 @@ func TestGetConfiguration_MalformedRoleConfig_IsNonFatal(t *testing.T) {
 // check at all, so this call would proceed straight into ResolveConfiguration
 // under the caller-asserted tenant.
 func TestGetEffectiveConfiguration_CrossTenantDenied(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 
@@ -403,7 +403,7 @@ func TestGetEffectiveConfiguration_CrossTenantDenied(t *testing.T) {
 // caller — mirroring handleGetEffectiveConfig's prior behaviour of passing
 // its own session tenant straight through.
 func TestGetEffectiveConfiguration_ResolvesOwningTenantNotCallerSupplied(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	sm := pkgtesting.SetupTestStorage(t)
 
@@ -472,7 +472,7 @@ func TestFlattenDNAFragments_SelectorRelevantKeys(t *testing.T) {
 // Pre-story code derived membership from GetAllStewards() — node-local — so node 2
 // returned no clusters for this steward and its cluster policies were never applied.
 func TestMemberClusters_PeerAttachedSteward(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	dataDir := t.TempDir()
 
 	// --- Node 1: register the steward and publish its cluster membership fragment. ---

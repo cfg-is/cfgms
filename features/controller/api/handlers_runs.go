@@ -294,13 +294,15 @@ func (s *Server) resolveAuthorizedRunTargets(w http.ResponseWriter, r *http.Requ
 	return devices, true
 }
 
-// runVisibleTo reports whether the caller may read/cancel the given run, using the
+// runAccess decides whether the caller may read/cancel the given run, using the
 // caller's ctxkeys.TenantScope (Issue #4335) rather than the raw tenantID string:
-// an unset scope is refused (not treated as root), root always passes, and a tenant
-// scope is checked via subtree containment. Callers return 404 (not 403) on false to
-// avoid leaking cross-tenant run existence (Issue #1990).
-func (s *Server) runVisibleTo(scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) bool {
-	return s.isAuthorizedForTenant(scope, run.TenantID, route)
+// an unset scope is refused (not treated as root), a tenant scope is checked via
+// subtree containment, and a root caller subject to the ADR-025 crossing boundary
+// needs a crossing for a run in a tenant below root (Issue #4665). Callers answer
+// tenantAuthDenied with 404 (not 403) to avoid leaking cross-tenant run existence
+// (Issue #1990), and tenantAuthNeedsCrossing with the crossing challenge.
+func (s *Server) runAccess(ctx context.Context, scope ctxkeys.TenantScope, run *controllerrun.RunRecord, route string) tenantAuthDecision {
+	return s.tenantAccessForScope(ctx, scope, run.TenantID, route)
 }
 
 // handlePostRunScript handles POST /api/v1/runs/script.
@@ -678,8 +680,10 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant isolation: return 404 (not 403) to avoid leaking existence across tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -717,8 +721,10 @@ func (s *Server) handleGetRunJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}/jobs") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "GET /api/v1/runs/{run_id}/jobs"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 
@@ -768,8 +774,10 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.runVisibleTo(scope, run, "DELETE /api/v1/runs/{run_id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+	if access := s.runAccess(r.Context(), scope, run, "DELETE /api/v1/runs/{run_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, run.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Run not found", "NOT_FOUND")
+		}
 		return
 	}
 

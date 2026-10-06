@@ -608,7 +608,9 @@ func New(
 				AppliedAt: time.Now().UTC(),
 				Source:    "save-deploy",
 			}
-			allStewards := controllerService.ListFleetStewards(context.Background())
+			// Fleet-wide read filtered to tenantID below; system-internal, since a
+			// save=deploy fanout has no caller of its own (Issue #4665).
+			allStewards := controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
 			var tenantStewards []*service.StewardInfo
 			for _, st := range allStewards {
 				if st.TenantID == tenantID {
@@ -663,9 +665,10 @@ type controllerServiceAdapter struct {
 }
 
 func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
-	// context.Background: tenant scoping is applied downstream by MemoryQuery.Search via
-	// Filter.TenantSubtree/TenantID, not at the provider level.
-	infos := a.svc.ListFleetStewards(context.Background())
+	// System-internal (ctxkeys.WithSystem, Issue #4665): tenant scoping is applied
+	// downstream by MemoryQuery.Search via Filter.TenantSubtree/TenantID, not at
+	// the provider level, and a bare context would be refused.
+	infos := a.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	result := make([]fleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		// ListFleetStewards already copies Tags from the tag store.

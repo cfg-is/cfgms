@@ -85,11 +85,10 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	// bug that lost the caller's tenant) is refused rather than treated as an
 	// unrestricted mTLS admin.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, req.TenantID, "POST /api/v1/registration/tokens") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, req.TenantID, "POST /api/v1/registration/tokens"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 
@@ -256,11 +255,10 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 	// from other tenants. 404 (not 403) avoids existence disclosure across tenant
 	// boundaries. An unset scope is refused the same way, not treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, token.TenantID, "GET /api/v1/registration/tokens/{token}") {
-		http.Error(w, "Token not found", http.StatusNotFound)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, "GET /api/v1/registration/tokens/{token}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, token.TenantID) {
+			http.Error(w, "Token not found", http.StatusNotFound)
+		}
 		return
 	}
 
@@ -313,11 +311,10 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not delete tokens
 	// from other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}") {
-		http.Error(w, "Token not found", http.StatusNotFound)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, token.TenantID) {
+			http.Error(w, "Token not found", http.StatusNotFound)
+		}
 		return
 	}
 
@@ -383,11 +380,10 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke tokens
 	// from other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, token.TenantID, "POST /api/v1/registration/tokens/{token}/revoke") {
-		http.Error(w, "Token not found", http.StatusNotFound)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, token.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, "POST /api/v1/registration/tokens/{token}/revoke"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, token.TenantID) {
+			http.Error(w, "Token not found", http.StatusNotFound)
+		}
 		return
 	}
 
@@ -437,11 +433,10 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	// treated as unrestricted. This runs BEFORE RotateToken is called below, so a
 	// refused caller never causes a new secret to be minted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/registration/tokens/{tenant_id}/rotate") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, "POST /api/v1/registration/tokens/{tenant_id}/rotate"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 

@@ -99,12 +99,18 @@ func (s *Server) loadRoleForWrite(w http.ResponseWriter, r *http.Request, roleID
 		return nil, false
 	}
 
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, resp.Role.TenantId) {
-		s.logger.Warn("Blocked cross-tenant role write",
-			"role_id", logging.SanitizeLogValue(roleID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant),
-			"action", action)
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+	// tenantAccessForScope also holds a root caller subject to the ADR-025
+	// crossing boundary to a crossing for a role owned by a tenant below root
+	// (Issue #4665).
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, resp.Role.TenantId, "role "+action); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, resp.Role.TenantId) {
+			s.logger.Warn("Blocked cross-tenant role write",
+				"role_id", logging.SanitizeLogValue(roleID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant),
+				"action", action)
+			s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		}
 		return nil, false
 	}
 
@@ -268,12 +274,17 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 
 	// Validate that the request body's TenantId is within the caller's subtree.
 	// 400 (not 404): there is no existing resource whose existence to conceal.
+	// A root caller subject to the ADR-025 boundary needs a crossing to create a
+	// role in a tenant below root (Issue #4665).
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, roleInfo.TenantID) {
-		s.logger.Info("Cross-tenant role create refused",
-			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
-		s.writeErrorResponse(w, http.StatusBadRequest, "TenantId is outside caller's scope", "TENANT_SCOPE_VIOLATION")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, roleInfo.TenantID, "POST /api/v1/rbac/roles"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, roleInfo.TenantID) {
+			s.logger.Info("Cross-tenant role create refused",
+				"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusBadRequest, "TenantId is outside caller's scope", "TENANT_SCOPE_VIOLATION")
+		}
 		return
 	}
 

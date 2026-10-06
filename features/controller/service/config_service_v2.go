@@ -72,13 +72,14 @@ type clusterRegistryAdapter struct {
 // invisible here. Now uses ListFleetStewards so peer-node fragments are included.
 func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
 	// Use the fleet-wide source so peer-attached stewards with cluster
-	// membership fragments are included. Pass context.Background() (unscoped)
-	// and apply exact-tenant filtering manually to preserve the prior exact-match
+	// membership fragments are included. Pass a system-internal context
+	// (unscoped, ctxkeys.WithSystem — Issue #4665) and apply exact-tenant
+	// filtering manually to preserve the prior exact-match
 	// scoping behaviour (ListFleetStewards applies subtree scoping, which
 	// would be a wider change than intended for MemberClusters). ListFleetStewards
 	// reads durable storage directly on every call (ADR-031 Decision 3, Issue
 	// #3764), so there is no populate-lag window to degrade around.
-	stewards := a.controllerSvc.ListFleetStewards(context.Background())
+	stewards := a.controllerSvc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 
 	// Resolve the queried steward's own tenant, which scopes the member list.
 	// The node-local registry is checked first: it is the freshest view for a

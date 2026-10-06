@@ -17,7 +17,6 @@ import (
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
 	"github.com/cfgis/cfgms/features/controller/fleet"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/session"
 )
 
@@ -86,7 +85,7 @@ func makeOsqueryRequest(t *testing.T, s *Server, body interface{}, principal *Pr
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/osquery/query", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(context.WithValue(req.Context(), principalContextKey, principal))
+	req = req.WithContext(context.WithValue(withCallerTenant(req.Context(), principal.TenantID), principalContextKey, principal))
 	// Inject presence token: osquery:execute carries RequireUserPresence: true.
 	token := mintPresenceToken(t, s, principal.ID)
 	req.Header.Set(presenceTokenHeader, token)
@@ -126,7 +125,7 @@ func makeOsqueryRequestForTenant(t *testing.T, s *Server, body interface{}, prin
 	t.Helper()
 	req := makeOsqueryRequest(t, s, body, principal)
 	if tenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
+		req = req.WithContext(withCallerTenant(req.Context(), tenantID))
 	}
 	return req
 }

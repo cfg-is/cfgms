@@ -2818,6 +2818,7 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 			name: "handleApproveAllRegistrations approves the entry",
 			invoke: func(s *Server, _ string) *httptest.ResponseRecorder {
 				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-all", nil)
+				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 				rec := httptest.NewRecorder()
 				s.handleApproveAllRegistrations(rec, r)
 				return rec

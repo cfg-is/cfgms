@@ -168,6 +168,10 @@ func (h *RelayHandler) handleRelayEvent(ctx context.Context, event *cpTypes.Even
 	reqCtx = context.WithValue(reqCtx, principalContextKey, principal)
 	reqCtx = context.WithValue(reqCtx, ctxkeys.UserIDKey, logging.SanitizeLogValue(principal.ID))
 	reqCtx = context.WithValue(reqCtx, ctxkeys.TenantID, principal.TenantID)
+	// The relay principal is confined to its tenant; carry the explicit scope the
+	// authentication middleware sets for every other credential, so scope-based
+	// tenant checks judge it the same way (Issue #4665).
+	reqCtx = context.WithValue(reqCtx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(principal.TenantID))
 	req = req.WithContext(reqCtx)
 
 	// Route through the existing REST handler (requirePermission checks Permissions).

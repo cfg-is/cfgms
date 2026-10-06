@@ -697,7 +697,7 @@ func TestCSRFMiddleware_SessionBound(t *testing.T) {
 
 	// Issue a session directly and inject a CSRF token (no need for passkey ceremony here).
 	_, token, err := srv.webSessionManager.Issue(context.Background(),
-		"webauthn-test-user", "test", "")
+		"webauthn-test-user", "test", "test-tenant")
 	require.NoError(t, err)
 	webSess, err := srv.webSessionManager.Validate(context.Background(), token)
 	require.NoError(t, err)

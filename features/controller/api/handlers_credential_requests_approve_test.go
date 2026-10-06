@@ -529,7 +529,7 @@ func TestPrincipalHasCertifiedRootScope_RevokedCertFallsBackToOrdinarySession(t 
 	x509Cert, err := x509.ParseCertificate(certBlock.Bytes)
 	require.NoError(t, err)
 
-	cookie := issueWebSession(t, mgr, "alice", "")
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
 
 	var captured *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -151,10 +151,16 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Set default tenant if not specified
+	// A key with no tenant named belongs to the caller's own tenant — the root
+	// tenant for a root caller (Issue #4665) — never a substituted one (Issue #4543).
 	tenantID := createReq.TenantID
 	if tenantID == "" {
-		tenantID = "default"
+		own, ok := callerOwnTenant(r.Context())
+		if !ok {
+			s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+			return
+		}
+		tenantID = own
 	}
 
 	// Issue #4334: the created key's tenant is bounded by the caller's own scope — a
@@ -163,9 +169,11 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// outright (Issue #4316 fail-closed contract): holding api-key:create does not by
 	// itself prove a valid caller scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, "POST /api/v1/api-keys") {
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"Cannot create an API key outside your tenant scope", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, "POST /api/v1/api-keys"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"Cannot create an API key outside your tenant scope", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -293,6 +301,11 @@ func (s *Server) handleGetAPIKey(w http.ResponseWriter, r *http.Request) {
 	// tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	rec, local, err := s.findAPIKeyInScope(r.Context(), keyID, scope, "GET /api/v1/api-keys/{id}")
+	var crossing *tenantCrossingRequiredError
+	if errors.As(err, &crossing) {
+		s.writeTenantCrossingChallenge(w, crossing.tenant)
+		return
+	}
 	if err != nil {
 		s.logger.Error("Failed to look up API key in secret store",
 			"id", logging.SanitizeLogValue(keyID),
@@ -329,6 +342,11 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	// tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	rec, local, err := s.findAPIKeyInScope(r.Context(), keyID, scope, "DELETE /api/v1/api-keys/{id}")
+	var crossing *tenantCrossingRequiredError
+	if errors.As(err, &crossing) {
+		s.writeTenantCrossingChallenge(w, crossing.tenant)
+		return
+	}
 	if err != nil {
 		s.logger.Error("Failed to look up API key in secret store",
 			"id", logging.SanitizeLogValue(keyID),
@@ -382,15 +400,20 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 // record's tenant, and the record is then read from that tenant alone. The local cache
 // is consulted only for local-only entries (recordRef == ""), which have no durable
 // record. A key outside the caller's scope is reported exactly like a missing one (both
-// return nil, nil) so callers cannot distinguish the two. A store read error is
-// returned as-is; it is never treated as not-found.
+// return nil, nil) so callers cannot distinguish the two; a key a root caller may reach
+// only through an ADR-025 crossing returns *tenantCrossingRequiredError (Issue #4665).
+// A store read error is returned as-is; it is never treated as not-found.
 func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxkeys.TenantScope, route string) (*secretsif.SecretMetadata, *APIKey, error) {
 	keyHash, entry, found, err := s.locateAPIKeyByID(ctx, keyID)
 	if err != nil {
 		return nil, nil, err
 	}
 	if found {
-		if !s.isAuthorizedForTenant(scope, entry.TenantID, route) {
+		switch s.tenantAccessForScope(ctx, scope, entry.TenantID, route) {
+		case tenantAuthAllowed:
+		case tenantAuthNeedsCrossing:
+			return nil, nil, &tenantCrossingRequiredError{tenant: entry.TenantID}
+		default:
 			return nil, nil, nil
 		}
 		// A tenant-scoped, name-filtered listing rather than GetSecret, because an
@@ -427,10 +450,17 @@ func (s *Server) findAPIKeyInScope(ctx context.Context, keyID string, scope ctxk
 		}
 	}
 	s.mu.RUnlock()
-	if local == nil || !s.isAuthorizedForTenant(scope, local.TenantID, route) {
+	if local == nil {
 		return nil, nil, nil
 	}
-	return nil, local, nil
+	switch s.tenantAccessForScope(ctx, scope, local.TenantID, route) {
+	case tenantAuthAllowed:
+		return nil, local, nil
+	case tenantAuthNeedsCrossing:
+		return nil, nil, &tenantCrossingRequiredError{tenant: local.TenantID}
+	default:
+		return nil, nil, nil
+	}
 }
 
 // evictCachedAPIKeyByID drops every cache entry for the key with the given ID and,

@@ -388,8 +388,10 @@ func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id strin
 // same "not found" response loadCallerCase already uses and returns false.
 func (s *Server) authorizeCaseTenantScope(w http.ResponseWriter, r *http.Request, c *business.Case, route string) bool {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, c.TenantID, route) {
-		http.Error(w, "not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), scope, c.TenantID, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, c.TenantID) {
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 		return false
 	}
 	return true

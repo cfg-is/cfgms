@@ -124,7 +124,7 @@ func injectNonAdminPrincipal(r *http.Request) *http.Request {
 		Permissions: []string{"steward:list"},
 		TenantID:    "default",
 	}
-	return r.WithContext(context.WithValue(r.Context(), principalContextKey, p))
+	return r.WithContext(context.WithValue(withCallerTenant(r.Context(), p.TenantID), principalContextKey, p))
 }
 
 // injectSessionMuxVars sets gorilla/mux route variables directly on the request

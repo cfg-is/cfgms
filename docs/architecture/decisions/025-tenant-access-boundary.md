@@ -1089,15 +1089,50 @@ through `TenantScope`.
   `TenantScope`. Proof strength stays a separate layer: `requirePermission` still applies
   each permission's assurance floor, so AssuranceStrong permissions still require step-up.
 - **One decision point.** `ctxkeys.TenantRestriction` is the only place an "all tenants"
-  decision is made: root scope or a context with no caller at all (system-internal work) is
-  unrestricted; a tenant caller is confined to its tenant; anything else is refused. An
-  empty tenant ID never grants reach.
-- **Fail closed at the edge.** A principal with neither a root flag nor a tenant is refused
-  by the authentication middleware. An unbound session with an empty tenant — the
-  pre-amendment form — is refused with `SESSION_SCOPE_INVALID`; reconnecting issues a bound
-  session.
+  decision is made: root scope, or a context explicitly marked system-internal with
+  `ctxkeys.WithSystem`, is unrestricted; a tenant caller is confined to its tenant; anything
+  else is refused — including a context that simply carries no caller, such as a stray
+  `context.Background()` on a request path. Background jobs, startup tasks and fleet-wide
+  reads that apply their own tenant filter (the fleet query, signing-CA rotation) take the
+  mark at their entry point, so every unrestricted context is a deliberate, greppable
+  decision. An empty tenant ID never grants reach.
+- **Fail closed at the edge.** Every credential path in the authentication middleware —
+  admin certificate, bearer session, web session, API key and relay — refuses a principal
+  with neither a root flag nor a tenant (`NO_TENANT_SCOPE`) before it reaches a handler. An
+  unbound session with an empty tenant — the pre-amendment form — is refused with
+  `SESSION_SCOPE_INVALID`; reconnecting issues a bound session.
+- **The crossing boundary applies to stored records.** A root scope is not unconditional.
+  For a principal subject to Decision 1's boundary, the record-tenant check every
+  record-by-ID route passes through (an account, a registration or token, a rollout, a run,
+  an API key, a role or RBAC subject, a steward's config) is judged by the same
+  `authorizeTenantAccess` decision as a tenant path variable: the root tenant's own records
+  are reachable, a record owned by a tenant below root needs an active grant or break-glass
+  crossing and otherwise answers with the crossing challenge (Decision 3). Before this
+  amendment such a principal's session was refused on these routes outright; root's reads
+  on list endpoints keep their existing breadth.
+- **No substituted tenant.** Where an operation needs a tenant the caller did not name, it
+  uses the caller's own authenticated tenant — the root tenant for a root caller — never a
+  literal fallback such as `default` (Issue #4543): a per-steward config read, write or
+  delete uses the steward's own tenant (registry, then durable record), falling back to the
+  caller's tenant only for a steward known nowhere; config and deployment listings read the
+  caller's tenant or one it names with `?tenant_id` and is authorized for; an API key or a
+  non-root account created without a tenant belongs to the caller's tenant. Data a root
+  caller previously wrote under `default` is reachable through `?tenant_id=default` where
+  `default` exists as a tenant.
 
-### A7.3 — Unchanged
+### A7.3 — Consequences
+
+- Per-tenant assurance overrides now apply to root callers: `requirePermission` resolves a
+  root caller's assurance requirement against the root tenant's override chain, where it
+  previously resolved against no tenant and used only the global floor. An override declared
+  on the root tenant therefore binds root operators as well — the intended reading of an
+  override on that tenant.
+- The steward data plane, the registration path and other controller-internal consumers
+  that resolve a tenant from their own context (`features/controller/service`) are tracked
+  separately under Issue #4543; they serve stewards rather than tenant principals and are
+  outside this amendment.
+
+### A7.4 — Unchanged
 
 - The steward operator-roster wire format: root entries keep their existing representation,
   so deployed stewards verify them as before.

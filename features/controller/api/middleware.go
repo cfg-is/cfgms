@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -729,7 +730,7 @@ func isWithinTenantScope(callerTenant, resourceTenant string) bool {
 		strings.HasPrefix(resourceTenant, callerTenant+"/")
 }
 
-// isAuthorizedForTenant answers "may this caller act on resourceTenant" for the
+// tenantAccessForScope answers "may this caller act on resourceTenant" for the
 // explicit three-state ctxkeys.TenantScope (Issue #4316). It is the fail-closed
 // replacement for comparing an empty tenant string by hand: unlike
 // isWithinTenantScope(""), the unset state here is never treated as unrestricted.
@@ -744,22 +745,57 @@ func isWithinTenantScope(callerTenant, resourceTenant string) bool {
 //     read the wrong context key, or a context.Background() call that dropped the
 //     request's scope. Silently treating it as "no restriction" is the defect this
 //     story closes.
-//   - Root scope always allows.
+//   - Root scope allows, except for a principal subject to ADR-025 Decision 1's
+//     root<->MSP crossing boundary (subjectToTenantCrossingBoundary): it is judged by
+//     authorizeTenantAccess, so a record owned by a tenant below root needs an active
+//     grant or break-glass crossing and yields tenantAuthNeedsCrossing without one.
+//     Routes that name a stored record by ID (an account, a token, a registration, a
+//     run) carry no tenant in the request, so requirePermission's boundary gate cannot
+//     see the record's tenant; this is the one place every such route passes through
+//     (Issue #4665).
 //   - Tenant scope defers to isWithinTenantScope, preserving its existing subtree
 //     semantics (including the trailing-separator guard) — see that function's tests.
-func (s *Server) isAuthorizedForTenant(scope ctxkeys.TenantScope, resourceTenant, route string) bool {
+//
+// A caller that can respond to the request writes the crossing challenge for
+// tenantAuthNeedsCrossing (writeTenantCrossingIfNeeded) and its own not-found or
+// forbidden response for tenantAuthDenied.
+func (s *Server) tenantAccessForScope(ctx context.Context, scope ctxkeys.TenantScope, resourceTenant, route string) tenantAuthDecision {
 	switch {
 	case scope.IsRoot():
-		return true
+		principal, _ := ctx.Value(principalContextKey).(*Principal)
+		if !subjectToTenantCrossingBoundary(principal) {
+			return tenantAuthAllowed
+		}
+		var decision tenantAuthDecision
+		if s.tenantManager == nil {
+			// No ancestry source wired: root's own records stay reachable and every
+			// other tenant fails closed exactly as if no crossing were active,
+			// matching authorizeRootScopedTenantAccess's nil-store stance.
+			decision = tenantAuthNeedsCrossing
+			if resourceTenant == "" || resourceTenant == s.rootTenantID(ctx) {
+				decision = tenantAuthAllowed
+			}
+		} else {
+			decision = s.authorizeTenantAccess(ctx, principal, resourceTenant)
+		}
+		if decision != tenantAuthAllowed {
+			s.logger.Info("Root-scoped tenant access refused at the crossing boundary",
+				"route", logging.SanitizeLogValue(route),
+				"principal_id", logging.SanitizeLogValue(principal.ID),
+				"resource_tenant", logging.SanitizeLogValue(resourceTenant),
+				"needs_crossing", strconv.FormatBool(decision == tenantAuthNeedsCrossing),
+			)
+		}
+		return decision
 	case scope.IsTenant() && scope.Path() != "":
 		if isWithinTenantScope(scope.Path(), resourceTenant) {
-			return true
+			return tenantAuthAllowed
 		}
 		s.logger.Warn("Tenant scope authorization denied",
 			"route", logging.SanitizeLogValue(route),
 			"reason", "resource_outside_caller_subtree",
 		)
-		return false
+		return tenantAuthDenied
 	default:
 		// Covers both the unset zero value and a tenant scope with an empty path
 		// (see NewTenantScope's doc comment on why the latter is treated as unset).
@@ -767,8 +803,45 @@ func (s *Server) isAuthorizedForTenant(scope ctxkeys.TenantScope, resourceTenant
 			"route", logging.SanitizeLogValue(route),
 			"reason", "unset_scope",
 		)
+		return tenantAuthDenied
+	}
+}
+
+// isAuthorizedForTenant is the boolean form of tenantAccessForScope, for a caller
+// with no response to shape: anything short of tenantAuthAllowed — including a
+// missing crossing — is a refusal.
+func (s *Server) isAuthorizedForTenant(ctx context.Context, scope ctxkeys.TenantScope, resourceTenant, route string) bool {
+	return s.tenantAccessForScope(ctx, scope, resourceTenant, route) == tenantAuthAllowed
+}
+
+// writeTenantCrossingIfNeeded writes the ADR-025 crossing challenge when decision is
+// tenantAuthNeedsCrossing and reports whether it did; the caller writes its own
+// refusal otherwise.
+func (s *Server) writeTenantCrossingIfNeeded(w http.ResponseWriter, decision tenantAuthDecision, resourceTenant string) bool {
+	if decision != tenantAuthNeedsCrossing {
 		return false
 	}
+	s.writeTenantCrossingChallenge(w, resourceTenant)
+	return true
+}
+
+// refuseUnscopedPrincipal refuses, at the authentication edge, a principal that
+// is neither root (GlobalScope) nor bound to a tenant, and reports whether it did
+// (ADR-025 Amendment 7, Issue #4665). Every credential path calls it before the
+// principal reaches a handler, so "no tenant" can never be read further in as
+// "every tenant" — the scope a handler sees is always root or a real tenant.
+func (s *Server) refuseUnscopedPrincipal(w http.ResponseWriter, principal *Principal) bool {
+	if principal != nil && (principal.GlobalScope || principal.TenantID != "") {
+		return false
+	}
+	id := ""
+	if principal != nil {
+		id = principal.ID
+	}
+	s.logger.Warn("Authenticated principal has no tenant scope; refused",
+		"principal_id", logging.SanitizeLogValue(id))
+	s.writeErrorResponse(w, http.StatusForbidden, "Credential is not bound to a tenant", "NO_TENANT_SCOPE")
+	return true
 }
 
 // hasHeaderCredentials reports whether the request carries an API key or Bearer token header.
@@ -793,7 +866,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 		// ServeHTTP, so the context already carries both keys.
 		if injected, ok := r.Context().Value(relayPrincipalKey).(*Principal); ok && injected != nil {
 			// principalContextKey is already set by the relay handler; just proceed.
-			_ = injected // already in context
+			if s.refuseUnscopedPrincipal(w, injected) {
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -808,6 +883,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			// Cert-auth success: set principal context and proceed.
+			if s.refuseUnscopedPrincipal(w, adminPrincipal) {
+				return
+			}
 			ctx := context.WithValue(r.Context(), principalContextKey, adminPrincipal)
 			ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(adminPrincipal.ID))
 			ctx = context.WithValue(ctx, ctxkeys.TenantID, adminPrincipal.TenantID)
@@ -965,6 +1043,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 						// GlobalScope.
 						RootScoped: sess.RootScoped || rootScopeFromAssertion(acct, sess.Assurance),
 					}
+					if s.refuseUnscopedPrincipal(w, sessionPrincipal) {
+						return
+					}
 					ctx := context.WithValue(r.Context(), principalContextKey, sessionPrincipal)
 					ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(sess.PrincipalID))
 					ctx = context.WithValue(ctx, ctxkeys.TenantID, tenantID)
@@ -1100,6 +1181,9 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 					// mirrors the Bearer-session branch's acct != nil signal.
 					AccountBound: webAcct != nil,
 				}
+				if s.refuseUnscopedPrincipal(w, webPrincipal) {
+					return
+				}
 				ctx := context.WithValue(r.Context(), principalContextKey, webPrincipal)
 				ctx = context.WithValue(ctx, ctxkeys.UserIDKey, logging.SanitizeLogValue(webSess.PrincipalID))
 				ctx = context.WithValue(ctx, ctxkeys.TenantID, webTenant)
@@ -1192,6 +1276,10 @@ func (s *Server) authenticationMiddleware(next http.Handler) http.Handler {
 			GlobalScope: false,
 			Permissions: keyInfo.Permissions,
 			TenantID:    keyInfo.TenantID,
+		}
+
+		if s.refuseUnscopedPrincipal(w, principal) {
+			return
 		}
 
 		// Add key info and principal to request context
@@ -1676,8 +1764,8 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 			// ADR-025 Decision 1 root<->MSP boundary for principals subject to it.
 			//
 			// This must sit outside the tenant-scoped block below: a boundary-subject
-			// principal presents GlobalScope == true and TenantID == "" (extractAdminPrincipal
-			// and the Bearer/session path both keep the unscoped shape), so that block is
+			// principal presents GlobalScope == true (its TenantID is the root tenant,
+			// Issue #4665), and that block runs only for !GlobalScope principals, so it is
 			// structurally unreachable for it. Enforcing the boundary only inside the
 			// handlers that happen to call authorizeTenantAccess left every other
 			// tenant-targeting route open — tenant:manage's suspend and config-source/test,

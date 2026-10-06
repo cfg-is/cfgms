@@ -121,9 +121,12 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 	// registry (reg.GetAll()), which is node-local by design. (Issue #3495: intended
 	// behavior change — peer-attached steward IDs now appear in allowedIDs, improving
 	// tenant-scoping correctness.)
-	clusterCtx := context.Background()
+	// "" from callerTenantFilter means an explicitly root caller, whose
+	// fleet-wide read is marked system-internal: a bare context is refused
+	// (Issue #4665).
+	clusterCtx := ctxkeys.WithSystem(r.Context())
 	if callerTenant != "" {
-		clusterCtx = context.WithValue(clusterCtx, ctxkeys.TenantID, callerTenant)
+		clusterCtx = context.WithValue(r.Context(), ctxkeys.TenantID, callerTenant)
 	}
 	allStewards := s.controllerService.ListFleetStewards(clusterCtx)
 	allowedIDs := make(map[string]bool, len(allStewards))

@@ -13,6 +13,7 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -23,9 +24,11 @@ func isEscalationError(err error) bool {
 }
 
 // subjectInCallerScope looks up subjectID and confirms that its tenant is within
-// callerTenant's subtree. On failure it writes the HTTP error response and returns
-// ("", false). On success it returns the subject's tenant and true.
-// An empty callerTenant (unscoped mTLS admin) bypasses the scope check.
+// the caller's scope (tenantAccessForScope): a tenant caller's subtree, and for a
+// root caller subject to the ADR-025 boundary, the root tenant or a tenant it holds
+// a crossing for (Issue #4665). On failure it writes the HTTP error response — the
+// crossing challenge when only a crossing is missing — and returns ("", false). On
+// success it returns the subject's tenant and true.
 func (s *Server) subjectInCallerScope(w http.ResponseWriter, r *http.Request, subjectID, callerTenant string) (string, bool) {
 	subjectResp, err := s.rbacService.GetSubject(r.Context(), &controller.GetSubjectRequest{
 		SubjectId: subjectID,
@@ -36,13 +39,16 @@ func (s *Server) subjectInCallerScope(w http.ResponseWriter, r *http.Request, su
 	}
 
 	subjectTenant := subjectResp.Subject.TenantId
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, subjectTenant) {
-		s.logger.Warn("Blocked cross-tenant subject operation",
-			"subject_id", logging.SanitizeLogValue(subjectID),
-			"subject_tenant", logging.SanitizeLogValue(subjectTenant),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
-		// 404: do not confirm the subject's existence to out-of-scope callers.
-		s.writeErrorResponse(w, http.StatusNotFound, "Subject not found", "SUBJECT_NOT_FOUND")
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, subjectTenant, "rbac subject"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, subjectTenant) {
+			s.logger.Warn("Blocked cross-tenant subject operation",
+				"subject_id", logging.SanitizeLogValue(subjectID),
+				"subject_tenant", logging.SanitizeLogValue(subjectTenant),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			// 404: do not confirm the subject's existence to out-of-scope callers.
+			s.writeErrorResponse(w, http.StatusNotFound, "Subject not found", "SUBJECT_NOT_FOUND")
+		}
 		return "", false
 	}
 

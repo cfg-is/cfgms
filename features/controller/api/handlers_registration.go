@@ -179,8 +179,10 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 	// tenant) must be refused, not treated as unrestricted the way an empty
 	// callerTenant string was.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/approve") {
-		http.Error(w, "pending registration not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/approve"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+		}
 		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
@@ -224,8 +226,10 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 	// Issue #4336: see handleApproveRegistration's identical comment on why this
 	// reads ctxkeys.TenantScope directly instead of callerTenantID/isWithinTenantScope.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/deny") {
-		http.Error(w, "pending registration not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/deny"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+		}
 		return
 	}
 	// The deny reason is optional, so an absent body is not an error. A body that

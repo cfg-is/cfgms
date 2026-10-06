@@ -3621,9 +3621,7 @@ func TestHandleListStewards_CrossTenant_NoDisclosure(t *testing.T) {
 func listStewardsWithSelector(server *Server, q, tenantID string) *httptest.ResponseRecorder {
 	url := "/api/v1/stewards?q=" + q
 	req := httptest.NewRequest(http.MethodGet, url, nil)
-	if tenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, tenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), tenantID))
 	rec := httptest.NewRecorder()
 	server.handleListStewards(rec, req)
 	return rec
@@ -3787,7 +3785,7 @@ func TestHandleListStewards_Selector_TenantSubtree_Enforced(t *testing.T) {
 
 	// "all" selector with caller scoped to msp-a — must not see msp-b stewards.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=all", nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, "msp-a"))
+	req = req.WithContext(withCallerTenant(req.Context(), "msp-a"))
 	rec := httptest.NewRecorder()
 	server.handleListStewards(rec, req)
 
@@ -3811,7 +3809,7 @@ func TestHandleListStewards_Selector_Paginated_ReturnsPage(t *testing.T) {
 		makeSeedSteward("s3", "host-c", "linux", "amd64", "prod"),
 	)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=os%3Alinux&limit=2&offset=0", nil)
+	req := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=os%3Alinux&limit=2&offset=0", nil), "")
 	rec := httptest.NewRecorder()
 	server.handleListStewards(rec, req)
 
@@ -3840,7 +3838,7 @@ func TestHandleListStewards_Selector_All_AdminUnrestricted(t *testing.T) {
 	})
 
 	// Admin caller (empty tenant) must see both tenants.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=all", nil)
+	req := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/stewards?q=all", nil), "")
 	rec := httptest.NewRecorder()
 	server.handleListStewards(rec, req)
 

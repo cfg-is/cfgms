@@ -1530,7 +1530,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		// calls out the identical startup-gap pattern this mirrors).
 		if controllerService != nil && heartbeatService != nil {
 			warmed := 0
-			for _, steward := range controllerService.ListFleetStewards(context.Background()) {
+			for _, steward := range controllerService.ListFleetStewards(ctxkeys.WithSystem(context.Background())) {
 				if steward.DNA != nil {
 					hash, hashErr := dnaStorage.ContentHash(steward.DNA)
 					if hashErr != nil {
@@ -2164,7 +2164,7 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 		if gitSyncer != nil {
 			srv.gitSyncer = gitSyncer
 			srv.webhookHandler = webhookHandler // Issue #681: retain for shutdown drain
-			if err := gitSyncer.Start(context.Background()); err != nil {
+			if err := gitSyncer.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 				logger.Warn("git-sync: failed to start syncer", "error", err)
 			} else {
 				logger.Info("git-sync: syncer started", "data_dir", cfg.DataDir)
@@ -2756,7 +2756,10 @@ func (s *Server) Start() error {
 
 		// Start heartbeat monitoring service
 		if s.heartbeatService != nil {
-			if err := s.heartbeatService.Start(context.Background()); err != nil {
+			// Background jobs run system-internal (ctxkeys.WithSystem): a context with
+			// no caller is refused fleet-wide reach, so each job's reach is an explicit
+			// decision rather than the side effect of a bare context (Issue #4665).
+			if err := s.heartbeatService.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 				return fmt.Errorf("failed to start heartbeat service: %w", err)
 			}
 			s.logger.Info("Heartbeat monitoring service started")
@@ -2764,7 +2767,7 @@ func (s *Server) Start() error {
 
 		// Start command publisher
 		if s.commandPublisher != nil {
-			if err := s.commandPublisher.Start(context.Background()); err != nil {
+			if err := s.commandPublisher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 				return fmt.Errorf("failed to start command publisher: %w", err)
 			}
 			s.logger.Info("Command publisher started")
@@ -2772,7 +2775,7 @@ func (s *Server) Start() error {
 
 		// Start job dispatcher (Issue #1672)
 		if s.jobDispatcher != nil {
-			if err := s.jobDispatcher.Start(context.Background()); err != nil {
+			if err := s.jobDispatcher.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 				return fmt.Errorf("failed to start job dispatcher: %w", err)
 			}
 			s.logger.Info("Job dispatcher started")
@@ -2781,14 +2784,14 @@ func (s *Server) Start() error {
 
 	// Start background expiry jobs (Issue #1697).
 	if s.ipTrustExpiryJob != nil {
-		if err := s.ipTrustExpiryJob.Start(context.Background()); err != nil {
+		if err := s.ipTrustExpiryJob.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 			s.logger.Warn("Failed to start IP-trust expiry job", "error", err)
 		} else {
 			s.logger.Info("IP-trust expiry job started (Issue #1697)")
 		}
 	}
 	if s.pendingExpiryJob != nil {
-		if err := s.pendingExpiryJob.Start(context.Background()); err != nil {
+		if err := s.pendingExpiryJob.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 			s.logger.Warn("Failed to start pending-registration expiry job", "error", err)
 		} else {
 			s.logger.Info("Pending-registration expiry job started (Issue #1697)")
@@ -2797,7 +2800,7 @@ func (s *Server) Start() error {
 
 	// Start workflow trigger manager (Issue #414)
 	if s.triggerManager != nil {
-		if err := s.triggerManager.Start(context.Background()); err != nil {
+		if err := s.triggerManager.Start(ctxkeys.WithSystem(context.Background())); err != nil {
 			s.logger.Warn("Failed to start trigger manager", "error", err)
 		} else {
 			s.logger.Info("Workflow trigger manager started")
@@ -2810,7 +2813,7 @@ func (s *Server) Start() error {
 	// it owns — the mechanism behind "cancelling the controller's context stops the
 	// polling loop."
 	if s.configSyncService != nil {
-		syncCtx, cancel := context.WithCancel(context.Background())
+		syncCtx, cancel := context.WithCancel(ctxkeys.WithSystem(context.Background()))
 		s.configSyncCancel = cancel
 		s.configSyncService.Run(syncCtx)
 		s.logger.Info("Config source sync service started (Issue #4408)")
@@ -2831,7 +2834,7 @@ func (s *Server) Start() error {
 			func(ctx context.Context) error {
 				return s.egTenantSyncWriter.Ingest(ctx, tenantStore)
 			}, s.egTenantSyncLeaseJob, s.logger)
-		s.egTenantSyncSweeper.Start(context.Background())
+		s.egTenantSyncSweeper.Start(ctxkeys.WithSystem(context.Background()))
 		s.logger.Info("Entity graph tenant-sync periodic sweep started (Issue #4413)",
 			"interval", entityGraphTenantSyncSweepInterval)
 	}
@@ -2846,14 +2849,14 @@ func (s *Server) Start() error {
 	if s.egCorrelatorWriter != nil {
 		s.egCorrelatorSweeper = newEntityGraphPeriodicSweeper("entitygraph-correlator", entityGraphCorrelatorSweepInterval,
 			s.egCorrelatorWriter.Correlate, s.egCorrelatorLeaseJob, s.logger)
-		s.egCorrelatorSweeper.Start(context.Background())
+		s.egCorrelatorSweeper.Start(ctxkeys.WithSystem(context.Background()))
 		s.logger.Info("Entity graph correlator periodic sweep started (Issue #4413)",
 			"interval", entityGraphCorrelatorSweepInterval)
 	}
 
 	// Start health collector and alert manager (Story #417)
 	if s.healthCollector != nil {
-		if err := s.healthCollector.Start(context.Background(), 30*time.Second); err != nil {
+		if err := s.healthCollector.Start(ctxkeys.WithSystem(context.Background()), 30*time.Second); err != nil {
 			s.logger.Warn("Failed to start health collector", "error", err)
 		} else {
 			s.logger.Info("Health collector started", "interval", "30s")
@@ -3246,7 +3249,8 @@ func (s *Server) resumePendingPushes(ctx context.Context) {
 			}
 			continue
 		}
-		stewards := s.controllerService.ListFleetStewards(ctx)
+		// Fleet-wide read: a resumed push has no caller of its own (Issue #4665).
+		stewards := s.controllerService.ListFleetStewards(ctxkeys.WithSystem(ctx))
 		result := push.Fanout(ctx, &cfg, stewards, s.commandPublisher, s.logger)
 		s.logger.Info("Resumed push fan-out complete",
 			"push_id", record.ID,
@@ -4090,7 +4094,7 @@ func (r *applyOutcomeEIDResolver) verifiedClusterName() string {
 	}
 	tenantID := info.TenantID
 
-	allStewards := controllerSvc.ListFleetStewards(context.Background())
+	allStewards := controllerSvc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	fleetData := make([]controllerFleet.StewardData, 0, len(allStewards))
 	for _, si := range allStewards {
 		if si == nil || si.TenantID != tenantID {
@@ -4673,7 +4677,9 @@ type serverFleetStewardProvider struct {
 // features/controller/api/server.go for any steward both adapters can see.
 // (Issue #3495, #3764)
 func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardData {
-	infos := p.svc.ListFleetStewards(context.Background())
+	// System-internal (Issue #4665): MemoryQuery applies tenant scoping
+	// downstream, and a bare context would be refused.
+	infos := p.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	result := make([]controllerFleet.StewardData, 0, len(infos))
 	for _, info := range infos {
 		var attrs map[string]string

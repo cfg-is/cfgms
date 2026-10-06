@@ -531,8 +531,10 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
 			return
 		}
-		if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/certificates/provision") {
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		if access := s.tenantAccessForScope(r.Context(), scope, record.TenantID, "POST /api/v1/certificates/provision"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			}
 			return
 		}
 

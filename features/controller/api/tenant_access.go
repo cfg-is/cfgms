@@ -4,6 +4,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
@@ -34,4 +35,62 @@ func callerTenantFilter(ctx context.Context) string {
 	default:
 		return tenant
 	}
+}
+
+// tenantCrossingRequiredError is returned by a lookup that found a record the
+// caller may reach only through an ADR-025 tenant crossing, so the handler can
+// answer with the crossing challenge (writeTenantCrossingChallenge) rather than
+// a not-found.
+type tenantCrossingRequiredError struct {
+	tenant string
+}
+
+func (e *tenantCrossingRequiredError) Error() string {
+	return "tenant crossing required"
+}
+
+// callerOwnTenant is the tenant the caller authenticated into (ctxkeys.TenantID):
+// its own tenant for a tenant-scoped caller and the deployment's root tenant for a
+// root caller (Issue #4665). ok is false when the context carries none, which a
+// caller refuses rather than substituting a tenant the caller never named
+// (Issue #4543).
+func callerOwnTenant(ctx context.Context) (string, bool) {
+	tenant, _ := ctx.Value(ctxkeys.TenantID).(string)
+	return tenant, tenant != ""
+}
+
+// selectListTenant resolves the tenant a tenant-keyed listing reads: the caller's
+// own tenant, or one it names with ?tenant_id. A named tenant must pass
+// tenantAccessForScope — a tenant-scoped caller stays inside its subtree, and a
+// root caller subject to the ADR-025 boundary needs a crossing for a tenant below
+// root — and must exist; the stored tenant ID is returned, never the raw query
+// value. It writes the refusal and returns false otherwise.
+func (s *Server) selectListTenant(w http.ResponseWriter, r *http.Request, route string) (string, bool) {
+	own, ok := callerOwnTenant(r.Context())
+	if !ok {
+		s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+		return "", false
+	}
+	requested := r.URL.Query().Get("tenant_id")
+	if requested == "" || requested == own {
+		return own, true
+	}
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, requested, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, requested) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"tenant_id filter must be within the authenticated tenant scope", "TENANT_MISMATCH")
+		}
+		return "", false
+	}
+	if s.tenantManager == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Tenant management not available", "SERVICE_UNAVAILABLE")
+		return "", false
+	}
+	stored, err := s.tenantManager.GetTenant(r.Context(), requested)
+	if err != nil || stored == nil || stored.ID == "" {
+		s.writeErrorResponse(w, http.StatusNotFound, "Tenant not found", "TENANT_NOT_FOUND")
+		return "", false
+	}
+	return stored.ID, true
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/audit"
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	"github.com/cfgis/cfgms/pkg/configrouting"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -307,7 +308,7 @@ func TestWiredSyncService_PullsAndCascadesWithinRootOnly(t *testing.T) {
 	// perform the initial clone itself — already observing both commits at
 	// once (prevSHA == newSHA) — rather than observing the second commit as a
 	// change, which is what this test needs to prove.
-	_, _ = configService.ConfigSourceRouter().GetConfig(context.Background(), &cfgconfig.ConfigKey{
+	_, _ = configService.ConfigSourceRouter().GetConfig(ctxkeys.WithSystem(context.Background()), &cfgconfig.ConfigKey{
 		TenantID: "tenant-a1", Namespace: "warmup", Name: "warmup",
 	})
 

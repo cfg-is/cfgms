@@ -84,8 +84,10 @@ func (s *Server) handleRequestSigningCredential(w http.ResponseWriter, r *http.R
 	// self-consistent. signing-credential:request granting reachability does not by
 	// itself prove a valid caller scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, principal.TenantID, "POST /api/v1/signing-credential/request") {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this identity is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), scope, principal.TenantID, "POST /api/v1/signing-credential/request"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, principal.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this identity is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 

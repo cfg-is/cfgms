@@ -66,10 +66,13 @@ type ClusterResourceStatus struct {
 // Intended behavior change (Issue #3495): stewards attached to peer nodes are now
 // visible here. Previously this was node-local; now it is cluster-wide.
 func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData, map[string]string) {
-	// Build a scoped context so ListFleetStewards applies tenant filtering internally.
-	ctx := context.Background()
+	// Build a scoped context so ListFleetStewards applies tenant filtering
+	// internally. callerTenant is callerTenantFilter's answer, so "" means an
+	// explicitly root caller, whose fleet-wide read is marked system-internal: a
+	// bare context is refused (Issue #4665).
+	ctx := ctxkeys.WithSystem(context.Background())
 	if callerTenant != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenant)
+		ctx = context.WithValue(context.Background(), ctxkeys.TenantID, callerTenant)
 	}
 	infos := s.controllerService.ListFleetStewards(ctx)
 	result := make([]fleet.StewardData, 0, len(infos))

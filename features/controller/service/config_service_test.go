@@ -77,7 +77,7 @@ func createTestServiceV2(t *testing.T) *ConfigurationServiceV2 {
 	storageManager := pkgtesting.SetupTestStorage(t)
 	svc := NewConfigurationServiceV2(logger, storageManager, nil)
 	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
-		context.Background(),
+		ctxkeys.WithSystem(context.Background()),
 		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
 	))
 	return svc
@@ -97,7 +97,7 @@ func createTestServiceV2WithFlatfileRoot(t *testing.T, rootDir string) *Configur
 	t.Cleanup(func() { _ = storageManager.Close() })
 	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), storageManager, nil)
 	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
-		context.Background(),
+		ctxkeys.WithSystem(context.Background()),
 		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
 	))
 	return svc
@@ -110,7 +110,7 @@ func TestNewConfigurationServiceV2(t *testing.T) {
 }
 
 func TestSetConfiguration(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -147,7 +147,7 @@ func TestSetConfiguration(t *testing.T) {
 }
 
 func TestGetConfiguration(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -254,7 +254,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_OK, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "valid")
@@ -267,7 +267,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "Invalid configuration format")
@@ -299,7 +299,7 @@ func TestValidateConfig(t *testing.T) {
 			Version: "v1",
 		}
 
-		resp, err := svc.ValidateConfig(context.Background(), req)
+		resp, err := svc.ValidateConfig(ctxkeys.WithSystem(context.Background()), req)
 		require.NoError(t, err)
 		assert.Equal(t, common.Status_ERROR, resp.Status.Code)
 		assert.Contains(t, resp.Status.Message, "critical errors")
@@ -350,7 +350,7 @@ func TestFilterConfigByModules(t *testing.T) {
 }
 
 func TestSetConfiguration_FiresFanoutCallback_OnSuccess(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t)
 
 	var callCount int
@@ -370,7 +370,7 @@ func TestSetConfiguration_FiresFanoutCallback_OnSuccess(t *testing.T) {
 }
 
 func TestSetConfiguration_DoesNotFireFanoutCallback_OnError(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 
 	t.Run("validation error", func(t *testing.T) {
 		svc := createTestServiceV2(t)
@@ -405,7 +405,7 @@ func TestSetConfiguration_DoesNotFireFanoutCallback_OnError(t *testing.T) {
 }
 
 func TestSetConfiguration_FanoutCallback_IsTenantScoped(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t)
 
 	var gotTenantIDs []string
@@ -425,7 +425,7 @@ func TestSetConfiguration_FanoutCallback_IsTenantScoped(t *testing.T) {
 }
 
 func TestConfigurationServiceV2Concurrency(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t)
 
 	stewardID := "test-steward"
@@ -503,7 +503,7 @@ func seedTwoLevelTenants(t *testing.T, ctx context.Context, sm interface{ GetTen
 //     no device-level override.
 //   - A device-level resource with the same name overrides the parent resource.
 func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	sm := pkgtesting.SetupTestStorage(t)
 	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
 
@@ -573,7 +573,7 @@ func TestGetConfiguration_CascadeMergedDelivery(t *testing.T) {
 // with no hierarchy record, so the delivery path must degrade gracefully instead of
 // returning NOT_FOUND for an already-configured steward.
 func TestGetConfiguration_TenantWithoutHierarchyRecord(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	sm := pkgtesting.SetupTestStorage(t)
 	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
 
@@ -612,7 +612,7 @@ func TestGetConfiguration_TenantWithoutHierarchyRecord(t *testing.T) {
 //
 // AC covered: a test asserts tenant isolation.
 func TestGetConfiguration_TenantIsolation(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	sm := pkgtesting.SetupTestStorage(t)
 	svc := NewConfigurationServiceV2(logging.NewNoopLogger(), sm, nil)
 
@@ -668,7 +668,7 @@ func createTestServiceV2WithControllerSvc(t *testing.T) (*ConfigurationServiceV2
 	controllerSvc := NewControllerService(logger)
 	svc := NewConfigurationServiceV2(logger, storageManager, controllerSvc)
 	require.NoError(t, storageManager.GetTenantStore().CreateTenant(
-		context.Background(),
+		ctxkeys.WithSystem(context.Background()),
 		&business.TenantData{ID: "default", Name: "Default", Status: business.TenantStatusActive},
 	))
 	return svc, controllerSvc
@@ -681,7 +681,7 @@ func createTestServiceV2WithControllerSvc(t *testing.T) (*ConfigurationServiceV2
 // a steward with cluster membership DNA attributes receives resources from the matching
 // cluster-policies config document in its effective configuration.
 func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc, controllerSvc := createTestServiceV2WithControllerSvc(t)
 
 	stewardID := "cluster-member-1"
@@ -743,7 +743,7 @@ func TestNewConfigurationServiceV2_WiresClusterRegistry(t *testing.T) {
 // NewConfigurationServiceV2 is constructed with a nil ControllerService (test/standalone mode),
 // no cluster cascade occurs and ResolveConfiguration behaves identically to before this story.
 func TestNewConfigurationServiceV2_NoControllerSvc_NoCascade(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	svc := createTestServiceV2(t) // nil controllerSvc
 
 	stewardID := "no-cluster-steward"

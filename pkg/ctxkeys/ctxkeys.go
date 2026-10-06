@@ -134,12 +134,14 @@ func (s TenantScope) Path() string {
 //
 //   - a root-scoped caller (TenantScope root) is unrestricted;
 //   - a tenant-scoped caller is confined to its tenant;
-//   - a context with no caller at all — neither a TenantScope nor a TenantID, as
-//     in a background job or a startup task — is system-internal and unrestricted;
 //   - a context carrying only a non-empty TenantID (no TenantScope) is confined to
 //     that tenant — confinement only narrows, so it needs no explicit scope;
-//   - any other context — an empty TenantID with no scope, or an empty-path or
-//     unset tenant scope — is refused: ok is false.
+//   - a context marked system-internal by WithSystem — a background job, a startup
+//     task, the steward data plane — is unrestricted;
+//   - any other context — no caller and no system mark, an empty TenantID with no
+//     scope, or an empty-path or unset tenant scope — is refused: ok is false. A
+//     context that merely lost its caller (a stray context.Background() on a
+//     request path) therefore fails closed instead of reaching every tenant.
 //
 // For an unrestricted caller tenant is "", meaning "no tenant filter"; callers
 // that need the root caller's own tenant (to store something under it) read
@@ -161,7 +163,10 @@ func TenantRestriction(ctx contextValuer) (tenant string, unrestricted bool, ok 
 		}
 		return "", false, false
 	}
-	return "", true, true
+	if IsSystem(ctx) {
+		return "", true, true
+	}
+	return "", false, false
 }
 
 // contextValuer is the subset of context.Context TenantRestriction needs.
@@ -169,22 +174,37 @@ type contextValuer interface {
 	Value(key any) any
 }
 
-// WithoutCaller returns ctx with its caller's tenant identity removed: TenantID
-// and TenantScopeKey read as absent, so TenantRestriction treats the result as a
-// system-internal context with fleet-wide reach. Cancellation, deadline and every
-// other value are kept. It is for controller-wide work an authorized request
-// starts — such as signing-CA rotation, which must reach every steward — and
-// replaces the old convention of setting an empty TenantID to mean "whole fleet"
-// (Issue #4665).
-func WithoutCaller(ctx context.Context) context.Context {
-	return callerMasked{ctx}
+// systemKey marks a context as system-internal (WithSystem).
+type systemKey struct{}
+
+// WithSystem returns ctx marked as system-internal work with fleet-wide reach:
+// any caller identity it carried (TenantID, TenantScopeKey) reads as absent, and
+// TenantRestriction reports it unrestricted. Cancellation, deadline and every
+// other value are kept.
+//
+// It is the only way to obtain an unrestricted context without a root caller, so
+// each use is a deliberate, greppable decision (Issue #4665): background jobs,
+// startup tasks, the steward data plane (whose caller is a steward, not a tenant
+// principal), and controller-wide work an authorized request starts — such as
+// signing-CA rotation, which must reach every steward.
+func WithSystem(ctx context.Context) context.Context {
+	return systemContext{ctx}
 }
 
-type callerMasked struct{ context.Context }
+// IsSystem reports whether ctx was marked by WithSystem.
+func IsSystem(ctx contextValuer) bool {
+	marked, _ := ctx.Value(systemKey{}).(bool)
+	return marked
+}
 
-func (c callerMasked) Value(key any) any {
-	if key == TenantID || key == TenantScopeKey {
+type systemContext struct{ context.Context }
+
+func (c systemContext) Value(key any) any {
+	switch key {
+	case TenantID, TenantScopeKey:
 		return nil
+	case systemKey{}:
+		return true
 	}
 	return c.Context.Value(key)
 }

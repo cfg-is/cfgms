@@ -218,8 +218,10 @@ func (s *Server) handleGetRollout(w http.ResponseWriter, r *http.Request) {
 	// distinguishable 403 FORBIDDEN, so a cross-tenant caller cannot use the
 	// response to tell "does not exist" apart from "exists in another tenant".
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, record.TenantID, "GET /api/v1/rollout/{rollout_id}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, record.TenantID, "GET /api/v1/rollout/{rollout_id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
+		}
 		return
 	}
 
@@ -303,8 +305,10 @@ func (s *Server) handleHaltRollout(w http.ResponseWriter, r *http.Request) {
 	// distinguishable 403 FORBIDDEN, so a cross-tenant caller cannot use the
 	// response to tell "does not exist" apart from "exists in another tenant".
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/rollout/{rollout_id}/halt") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, record.TenantID, "POST /api/v1/rollout/{rollout_id}/halt"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Rollout record not found", "ROLLOUT_NOT_FOUND")
+		}
 		return
 	}
 

@@ -800,11 +800,17 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// Resolve final scope (Issue #2919):
 	//   RootScope:true  → explicit root grant; clear TenantID for uniformity
 	//   TenantID != ""  → tenant-scoped (already set above)
-	//   neither         → default to "default" (backward-compat; never silently root)
+	//   neither         → the caller's own tenant (never silently root, and never a
+	//                     substituted tenant the caller did not name, Issue #4543)
 	if acct.RootScope {
 		acct.TenantID = ""
 	} else if acct.TenantID == "" {
-		acct.TenantID = "default"
+		own, ok := callerOwnTenant(r.Context())
+		if !ok {
+			s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+			return
+		}
+		acct.TenantID = own
 	}
 	if acct.Permissions == nil {
 		acct.Permissions = []string{}
@@ -821,12 +827,18 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// outright — holding account:create does not by itself prove a valid caller
 	// scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if existing != nil && !s.isAuthorizedForTenant(scope, existing.TenantID, "POST /api/v1/accounts") {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
-		return
+	if existing != nil {
+		if access := s.tenantAccessForScope(r.Context(), scope, existing.TenantID, "POST /api/v1/accounts"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, existing.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+			}
+			return
+		}
 	}
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "POST /api/v1/accounts") {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "POST /api/v1/accounts"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -1285,8 +1297,10 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// refused outright — holding account:update does not by itself prove a valid
 	// caller scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "PUT /api/v1/accounts/{username}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "PUT /api/v1/accounts/{username}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		}
 		return
 	}
 
@@ -1477,8 +1491,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// matching handleGetAccount/handleUpdateAccount. An unset scope is refused
 	// outright (Issue #4316 fail-closed contract).
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "DELETE /api/v1/accounts/{username}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "DELETE /api/v1/accounts/{username}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		}
 		return
 	}
 

@@ -21,6 +21,7 @@ import (
 
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
 	routerinterfaces "github.com/cfgis/cfgms/pkg/configrouting/interfaces"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,7 +83,7 @@ func testGetEffectiveConfigSource_DefaultsToController(t *testing.T, factory Rou
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	info, err := router.GetEffectiveConfigSource(context.Background(), "root")
+	info, err := router.GetEffectiveConfigSource(ctxkeys.WithSystem(context.Background()), "root")
 	require.NoError(t, err)
 	assert.Equal(t, pkgconfig.ConfigSourceTypeController, info.Type)
 }
@@ -92,7 +93,7 @@ func testGetEffectiveConfigSource_CachesResult(t *testing.T, factory RouterFacto
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	info1, err := router.GetEffectiveConfigSource(ctx, "root")
 	require.NoError(t, err)
 
@@ -108,7 +109,7 @@ func testSnapshotSources_ReturnsAllLevels(t *testing.T, factory RouterFactory) {
 	defer cleanup()
 
 	path := []string{"root", "msp", "client"}
-	snapshot, err := router.SnapshotSources(context.Background(), path)
+	snapshot, err := router.SnapshotSources(ctxkeys.WithSystem(context.Background()), path)
 	require.NoError(t, err)
 	require.Len(t, snapshot, 3)
 
@@ -124,7 +125,7 @@ func testSnapshotSources_ReturnsDeepCopies(t *testing.T, factory RouterFactory) 
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	snapshot, err := router.SnapshotSources(ctx, []string{"root"})
 	require.NoError(t, err)
 
@@ -142,7 +143,7 @@ func testInvalidateTenantCache_ForcesRefresh(t *testing.T, factory RouterFactory
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	// Prime the cache.
 	_, err := router.GetEffectiveConfigSource(ctx, "client")
 	require.NoError(t, err)
@@ -161,7 +162,7 @@ func testStoreConfig_Roundtrip(t *testing.T, factory RouterFactory) {
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	key := &cfgconfig.ConfigKey{TenantID: "client", Namespace: "test-contract", Name: "entry1"}
 	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
@@ -182,7 +183,7 @@ func testGetConfig_NotFound(t *testing.T, factory RouterFactory) {
 	defer cleanup()
 
 	key := &cfgconfig.ConfigKey{TenantID: "client", Namespace: "test-contract", Name: "does-not-exist"}
-	_, err := router.GetConfig(context.Background(), key)
+	_, err := router.GetConfig(ctxkeys.WithSystem(context.Background()), key)
 	assert.Error(t, err, "GetConfig must return an error for missing keys")
 }
 
@@ -193,7 +194,7 @@ func testListConfigs_EmptyTenantIDAllowed(t *testing.T, factory RouterFactory) {
 
 	// ListConfigs with an empty TenantID filter must not return a cross-tenant error.
 	filter := &cfgconfig.ConfigFilter{TenantID: ""}
-	_, err := router.ListConfigs(context.Background(), filter)
+	_, err := router.ListConfigs(ctxkeys.WithSystem(context.Background()), filter)
 	assert.NoError(t, err, "empty TenantID filter must be accepted (backward compat)")
 }
 
@@ -202,7 +203,7 @@ func testDeleteConfig_Roundtrip(t *testing.T, factory RouterFactory) {
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	key := &cfgconfig.ConfigKey{TenantID: "client", Namespace: "test-contract", Name: "to-delete"}
 	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
@@ -222,7 +223,7 @@ func testStoreConfigBatch_Roundtrip(t *testing.T, factory RouterFactory) {
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	entries := []*cfgconfig.ConfigEntry{
 		{
 			Key:    &cfgconfig.ConfigKey{TenantID: "client", Namespace: "batch", Name: "a"},
@@ -250,7 +251,7 @@ func testGetConfigHistory_AfterStore(t *testing.T, factory RouterFactory) {
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	key := &cfgconfig.ConfigKey{TenantID: "client", Namespace: "history", Name: "versioned"}
 	entry := &cfgconfig.ConfigEntry{
 		Key:    key,
@@ -270,7 +271,7 @@ func testSnapshotSources_EmptyPath(t *testing.T, factory RouterFactory) {
 	router, cleanup := factory(t)
 	defer cleanup()
 
-	snapshot, err := router.SnapshotSources(context.Background(), []string{})
+	snapshot, err := router.SnapshotSources(ctxkeys.WithSystem(context.Background()), []string{})
 	require.NoError(t, err)
 	assert.Empty(t, snapshot, "empty path must return empty map")
 }
