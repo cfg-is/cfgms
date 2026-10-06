@@ -4,6 +4,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -68,7 +69,8 @@ func TestErrorWorkflowStep(t *testing.T) {
 }
 
 func TestErrorWorkflowWithPath(t *testing.T) {
-	// Write a real YAML error-handler workflow to a temp dir and load it by path.
+	// An error workflow referenced by path is refused (Issue #4638): the file
+	// exists and is valid, and must still never be read.
 	const yamlContent = `
 name: path-error-handler
 variables:
@@ -78,52 +80,32 @@ steps:
     type: delay
     delay:
       duration: 1ms
-      message: "Error handler loaded from path"
 `
-	dir := t.TempDir()
-	wfPath := filepath.Join(dir, "error-handler.yaml")
+	wfPath := filepath.Join(t.TempDir(), "error-handler.yaml")
 	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
 
 	workflow := Workflow{
 		Name: "error-workflow-path-test",
-		Steps: []Step{
-			{
-				Name: "handle-error-by-path",
-				Type: StepTypeErrorWorkflow,
-				ErrorWorkflow: &ErrorWorkflowConfig{
-					WorkflowPath: wfPath,
-					Parameters: map[string]interface{}{
-						"error_type": "validation",
-					},
-					OutputMappings: map[string]string{
-						"recovery_status": "status",
-					},
-					RecoveryAction: RecoveryActionRetry,
-				},
+		Steps: []Step{{
+			Name: "handle-error-by-path",
+			Type: StepTypeErrorWorkflow,
+			ErrorWorkflow: &ErrorWorkflowConfig{
+				WorkflowPath:   wfPath,
+				OutputMappings: map[string]string{"recovery_status": "status"},
+				RecoveryAction: RecoveryActionRetry,
 			},
-		},
+		}},
 	}
 
-	// Create engine and execute workflow
-	moduleFactory := createTestFactory()
-	logger := logging.NewNoopLogger()
-	engine := NewEngine(moduleFactory, logger, nil, nil, nil, nil, nil)
-	ctx := context.Background()
-
-	execution, err := engine.ExecuteWorkflow(ctx, workflow, nil)
+	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	execution, err := engine.ExecuteWorkflow(context.Background(), workflow, nil)
 	require.NoError(t, err)
-	require.NotNil(t, execution)
 
-	// Wait for completion (fixes Windows CI async race condition - Issue #309)
-	waitForWorkflowCompletion(t, execution, 2*time.Second)
-
-	// Verify execution completed successfully
-	assert.Equal(t, StatusCompleted, execution.GetStatus())
-
-	// Verify output mapping worked from the file-loaded variable
-	status, exists := execution.GetVariable("status")
-	assert.True(t, exists)
-	assert.Equal(t, "handled", status)
+	final := waitForTerminal(t, engine, execution.ID)
+	assert.Equal(t, StatusFailed, final.Status)
+	assert.Contains(t, fmt.Sprint(final.Error), "workflow_path is not supported")
+	_, loaded := final.Variables["recovery_status"]
+	assert.False(t, loaded, "nothing from the file may reach the execution")
 }
 
 func TestErrorWorkflowAsync(t *testing.T) {

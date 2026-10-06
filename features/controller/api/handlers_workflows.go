@@ -210,6 +210,24 @@ func (h *WorkflowHandler) rootScopedTenant(w http.ResponseWriter, r *http.Reques
 	return "", false
 }
 
+// refuseFilesystemWorkflowReference writes a 400 and returns false when wf
+// references a workflow by filesystem path anywhere in its definition (Issue
+// #4638): composed workflows are referenced by workflow_name and resolved from
+// the executing tenant's store, never from the controller's filesystem.
+func (h *WorkflowHandler) refuseFilesystemWorkflowReference(w http.ResponseWriter, wf *workflow.Workflow) bool {
+	found, err := workflow.ContainsFilesystemWorkflowReference(*wf)
+	if err != nil {
+		h.logger.Error("Failed to inspect workflow definition", "error", logging.SanitizeLogValue(err.Error()))
+		h.sendError(w, http.StatusBadRequest, "invalid workflow definition")
+		return false
+	}
+	if found {
+		h.sendError(w, http.StatusBadRequest, workflow.ErrFilesystemWorkflowReference.Error())
+		return false
+	}
+	return true
+}
+
 // handleListWorkflows handles GET /api/v1/workflows
 func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	if h.engine == nil || h.configStore == nil {
@@ -297,6 +315,9 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 			ErrorWorkflows: req.ErrorWorkflows,
 		},
 		SemanticVersion: *semver,
+	}
+	if !h.refuseFilesystemWorkflowReference(w, &vw.Workflow) {
+		return
 	}
 
 	store, ok := h.workflowStoreForRequest(w, r)
@@ -388,6 +409,9 @@ func (h *WorkflowHandler) handleUpdateWorkflow(w http.ResponseWriter, r *http.Re
 			ErrorWorkflows: req.ErrorWorkflows,
 		},
 		SemanticVersion: *semver,
+	}
+	if !h.refuseFilesystemWorkflowReference(w, &vw.Workflow) {
+		return
 	}
 
 	nameForLog := logging.SanitizeLogValue(name)

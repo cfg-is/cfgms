@@ -1794,6 +1794,8 @@ Workflow endpoints are registered only when a `WorkflowHandler` is wired in via 
 
 **Tenant scope:** A tenant-scoped caller's workflows live in its own tenant. A root-scoped caller's workflows live in the deployment's root tenant; it may select another tenant with the `tenant` query parameter (`?tenant=<id>`) on any workflow route, and a client tenant selected that way requires an active tenant crossing (`401` with `WWW-Authenticate: ... required="tenant-crossing"` otherwise; `404` for an unknown tenant). When no root tenant can be resolved, a root-scoped request without `?tenant=` returns `400`. An execution runs under the tenant its workflow was resolved in, so its tenant-scoped steps (script dispatch, config writes) act on that tenant's own devices only. The crossing is checked when the execution starts; an execution already running continues to completion if the crossing expires meanwhile, and later requests for that tenant are challenged again.
 
+**Composed workflows:** a nested `workflow` step, a step's `error_workflow` and a composite component reference another workflow by `workflow_name`, which resolves to the latest version stored in the executing tenant — never another tenant's workflow. A definition that references a workflow by `workflow_path` is refused with `400`; the controller never loads workflow definitions from its filesystem.
+
 #### GET /api/v1/workflows
 
 List workflow definitions for the calling tenant.
