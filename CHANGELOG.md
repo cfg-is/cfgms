@@ -294,6 +294,12 @@ management, and a fleet-wide tenant-containment hardening pass. See
     `cfg` sessions and the bootstrap admin certificate are bound to the deployment's root tenant
     and carry root scope from the account's `root_scope` flag, instead of an empty tenant that
     some handlers refused and others read as unrestricted (Issue #4665).
+  - Public installer downloads keep serving artifacts uploaded under a tenant literally named
+    `root`, as the earlier documentation instructed, when the deployment's root tenant has another
+    ID: the root tenant's own artifact wins, and the legacy one is read as a fallback, logged at
+    WARN (Issue #4667). Re-upload public installers as root; the fallback is removed in 0.10.6. On
+    a deployment where a non-root tenant is itself named `root`, that tenant's installers are
+    served publicly through the fallback until then.
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
