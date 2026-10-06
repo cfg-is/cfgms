@@ -9,10 +9,10 @@
  * column set: Platform, Arch, Size, Checksum, Download.
  *
  * Scope mismatch between the two columns, labelled rather than hidden:
- * the rows are tenant-scoped (handleListInstallerArtifacts reads
- * ctxkeys.TenantID) but GET /api/v1/installer/download/{platform}/{arch} is
- * unauthenticated and always reads the fixed root tenant
- * (handlers_installer.go `downloadTenantID = "root"`, Issue #1704), returning a
+ * the rows are tenant-scoped (handleListInstallerArtifacts lists the caller's
+ * tenant; a root admin's is the deployment's root tenant, Issue #4634) but
+ * GET /api/v1/installer/download/{platform}/{arch} is unauthenticated and
+ * always reads the root tenant (resolved by position, Issue #4634), returning a
  * tar.gz of the binary plus CA material — not the raw blob whose checksum the
  * row displays. Two consequences the operator must be told about before they
  * run the result under sudo: for a non-root tenant the link serves someone
