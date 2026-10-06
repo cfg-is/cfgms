@@ -210,6 +210,13 @@ management, and a fleet-wide tenant-containment hardening pass. See
 
 ### Changed
 
+- **Public installer download serves the root tenant's artifacts** — `GET
+  /api/v1/installer/download/{platform}/{arch}` resolves the deployment's root tenant by position
+  (the single parentless tenant) instead of a tenant literally named `root`, and a root admin's
+  uploads land in that tenant by default (Issue #4634). An upgraded deployment whose top tenant
+  has a different ID starts serving its root-uploaded artifacts publicly, where it previously
+  served nothing; upload to a client tenant with `?tenant=<id>` to keep an artifact out of the
+  public download.
 - **Controller HA no longer uses Raft.** Leadership is a fenced database lease and membership is
   a node registry; any node serves requests and inline leadership gates were removed from the
   request path (Issues #3760, #3761, #3763, ADR-031).
@@ -239,6 +246,29 @@ management, and a fleet-wide tenant-containment hardening pass. See
 
 ### Fixed
 
+- **RC end-to-end validation fixes** (v0.10.5 RC, 2026-10-02 – 2026-10-06):
+  - Root tenant resolved by position instead of the hard-coded `default`; a second parentless
+    tenant is refused (Issue #4542).
+  - A healthy steward that loses its identity re-registers instead of stranding: bounded
+    stored-identity reconnect with a re-admission handshake (Issue #4532); a decommissioned
+    steward releases its `device_id` for re-enrollment (Issue #4534).
+  - Commands published by any cluster node carry the current lease fencing token, so stewards no
+    longer reject commands from non-holder nodes (Issues #4566, #4502, #4510); runs and the
+    execution queue are shared across nodes (Issue #4528); internal delivery is enabled at
+    bootstrap (Issue #4512).
+  - Workflows work for root-scoped admins: stored under the root tenant (or a crossed client
+    tenant), executions run under that tenant (Issue #4576); `cfg workflow run` accepts the
+    shipped examples, duration strings and the `workflow:` wrapper, and create/update keep
+    `on_failure` and `error_workflows` (Issue #4577).
+  - Workflow triggers work for root-scoped admins, triggered executions carry the trigger's
+    tenant (Issue #4640), and triggers persist in the durable trigger store with credentials in
+    the secret store, re-arming on restart (Issue #4641).
+  - The web console Installer page no longer loops on passkey re-login; installer artifacts
+    resolve a root admin's tenant instead of answering `401` (Issue #4634).
+  - Passkey enrollment and login work against a real controller (Issue #4505); `cfg` runs the
+    presence relay on admin mTLS bundle clients (Issue #4508).
+  - Certificates are back-dated so they verify on trailing clocks (Issue #4536); schema init
+    upgrades pre-#3754/#3757 Postgres databases (Issue #4499).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
@@ -274,6 +304,19 @@ management, and a fleet-wide tenant-containment hardening pass. See
 
 ### Security
 
+- **RC end-to-end validation fixes** (v0.10.5 RC):
+  - Tenant-crossing boundary (ADR-025) applied to tenant-selected writes — role configs, Hyper-V
+    profiles, registration tokens and IP trust (Issue #4571) — to ad-hoc run dispatch
+    (Issue #4554), and with the boundary's root-scope predicate in crossing handlers
+    (Issues #4545, #4549). A selected tenant is carried onward by its stored ID.
+  - Composed workflows (nested steps, error workflows, components) resolve by name from the
+    executing tenant's store only; a definition referencing a workflow by filesystem path is
+    refused and the controller never loads workflow definitions from disk; composition depth,
+    cycles and per-execution breadth are bounded (Issue #4638).
+  - API keys are listed and revoked against the store on every cluster node (Issue #4574);
+    in-memory WebAuthn ceremony and throttle state is bounded (Issue #4572); the client IP is
+    resolved through `trusted_proxies` and IPv6 is bucketed by /64 (Issue #4573).
+  - Credentials carried in URL paths are redacted from request and audit logs (Issue #4520).
 - **CodeQL triage and fixes** — M365 OAuth callback values are escaped against reflected XSS
   and the page is now rendered with `html/template` (Issues #4489, #4495); `DeleteSecret` no
   longer returns the key or storage path, so API-key hashes stay out of errors and logs
@@ -327,6 +370,13 @@ management, and a fleet-wide tenant-containment hardening pass. See
   Active Directory module (Issue #4447), and stale `api/proto` duplicates, the git config
   provider and the workflow transform engine (Issue #4405).
 - Loopback WebAuthn ceremony relay in `cfg` (Issue #3728).
+
+### Known limitations
+
+- **Module distribution is not yet end to end.** Listing and approving cached modules works, and a
+  steward runs a correctly signed bundle installed in its module directory, but there is no shipped
+  bundle signing tool, the controller does not fetch from module sources or cache module binaries,
+  and stewards cannot pull modules from the controller. Tracked by Epic #4654.
 
 ## [0.9.7] - 2026-06-15
 
