@@ -298,7 +298,7 @@ func parseInstallerName(name string) (platform, arch string, ok bool) {
 // re-login loop on the Installer page.
 func (s *Server) installerTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if scope.IsRoot() {
+	if scope.IsRoot() { //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing, or it is the root tenant itself
 		if selected := r.URL.Query().Get("tenant"); selected != "" {
 			// The stored tenant ID, not the request value, becomes the blob key.
 			return s.selectAuthorizedTenant(w, r, selected)

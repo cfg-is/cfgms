@@ -81,11 +81,24 @@ func (s *Server) handleRotateSigningCert(w http.ResponseWriter, r *http.Request)
 	// (Issue #4316 fail-closed contract) — the AssuranceStrong gate above proves the
 	// credential, never the caller's tenant scope.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !scope.IsRoot() {
+	if !scope.IsRoot() { //architecture:allow-root-scope -- the signing CA is one fleet-wide resource owned by no tenant
 		s.logger.Warn("Denied tenant-scoped signing certificate rotation",
 			"operator_serial", logging.SanitizeLogValue(principal.CertSerial))
 		s.writeErrorResponse(w, http.StatusForbidden,
 			"Signing certificate rotation is available to unscoped administrators only", "FORBIDDEN")
+		return
+	}
+	// Rotation replaces the chain every steward verifies operator commands against —
+	// a rarely-touched, fleet-wide operation with the largest blast radius of any
+	// certificate surface. It stays with a certificate-authenticated root
+	// principal, as before root sessions were bound to the root tenant: a root web
+	// or Bearer session, which a phished passkey could yield, may not rotate the
+	// signing CA (Issue #4665).
+	if principal.CertSerial == "" {
+		s.logger.Warn("Denied signing certificate rotation from a non-certificate session",
+			"principal_id", logging.SanitizeLogValue(principal.ID))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"Signing certificate rotation requires an admin certificate", "FORBIDDEN")
 		return
 	}
 
@@ -202,8 +215,8 @@ func (s *Server) handleListCertificates(w http.ResponseWriter, r *http.Request) 
 	// Apply tenant-scope filter: scoped callers only see certs for stewards
 	// within their own tenant subtree. Only an unscoped admin (callerTenant == "")
 	// skips filtering; every scoped caller requires an evaluable steward store.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		if s.stewardStore == nil {
 			// Without the steward store, subtree membership cannot be evaluated at
 			// all. Returning the unfiltered list would disclose every tenant's
@@ -286,7 +299,7 @@ func (s *Server) filterCertsByTenantScope(ctx context.Context, certs []Certifica
 			return nil, fmt.Errorf("steward lookup for tenant scope failed: %w", err)
 		}
 
-		inScope := isWithinTenantScope(callerTenant, record.TenantID)
+		inScope := isWithinTenantScope(callerTenant, record.TenantID) //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		scopeCache[c.StewardID] = inScope
 		if inScope {
 			filtered = append(filtered, c)
@@ -336,8 +349,8 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 	// certificates whose owning steward lives within that subtree.
 	// Unscoped admins (callerTenant == "") see everything.
 	// Controller-internal certs (ClientID == "") have no tenant owner and are always visible.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && certData.ClientID != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" && certData.ClientID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		if s.stewardStore == nil {
 			s.logger.Error("certificate get failed: steward store not configured",
 				"caller_tenant", logging.SanitizeLogValue(callerTenant))
@@ -357,7 +370,7 @@ func (s *Server) handleGetCertificate(w http.ResponseWriter, r *http.Request) {
 			}
 			// ErrStewardNotFound: no durable record — unattributable, visible fleet-wide
 			// (same rule as filterCertsByTenantScope for the list endpoint).
-		} else if !isWithinTenantScope(callerTenant, record.TenantID) {
+		} else if !isWithinTenantScope(callerTenant, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 			// Out-of-scope: return 404 to avoid leaking cross-tenant serial existence.
 			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
 			return
@@ -413,8 +426,8 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 	// for another tenant's steward. Both are denied with the same 404 used for
 	// out-of-scope certs so no cross-tenant existence is leaked. Only an
 	// unscoped admin (empty caller tenant) may revoke those.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers; a root caller is checked by authorizeRootCertIdentities in the else branch
 		if certData.ClientID == "" {
 			s.logger.Warn("Denied tenant-scoped revoke of unattributable certificate",
 				"serial", logging.SanitizeLogValue(serial),
@@ -449,10 +462,18 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
 			return
 		}
-		if !isWithinTenantScope(callerTenant, record.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), record.TenantID, "POST /api/v1/certificates/{serial}/revoke"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+				s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+			}
 			return
 		}
+	} else if !s.authorizeRootCertIdentities(w, r, callerTenantScope(r), "POST /api/v1/certificates/{serial}/revoke", func() {
+		s.writeErrorResponse(w, http.StatusNotFound, "Certificate not found", "CERTIFICATE_NOT_FOUND")
+	}, certData.ClientID) {
+		// An explicitly root caller (callerTenantFilter's ""): a certificate issued to
+		// a client tenant's steward needs a crossing (Issue #4665).
+		return
 	}
 
 	if err := s.certManager.Revoke(serial); err != nil {
@@ -468,6 +489,75 @@ func (s *Server) handleRevokeCertificate(w http.ResponseWriter, r *http.Request)
 		IsValid:      false,
 		IsRevoked:    true,
 	})
+}
+
+// isClusterNodeIdentity reports whether id is a controller cluster node ID — an
+// identity the internal-delivery peer authorizer admits on CommonName — which no
+// provisioned certificate may carry (Issue #4665).
+func (s *Server) isClusterNodeIdentity(id string) bool {
+	if id == "" {
+		return false
+	}
+	s.mu.RLock()
+	nodeIDs := s.deliveryPeerNodeIDs
+	s.mu.RUnlock()
+	if nodeIDs == nil {
+		return false
+	}
+	for _, nodeID := range nodeIDs() {
+		if nodeID != "" && nodeID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// authorizeRootCertIdentities checks, for a root caller, every steward a
+// certificate names — for provisioning, its steward_id and, when it differs, its
+// common_name (the identity consumers authenticate on); for revocation, the
+// steward it was issued to — that already exists: each one's tenant must pass
+// tenantAccessForScope, so a root caller subject to the ADR-025 boundary cannot
+// mint, impersonate or revoke a client tenant's steward certificate without a
+// crossing (Issue #4665). An identity that names no existing steward (new-device
+// onboarding, a controller-internal certificate) stays root's. On refusal it
+// writes the crossing challenge, or calls deny, and returns false.
+func (s *Server) authorizeRootCertIdentities(w http.ResponseWriter, r *http.Request, scope ctxkeys.TenantScope, route string, deny func(), identities ...string) bool {
+	if s.stewardStore == nil {
+		principal, _ := r.Context().Value(principalContextKey).(*Principal)
+		if subjectToTenantCrossingBoundary(principal) {
+			// The identities cannot be attributed, so the crossing boundary cannot
+			// be applied: fail closed.
+			s.logger.Error("certificate provision failed: steward store not configured")
+			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
+			return false
+		}
+		return true
+	}
+	seen := make(map[string]bool, len(identities))
+	for _, id := range identities {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		record, err := s.stewardStore.GetSteward(r.Context(), id)
+		if err != nil && !errors.Is(err, business.ErrStewardNotFound) {
+			s.logger.Error("Failed to resolve steward for provisioning tenant scope",
+				"steward_id", logging.SanitizeLogValue(id),
+				"error", logging.SanitizeLogValue(err.Error()))
+			s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to provision certificate", "INTERNAL_ERROR")
+			return false
+		}
+		if err != nil || record == nil || record.ID == "" {
+			continue
+		}
+		if access := s.tenantAccessForScope(r.Context(), scope, record.TenantID, route); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+				deny()
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // handleProvisionCertificate handles POST /api/v1/certificates/provision
@@ -508,7 +598,13 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
 		return
 	}
-	if !scope.IsRoot() {
+	if scope.IsRoot() { //architecture:allow-root-scope -- root keeps new-device onboarding and the free-form Subject; authorizeRootCertIdentities holds every existing steward the certificate would name to tenantAccessForScope
+		if !s.authorizeRootCertIdentities(w, r, scope, "POST /api/v1/certificates/provision", func() {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		}, provisionReq.StewardID, provisionReq.CommonName) {
+			return
+		}
+	} else {
 		if s.stewardStore == nil {
 			s.logger.Error("certificate provision failed: steward store not configured")
 			s.writeErrorResponse(w, http.StatusServiceUnavailable, "Fleet store unavailable", "SERVICE_UNAVAILABLE")
@@ -531,8 +627,10 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
 			return
 		}
-		if !s.isAuthorizedForTenant(scope, record.TenantID, "POST /api/v1/certificates/provision") {
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+		if access := s.tenantAccessForScope(r.Context(), scope, record.TenantID, "POST /api/v1/certificates/provision"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden, "Access to this steward is not permitted", "FORBIDDEN")
+			}
 			return
 		}
 
@@ -576,6 +674,31 @@ func (s *Server) handleProvisionCertificate(w http.ResponseWriter, r *http.Reque
 
 	if provisionReq.CommonName == "" {
 		provisionReq.CommonName = provisionReq.StewardID // Default to steward ID
+	}
+
+	// Every certificate this endpoint mints is a steward leaf, for every caller
+	// (Issue #4665). The internal-delivery peer authorizer admits a controller-CA
+	// leaf whose CommonName is a cluster node ID unless it carries the steward
+	// Organization, so a caller-chosen Organization — or a CommonName naming a
+	// cluster node — would hand back the private key of a controller peer
+	// identity. The steward Organization is therefore always stamped, any other
+	// requested Organization is refused, and no identity may name a cluster node.
+	if provisionReq.Organization != "" && provisionReq.Organization != internaldelivery.StewardCertOrganization {
+		s.logger.Warn("Denied provision with a non-steward organization",
+			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+			"organization", logging.SanitizeLogValue(provisionReq.Organization))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"organization must be the steward certificate organization", "FORBIDDEN")
+		return
+	}
+	provisionReq.Organization = internaldelivery.StewardCertOrganization
+	if s.isClusterNodeIdentity(provisionReq.StewardID) || s.isClusterNodeIdentity(provisionReq.CommonName) {
+		s.logger.Warn("Denied provision naming a cluster node identity",
+			"steward_id", logging.SanitizeLogValue(provisionReq.StewardID),
+			"common_name", logging.SanitizeLogValue(provisionReq.CommonName))
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"a steward certificate may not name a cluster node", "FORBIDDEN")
+		return
 	}
 
 	// Create service request

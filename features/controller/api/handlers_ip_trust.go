@@ -56,11 +56,10 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not add ranges for
 	// other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, req.TenantID, "POST /api/v1/registration/ip-trust") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, req.TenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, req.TenantID, "POST /api/v1/registration/ip-trust"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, req.TenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 
@@ -103,11 +102,10 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke ranges
 	// for other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, "DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}") {
-		http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
-		return
-	}
-	if !s.authorizeSelectedTenant(w, r, tenantID) { // Issue #4571
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, "DELETE /api/v1/registration/ip-trust/{tenant_id}/{cidr}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			http.Error(w, "forbidden: target tenant is outside caller's tenant subtree", http.StatusForbidden)
+		}
 		return
 	}
 
@@ -146,7 +144,7 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	var tenantID string
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing
 		tenantID = r.URL.Query().Get("tenant_id")
 		if tenantID == "" {
 			http.Error(w, "tenant_id query parameter is required for unscoped callers", http.StatusBadRequest)

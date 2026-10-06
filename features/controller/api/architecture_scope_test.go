@@ -61,6 +61,10 @@ var scopeConsumingSymbols = []string{
 	"isWithinTenantScope(",
 	"callerTenantID(",
 	"isAuthorizedForTenant(",
+	"tenantAccessForScope(",
+	"callerTenantFilter(",
+	"callerOwnTenant(",
+	"selectListTenant(",
 	"ctxkeys.TenantScopeKey",
 	"ctxkeys.TenantID",
 }

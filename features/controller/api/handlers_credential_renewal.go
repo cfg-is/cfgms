@@ -377,9 +377,11 @@ func (s *Server) handleRenewCredential(w http.ResponseWriter, r *http.Request) {
 	// Reaching this handler at all (credential-renewal carries no requirePermission
 	// gate) does not by itself prove a valid caller scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "POST /api/v1/credential-renewal") {
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"No account is bound to the presented certificate; renewal is not permitted", "NO_ACCOUNT_BINDING")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "POST /api/v1/credential-renewal"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"No account is bound to the presented certificate; renewal is not permitted", "NO_ACCOUNT_BINDING")
+		}
 		return
 	}
 

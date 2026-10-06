@@ -350,7 +350,7 @@ func TestPasskeyLogin_ResponseCarriesTenantScope(t *testing.T) {
 		loginRec := doPasskeyLogin(t, srv, rootUser, "")
 		require.Equal(t, http.StatusOK, loginRec.Code, "body: %s", loginRec.Body.String())
 		tenantID, rootScope := decodeScope(t, loginRec)
-		assert.Empty(t, tenantID, "root-scoped login must return empty tenant_id")
+		assert.Equal(t, testRootTenantID, tenantID, "a root-scoped login returns the root tenant it is bound to (Issue #4665)")
 		assert.True(t, rootScope, "root-scoped login must report root_scope=true")
 	})
 }
@@ -697,7 +697,7 @@ func TestCSRFMiddleware_SessionBound(t *testing.T) {
 
 	// Issue a session directly and inject a CSRF token (no need for passkey ceremony here).
 	_, token, err := srv.webSessionManager.Issue(context.Background(),
-		"webauthn-test-user", "test", "")
+		"webauthn-test-user", "test", "test-tenant")
 	require.NoError(t, err)
 	webSess, err := srv.webSessionManager.Validate(context.Background(), token)
 	require.NoError(t, err)

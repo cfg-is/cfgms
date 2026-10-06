@@ -71,7 +71,7 @@ func isControlRune(r rune) bool {
 // with subtree scope and the unscoped ("") admin mTLS path, so a role can never be
 // fetched by ID that the same caller cannot see in the list.
 func roleReadableByTenant(role *common.Role, callerTenant string) bool {
-	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId))
+	return role != nil && (role.IsSystemRole || callerTenant == "" || isWithinTenantScope(callerTenant, role.TenantId)) //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 }
 
 // loadRoleForWrite loads roleID and confirms callerTenant may act on it, writing the
@@ -99,12 +99,18 @@ func (s *Server) loadRoleForWrite(w http.ResponseWriter, r *http.Request, roleID
 		return nil, false
 	}
 
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, resp.Role.TenantId) {
-		s.logger.Warn("Blocked cross-tenant role write",
-			"role_id", logging.SanitizeLogValue(roleID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant),
-			"action", action)
-		s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+	// tenantAccessForScope also holds a root caller subject to the ADR-025
+	// crossing boundary to a crossing for a role owned by a tenant below root
+	// (Issue #4665).
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, resp.Role.TenantId, "role "+action); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, resp.Role.TenantId) {
+			s.logger.Warn("Blocked cross-tenant role write",
+				"role_id", logging.SanitizeLogValue(roleID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant),
+				"action", action)
+			s.writeErrorResponse(w, http.StatusNotFound, "Role not found", "ROLE_NOT_FOUND")
+		}
 		return nil, false
 	}
 
@@ -268,12 +274,17 @@ func (s *Server) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 
 	// Validate that the request body's TenantId is within the caller's subtree.
 	// 400 (not 404): there is no existing resource whose existence to conceal.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" && !isWithinTenantScope(callerTenant, roleInfo.TenantID) {
-		s.logger.Info("Cross-tenant role create refused",
-			"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
-			"caller_tenant", logging.SanitizeLogValue(callerTenant))
-		s.writeErrorResponse(w, http.StatusBadRequest, "TenantId is outside caller's scope", "TENANT_SCOPE_VIOLATION")
+	// A root caller subject to the ADR-025 boundary needs a crossing to create a
+	// role in a tenant below root (Issue #4665).
+	callerTenant := callerTenantFilter(r.Context())
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, roleInfo.TenantID, "POST /api/v1/rbac/roles"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, roleInfo.TenantID) {
+			s.logger.Info("Cross-tenant role create refused",
+				"requested_tenant", logging.SanitizeLogValue(roleInfo.TenantID),
+				"caller_tenant", logging.SanitizeLogValue(callerTenant))
+			s.writeErrorResponse(w, http.StatusBadRequest, "TenantId is outside caller's scope", "TENANT_SCOPE_VIOLATION")
+		}
 		return
 	}
 
@@ -355,7 +366,7 @@ func (s *Server) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	// Tenant scoping: a role outside the caller's subtree must not be readable by ID
 	// unless it is a system role (visible to every tenant, matching ListRoles).
 	// Reported as 404 so the response does not confirm that the role exists.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if !roleReadableByTenant(resp.Role, callerTenant) {
 		s.logger.Warn("Blocked cross-tenant role read",
 			"role_id", logging.SanitizeLogValue(roleID),
@@ -408,7 +419,7 @@ func (s *Server) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant scoping: the role must exist inside the caller's subtree (or the caller
 	// is an unscoped admin) and must not be a system role before any field is written.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	existing, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "modified")
 	if !ok {
 		return
@@ -491,7 +502,7 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 
 	// Tenant scoping: only a role inside the caller's subtree (or an unscoped admin)
 	// may be deleted, and system roles may never be deleted.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	if _, ok := s.loadRoleForWrite(w, r, roleID, callerTenant, "deleted"); !ok {
 		return
 	}

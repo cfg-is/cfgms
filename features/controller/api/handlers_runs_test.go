@@ -79,7 +79,7 @@ func (s *testBlastRadiusPolicyStore) SetPolicy(_ context.Context, p *business.Bl
 // closed, even though p.TenantID says the caller is authorized.
 func withPrincipal(req *http.Request, p *Principal) *http.Request {
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, fixtureCallerTenant(p.TenantID))
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	return req.WithContext(ctx)
 }
@@ -95,7 +95,7 @@ func postRunWithPrincipal(t *testing.T, handler http.HandlerFunc, path string, p
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	ctx := context.WithValue(req.Context(), principalContextKey, p)
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, p.TenantID)
+	ctx = context.WithValue(ctx, ctxkeys.TenantID, fixtureCallerTenant(p.TenantID))
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, scopeForVerifiedAdminCert(p.TenantID))
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
@@ -1104,7 +1104,7 @@ func TestRunEndpoints_TenantIsolation(t *testing.T) {
 }
 
 // TestRunVisibleTo_AssuranceBoundary is a table-driven regression test for the
-// runVisibleTo helper (handlers_runs.go), migrated to ctxkeys.TenantScope
+// runAccess helper (handlers_runs.go), migrated to ctxkeys.TenantScope
 // (Issue #4335) confirming that the Assurance-based isolation gate is
 // byte-for-byte equivalent to the deleted IsAdmin check:
 //   - AssuranceBasic (admin) principal always sees the run regardless of tenant.
@@ -1156,9 +1156,9 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			got := server.runVisibleTo(tc.scope, run, "GET /api/v1/runs/{run_id}")
+			got := server.runAccess(context.Background(), tc.scope, run, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed
 			assert.Equal(t, tc.wantVis, got,
-				"runVisibleTo(scope=%+v, run{TenantID=%q})", tc.scope, run.TenantID)
+				"runAccess(scope=%+v, run{TenantID=%q})", tc.scope, run.TenantID)
 		})
 	}
 }
@@ -1166,7 +1166,7 @@ func TestRunVisibleTo_AssuranceBoundary(t *testing.T) {
 // TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked verifies the fix for Issue
 // #3143: a session-authenticated principal has GlobalScope=true (set by middleware)
 // even when scoped to a specific tenant. Before the fix, the GlobalScope flag caused
-// runVisibleTo to return true for any run regardless of the caller's tenant. After
+// runAccess to return true for any run regardless of the caller's tenant. After
 // the fix, only the caller's ctxkeys.TenantScope (Issue #4335) governs access.
 func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	server := setupTestServer(t)
@@ -1178,9 +1178,9 @@ func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 	runOwnTenant := &controllerrun.RunRecord{RunID: "r-own", TenantID: "tenant-a"}
 	runOtherTenant := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
 
-	assert.True(t, server.runVisibleTo(scope, runOwnTenant, "GET /api/v1/runs/{run_id}"),
+	assert.True(t, server.runAccess(context.Background(), scope, runOwnTenant, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
 		"session principal must see runs belonging to their own tenant")
-	assert.False(t, server.runVisibleTo(scope, runOtherTenant, "GET /api/v1/runs/{run_id}"),
+	assert.False(t, server.runAccess(context.Background(), scope, runOtherTenant, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
 		"session principal must NOT see runs belonging to a different tenant (Issue #3143)")
 }
 
@@ -1190,7 +1190,7 @@ func TestRunVisibleTo_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 // are genuinely independent signals — not just relabeled versions of each other.
 // A hypothetical future tenant-scoped-but-strongly-authenticated platform admin
 // (Assurance=AssuranceStrong, GlobalScope=false, ImplicitAdmin=true) must be:
-//   - Confined by the tenant-scope sites (runVisibleTo returns false for cross-tenant)
+//   - Confined by the tenant-scope sites (runAccess returns false for cross-tenant)
 //   - Still admitted by auth-strength-gated actions (hasPermission returns true via
 //     ImplicitAdmin; requirePermission admits on AssuranceStrong-gated routes)
 //
@@ -1214,9 +1214,9 @@ func TestGlobalScope_IndependentOfAssurance(t *testing.T) {
 	server := setupTestServer(t)
 	scope := ctxkeys.NewTenantScope("tenant-a")
 	run := &controllerrun.RunRecord{RunID: "r-other", TenantID: "tenant-b"}
-	assert.False(t, server.runVisibleTo(scope, run, "GET /api/v1/runs/{run_id}"),
-		"AssuranceStrong+GlobalScope:false principal must be tenant-confined by runVisibleTo (cross-tenant run must be invisible)")
-	assert.True(t, server.runVisibleTo(scope, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "GET /api/v1/runs/{run_id}"),
+	assert.False(t, server.runAccess(context.Background(), scope, run, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
+		"AssuranceStrong+GlobalScope:false principal must be tenant-confined by runAccess (cross-tenant run must be invisible)")
+	assert.True(t, server.runAccess(context.Background(), scope, &controllerrun.RunRecord{RunID: "r-same", TenantID: "tenant-a"}, "GET /api/v1/runs/{run_id}") == tenantAuthAllowed,
 		"AssuranceStrong+GlobalScope:false principal must see same-tenant runs")
 
 	// Permission breadth: ImplicitAdmin passes regardless of GlobalScope.

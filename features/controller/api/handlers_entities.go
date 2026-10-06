@@ -82,7 +82,7 @@ func parseTimeRangeQuery(q url.Values) (eginterfaces.TimeRange, error) {
 // request context. An empty string means the caller has global (cross-tenant)
 // scope and sees all entities.
 func callerTenantSubtree(r *http.Request) string {
-	t, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	t := callerTenantFilter(r.Context())
 	return t
 }
 

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -176,10 +177,12 @@ type AccountCreateResponse struct {
 }
 
 // accountStorageTenant returns the tenant key to use in the secret store
-// for an account. Root-scoped accounts (logicalTenantID == "") are stored
-// under the system sentinel because the secret store requires non-empty TenantID.
-// The metadata field "root_scope" is the authoritative indicator; this mapping is
-// only for storage routing (Issue #2919).
+// for an account. A root-scope account's stored record carries no tenant and is
+// stored under the system sentinel because the secret store requires a
+// non-empty TenantID. This is storage routing only: the metadata field
+// "root_scope" (account.RootScope) is the authority on root scope, and a root
+// account's tenant is the deployment's root tenant (accountPrincipalTenant,
+// Issue #4665) — an empty stored tenant is never read as root (Issue #2919).
 func accountStorageTenant(logicalTenantID string) string {
 	if logicalTenantID == "" {
 		return audit.SystemTenantID
@@ -797,11 +800,17 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// Resolve final scope (Issue #2919):
 	//   RootScope:true  → explicit root grant; clear TenantID for uniformity
 	//   TenantID != ""  → tenant-scoped (already set above)
-	//   neither         → default to "default" (backward-compat; never silently root)
+	//   neither         → the caller's own tenant (never silently root, and never a
+	//                     substituted tenant the caller did not name, Issue #4543)
 	if acct.RootScope {
 		acct.TenantID = ""
 	} else if acct.TenantID == "" {
-		acct.TenantID = "default"
+		own, ok := callerOwnTenant(r.Context())
+		if !ok {
+			s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+			return
+		}
+		acct.TenantID = own
 	}
 	if acct.Permissions == nil {
 		acct.Permissions = []string{}
@@ -818,12 +827,18 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 	// outright — holding account:create does not by itself prove a valid caller
 	// scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if existing != nil && !s.isAuthorizedForTenant(scope, existing.TenantID, "POST /api/v1/accounts") {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
-		return
+	if existing != nil {
+		if access := s.tenantAccessForScope(r.Context(), scope, existing.TenantID, "POST /api/v1/accounts"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, existing.TenantID) {
+				s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+			}
+			return
+		}
 	}
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "POST /api/v1/accounts") {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "POST /api/v1/accounts"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -932,7 +947,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		"action", action,
 		"username", logging.SanitizeLogValue(acct.Username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.TenantID == "",
+		"root_scope", logging.SanitizeLogValue(strconv.FormatBool(acct.RootScope)),
 		"enrollment_link_minted", rawToken != "",
 		"principal_id", logging.SanitizeLogValue(actingPrincipalID))
 
@@ -940,7 +955,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		AccountInfo: AccountInfo{
 			ID:                           acct.ID,
 			Username:                     acct.Username,
-			TenantID:                     acct.TenantID,
+			TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
 			RootScope:                    acct.RootScope,
 			Permissions:                  acct.Permissions,
 			Disabled:                     acct.Disabled, // Issue #3126: a reset retains the disable
@@ -976,8 +991,10 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 	// Issue #2974: enforce tenant-subtree scope before revealing any link state.
 	// An out-of-subtree caller receives 403 regardless of whether a link is
 	// outstanding — checking link state first would create an enrollment-state oracle.
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/enrollment-link/revoke"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 	if !enrollmentLinkOutstanding(acct) {
@@ -1042,7 +1059,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	metas, err := s.secretStore.ListSecrets(r.Context(), &secretsif.SecretFilter{
 		Metadata: map[string]string{
@@ -1059,7 +1076,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
 		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			if meta.TenantID != callerTenant && !strings.HasPrefix(meta.TenantID, callerTenant+"/") {
 				continue
 			}
@@ -1072,11 +1089,11 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Issue #2919: root-scoped accounts are stored under the system sentinel;
-		// restore the logical empty TenantID for the response.
+		// a root account belongs to the deployment's root tenant (Issue #4665).
 		rootScope := meta.Metadata["root_scope"] == "true"
 		tenantID := meta.TenantID
 		if rootScope {
-			tenantID = ""
+			tenantID = s.rootTenantID(r.Context())
 		}
 		// Issue #2974: determine whether an outstanding enrollment link exists.
 		// Check hash, expiry, and revoked flag from stored metadata.
@@ -1219,8 +1236,8 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 
 	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
 	// not 403 — to avoid disclosing that the account exists in another tenant.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, acct.TenantID) {
+	callerTenant := callerTenantFilter(r.Context())
+	if !isWithinTenantScope(callerTenant, acct.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}
@@ -1228,7 +1245,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccessResponse(w, AccountInfo{
 		ID:                           acct.ID,
 		Username:                     acct.Username,
-		TenantID:                     acct.TenantID,
+		TenantID:                     s.accountPrincipalTenant(r.Context(), acct),
 		RootScope:                    acct.RootScope,
 		Permissions:                  acct.Permissions,
 		Disabled:                     acct.Disabled,
@@ -1282,8 +1299,10 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// refused outright — holding account:update does not by itself prove a valid
 	// caller scope was established.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "PUT /api/v1/accounts/{username}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "PUT /api/v1/accounts/{username}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		}
 		return
 	}
 
@@ -1474,8 +1493,10 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	// matching handleGetAccount/handleUpdateAccount. An unset scope is refused
 	// outright (Issue #4316 fail-closed contract).
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "DELETE /api/v1/accounts/{username}") {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "DELETE /api/v1/accounts/{username}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		}
 		return
 	}
 
@@ -1592,7 +1613,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("Web admin account offboarded and deleted",
 		"username", logging.SanitizeLogValue(username),
 		"tenant_id", logging.SanitizeLogValue(acct.TenantID),
-		"root_scope", acct.TenantID == "",
+		"root_scope", acct.RootScope,
 		"certs_revoked", certsRevoked,
 		"cli_sessions_revoked", cliSessionsRevoked,
 		"web_sessions_revoked", webSessionsRevoked,

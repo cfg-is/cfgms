@@ -387,7 +387,13 @@ func (v *DefaultRollbackValidator) validatePermissions(ctx context.Context, requ
 	}
 
 	userID, _ := ctx.Value(ctxkeys.UserIDKey).(string)
-	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	// The RBAC lookup's tenant: "" for a root-scoped or system-internal caller,
+	// the caller's tenant otherwise; a context with no usable scope is refused
+	// (Issue #4665).
+	tenantID, _, ok := ctxkeys.TenantRestriction(ctx)
+	if !ok {
+		return fmt.Errorf("rollback refused: caller has no tenant scope")
+	}
 
 	if request.Emergency || request.RollbackType == RollbackTypeEmergency {
 		resp, err := v.rbacManager.CheckPermission(ctx, &common.AccessRequest{

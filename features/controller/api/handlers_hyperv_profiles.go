@@ -97,7 +97,7 @@ func (s *Server) resolveHypervProfileTenant(w http.ResponseWriter, r *http.Reque
 	switch {
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- root selects the tenant explicitly and the selection passes the ADR-025 crossing
 		tenantID := strings.TrimSpace(r.URL.Query().Get("tenant"))
 		if tenantID == "" {
 			s.writeErrorResponse(w, http.StatusBadRequest,

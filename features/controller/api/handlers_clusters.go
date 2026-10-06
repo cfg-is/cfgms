@@ -66,10 +66,13 @@ type ClusterResourceStatus struct {
 // Intended behavior change (Issue #3495): stewards attached to peer nodes are now
 // visible here. Previously this was node-local; now it is cluster-wide.
 func (s *Server) stewardsInTenantScope(callerTenant string) ([]fleet.StewardData, map[string]string) {
-	// Build a scoped context so ListFleetStewards applies tenant filtering internally.
-	ctx := context.Background()
+	// Build a scoped context so ListFleetStewards applies tenant filtering
+	// internally. callerTenant is callerTenantFilter's answer, so "" means an
+	// explicitly root caller, whose fleet-wide read is marked system-internal: a
+	// bare context is refused (Issue #4665).
+	ctx := ctxkeys.WithSystem(context.Background())
 	if callerTenant != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenant)
+		ctx = context.WithValue(context.Background(), ctxkeys.TenantID, callerTenant)
 	}
 	infos := s.controllerService.ListFleetStewards(ctx)
 	result := make([]fleet.StewardData, 0, len(infos))
@@ -150,7 +153,7 @@ func dnaHostname(dna *commonpb.DNA) string {
 // authenticated context limits which stewards' DNA is scanned. An admin mTLS
 // principal (empty TenantID) has no scope restriction.
 func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, _ := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)
@@ -187,7 +190,7 @@ func (s *Server) handleGetCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, _ := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)
@@ -241,7 +244,7 @@ func (s *Server) handleClusterReconciliation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	stewards, hostnameOwners := s.stewardsInTenantScope(callerTenant)
 	reg := clusterregistry.BuildRegistry(stewards)

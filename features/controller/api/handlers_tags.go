@@ -11,7 +11,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/controller/tagstore"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
 
@@ -163,14 +162,11 @@ func (s *Server) resolveStewardForTags(w http.ResponseWriter, r *http.Request) (
 	return stewardID, true
 }
 
-// callerTenantID returns the authenticated caller's tenant ID.
-// mTLS admin certs have global scope (empty TenantID); API-key callers have a tenant scope.
+// callerTenantID returns the caller's tenant restriction (callerTenantFilter):
+// "" only for an explicitly root-scoped caller, the caller's tenant otherwise
+// (Issue #4665).
 func (s *Server) callerTenantID(r *http.Request) string {
-	if p := s.extractAdminPrincipal(r); p != nil {
-		return p.TenantID
-	}
-	tid, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	return tid
+	return callerTenantFilter(r.Context())
 }
 
 // mergeTags returns the sorted union of current and incoming, deduplicated.

@@ -93,17 +93,16 @@ func (s *DatabaseRBACStore) validateTenantAccess(ctx context.Context, resourceTe
 		return nil
 	}
 
-	// Extract authenticated tenant ID from context
-	authTenantIDValue := ctx.Value(ctxkeys.TenantID)
-	if authTenantIDValue == nil {
-		// If no tenant_id in context, allow operation (backwards compatibility)
-		// This supports operations from internal system components
-		return nil
-	}
-
-	authTenantID, ok := authTenantIDValue.(string)
+	// The caller's reach (Issue #4665): a root-scoped caller or a system-internal
+	// context (internal components carry no caller) is unrestricted; a tenant
+	// caller is confined to its tenant; a caller with no usable scope is denied.
+	authTenantID, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
 	if !ok {
-		return fmt.Errorf("invalid tenant_id type in context")
+		return fmt.Errorf("%w: caller has no tenant scope, resource tenant=%s",
+			ErrCrossTenantAccessDenied, resourceTenantID)
+	}
+	if unrestricted {
+		return nil
 	}
 
 	// H-TENANT-1: Block cross-tenant access (security audit finding)

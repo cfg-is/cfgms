@@ -119,7 +119,7 @@ func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
 	tenantID := ""
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
+	if tid := callerTenantFilter(r.Context()); tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		tenantID = tid
 	}
 
@@ -286,7 +286,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	for _, steward := range stewards {
 		// A tenant-scoped caller must not see other tenants' stewards. The
 		// node-local map is unscoped, so this filter applies to it too.
-		if !isWithinTenantScope(tenantID, steward.TenantID) {
+		if !isWithinTenantScope(tenantID, steward.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			continue
 		}
 		seen[steward.ID] = true
@@ -450,8 +450,8 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) {
+	callerTenant := callerTenantFilter(r.Context())
+	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.logger.Info("Cross-tenant steward get refused",
 			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -549,8 +549,8 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		info, ok := s.controllerService.GetStewardInfo(stewardID)
 		stewardTenant := ""
 		if ok {
@@ -574,7 +574,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	dnaResp, err := s.controllerService.GetStewardDNA(context.Background(), req)
+	dnaResp, err := s.controllerService.GetStewardDNA(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to get steward DNA", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get steward DNA", "INTERNAL_ERROR")
@@ -637,8 +637,10 @@ func (s *Server) authorizeStewardScope(w http.ResponseWriter, r *http.Request, s
 	}
 
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, stewardTenant, route) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, stewardTenant, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, stewardTenant) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		}
 		return false
 	}
 	return true
@@ -662,22 +664,47 @@ func (s *Server) authorizeStewardScope(w http.ResponseWriter, r *http.Request, s
 // caller's own tenant and self-authorize. The durable store answers nothing for a
 // genuinely unregistered steward, so the intended leniency is preserved.
 func (s *Server) authorizeStewardScopeLenient(w http.ResponseWriter, r *http.Request, stewardID, route string) bool {
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
-	}
-	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
-		tenantID = info.TenantID
-	} else if rec := s.durableStewardRecord(r.Context(), stewardID); rec != nil && rec.TenantID != "" {
-		tenantID = rec.TenantID
+	_, ok := s.authorizeStewardTenantLenient(w, r, stewardID, route)
+	return ok
+}
+
+// authorizeStewardTenantLenient is authorizeStewardScopeLenient returning the
+// tenant it authorized — the tenant the steward's config is stored under. A
+// steward known nowhere resolves to the caller's own tenant (the root tenant for a
+// root caller, Issue #4665); a caller with no tenant at all is refused rather than
+// given a substitute tenant (Issue #4543).
+func (s *Server) authorizeStewardTenantLenient(w http.ResponseWriter, r *http.Request, stewardID, route string) (string, bool) {
+	tenantID, known := s.stewardOwnerTenant(r.Context(), stewardID)
+	if !known {
+		own, ok := callerOwnTenant(r.Context())
+		if !ok {
+			s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+			return "", false
+		}
+		tenantID = own
 	}
 
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, tenantID, route) {
-		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-		return false
+	if access := s.tenantAccessForScope(r.Context(), scope, tenantID, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+		}
+		return "", false
 	}
-	return true
+	return tenantID, true
+}
+
+// stewardOwnerTenant is the tenant that owns stewardID, from the live registry
+// first and the durable store second (see authorizeStewardScopeLenient for why
+// both). ok is false for a steward known to neither.
+func (s *Server) stewardOwnerTenant(ctx context.Context, stewardID string) (string, bool) {
+	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
+		return info.TenantID, true
+	}
+	if rec := s.durableStewardRecord(ctx, stewardID); rec != nil && rec.TenantID != "" {
+		return rec.TenantID, true
+	}
+	return "", false
 }
 
 // handleGetStewardConfig handles GET /api/v1/stewards/{id}/config
@@ -783,48 +810,20 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 	// specific steward, so the config must be stored under THAT steward's
 	// tenant — not the caller's. Using the caller's tenant would store the
 	// config where neither the save=deploy fanout nor the steward's own sync
-	// can find it. Fall back to the caller's tenant (then "default") only when
-	// the steward is not yet known. (Issue #1572)
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
-	}
-	if info, ok := s.controllerService.GetStewardInfo(stewardID); ok && info.TenantID != "" {
-		tenantID = info.TenantID
-	}
-
-	// Tenant-subtree authorization (Issue #3792): a scoped caller may only push
-	// config to a steward within its own tenant subtree. An unscoped caller
-	// (mTLS admin, callerTenant == "") retains global authority, mirroring
-	// handleApproveRegistration. Checked before the body is even read, so a
-	// caller with no authority over the target tenant learns nothing about the
-	// request beyond a 404 — not even whether the body is well-formed. Returns
-	// 404 rather than 403 to avoid disclosing that a steward exists in a tenant
-	// outside the caller's authority.
-	callerTenant := s.callerTenantID(r)
-	if callerTenant != "" {
-		inSubtree := tenantID == callerTenant || strings.HasPrefix(tenantID, callerTenant+"/")
-		if !inSubtree {
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
-	} else if principal, _ := r.Context().Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) {
-		// ADR-025 Decision 1 root<->MSP boundary (Issue #4337): this is the most
-		// powerful write class in the API — an unscoped caller pushing steward
-		// config — so a principal subject to the crossing boundary must pass it here
-		// exactly as it would on any other tenant-targeting route, rather than
-		// inheriting the "unscoped caller retains global authority" branch above,
-		// which is reserved for callers that are not subject to the boundary at all.
-		switch s.authorizeTenantAccess(r.Context(), principal, tenantID) {
-		case tenantAuthAllowed:
-			// Active crossing grant, or the steward's tenant is "root" itself.
-		case tenantAuthNeedsCrossing:
-			s.writeTenantCrossingChallenge(w, tenantID)
-			return
-		default:
-			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
-		}
+	// can find it. The caller's own tenant is used only when the steward is not
+	// yet known (Issue #1572).
+	//
+	// Tenant-subtree authorization (Issue #3792) is checked before the body is
+	// even read, so a caller with no authority over the target tenant learns
+	// nothing about the request beyond a 404 — not even whether the body is
+	// well-formed. 404 rather than 403 avoids disclosing that a steward exists in
+	// a tenant outside the caller's authority. This is the most powerful write
+	// class in the API, so a root caller subject to the ADR-025 boundary must hold
+	// a crossing for the steward's tenant exactly as on any other tenant-targeting
+	// route (Issue #4337).
+	tenantID, ok := s.authorizeStewardTenantLenient(w, r, stewardID, "PUT /api/v1/stewards/{id}/config")
+	if !ok {
+		return
 	}
 
 	tenantIDForLog := logging.SanitizeLogValue(tenantID)
@@ -1036,7 +1035,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call gRPC service
-	validationResp, err := s.configService.ValidateConfig(context.Background(), req)
+	validationResp, err := s.configService.ValidateConfig(r.Context(), req)
 	if err != nil {
 		s.logger.Error("Failed to validate configuration", "steward_id", stewardIDForLog, "error", logging.SanitizeLogValue(err.Error()))
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to validate configuration", "INTERNAL_ERROR")
@@ -1093,9 +1092,11 @@ func (s *Server) handleDeleteStewardConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
+	// The config lives under the steward's own tenant (Issue #1572), which the
+	// caller must be authorized for (Issue #4665).
+	tenantID, ok := s.authorizeStewardTenantLenient(w, r, stewardID, "DELETE /api/v1/stewards/{id}/config")
+	if !ok {
+		return
 	}
 
 	err := s.configService.DeleteConfiguration(r.Context(), tenantID, stewardID)
@@ -1134,7 +1135,7 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
@@ -1154,13 +1155,11 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		}
 		// Cross-tenant scope check using the in-memory record's TenantID (fallback path).
 		// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
-		if callerTenant != "" {
-			sameTenant := memInfo.TenantID == callerTenant
-			ancestorTenant := strings.HasPrefix(memInfo.TenantID, callerTenant+"/")
-			if !sameTenant && !ancestorTenant {
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), memInfo.TenantID, "DELETE /api/v1/stewards/{id}"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, memInfo.TenantID) {
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
 			}
+			return
 		}
 		// Backfill a durable record before tombstoning — must succeed before any in-memory
 		// updates (mirrors the "durable write must succeed first" invariant). Populate at
@@ -1176,17 +1175,15 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	} else {
-		// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
-		// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
-		// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
-		if callerTenant != "" {
-			sameTenant := record.TenantID == callerTenant
-			ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
-			if !sameTenant && !ancestorTenant {
+		// Cross-tenant scope check using the durable record's TenantID as the authoritative
+		// source; a root caller subject to the ADR-025 boundary needs a crossing for a
+		// steward in a tenant below root (Issue #4665).
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), record.TenantID, "DELETE /api/v1/stewards/{id}"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
 				// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
 			}
+			return
 		}
 	}
 
@@ -1283,7 +1280,7 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 
 	record, err := s.stewardStore.GetSteward(r.Context(), stewardID)
 	if err != nil {
@@ -1298,13 +1295,11 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Tenant-scope check: 404 instead of 403 to avoid existence disclosure across tenant boundaries.
-	if callerTenant != "" {
-		sameTenant := record.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), record.TenantID, "PATCH /api/v1/stewards/{id}/visibility"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
 		}
+		return
 	}
 
 	// Durable write first — hard-fail the request on error.
@@ -1396,15 +1391,9 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 
 	// Cross-tenant check: the caller's tenant must be a prefix of or equal to the
 	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
-	// mTLS admin principals have empty TenantID (global access), so check is skipped for them.
-	adminPrincipal := s.extractAdminPrincipal(r)
-	var callerTenantID string
-	if adminPrincipal != nil {
-		callerTenantID = adminPrincipal.TenantID
-	} else {
-		callerTenantID, _ = r.Context().Value(ctxkeys.TenantID).(string)
-	}
-	if callerTenantID != "" {
+	// A root caller has fleet-wide reach; anyone else is confined (Issue #4665).
+	callerTenantID := callerTenantFilter(r.Context())
+	if callerTenantID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		tenantMatch := stewardInfo.TenantID == callerTenantID ||
 			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
 		if !tenantMatch {
@@ -1530,9 +1519,9 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	info, exists := s.controllerService.GetStewardInfo(stewardID)
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := ""
 		if exists {
 			stewardTenant = info.TenantID
@@ -1737,14 +1726,40 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 	// Extract the caller's principal and scope from context once so they are available
 	// throughout authorization, audit, and the success path.
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerTenantID, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenantID := callerTenantFilter(r.Context())
 
 	// Dual-admin authorization (Issue #2342).
-	// An unscoped (root) admin (callerTenantID == "") is always permitted; the move is
-	// recorded as a privileged cross-tenant action. A scoped admin must have scope that is
-	// an ancestor of (or equal to) BOTH source AND destination via the anchored-prefix form.
-	// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
-	if callerTenantID != "" {
+	// An explicitly root caller (callerTenantID == "") may move across tenants — the move
+	// is recorded as a privileged cross-tenant action — but both the source and the
+	// destination tenant must pass its tenant decision, so a root caller subject to the
+	// ADR-025 boundary needs a crossing for each tenant below root it touches (Issue
+	// #4665). A scoped admin must have scope that is an ancestor of (or equal to) BOTH
+	// source AND destination via the anchored-prefix form. The "/" separator boundary
+	// prevents "tenant-a" from matching "tenant-abc".
+	if callerTenantID == "" { //architecture:allow-root-scope -- an explicitly root caller: both tenants pass tenantAccessForScope here
+		for _, tenant := range []string{oldTenantID, newTenantID} {
+			access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenant, "POST /api/v1/stewards/{id}/move")
+			if access == tenantAuthAllowed {
+				continue
+			}
+			reason := "tenant_outside_boundary"
+			if access == tenantAuthNeedsCrossing {
+				reason = "tenant_crossing_required"
+			}
+			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+				business.AuditEventSecurityEvent, "steward_move",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{
+					"decision": "denied",
+					"reason":   reason,
+				})
+			if !s.writeTenantCrossingIfNeeded(w, access, tenant) {
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			}
+			return
+		}
+	}
+	if callerTenantID != "" { //architecture:allow-root-scope -- tenant-scoped callers: source and destination must both be in the caller subtree
 		sourceInScope := oldTenantID == callerTenantID || strings.HasPrefix(oldTenantID, callerTenantID+"/")
 		destInScope := newTenantID == callerTenantID || strings.HasPrefix(newTenantID, callerTenantID+"/")
 		if !sourceInScope || !destInScope {
@@ -1892,7 +1907,7 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		business.AuditResultSuccess, business.AuditSeverityHigh,
 		map[string]interface{}{
 			"decision":                "approved",
-			"privileged_cross_tenant": callerTenantID == "",
+			"privileged_cross_tenant": callerTenantID == "", //architecture:allow-root-scope -- audit detail, not an access decision
 		})
 
 	s.writeSuccessResponse(w, map[string]any{
@@ -1972,10 +1987,11 @@ func (s *Server) handleGetEffectiveConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Extract tenant from context or use default
-	tenantID := "default"
-	if tid, ok := r.Context().Value(ctxkeys.TenantID).(string); ok && tid != "" {
-		tenantID = tid
+	// The config lives under the steward's own tenant (Issue #1572), which the
+	// caller must be authorized for (Issue #4665).
+	tenantID, ok := s.authorizeStewardTenantLenient(w, r, stewardID, "GET /api/v1/stewards/{id}/config/effective")
+	if !ok {
+		return
 	}
 
 	// Get effective configuration from the V2 configuration service (durable storage)

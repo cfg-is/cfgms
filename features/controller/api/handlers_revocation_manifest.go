@@ -13,7 +13,6 @@ import (
 
 	"github.com/cfgis/cfgms/features/config/signature"
 	"github.com/cfgis/cfgms/pkg/cert"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
@@ -308,8 +307,8 @@ func (s *Server) webAuthnRelyingPartyBinding() *WebAuthnRelyingParty {
 func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Request) {
 	// Authorization before resource state: a scoped caller learns nothing about
 	// controller configuration from this endpoint.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if callerTenant != "" {
+	callerTenant := callerTenantFilter(r.Context())
+	if callerTenant != "" { //architecture:allow-root-scope -- read of the revocation manifest; root receives the fleet-wide manifest
 		s.logger.Warn("Denied tenant-scoped access to fleet-wide revocation manifest",
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))
 		s.writeErrorResponse(w, http.StatusForbidden,
@@ -445,8 +444,9 @@ func (s *Server) stewardTenantFromPeerCertificate(r *http.Request) (tenantID str
 // the first place.
 //
 // The rule is fail-closed on every unset tenant, deliberately: an entry with
-// TenantID == "" and RootScope == false is a reachable account state
-// (handleCreateAccount accepts root_scope:false with no tenant_id), and treating that
+// TenantID == "" and RootScope == false can still come from an account record written
+// before Issue #4665 (handleCreateAccount then accepted root_scope:false with no
+// tenant_id; it now assigns the caller's own tenant), and treating that
 // unset tenant as "unrestricted" — which is what the general-purpose
 // isWithinTenantScope("") does for an *mTLS admin caller* — would disclose that entry's
 // credential ID, public key and existence to every steward in the fleet. The unset
@@ -488,7 +488,7 @@ func webauthnCredentialAuthorizedForSteward(credential AuthorizedWebAuthnCredent
 	if credential.TenantID == "" || stewardTenant == "" {
 		return false
 	}
-	return isWithinTenantScope(credential.TenantID, stewardTenant)
+	return isWithinTenantScope(credential.TenantID, stewardTenant) //architecture:allow-root-scope -- compares a roster entry with a steward, not a caller
 }
 
 // handleGetStewardRevocationManifest handles GET /api/v1/public/steward-revocation-manifest

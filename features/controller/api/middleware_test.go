@@ -1620,7 +1620,7 @@ func TestWebSessionCookie_CoexistenceMatrix(t *testing.T) {
 	t.Cleanup(bearerStore.Close)
 	bearerMgr := session.NewManager(bearerCfg, bearerStore, time.Now)
 	srv.SetSessionManager(bearerMgr)
-	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", "")
+	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", testRootTenantID)
 	require.NoError(t, err)
 
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1701,7 +1701,7 @@ func TestWebSessionCookie_BearerPathUnchanged_Regression(t *testing.T) {
 	bearerMgr := session.NewManager(bearerCfg, bearerStore, time.Now)
 	srv.SetSessionManager(bearerMgr)
 
-	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", "")
+	_, bearerToken, err := bearerMgr.Issue(context.Background(), "admin", "cfg-cli", testRootTenantID)
 	require.NoError(t, err)
 
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1903,21 +1903,21 @@ func TestBearerSession_RootScopedPropagatedToPrincipal(t *testing.T) {
 
 	t.Run("root-scoped session yields RootScoped principal", func(t *testing.T) {
 		principal := captureBearerPrincipal(t, func(mgr session.Manager) string {
-			_, token, err := mgr.IssueRootScoped(context.Background(), "root-operator-1", "cfg-cli")
+			_, token, err := mgr.IssueRootScoped(context.Background(), "root-operator-1", "cfg-cli", testRootTenantID)
 			require.NoError(t, err)
 			return token
 		})
 
 		assert.True(t, principal.RootScoped,
 			"a session issued via IssueRootScoped must produce a RootScoped Principal")
-		assert.Equal(t, "", principal.TenantID,
-			"a root-scoped session stays unscoped — RootScoped must not synthesise a TenantID")
+		assert.Equal(t, testRootTenantID, principal.TenantID,
+			"a root-scoped session is bound to the deployment's root tenant (Issue #4665)")
 		assert.Equal(t, "root-operator-1", principal.ID)
 	})
 
 	t.Run("ordinary unscoped session is not RootScoped", func(t *testing.T) {
 		principal := captureBearerPrincipal(t, func(mgr session.Manager) string {
-			_, token, err := mgr.Issue(context.Background(), "admin-1", "cfg-cli", "")
+			_, token, err := mgr.Issue(context.Background(), "admin-1", "cfg-cli", testRootTenantID)
 			require.NoError(t, err)
 			return token
 		})
@@ -2436,9 +2436,11 @@ func TestBearerSession_TenantScoped_GlobalScopeFalse(t *testing.T) {
 	assert.Equal(t, "msp-a", capturedPrincipal.TenantID)
 }
 
-// TestBearerSession_Unscoped_GlobalScopeTrue verifies that a cfg-CLI session with no
-// tenant scope (TenantID=="") still receives cross-tenant visibility (GlobalScope==true),
-// so existing platform-admin CLI workflows do not regress after Issue #3194.
+// TestBearerSession_Unscoped_GlobalScopeTrue verifies that an unbound cfg-CLI session
+// minted for a root admin — bound to the deployment's root tenant — receives
+// cross-tenant visibility (GlobalScope==true, root TenantScope), so platform-admin
+// CLI workflows do not regress (Issue #3194), and that the pre-#4665 form, an
+// unbound session with an EMPTY tenant, is refused rather than read as root.
 func TestBearerSession_Unscoped_GlobalScopeTrue(t *testing.T) {
 	cfg := session.DefaultConfig()
 	store := session.NewMemStore(cfg, time.Now)
@@ -2448,12 +2450,14 @@ func TestBearerSession_Unscoped_GlobalScopeTrue(t *testing.T) {
 	srv := setupTestServer(t)
 	srv.SetSessionManager(mgr)
 
-	_, token, err := mgr.Issue(context.Background(), "platform-admin", "cfg-cli", "")
+	_, token, err := mgr.Issue(context.Background(), "platform-admin", "cfg-cli", testRootTenantID)
 	require.NoError(t, err)
 
 	var capturedPrincipal *Principal
+	var capturedScope ctxkeys.TenantScope
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPrincipal, _ = r.Context().Value(principalContextKey).(*Principal)
+		capturedScope, _ = r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -2465,8 +2469,19 @@ func TestBearerSession_Unscoped_GlobalScopeTrue(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedPrincipal)
 	assert.True(t, capturedPrincipal.GlobalScope,
-		"cfg-CLI session with empty TenantID (platform admin) must yield GlobalScope=true (Issue #3194 regression guard)")
-	assert.Empty(t, capturedPrincipal.TenantID)
+		"a root admin's cfg-CLI session must yield GlobalScope=true (Issue #3194 regression guard)")
+	assert.True(t, capturedScope.IsRoot(), "and a root TenantScope")
+	assert.Equal(t, testRootTenantID, capturedPrincipal.TenantID, "bound to the root tenant (Issue #4665)")
+
+	// The pre-#4665 form: an unbound session with an empty tenant is refused.
+	_, legacyToken, err := mgr.Issue(context.Background(), "platform-admin", "cfg-cli", "")
+	require.NoError(t, err)
+	legacyReq := httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil)
+	legacyReq.Header.Set("Authorization", "Bearer "+legacyToken)
+	legacyRec := httptest.NewRecorder()
+	handler.ServeHTTP(legacyRec, legacyReq)
+	assert.Equal(t, http.StatusUnauthorized, legacyRec.Code, "an empty tenant must never be read as root")
+	assert.Contains(t, legacyRec.Body.String(), "SESSION_SCOPE_INVALID")
 }
 
 // TestBearerSession_TenantScoped_CrossTenantAccessDenied verifies end-to-end that the
@@ -2677,8 +2692,9 @@ func TestBearerSession_BoundDisabledAccount_Returns401Revoked(t *testing.T) {
 }
 
 // TestBearerSession_NoAccountFound_PreservesImplicitAdmin verifies that a session
-// whose PrincipalID matches no account (e.g. a certificate-derived CLI session)
-// sets ImplicitAdmin: true and TenantID from the session (ADR-025 Amendment 3).
+// whose PrincipalID matches no account (a certificate-derived CLI session, bound to
+// the root tenant) sets ImplicitAdmin: true and carries the root tenant (ADR-025
+// Amendment 3, Issue #4665).
 func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
 	cfg := session.DefaultConfig()
 	store := session.NewMemStore(cfg, time.Now)
@@ -2689,7 +2705,7 @@ func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
 	srv.SetSessionManager(mgr)
 
 	// No account cached — simulates a session issued from an mTLS admin cert path.
-	token := setupBearerSession(t, mgr, "cert-admin-no-account", "")
+	token := setupBearerSession(t, mgr, "cert-admin-no-account", testRootTenantID)
 
 	var capturedPrincipal *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2708,8 +2724,8 @@ func TestBearerSession_NoAccountFound_PreservesImplicitAdmin(t *testing.T) {
 		"no-account-found fallback must set ImplicitAdmin: true (ADR-025 Amendment 3)")
 	assert.NotNil(t, capturedPrincipal.Permissions,
 		"Permissions must not be nil — the nil-sentinel is replaced by ImplicitAdmin")
-	assert.Empty(t, capturedPrincipal.TenantID,
-		"no-account-found fallback must use the session's TenantID (empty for an unscoped session)")
+	assert.Equal(t, testRootTenantID, capturedPrincipal.TenantID,
+		"no-account-found fallback carries the root tenant the session is bound to")
 }
 
 // TestBearerSession_BoundRootScopeAccount_IsImplicitAdmin verifies that a session
@@ -2912,7 +2928,7 @@ func TestResponseEncodeFailuresAreLogged(t *testing.T) {
 
 		// steward:decommission requires AssuranceStrong; a CLI session is AssuranceBasic,
 		// so requirePermission answers with the step-up challenge body.
-		token := setupBearerSession(t, mgr, "stepup-encode-admin", "")
+		token := setupBearerSession(t, mgr, "stepup-encode-admin", testRootTenantID)
 		handler := srv.authenticationMiddleware(
 			srv.requirePermission("steward", "decommission")(
 				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -3001,10 +3017,10 @@ func TestExtractAdminPrincipal_BoundAccount_CrossProduct(t *testing.T) {
 			accountTenantID:    "",
 			accountPerms:       nil,
 			certHasRootMarker:  false,
-			wantGlobalScope:    true,  // from account.RootScope
-			wantRootScoped:     false, // from cert (no marker)
-			wantTenantID:       "",
-			wantPermissionsNil: true, // nil for root-scope accounts (ImplicitAdmin gate)
+			wantGlobalScope:    true,             // from account.RootScope
+			wantRootScoped:     false,            // from cert (no marker)
+			wantTenantID:       testRootTenantID, // bound to the root tenant (Issue #4665)
+			wantPermissionsNil: true,             // nil for root-scope accounts (ImplicitAdmin gate)
 			wantImplicitAdmin:  true,
 		},
 		{
@@ -3016,7 +3032,7 @@ func TestExtractAdminPrincipal_BoundAccount_CrossProduct(t *testing.T) {
 			certHasRootMarker:  true,
 			wantGlobalScope:    true,
 			wantRootScoped:     true,
-			wantTenantID:       "",
+			wantTenantID:       testRootTenantID, // bound to the root tenant (Issue #4665)
 			wantPermissionsNil: true,
 			wantImplicitAdmin:  true,
 		},
@@ -3089,7 +3105,7 @@ func TestExtractAdminPrincipal_Unbound_Bootstrap(t *testing.T) {
 	require.NotNil(t, p)
 	assert.Equal(t, "test-admin", p.ID, "bootstrap fallback: ID must be the cert CN")
 	assert.True(t, p.GlobalScope)
-	assert.Equal(t, "", p.TenantID)
+	assert.Equal(t, testRootTenantID, p.TenantID, "the bootstrap admin is bound to the root tenant (Issue #4665)")
 	assert.True(t, p.ImplicitAdmin)
 }
 
@@ -3298,25 +3314,25 @@ func TestIsAuthorizedForTenant(t *testing.T) {
 
 	t.Run("unset_scope_denies", func(t *testing.T) {
 		var unset ctxkeys.TenantScope
-		assert.False(t, srv.isAuthorizedForTenant(unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), unset, "root/msp-a", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("root_scope_allows", func(t *testing.T) {
 		root := ctxkeys.NewRootScope()
-		assert.True(t, srv.isAuthorizedForTenant(root, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(root, "", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), root, "", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("tenant_scope_allows_own_subtree", func(t *testing.T) {
 		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
-		assert.True(t, srv.isAuthorizedForTenant(scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.True(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-a/client-1", "GET /api/v1/stewards/{id}"))
 	})
 
 	t.Run("tenant_scope_refused_sibling_subtree", func(t *testing.T) {
 		scope := ctxkeys.NewTenantScope("root/msp-a")
-		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
-		assert.False(t, srv.isAuthorizedForTenant(scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-b", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), scope, "root/msp-ab", "GET /api/v1/stewards/{id}"),
 			"trailing-separator guard: msp-a must not match msp-ab")
 	})
 
@@ -3328,7 +3344,7 @@ func TestIsAuthorizedForTenant(t *testing.T) {
 		// unchanged for its existing callers), but a TenantScope must fail
 		// closed instead of reintroducing that ambiguity through Path().
 		degenerate := ctxkeys.NewTenantScope("")
-		assert.False(t, srv.isAuthorizedForTenant(degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
+		assert.False(t, srv.isAuthorizedForTenant(context.Background(), degenerate, "root/msp-a", "GET /api/v1/stewards/{id}"))
 	})
 }
 
@@ -3938,11 +3954,13 @@ func TestWebSessionCookie_RootScopeMarker_RemovedWhenAccountFlagCleared(t *testi
 	require.NotNil(t, captured)
 	require.True(t, captured.RootScoped, "precondition: the first request must carry the marker")
 
-	// Administratively clear the account's RootScope flag — no session mutation at all.
+	// Administratively clear the account's RootScope flag, demoting it to a tenant
+	// account — no session mutation at all. (An account left with neither root scope
+	// nor a tenant is refused outright, Issue #4665.)
 	srv.cacheAccount(&account{
 		ID:        "web-root-op-cleared",
 		Username:  "web-root-op-cleared",
-		TenantID:  "",
+		TenantID:  "tenant-a",
 		RootScope: false,
 	})
 
@@ -4008,7 +4026,7 @@ func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
 		p := server.extractAdminPrincipal(req)
 		require.NotNil(t, p)
 		assert.True(t, p.RootScoped, "a root-scope-marked certificate must still derive RootScoped from the extension")
-		assert.Equal(t, "", p.TenantID)
+		assert.Equal(t, testRootTenantID, p.TenantID, "a root admin is bound to the root tenant (Issue #4665)")
 		assert.NotEmpty(t, p.CertSerial)
 	})
 
@@ -4019,7 +4037,7 @@ func TestCertificateAuthPath_UnchangedByAmendment4(t *testing.T) {
 		p := server.extractAdminPrincipal(req)
 		require.NotNil(t, p)
 		assert.False(t, p.RootScoped, "an unmarked admin certificate must still derive RootScoped=false")
-		assert.Equal(t, "", p.TenantID)
+		assert.Equal(t, testRootTenantID, p.TenantID, "the bootstrap admin is bound to the root tenant (Issue #4665)")
 		assert.True(t, p.ImplicitAdmin, "the unbound bootstrap-fallback admin grant must be unaffected")
 	})
 

@@ -7,8 +7,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
-
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -61,7 +59,7 @@ func (s *Server) fleetRecords(ctx context.Context, callerTenant string) (map[str
 	}
 	out := make(map[string]*business.StewardRecord, len(records))
 	for _, rec := range records {
-		if rec == nil || !isWithinTenantScope(callerTenant, rec.TenantID) {
+		if rec == nil || !isWithinTenantScope(callerTenant, rec.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 			continue
 		}
 		out[rec.ID] = rec
@@ -99,8 +97,8 @@ func (s *Server) durableStewardRecord(ctx context.Context, stewardID string) *bu
 // node genuinely has no session with it. What it must NOT do is 404, which is
 // what made a steward attached to a peer look non-existent (Issue #3480).
 func (s *Server) writeStewardFromDurableRecord(w http.ResponseWriter, r *http.Request, rec *business.StewardRecord) {
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
-	if !isWithinTenantScope(callerTenant, rec.TenantID) {
+	callerTenant := callerTenantFilter(r.Context())
+	if !isWithinTenantScope(callerTenant, rec.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 rather than 403: never disclose existence across tenants.
 		s.logger.Info("Cross-tenant steward get refused (durable record)",
 			"steward_tenant", logging.SanitizeLogValue(rec.TenantID),

@@ -486,9 +486,9 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		assert.Empty(t, resp.ByTenant)
 	})
 
-	// Root/unscoped callers see all tenants' stewards; compliance buckets derive
-	// from drift signal, not liveness. Calling the handler directly to inject an
-	// empty-tenant context (root/admin — no TenantID in context).
+	// Root callers see all tenants' stewards; compliance buckets derive from drift
+	// signal, not liveness. Calling the handler directly with an explicit root
+	// scope (Issue #4665: a context with no caller at all is refused, not root).
 	t.Run("root caller sees drift-based compliance counts", func(t *testing.T) {
 		server, sm := setupComplianceTestServer(t)
 
@@ -499,7 +499,7 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		// s1 has critical drift; s2 and s3 have no DNA history → compliant.
 		storeDNAPair(t, sm, "s1", "security:firewall_rules", "allow-all", "deny-all")
 
-		req := httptest.NewRequest("GET", "/api/v1/compliance/summary", nil)
+		req := withTenant(httptest.NewRequest("GET", "/api/v1/compliance/summary", nil), "")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 
@@ -542,7 +542,7 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 		require.NoError(t, server.controllerService.RegisterSteward("s1", "tenant-1", "addr-1", "online"))
 		require.NoError(t, server.controllerService.RegisterSteward("s2", "tenant-2", "addr-2", "online"))
 
-		req := httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=tenant-1", nil)
+		req := withTenant(httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=tenant-1", nil), "")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 
@@ -561,7 +561,7 @@ func TestHandleGetComplianceSummary(t *testing.T) {
 
 		require.NoError(t, server.controllerService.RegisterSteward("s1", "tenant-1", "addr-1", "online"))
 
-		req := httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=nonexistent", nil)
+		req := withTenant(httptest.NewRequest("GET", "/api/v1/compliance/summary?tenant_id=nonexistent", nil), "")
 		rec := httptest.NewRecorder()
 		server.handleGetComplianceSummary(rec, req)
 

@@ -183,9 +183,11 @@ func (s *Server) resolveAccountForCredentials(w http.ResponseWriter, r *http.Req
 	// found and out-of-scope return the same response so this surface cannot be used
 	// to probe for account existence across tenants.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, acct.TenantID, "/api/v1/accounts/{username}/webauthn/*") {
-		s.writeErrorResponse(w, http.StatusNotFound,
-			"Account not found", "ACCOUNT_NOT_FOUND")
+	if access := s.tenantAccessForScope(r.Context(), scope, acct.TenantID, "/api/v1/accounts/{username}/webauthn/*"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusNotFound,
+				"Account not found", "ACCOUNT_NOT_FOUND")
+		}
 		return nil, nil, false
 	}
 	return acct, principal, true

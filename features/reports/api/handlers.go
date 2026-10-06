@@ -136,7 +136,7 @@ func (h *Handler) generateReport(w http.ResponseWriter, r *http.Request) {
 	// DeviceIDs are authorized against that tenant before reaching the engine.
 	// Without this, generate would bypass the scoping enforced on the GET
 	// endpoints, since the exported report carries per-device rows.
-	if callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string); callerTenant != "" {
+	if callerTenant := reportCallerTenant(r.Context()); callerTenant != "" {
 		req.TenantIDs = []string{callerTenant}
 	}
 	if _, err := h.enforceDeviceTenant(r.Context(), req.DeviceIDs); err != nil {
@@ -671,7 +671,7 @@ func (h *Handler) scopedDeviceIDs(r *http.Request) ([]string, error) {
 // so device IDs are the actual cross-tenant selector and must be authorized
 // here, at the boundary, before they reach the engine.
 func (h *Handler) enforceDeviceTenant(ctx context.Context, deviceIDs []string) ([]string, error) {
-	callerTenant, _ := ctx.Value(ctxkeys.TenantID).(string)
+	callerTenant := reportCallerTenant(ctx)
 	if callerTenant == "" || len(deviceIDs) == 0 {
 		// Root/unscoped caller, or no device selector to authorize.
 		return deviceIDs, nil
@@ -715,7 +715,7 @@ func (h *Handler) parseTenantIDs(r *http.Request) []string {
 	// A tenant-scoped caller may only see their own tenant's data. The caller's
 	// tenant is authoritative; any query param is ignored to prevent cross-tenant
 	// data access. Root/unscoped callers retain query-param-driven filtering.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := reportCallerTenant(r.Context())
 	if callerTenant != "" {
 		return []string{callerTenant}
 	}
@@ -770,4 +770,25 @@ func (h *Handler) writeError(w http.ResponseWriter, status int, message string, 
 	}
 
 	h.writeJSON(w, status, response)
+}
+
+// reportNoTenantScope is what reportCallerTenant returns for a caller without a
+// usable tenant scope: not a valid tenant ID, so it matches no data.
+const reportNoTenantScope = "!no-tenant-scope"
+
+// reportCallerTenant is the caller's tenant restriction for reports (Issue
+// #4665): "" — no restriction — only for a root-scoped or system-internal
+// context (ctxkeys.TenantRestriction), the caller's tenant otherwise, and
+// reportNoTenantScope for a caller with no usable scope. An empty tenant ID is
+// never read as root.
+func reportCallerTenant(ctx context.Context) string {
+	tenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	switch {
+	case !ok:
+		return reportNoTenantScope
+	case unrestricted:
+		return ""
+	default:
+		return tenant
+	}
 }

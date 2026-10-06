@@ -179,8 +179,10 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 	// tenant) must be refused, not treated as unrestricted the way an empty
 	// callerTenant string was.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/approve") {
-		http.Error(w, "pending registration not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/approve"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+		}
 		return
 	}
 	if err := s.pendingStore.UpdateStatus(r.Context(), pendingID, business.PendingRegistrationStatusApproved); err != nil {
@@ -224,8 +226,10 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 	// Issue #4336: see handleApproveRegistration's identical comment on why this
 	// reads ctxkeys.TenantScope directly instead of callerTenantID/isWithinTenantScope.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if !s.isAuthorizedForTenant(scope, entry.TenantID, "POST /api/v1/registration/{id}/deny") {
-		http.Error(w, "pending registration not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/deny"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+		}
 		return
 	}
 	// The deny reason is optional, so an absent body is not an error. A body that
@@ -616,7 +620,7 @@ func (s *Server) buildClaimResponse(ctx context.Context, entry *business.Pending
 func (s *Server) tenantListFilterForScope(r *http.Request) (tenantFilter string, ok bool) {
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
 	switch {
-	case scope.IsRoot():
+	case scope.IsRoot(): //architecture:allow-root-scope -- list breadth; the bulk approvals apply tenantAccessFilter per entry
 		return "", true
 	case scope.IsTenant() && scope.Path() != "":
 		return scope.Path(), true
@@ -652,9 +656,13 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Bulk: entries the caller may not act on — for a root caller subject to the
+	// ADR-025 boundary, a tenant below root it holds no crossing for — are skipped
+	// (Issue #4665).
+	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-all")
 	approved := 0
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending {
+		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) {
 			continue
 		}
 		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
@@ -708,9 +716,11 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bulk: entries the caller may not act on are skipped (Issue #4665).
+	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-by-cidr")
 	approved := 0
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending {
+		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) {
 			continue
 		}
 		ip := net.ParseIP(e.SourceIP)
@@ -777,10 +787,13 @@ func (s *Server) handleApproveByCIDRPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// The preview shows exactly what approve-by-cidr would approve, so it applies
+	// the same per-entry decision (Issue #4665).
+	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-by-cidr")
 	pendingIDs := make([]string, 0)
 	sourceIPs := make([]string, 0)
 	for _, e := range entries {
-		if e.Status != business.PendingRegistrationStatusPending {
+		if e.Status != business.PendingRegistrationStatusPending || !mayApprove(e.TenantID) {
 			continue
 		}
 		ip := net.ParseIP(e.SourceIP)

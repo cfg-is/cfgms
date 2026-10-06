@@ -1403,13 +1403,14 @@ func TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400(t *tes
 }
 
 // TestHandleProvisionCertificate_ExplicitCommonName_Returns201 verifies an explicit
-// common_name is used instead of the steward_id default.
+// common_name is used instead of the steward_id default, while the organization is
+// always the steward certificate organization (Issue #4665).
 func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) {
 	server, certMgr, _ := setupProvisionTestServer(t)
 	peer := newAdminPeerCert(t, certMgr)
 
 	rec := postProvision(server, peer,
-		`{"steward_id":"steward-prov-02","common_name":"steward-prov-02.example.com","organization":"Example Org"}`)
+		`{"steward_id":"steward-prov-02","common_name":"steward-prov-02.example.com"}`)
 
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
@@ -1421,7 +1422,7 @@ func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) 
 	issued, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
 	require.NoError(t, err)
 	assert.Equal(t, "steward-prov-02.example.com", issued.Subject.CommonName)
-	assert.Contains(t, issued.Subject.Organization, "Example Org")
+	assert.Equal(t, []string{internaldelivery.StewardCertOrganization}, issued.Subject.Organization)
 }
 
 // TestHandleProvisionCertificate_ProvisioningFailure_Returns500 verifies that a real
@@ -2150,7 +2151,7 @@ func TestHandleRevokeCertificate_TenantScope_SiblingTenant_Returns404_AndDoesNot
 	// Inject a Strong-assurance principal scoped to client-1 directly into the
 	// context. We call the handler method directly (bypassing requirePermission)
 	// because certificate:revoke is AssuranceStrong and no API key can satisfy that.
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx := withCallerTenant(context.Background(), "client-1")
 	ctx = context.WithValue(ctx, principalContextKey, &Principal{
 		ID:        "scoped-admin",
 		Name:      "mtls-cert:scoped-admin",
@@ -2195,7 +2196,7 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, "client-1")
+	ctx := withCallerTenant(context.Background(), "client-1")
 	ctx = context.WithValue(ctx, principalContextKey, &Principal{
 		ID:        "scoped-admin",
 		Name:      "mtls-cert:scoped-admin",
@@ -2219,13 +2220,16 @@ func TestHandleRevokeCertificate_TenantScope_OwnTenant_Succeeds(t *testing.T) {
 
 // scopedRevokeContext builds a Strong-assurance principal context scoped to the
 // given tenant. An empty tenant models an unscoped mTLS admin.
+// An empty tenantID builds a root admin caller — explicitly, with GlobalScope and
+// a root TenantScope as the middleware gives one (Issue #4665).
 func scopedRevokeContext(tenantID string) context.Context {
-	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	ctx := withCallerTenant(context.Background(), tenantID)
 	return context.WithValue(ctx, principalContextKey, &Principal{
-		ID:        "revoke-caller",
-		Name:      "mtls-cert:revoke-caller",
-		Assurance: session.AssuranceStrong,
-		TenantID:  tenantID,
+		ID:          "revoke-caller",
+		Name:        "mtls-cert:revoke-caller",
+		Assurance:   session.AssuranceStrong,
+		TenantID:    tenantID,
+		GlobalScope: tenantID == "",
 	})
 }
 

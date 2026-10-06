@@ -18,7 +18,6 @@ import (
 	"github.com/cfgis/cfgms/api/proto/common"
 	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/features/rbac"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // createSubjectForTenant creates a subject in a specific tenant via the RBAC service.
@@ -38,9 +37,7 @@ func createSubjectForTenant(t *testing.T, server *Server, tenantID, subjectID, n
 // caller tenant and subject ID via context and mux vars.
 func callHandleGetSubjectRoles(server *Server, callerTenantID, subjectID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/subjects/"+subjectID+"/roles", nil)
-	if callerTenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), callerTenantID))
 	req = mux.SetURLVars(req, map[string]string{"id": subjectID})
 	rec := httptest.NewRecorder()
 	server.handleGetSubjectRoles(rec, req)
@@ -50,9 +47,7 @@ func callHandleGetSubjectRoles(server *Server, callerTenantID, subjectID string)
 // callHandleAssignSubjectRole calls handleAssignSubjectRole directly.
 func callHandleAssignSubjectRole(server *Server, callerTenantID, subjectID, roleID string) *httptest.ResponseRecorder {
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: assign subject role for rbac subjects handler test")
-	if callerTenantID != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenantID)
-	}
+	ctx = withCallerTenant(ctx, callerTenantID)
 	body, _ := json.Marshal(RoleAssignmentRequest{RoleID: roleID})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rbac/subjects/"+subjectID+"/roles", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -67,9 +62,7 @@ func callHandleAssignSubjectRole(server *Server, callerTenantID, subjectID, role
 // callHandleRevokeSubjectRole calls handleRevokeSubjectRole directly.
 func callHandleRevokeSubjectRole(server *Server, callerTenantID, subjectID, roleID string) *httptest.ResponseRecorder {
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: revoke subject role for rbac subjects handler test")
-	if callerTenantID != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenantID)
-	}
+	ctx = withCallerTenant(ctx, callerTenantID)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/rbac/subjects/"+subjectID+"/roles/"+roleID, nil)
 	req.Header.Set("X-Justification", "test: revoke subject role for rbac subjects handler test")
 	req = req.WithContext(ctx)
@@ -279,7 +272,7 @@ func TestHandleAssignSubjectRole_MissingRoleID(t *testing.T) {
 	createSubjectForTenant(t, server, "tenant-val", "subject-val", "Validation Subject")
 
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: missing role id validation")
-	ctx = context.WithValue(ctx, ctxkeys.TenantID, "tenant-val")
+	ctx = withCallerTenant(ctx, "tenant-val")
 	body, _ := json.Marshal(RoleAssignmentRequest{RoleID: ""})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rbac/subjects/subject-val/roles", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

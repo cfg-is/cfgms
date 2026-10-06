@@ -94,6 +94,12 @@ func (h *ConfigHandler) HandleGRPC(ctx context.Context, req *transportpb.ConfigS
 	// request context before calling GetConfiguration. The mTLS data-plane sync path
 	// carries no tenant context value, so without this injection extractTenantID(ctx)
 	// returns "default" and the config lookup scopes to the wrong tenant. (Issue #1720)
+	//
+	// The caller here is a steward proven by its certificate to be stewardID, not a
+	// tenant principal, so the context is marked system-internal (Issue #4665); the
+	// steward's own tenant, injected below whenever the registry knows it, confines
+	// every tenant-guarded read to that tenant.
+	ctx = ctxkeys.WithSystem(ctx)
 	if h.controllerSvc != nil {
 		if info, ok := h.controllerSvc.GetStewardInfo(stewardID); ok && info.TenantID != "" {
 			ctx = context.WithValue(ctx, ctxkeys.TenantID, info.TenantID)

@@ -24,9 +24,11 @@ import (
 // The risk this guards is the same shape as pkg/cert's TestSetRootScopeMarker_Architecture:
 // NewRootScope grants unrestricted, cross-tenant access, so an unauthorized caller is a
 // privilege-escalation risk exactly of the kind this story exists to close — a context
-// value that means "root, allow everything" must only ever be produced from a verified
-// admin certificate marker, in one auditable place, not constructed ad hoc wherever a
-// caller happens to want unrestricted access.
+// value that means "root, allow everything" must only ever be produced by the
+// authentication middleware for an authenticated root principal (a verified admin
+// certificate, or a credential bound to a root-scope account — Issue #4665), in one
+// auditable place, not constructed ad hoc wherever a caller happens to want
+// unrestricted access.
 func TestNewRootScope_RestrictedCaller(t *testing.T) {
 	allowList := map[string]bool{
 		// Issue #4316: the authentication middleware constructs root scope only after
@@ -75,7 +77,7 @@ func TestNewRootScope_RestrictedCaller(t *testing.T) {
 
 	assert.Empty(t, violations,
 		"unauthorized production callers of ctxkeys.NewRootScope; "+
-			"add to allow-list only alongside an equivalent verified-certificate check, "+
+			"add to allow-list only alongside an equivalent authenticated-root-principal check, "+
 			"or move the call to an allowed file: %v", violations)
 }
 

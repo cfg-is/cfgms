@@ -167,9 +167,7 @@ func TestServer_RBACSubjectCRUDRoutesDeregistered(t *testing.T) {
 // injecting the caller tenant and role ID via context and mux vars respectively.
 func callHandleGetRole(server *Server, callerTenantID, roleID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/rbac/roles/"+roleID, nil)
-	if callerTenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), callerTenantID))
 	req = mux.SetURLVars(req, map[string]string{"id": roleID})
 	rec := httptest.NewRecorder()
 	server.handleGetRole(rec, req)
@@ -179,9 +177,7 @@ func callHandleGetRole(server *Server, callerTenantID, roleID string) *httptest.
 // callHandleUpdateRole calls handleUpdateRole directly, bypassing the router/middleware.
 func callHandleUpdateRole(server *Server, callerTenantID, roleID string, body []byte) *httptest.ResponseRecorder {
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: update role")
-	if callerTenantID != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenantID)
-	}
+	ctx = withCallerTenant(ctx, callerTenantID)
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/rbac/roles/"+roleID, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(ctx)
@@ -194,9 +190,7 @@ func callHandleUpdateRole(server *Server, callerTenantID, roleID string, body []
 // callHandleDeleteRole calls handleDeleteRole directly, bypassing the router/middleware.
 func callHandleDeleteRole(server *Server, callerTenantID, roleID string) *httptest.ResponseRecorder {
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: delete role")
-	if callerTenantID != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenantID)
-	}
+	ctx = withCallerTenant(ctx, callerTenantID)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/rbac/roles/"+roleID, nil)
 	req = req.WithContext(ctx)
 	req = mux.SetURLVars(req, map[string]string{"id": roleID})
@@ -208,9 +202,7 @@ func callHandleDeleteRole(server *Server, callerTenantID, roleID string) *httpte
 // callHandleCreateRole calls handleCreateRole directly, bypassing the router/middleware.
 func callHandleCreateRole(server *Server, callerTenantID string, body []byte) *httptest.ResponseRecorder {
 	ctx := rbac.WithSensitiveOperationJustification(context.Background(), "test: create role")
-	if callerTenantID != "" {
-		ctx = context.WithValue(ctx, ctxkeys.TenantID, callerTenantID)
-	}
+	ctx = withCallerTenant(ctx, callerTenantID)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/rbac/roles", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = req.WithContext(ctx)
@@ -733,9 +725,7 @@ func unjustifiedRoleRequest(method, target, callerTenantID, roleID string, body 
 		req = httptest.NewRequest(method, target, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if callerTenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, callerTenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), callerTenantID))
 	if roleID != "" {
 		req = mux.SetURLVars(req, map[string]string{"id": roleID})
 	}
@@ -763,9 +753,7 @@ func roleMutationRequest(method, roleID, contextTenantID string, body io.Reader)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if contextTenantID != "" {
-		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantID, contextTenantID))
-	}
+	req = req.WithContext(withCallerTenant(req.Context(), contextTenantID))
 	if roleID != "" {
 		req = mux.SetURLVars(req, map[string]string{"id": roleID})
 	}

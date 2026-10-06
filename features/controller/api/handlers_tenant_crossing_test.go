@@ -356,14 +356,14 @@ func TestExtractAdminPrincipal_RootScopeMarker(t *testing.T) {
 	ordinaryPrincipal := server.extractAdminPrincipal(ordinaryReq)
 	require.NotNil(t, ordinaryPrincipal)
 	assert.False(t, ordinaryPrincipal.RootScoped, "an ordinary admin cert must not be treated as root-scoped")
-	assert.Equal(t, "", ordinaryPrincipal.TenantID)
+	assert.Equal(t, testRootTenantID, ordinaryPrincipal.TenantID, "a root admin is bound to the root tenant (Issue #4665)")
 
 	rootScopedCert := makeRootScopedAdminTestCert(t)
 	rootScopedReq := requestWithTLSCert(http.MethodGet, "/api/v1/tenants/x", rootScopedCert)
 	rootScopedPrincipalGot := server.extractAdminPrincipal(rootScopedReq)
 	require.NotNil(t, rootScopedPrincipalGot)
 	assert.True(t, rootScopedPrincipalGot.RootScoped)
-	assert.Equal(t, "", rootScopedPrincipalGot.TenantID, "RootScoped must not change TenantID's empty-string convention")
+	assert.Equal(t, testRootTenantID, rootScopedPrincipalGot.TenantID, "a root admin is bound to the root tenant regardless of the marker (Issue #4665)")
 }
 
 // makeRootScopedAdminTestCert builds a self-signed cert carrying both the admin marker

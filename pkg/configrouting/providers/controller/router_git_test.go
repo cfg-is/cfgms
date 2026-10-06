@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pkgconfig "github.com/cfgis/cfgms/pkg/config"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsiface "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -158,7 +159,7 @@ func TestNewControllerRouterWithGit_RoutesGitTenantToGitStore(t *testing.T) {
 
 	// Read from git-tenant — must be served from the cloned git repo.
 	gitKey := &cfgconfig.ConfigKey{TenantID: "git-tenant", Namespace: "policies", Name: "baseline"}
-	entry, readErr := router.GetConfig(context.Background(), gitKey)
+	entry, readErr := router.GetConfig(ctxkeys.WithSystem(context.Background()), gitKey)
 	require.NoError(t, readErr, "git-tenant read must succeed")
 	assert.Equal(t, configContent, string(entry.Data), "content must come from the git repo")
 
@@ -168,11 +169,11 @@ func TestNewControllerRouterWithGit_RoutesGitTenantToGitStore(t *testing.T) {
 		Data:   []byte("x: 1\n"),
 		Format: cfgconfig.ConfigFormatYAML,
 	}
-	require.NoError(t, router.StoreConfig(context.Background(), writeEntry),
+	require.NoError(t, router.StoreConfig(ctxkeys.WithSystem(context.Background()), writeEntry),
 		"write must route to controller store regardless of source type")
 
 	// ctrl-tenant (no git source) routes to controller store.
-	_, notFoundErr := router.GetConfig(context.Background(), &cfgconfig.ConfigKey{
+	_, notFoundErr := router.GetConfig(ctxkeys.WithSystem(context.Background()), &cfgconfig.ConfigKey{
 		TenantID: "ctrl-tenant", Namespace: "policies", Name: "baseline",
 	})
 	assert.ErrorIs(t, notFoundErr, cfgconfig.ErrConfigNotFound,
@@ -198,7 +199,7 @@ func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
 		Data:   []byte("fallback: true\n"),
 		Format: cfgconfig.ConfigFormatYAML,
 	}
-	require.NoError(t, controllerStore.StoreConfig(context.Background(), controllerEntry))
+	require.NoError(t, controllerStore.StoreConfig(ctxkeys.WithSystem(context.Background()), controllerEntry))
 
 	// Inject a git source pointing to a non-existent repo to trigger init failure.
 	injectGitSource(router, "git-tenant", pkgconfig.ConfigSourceInfo{
@@ -208,7 +209,7 @@ func TestNewControllerRouterWithGit_FallsBackOnInitFailure(t *testing.T) {
 	})
 
 	// storeForSource must fall back to controller store when git init fails.
-	entry, readErr := router.GetConfig(context.Background(), controllerEntry.Key)
+	entry, readErr := router.GetConfig(ctxkeys.WithSystem(context.Background()), controllerEntry.Key)
 	require.NoError(t, readErr, "fallback to controller store must succeed")
 	assert.Equal(t, controllerEntry.Data, entry.Data, "fallback must return controller store data")
 }
@@ -238,9 +239,9 @@ func TestNewControllerRouterWithGit_GitStoreIsCached(t *testing.T) {
 	key := &cfgconfig.ConfigKey{TenantID: "t1", Namespace: "ns", Name: "cfg"}
 
 	// Two reads must not fail and must not double-clone.
-	_, err = router.GetConfig(context.Background(), key)
+	_, err = router.GetConfig(ctxkeys.WithSystem(context.Background()), key)
 	require.NoError(t, err)
-	_, err = router.GetConfig(context.Background(), key)
+	_, err = router.GetConfig(ctxkeys.WithSystem(context.Background()), key)
 	require.NoError(t, err)
 
 	// Cache must hold exactly one entry for t1.
@@ -259,7 +260,7 @@ func TestStoreForSource_ControllerTypeReturnsControllerStore(t *testing.T) {
 	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), t.TempDir(), logging.NewNoopLogger()).(*controllerRouter)
 	ctrlSource := &pkgconfig.ConfigSourceInfo{Type: pkgconfig.ConfigSourceTypeController}
 
-	store := router.storeForSource(context.Background(), "any-tenant", ctrlSource)
+	store := router.storeForSource(ctxkeys.WithSystem(context.Background()), "any-tenant", ctrlSource)
 	assert.Same(t, cs, store, "controller source must route to controllerStore")
 }
 
@@ -275,7 +276,7 @@ func TestSyncTenantWithRemote_NonGitTenantReturnsEmpty(t *testing.T) {
 
 	router := NewControllerRouterWithGit(cs, ts, newGitRouterSecretStore(nil), t.TempDir(), logging.NewNoopLogger()).(*controllerRouter)
 
-	prevSHA, newSHA, syncErr := router.SyncTenantWithRemote(context.Background(), "ctrl-tenant")
+	prevSHA, newSHA, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "ctrl-tenant")
 	require.NoError(t, syncErr)
 	assert.Empty(t, prevSHA, "non-git tenant must return empty prevSHA")
 	assert.Empty(t, newSHA, "non-git tenant must return empty newSHA")
@@ -305,7 +306,7 @@ func TestSyncTenantWithRemote_GitTenantReturnsSHAs(t *testing.T) {
 	})
 
 	// First call: prevSHA is the initial HEAD (already cloned), newSHA is the same (no new commits yet).
-	prev1, new1, err := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	prev1, new1, err := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, err)
 	assert.Len(t, prev1, 40, "prevSHA must be a 40-char hex SHA")
 	assert.Equal(t, prev1, new1, "prevSHA and newSHA are equal when there are no new commits")
@@ -327,7 +328,7 @@ func TestSyncTenantWithRemote_GitTenantReturnsSHAs(t *testing.T) {
 	require.NoError(t, cloned.Push(&gogit.PushOptions{RemoteName: "origin"}))
 
 	// Second call: prevSHA is the old HEAD, newSHA is the new HEAD after pull.
-	prev2, new2, err := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	prev2, new2, err := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, err)
 	assert.Equal(t, new1, prev2, "prevSHA on second call must equal the newSHA from first call")
 	assert.NotEqual(t, prev2, new2, "newSHA must advance after remote receives a new commit")
@@ -359,7 +360,7 @@ func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) 
 	})
 
 	// Prime the git store so it is cloned.
-	_, _, primeErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	_, _, primeErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, primeErr, "initial sync must succeed")
 
 	// Break the remote by pointing the cached source at a non-existent URL.
@@ -373,7 +374,7 @@ func TestSyncTenantWithRemote_BrokenURLFallsBackToControllerStore(t *testing.T) 
 	// a new GitConfigStore pointing at the broken URL — construction will fail (clone error)
 	// and storeForSource falls back to controllerStore, meaning SyncTenantWithRemote returns ("","",nil).
 	// This is the expected graceful-degradation path.
-	prev, newSHA, syncErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	prev, newSHA, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, syncErr, "broken-URL fallback to controller store must not error")
 	assert.Empty(t, prev)
 	assert.Empty(t, newSHA)
@@ -405,7 +406,7 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 	})
 
 	// Prime the git store — forces a clone and populates gitStoreCache.
-	_, _, primeErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	_, _, primeErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	require.NoError(t, primeErr, "initial sync must succeed")
 
 	// Locate the cloned repo directory and corrupt its remote URL so the next pull fails.
@@ -420,6 +421,6 @@ func TestSyncTenantWithRemote_PullErrorPropagatesFromBrokenRemote(t *testing.T) 
 
 	// SyncTenantWithRemote must propagate the pull error — the cached git store is used
 	// directly (no fallback), so the broken remote surfaces as a returned error.
-	_, _, syncErr := router.SyncTenantWithRemote(context.Background(), "git-tenant")
+	_, _, syncErr := router.SyncTenantWithRemote(ctxkeys.WithSystem(context.Background()), "git-tenant")
 	assert.Error(t, syncErr, "sync must return an error when the cached git store's remote is broken")
 }

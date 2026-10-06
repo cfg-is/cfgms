@@ -72,13 +72,14 @@ type clusterRegistryAdapter struct {
 // invisible here. Now uses ListFleetStewards so peer-node fragments are included.
 func (a *clusterRegistryAdapter) MemberClusters(stewardID string) []string {
 	// Use the fleet-wide source so peer-attached stewards with cluster
-	// membership fragments are included. Pass context.Background() (unscoped)
-	// and apply exact-tenant filtering manually to preserve the prior exact-match
+	// membership fragments are included. Pass a system-internal context
+	// (unscoped, ctxkeys.WithSystem — Issue #4665) and apply exact-tenant
+	// filtering manually to preserve the prior exact-match
 	// scoping behaviour (ListFleetStewards applies subtree scoping, which
 	// would be a wider change than intended for MemberClusters). ListFleetStewards
 	// reads durable storage directly on every call (ADR-031 Decision 3, Issue
 	// #3764), so there is no populate-lag window to degrade around.
-	stewards := a.controllerSvc.ListFleetStewards(context.Background())
+	stewards := a.controllerSvc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 
 	// Resolve the queried steward's own tenant, which scopes the member list.
 	// The node-local registry is checked first: it is the freshest view for a
@@ -433,7 +434,7 @@ func (s *ConfigurationServiceV2) GetConfiguration(ctx context.Context, req *cont
 		// context must match the steward's tenant. The data-plane sync path
 		// (steward authenticated by its mTLS CN) carries no tenant context and
 		// is trusted to resolve to the steward's own tenant. (Issue #1572)
-		if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+		if reqTenant, denied := tenantGuardDenies(ctx, stewardInfo.TenantID); denied {
 			s.logger.Warn("Configuration request cross-tenant access denied",
 				"steward_id", logging.SanitizeLogValue(req.StewardId),
 				"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -617,7 +618,7 @@ func (s *ConfigurationServiceV2) SetConfiguration(ctx context.Context, tenantID,
 func (s *ConfigurationServiceV2) GetEffectiveConfiguration(ctx context.Context, tenantID, stewardID string) (*config.EffectiveConfiguration, error) {
 	if stewardID != "" && s.controllerSvc != nil {
 		if stewardInfo, exists := s.controllerSvc.GetStewardInfo(stewardID); exists {
-			if reqTenant, ok := ctx.Value(ctxkeys.TenantID).(string); ok && reqTenant != "" && reqTenant != stewardInfo.TenantID {
+			if reqTenant, denied := tenantGuardDenies(ctx, stewardInfo.TenantID); denied {
 				s.logger.Warn("Effective configuration request cross-tenant access denied",
 					"steward_id", logging.SanitizeLogValue(stewardID),
 					"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -900,4 +901,21 @@ func (s *ConfigurationServiceV2) convertValidationLevel(level string) controller
 // GetStorageStats returns storage statistics
 func (s *ConfigurationServiceV2) GetStorageStats(ctx context.Context) (*cfgconfig.ConfigStats, error) {
 	return s.configManager.GetConfigurationStats(ctx)
+}
+
+// tenantGuardDenies reports whether the caller in ctx may not act on a steward in
+// stewardTenant (Issue #4665): a root-scoped or system-internal context (the
+// data-plane sync path carries no caller) may; a tenant caller only in its own
+// tenant; a context with no usable scope never. reqTenant names the caller's
+// tenant for logging.
+func tenantGuardDenies(ctx context.Context, stewardTenant string) (reqTenant string, denied bool) {
+	tenant, unrestricted, ok := ctxkeys.TenantRestriction(ctx)
+	switch {
+	case !ok:
+		return "(no tenant scope)", true
+	case unrestricted:
+		return "", false
+	default:
+		return tenant, tenant != stewardTenant
+	}
 }

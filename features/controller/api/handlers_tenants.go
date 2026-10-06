@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/cfgis/cfgms/features/tenant"
-	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -173,17 +172,23 @@ func (s *Server) authorizeTenantAccess(ctx context.Context, principal *Principal
 		certAuthenticated = principal.CertSerial != ""
 	}
 
-	if callerTenant == "" {
+	// A root principal is recognised by its explicit GlobalScope flag; its
+	// TenantID is the deployment's root tenant, never "" (Issue #4665).
+	if principal != nil && principal.GlobalScope {
 		if !rootScoped {
 			if certAuthenticated {
 				return tenantAuthAllowed
 			}
-			// ADR-025 Amendment 4 A4.2: an unscoped, unmarked, non-certificate caller
+			// ADR-025 Amendment 4 A4.2: an unmarked, non-certificate root caller
 			// must fail closed rather than resolve to unrestricted access purely by
 			// omission of the marker.
 			return tenantAuthDenied
 		}
 		return s.authorizeRootScopedTenantAccess(ctx, principalID, resourceTenant)
+	}
+	if callerTenant == "" {
+		// Neither root nor bound to a tenant: no scope at all (Issue #4665).
+		return tenantAuthDenied
 	}
 
 	isAncestor, err := s.tenantManager.IsTenantAncestor(ctx, callerTenant, resourceTenant)
@@ -296,6 +301,12 @@ func (s *Server) isCallerAuthorizedForTenant(ctx context.Context, principal *Pri
 // path forward. "tenant-crossing" is not a session.AssuranceLevel: this does not touch
 // the assurance enum or resolveAssuranceRequirement, only the response shape.
 func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
+	writeTenantCrossingChallenge(w, resourceTenant)
+}
+
+// writeTenantCrossingChallenge is Server.writeTenantCrossingChallenge for handlers
+// that are not *Server (RollbackHandler).
+func writeTenantCrossingChallenge(w http.ResponseWriter, resourceTenant string) {
 	w.Header().Set("WWW-Authenticate", `CFGMS-StepUp realm="cfgms", required="tenant-crossing"`)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
@@ -327,7 +338,7 @@ func (s *Server) writeTenantCrossingChallenge(w http.ResponseWriter, resourceTen
 // keeps handleCreateTenant's guard consistent with every other handler in this file
 // instead of carrying its own, narrower-in-appearance-but-actually-wider fail-open path.
 func principalIsUnrestrictedAdmin(principal *Principal) bool {
-	if principal == nil || principal.TenantID != "" || subjectToTenantCrossingBoundary(principal) {
+	if principal == nil || !principal.GlobalScope || subjectToTenantCrossingBoundary(principal) {
 		return false
 	}
 	return principal.CertSerial != ""
@@ -464,7 +475,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 	// Uses authorizeTenantAccess (ADR-025 Amendment 1 A1.2's ancestry-based check), not the
 	// prefix-based isWithinTenantScope — real tenant IDs are flat, so the prefix match is
 	// dead code against them; see authorizeTenantAccess's doc comment.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	switch s.authorizeTenantAccess(r.Context(), principal, td.ID) {
 	case tenantAuthAllowed:
@@ -489,7 +500,7 @@ func (s *Server) handleGetTenant(w http.ResponseWriter, r *http.Request) {
 // Decision 1) — items it lacks a crossing for are silently omitted, not challenged:
 // a bulk list has no single resource to attach a step-up challenge to.
 func (s *Server) handleListTenants(w http.ResponseWriter, r *http.Request) {
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 
 	all, err := s.tenantManager.ListTenants(r.Context(), &business.TenantFilter{})
@@ -574,7 +585,7 @@ func (s *Server) handleUpdateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 
 	// Fetch the existing tenant to enforce subtree scope before allowing mutation.
@@ -667,7 +678,7 @@ func (s *Server) handleSuspendTenant(w http.ResponseWriter, r *http.Request) {
 	// (it covers every tenant-targeting route); this is the second line of defence for
 	// the destructive mutation, and it keeps the guard attached to the handler for any
 	// future call path that does not run the middleware.
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
@@ -729,7 +740,7 @@ func (s *Server) handleRestoreTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
@@ -787,7 +798,7 @@ func (s *Server) handleRequestTenantDeletion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
@@ -850,7 +861,7 @@ func (s *Server) handleCancelTenantDeletion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
@@ -903,7 +914,7 @@ func (s *Server) handleGetPendingDeletion(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {
@@ -952,7 +963,7 @@ func (s *Server) handleApproveTenantDeletion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	callerTenant, _ := r.Context().Value(ctxkeys.TenantID).(string)
+	callerTenant := callerTenantFilter(r.Context())
 	principal, _ := r.Context().Value(principalContextKey).(*Principal)
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
 	if err != nil {

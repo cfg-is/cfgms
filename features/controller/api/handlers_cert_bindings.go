@@ -224,8 +224,10 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 	// Tenant isolation: reject callers that are outside the account's tenant subtree.
 	// An out-of-subtree caller receives 403 regardless of whether any binding exists —
 	// leaking binding state would create an existence oracle across tenants.
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/bind"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -312,7 +314,7 @@ func (s *Server) handleListCertBindings(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
+	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
 		return
 	}
@@ -394,8 +396,10 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/revoke/{serial}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 
@@ -689,8 +693,10 @@ func (s *Server) handleRotateCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !isWithinTenantScope(s.callerTenantID(r), acct.TenantID) {
-		s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/rotate/{old_serial}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
 		return
 	}
 

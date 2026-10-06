@@ -67,10 +67,11 @@ func (m *manager) Issue(ctx context.Context, principalID, connectionName, tenant
 	return m.issue(ctx, principalID, connectionName, tenantID, false)
 }
 
-// IssueRootScoped mints a new unscoped session marked RootScoped (ADR-025 Amendment 1
-// A1.3). See the Manager interface doc comment for the caller-verification contract.
-func (m *manager) IssueRootScoped(ctx context.Context, principalID, connectionName string) (*Session, string, error) {
-	return m.issue(ctx, principalID, connectionName, "", true)
+// IssueRootScoped mints a new session for tenantID (the deployment's root tenant)
+// marked RootScoped (ADR-025 Amendment 1 A1.3, Issue #4665). See the Manager
+// interface doc comment for the caller-verification contract.
+func (m *manager) IssueRootScoped(ctx context.Context, principalID, connectionName, tenantID string) (*Session, string, error) {
+	return m.issue(ctx, principalID, connectionName, tenantID, true)
 }
 
 func (m *manager) issue(ctx context.Context, principalID, connectionName, tenantID string, rootScoped bool) (*Session, string, error) {

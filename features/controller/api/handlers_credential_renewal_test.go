@@ -168,7 +168,7 @@ func certBindingBySerial(t *testing.T, server *Server, acctUsername, serial stri
 func certifiedRootScopeApprover(id string) *Principal {
 	return &Principal{
 		ID: id, Assurance: session.AssuranceStrong,
-		RootScoped: true, CertSerial: "real-cert-serial-" + id, ImplicitAdmin: true,
+		GlobalScope: true, RootScoped: true, CertSerial: "real-cert-serial-" + id, ImplicitAdmin: true,
 	}
 }
 
@@ -355,13 +355,17 @@ func TestRenewCredential_MarkerSetNeverWidened(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := setupRenewalTestServer(t)
+			// The approver is a certified root-scope principal, subject to the ADR-025
+			// crossing boundary; the request lives in the root tenant so the markers,
+			// not the boundary, decide the outcome (Issue #4665).
+			require.NoError(t, ensureTestRootTenant(context.Background(), server.tenantManager))
 			grant := ApproveCredentialRequestBody{
 				GrantAdminMarker:          tc.admin,
 				GrantPayloadSigningMarker: tc.payloadSigning,
 				GrantRootScopeMarker:      tc.rootScope,
 			}
 			approver := certifiedRootScopeApprover("marker-test-" + tc.slug)
-			fx := issueRenewableCredential(t, server, "renew-marker-tenant-"+tc.slug, "renew-marker-owner-"+tc.slug, grant, approver)
+			fx := issueRenewableCredential(t, server, testRootTenantID, "renew-marker-owner-"+tc.slug, grant, approver)
 
 			presented := withNotAfter(fx.oldCert, time.Now().UTC().Add(10*24*time.Hour))
 			rec, _ := renewCredential(t, server, presented)

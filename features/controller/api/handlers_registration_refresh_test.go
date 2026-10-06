@@ -1481,7 +1481,7 @@ func TestRefresh_EndToEnd_CompleteToMTLSHandshake(t *testing.T) {
 func approveRefreshRequest(pendingID string, principal *Principal) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/stewards/refresh/"+pendingID+"/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"pending_id": pendingID})
-	ctx := context.WithValue(req.Context(), principalContextKey, principal)
+	ctx := context.WithValue(withCallerTenant(req.Context(), principal.TenantID), principalContextKey, principal)
 	return req.WithContext(ctx)
 }
 

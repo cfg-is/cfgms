@@ -436,9 +436,13 @@ func TestApproveCredentialRequest_RootScopeMarker_RequiresCertifiedRootScope(t *
 	})
 
 	t.Run("RootScoped true but no certified serial (e.g. a session field) refused", func(t *testing.T) {
-		lodged := lodgeTestCredentialRequest(t, server, "root-tenant-uncertified")
-		acct := createApprovalTestAccount(t, server, "root-owner-uncertified", "root-tenant-uncertified")
-		approver := &Principal{ID: "uncertified-root", Assurance: session.AssuranceStrong, RootScoped: true, CertSerial: ""}
+		// The approver is subject to the ADR-025 crossing boundary; the request lives
+		// in the root tenant so the marker gate, not the boundary, is what refuses it
+		// (Issue #4665).
+		require.NoError(t, ensureTestRootTenant(context.Background(), server.tenantManager))
+		lodged := lodgeTestCredentialRequest(t, server, testRootTenantID)
+		acct := createApprovalTestAccount(t, server, "root-owner-uncertified", testRootTenantID)
+		approver := &Principal{ID: "uncertified-root", Assurance: session.AssuranceStrong, GlobalScope: true, RootScoped: true, CertSerial: ""}
 
 		rec := approveCredentialRequest(t, server, approver, lodged.RequestID, ApproveCredentialRequestBody{
 			Fingerprint:          lodged.PublicKeyFingerprint,
@@ -449,11 +453,14 @@ func TestApproveCredentialRequest_RootScopeMarker_RequiresCertifiedRootScope(t *
 	})
 
 	t.Run("certified root-scope principal granted", func(t *testing.T) {
-		lodged := lodgeTestCredentialRequest(t, server, "root-tenant-certified")
-		acct := createApprovalTestAccount(t, server, "root-owner-certified", "root-tenant-certified")
+		// The request lives in the root tenant, which a root-scope principal reaches
+		// without a crossing (Issue #4665).
+		require.NoError(t, ensureTestRootTenant(context.Background(), server.tenantManager))
+		lodged := lodgeTestCredentialRequest(t, server, testRootTenantID)
+		acct := createApprovalTestAccount(t, server, "root-owner-certified", testRootTenantID)
 		approver := &Principal{
 			ID: "certified-root", Assurance: session.AssuranceStrong,
-			RootScoped: true, CertSerial: "real-cert-serial-1", ImplicitAdmin: true,
+			GlobalScope: true, RootScoped: true, CertSerial: "real-cert-serial-1", ImplicitAdmin: true,
 		}
 
 		rec := approveCredentialRequest(t, server, approver, lodged.RequestID, ApproveCredentialRequestBody{
@@ -480,7 +487,7 @@ func TestPrincipalHasCertifiedRootScope_RootScopedSessionRefused(t *testing.T) {
 	mgr := session.NewManager(bearerCfg, store, time.Now)
 	srv.SetSessionManager(mgr)
 
-	_, token, err := mgr.IssueRootScoped(context.Background(), "root-cli-op", "cfg-cli")
+	_, token, err := mgr.IssueRootScoped(context.Background(), "root-cli-op", "cfg-cli", testRootTenantID)
 	require.NoError(t, err)
 
 	var captured *Principal
@@ -529,7 +536,7 @@ func TestPrincipalHasCertifiedRootScope_RevokedCertFallsBackToOrdinarySession(t 
 	x509Cert, err := x509.ParseCertificate(certBlock.Bytes)
 	require.NoError(t, err)
 
-	cookie := issueWebSession(t, mgr, "alice", "")
+	cookie := issueWebSession(t, mgr, "alice", "tenant-a")
 
 	var captured *Principal
 	handler := srv.authenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

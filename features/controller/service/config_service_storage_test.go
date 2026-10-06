@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	stewardtypes "github.com/cfgis/cfgms/features/config/stewardtypes"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
 	pkgtesting "github.com/cfgis/cfgms/pkg/testing"
@@ -27,7 +28,7 @@ func createTestConfigStore(t *testing.T) cfgconfig.ConfigStore {
 
 // TestConfigurationStorageMigration tests the Epic 6 compliant storage migration
 func TestConfigurationStorageMigration(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	configStore := createTestConfigStore(t)
 	migration := NewConfigurationStorageMigration(configStore, logger)
@@ -203,7 +204,7 @@ func TestConfigurationStorageMigration(t *testing.T) {
 
 // TestEpic6ComplianceRequirements validates Epic 6 specific compliance requirements
 func TestEpic6ComplianceRequirements(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	configStore := createTestConfigStore(t)
 	migration := NewConfigurationStorageMigration(configStore, logger)
@@ -260,7 +261,7 @@ func TestEpic6ComplianceRequirements(t *testing.T) {
 
 // TestInMemoryToStorageMigration tests migrating from in-memory to storage provider
 func TestInMemoryToStorageMigration(t *testing.T) {
-	ctx := context.Background()
+	ctx := ctxkeys.WithSystem(context.Background())
 	logger := logging.NewNoopLogger()
 	configStore := createTestConfigStore(t)
 	migration := NewConfigurationStorageMigration(configStore, logger)

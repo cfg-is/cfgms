@@ -40,6 +40,24 @@ curl -k -H "Authorization: Bearer your-api-key" https://localhost:9080/api/v1/st
 
 Each endpoint requires a specific permission scope. Scopes follow the format `resource:action`. A key must hold the exact permission listed in each endpoint's **Required permission** field. The permission is checked by the `requirePermission(scope, action)` middleware registered in `server.go setupRouter()`.
 
+### Tenant Scope
+
+Every authenticated caller is either **root** (a `root_scope` account, or the bootstrap admin certificate) or **bound to one tenant**. A root caller's identity carries the deployment's root tenant; its reach comes from the root flag, never from an empty tenant. A credential that is neither root nor bound to a tenant is refused with `403 NO_TENANT_SCOPE` before any handler runs.
+
+A tenant-scoped caller reaches its own tenant's records. A root caller's lists, and its by-ID reads of records those lists show, span every tenant. For a root caller subject to the tenant-crossing boundary (ADR-025), an action on a record owned by a tenant below root — whether the route names that tenant, names the record by ID (an account, a certificate or cert binding, a token, a registration or credential request, a rollout, a run, a rollback, an API key, a role), or selects stewards with a fleet selector (a batch job, an upgrade, an osquery query, a signed operator payload) — requires an active grant or break-glass crossing, and otherwise returns `401` with `WWW-Authenticate: CFGMS-StepUp realm="cfgms", required="tenant-crossing"` and a body naming the tenant's break-glass endpoint:
+
+```json
+{
+  "error": "tenant_crossing_required",
+  "required_assurance": "tenant-crossing",
+  "break_glass_endpoint": "/api/v1/tenants/<tenant>/break-glass"
+}
+```
+
+Bulk approvals (approve-all, approve-by-CIDR) skip registrations the caller may not act on instead of returning the challenge.
+
+Where an operation needs a tenant the request does not name, it uses the caller's own tenant — the root tenant for a root caller — never a fallback tenant.
+
 ## Response Format
 
 All API responses follow a standard format:
@@ -497,12 +515,15 @@ Update configuration for a specific steward.
 **Authentication:** Required  
 **Required permission:** `steward:write-config`
 
-**Tenant scope:** a scoped caller may write configuration only for a steward
-within its own tenant subtree; an out-of-subtree steward is rejected with
-`404 STEWARD_NOT_FOUND` (not `403`, to avoid disclosing that the steward exists
-in another tenant). Root/unscoped callers retain authority across tenants,
-subject to the ADR-025 root/MSP tenant-crossing-boundary check for principals
-that are subject to it.
+**Tenant scope:** the configuration is stored under the steward's own tenant
+(the caller's own tenant only for a steward not yet known). A scoped caller may
+write configuration only for a steward within its own tenant subtree; an
+out-of-subtree steward is rejected with `404 STEWARD_NOT_FOUND` (not `403`, to
+avoid disclosing that the steward exists in another tenant). Root callers retain
+authority across tenants, subject to the tenant-crossing boundary (see
+[Tenant Scope](#tenant-scope)). `GET /api/v1/stewards/{id}/config/effective` and
+`DELETE /api/v1/stewards/{id}/config` resolve and authorize the steward's tenant
+the same way.
 
 **Parameters:**
 
@@ -775,15 +796,20 @@ tenant, and a `steward_id` with no record at all, are both refused with `403 FOR
 — without a record the target cannot be attributed to the caller's subtree, and this
 endpoint returns a signed certificate together with its private key. New-device
 onboarding is therefore a root/unscoped operation, or follows the steward's
-registration to a tenant. Root/unscoped callers may provision for any steward.
+registration to a tenant. Root callers may provision for any steward, subject to the
+tenant-crossing boundary (see [Tenant Scope](#tenant-scope)) for every existing steward
+the certificate would name.
 
 **Certificate subject:** for a tenant-scoped caller, `common_name` is always the
 resolved steward's own ID and `organization` is always the steward certificate
 organization; an explicit value for either is accepted only when it already matches,
 and refused with `403 FORBIDDEN` otherwise. The subject — not `steward_id` — is what
 peers authenticate on, so a request-supplied subject would let a caller pass the
-containment check with one steward and receive a certificate naming another.
-Root/unscoped callers may set both fields freely.
+containment check with one steward and receive a certificate naming another. A root
+caller may choose `common_name`. For every caller, the certificate's organization is
+always the steward certificate organization — any other `organization` is refused with
+`403 FORBIDDEN` — and a `steward_id` or `common_name` naming a controller cluster node is
+refused with `403 FORBIDDEN`, so this endpoint never mints a controller peer identity.
 
 **Validity ceiling:** `validity_days` may not exceed 825. A request above the ceiling
 is refused with `400 BAD_REQUEST` — the requested period is never silently clamped
@@ -822,6 +848,10 @@ retiring the old one after an overlap window.
 
 **Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
 **Required permission:** `certificate:rotate`
+
+**Caller:** a certificate-authenticated root principal (admin certificate). A root web or
+Bearer session is refused with `403 FORBIDDEN`: rotation replaces the chain every steward
+verifies operator commands against.
 
 **Tenant scope:** the signing CA is a single fleet-wide resource, not owned by any
 one tenant — rotating it replaces the chain every tenant's certificates verify
@@ -1134,11 +1164,11 @@ Create a new API key.
 **Authentication:** Required  
 **Required permission:** `api-key:create`
 
-**Tenant scope:** the created key's `tenant_id` (explicit, or the `"default"`
-fallback when omitted) must equal or descend from the caller's own tenant subtree —
-a tenant-scoped caller cannot mint a key for a sibling tenant, nor reach the
-catch-all `"default"` tenant outside its own subtree, by an out-of-scope
-`tenant_id`. Root/unscoped callers may target any tenant. A caller may also only
+**Tenant scope:** the created key's `tenant_id` (explicit, or the caller's own
+tenant when omitted) must equal or descend from the caller's own tenant subtree —
+a tenant-scoped caller cannot mint a key for a sibling tenant by an out-of-scope
+`tenant_id`. Root callers may target any tenant, subject to the tenant-crossing
+boundary (see [Tenant Scope](#tenant-scope)). A caller may also only
 grant a `permissions` entry it itself holds — a caller cannot mint a key with a
 permission it does not have, independent of the tenant check.
 
@@ -2768,6 +2798,8 @@ the no-op — is decided entirely at compile time, before the binary exists.
 | Code | Description |
 |------|-------------|
 | `MISSING_API_KEY` | API key not provided |
+| `NO_TENANT_SCOPE` | The credential is neither root nor bound to a tenant |
+| `TENANT_MISMATCH` | A `tenant_id` filter names a tenant outside the caller's scope |
 | `INVALID_API_KEY` | API key is invalid |
 | `EXPIRED_API_KEY` | API key has expired |
 | `MISSING_STEWARD_ID` | Steward ID parameter is required |
@@ -2915,7 +2947,9 @@ a new link.
 destination scope must be within the caller's own tenant subtree — a tenant-scoped
 caller receives `403 FORBIDDEN` targeting a username outside its subtree, or
 requesting `root_scope: true` (root scope is inside no tenant-scoped caller's
-subtree). Root/unscoped callers may create or reset any account.
+subtree). An account created with neither `root_scope` nor `tenant_id` belongs to the
+caller's own tenant. Root callers may create or reset any account, subject to the
+tenant-crossing boundary (see [Tenant Scope](#tenant-scope)).
 
 **Permission ceiling:** the caller must itself hold every permission in the account's
 *resulting* permission set, or the request is refused with `403 PERMISSION_ESCALATION`.
@@ -2938,6 +2972,10 @@ and collect the enrollment link for it. Checked independently of the tenant chec
 | `username` | string | 3–64 chars, starting alphanumeric, then `[a-zA-Z0-9._-]` |
 | `root_scope` | bool | Grant cross-tenant root scope. Mutually exclusive with `tenant_id`. |
 | `tenant_id` | string | Scope account to this tenant subtree. Mutually exclusive with `root_scope`. |
+
+A root-scope account belongs to the deployment's root tenant (the single tenant with no
+parent): responses report that tenant's ID in `tenant_id` alongside `root_scope: true`.
+Root authority comes only from `root_scope`; an empty tenant never means root.
 | `permissions` | array | Permission IDs (e.g. `"steward:list"`). Unknown IDs are rejected. |
 
 **Response (201 Created or 200 OK on reset):**
@@ -2947,7 +2985,7 @@ and collect the enrollment link for it. Checked independently of the tenant chec
   "data": {
     "id": "550e8400-e29b-41d4-a716-446655440000",
     "username": "alice",
-    "tenant_id": "",
+    "tenant_id": "root",
     "root_scope": true,
     "permissions": ["steward:list", "steward:read"],
     "created_at": "2026-01-12T10:30:00Z",
@@ -3024,7 +3062,7 @@ rejected). Root/unscoped callers see every tenant's accounts.
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "username": "alice",
-      "tenant_id": "",
+      "tenant_id": "root",
       "root_scope": true,
       "permissions": ["steward:list", "steward:read"],
       "created_at": "2026-01-12T10:30:00Z"
