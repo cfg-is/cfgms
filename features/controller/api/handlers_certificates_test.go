@@ -1088,12 +1088,11 @@ func TestHandleRotateSigningCert_ForceBypassesInProgress(t *testing.T) {
 		return rec
 	}
 
-	// Prime the cursor: first rotation seeds CurrentSerial; second shifts it
-	// into RotatingSerial with a 30-day overlap window.
-	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "first prime rotation must succeed")
-	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "second prime rotation must succeed")
+	// Prime the cursor: the first rotation records the replaced signing cert as
+	// RotatingSerial with a 30-day overlap window (Issue #4686).
+	require.Equal(t, http.StatusOK, do(`{"overlap_days":30}`).Code, "prime rotation must succeed")
 
-	// Third rotation without force MUST fail with "in progress" because the
+	// A second rotation without force MUST fail with "in progress" because the
 	// previous 30-day overlap is still active. The in-progress guard is a
 	// client-recoverable conflict, surfaced as 409 (not 500) so callers can
 	// retry with force=true (Issue #1816).
@@ -1101,7 +1100,7 @@ func TestHandleRotateSigningCert_ForceBypassesInProgress(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec3.Code,
 		"non-force rotation during active overlap must be rejected with 409, got body: %s", rec3.Body.String())
 
-	// Fourth rotation with force MUST succeed despite the active in-progress state.
+	// A rotation with force MUST succeed despite the active in-progress state.
 	rec4 := do(`{"overlap_days":30,"force":true}`)
 	require.Equal(t, http.StatusOK, rec4.Code,
 		"force rotation must succeed despite active overlap, got body: %s", rec4.Body.String())
