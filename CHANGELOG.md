@@ -303,6 +303,12 @@ management, and a fleet-wide tenant-containment hardening pass. See
   - A steward waiting on operator approval of its re-admission checks about every 15 seconds
     (jittered), so an approval takes effect promptly instead of after up to five minutes of connect
     backoff (Issue #4669).
+  - A steward that was offline during a signing-cert rotation trusts the new cert when it
+    reconnects. Commands that reach a steward before it has subscribed for them — the on-connect
+    signing-cert refresh and queued deliveries — are held and delivered in arrival order instead of
+    being dropped; the lost refresh had left such a steward rejecting every config and command
+    until re-enrolled. A config transfer refused because its signer was not yet trusted is fetched
+    again once a pushed signing cert is applied (Issue #4678).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
