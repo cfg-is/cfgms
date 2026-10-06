@@ -841,6 +841,15 @@ on-connect hook, calls `CommandStore.ListPendingDeliveries` keyed by the
 mTLS-authenticated connecting steward's own identity (never a caller-supplied
 ID) and republishes each pending row through the normal publish path.
 
+On-connect hooks run as soon as the ControlChannel stream registers, which is
+before the steward has subscribed its command handler: the steward opens the
+stream first and builds its handler after. The steward-side control-plane
+provider holds every command received before `SubscribeCommands` and delivers
+them, in arrival order and ahead of anything received later, when the handler
+subscribes (`pkg/controlplane/providers/internal/pendingcmd`, Issue #4678).
+Before that, the drained deliveries and the signing-cert refresh push sent in
+this window were silently discarded.
+
 **Retired by this mechanism:** the `GetAllStewardsCluster`/`GetAllStewards` split
 (`features/controller/service.ControllerService`) — the former had to stay
 node-local because dispatching to a steward it didn't know about locally simply

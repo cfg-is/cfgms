@@ -199,6 +199,13 @@ type TransportClient struct {
 	signingCertPEMs  []string   // Issue #1816: mutable set of signing certs (rotation support)
 	overlapExpiresAt *time.Time // Issue #1816: rotation overlap deadline for client-side expiry
 
+	// signingTrustGen counts push_signing_cert updates to signingCertPEMs.
+	// refetchConfigOnTrustChange records that a config transfer failed signature
+	// verification against the current trust set, so the next push re-fetches
+	// config (Issue #4678). Both are protected by mu.
+	signingTrustGen            uint64
+	refetchConfigOnTrustChange bool
+
 	// identityPersistFunc is called by the push-signing-cert handler to atomically
 	// persist updated signing cert PEMs before in-memory state is updated (Issue #1816).
 	// If nil, persistence is skipped and the cert is learned in memory only.
@@ -1821,6 +1828,11 @@ func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string
 	if len(transfer.Signature) == 0 {
 		return nil, "", status.Error(codes.DataLoss, "config signature missing")
 	}
+	// Read the trust generation before building the verifier: a push that lands
+	// in between then shows up as a changed generation, never as a missed one.
+	c.mu.RLock()
+	trustGen := c.signingTrustGen
+	c.mu.RUnlock()
 	verifier := c.buildVerifierOnDemand()
 	if verifier == nil {
 		return nil, "", status.Error(codes.FailedPrecondition, "config signature verifier unavailable")
@@ -1833,6 +1845,7 @@ func (c *TransportClient) GetConfiguration(ctx context.Context, modules []string
 		c.logger.Error("Config transfer signature verification failed",
 			"version", transfer.Version,
 			"error", err)
+		c.refetchConfigWhenTrusted(trustGen)
 		return nil, "", status.Error(codes.DataLoss, "config signature verification failed")
 	}
 
@@ -2917,6 +2930,9 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 	c.mu.Lock()
 	c.signingCertPEMs = newPEMs
 	c.overlapExpiresAt = overlapExpiresAt
+	c.signingTrustGen++
+	refetchConfig := c.refetchConfigOnTrustChange
+	c.refetchConfigOnTrustChange = false
 	c.mu.Unlock()
 
 	// Refresh the command handler's verifier so subsequent commands signed with the
@@ -2944,7 +2960,43 @@ func (c *TransportClient) handlePushSigningCert(_ context.Context, cmd *cpTypes.
 		"serial", appliedSerial,
 		"cert_count", len(newPEMs),
 		"retire_old", retireOld)
+
+	if refetchConfig {
+		c.startConfigRefetch()
+	}
 	return nil
+}
+
+// refetchConfigWhenTrusted is called when a config transfer failed signature
+// verification against the trust set at generation gen. A steward reconnecting
+// after a missed rotation pulls config signed with the new cert while the
+// on-connect push_signing_cert that carries it is still being applied; rather
+// than leave that config unapplied until the next convergence tick, the steward
+// fetches it again once a push changes its trust set (Issue #4678). If the trust
+// set already changed since gen, that push has run, so the fetch starts now.
+func (c *TransportClient) refetchConfigWhenTrusted(gen uint64) {
+	c.mu.Lock()
+	if c.signingTrustGen == gen {
+		c.refetchConfigOnTrustChange = true
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	c.startConfigRefetch()
+}
+
+// startConfigRefetch pulls and applies config in the background after the
+// signing trust set changed.
+func (c *TransportClient) startConfigRefetch() {
+	c.logger.Info("Re-fetching configuration after a signing-cert trust change")
+	// #nosec G118 -- like the on-connect sync, the re-fetch outlives the push
+	// command that triggered it; each module operation is bounded by its declared
+	// ModuleCallTimeoutSec.
+	go func() {
+		if err := c.syncConfigNow(context.Background(), "signing-trust-change", nil); err != nil {
+			c.logger.Info("Configuration re-fetch after signing-cert trust change failed", "error", err)
+		}
+	}()
 }
 
 // decodeBase64 decodes a standard base64-encoded string, accepting both padded
