@@ -56,7 +56,11 @@ type TriggerManagerImpl struct {
 	triggers        map[string]*Trigger
 	executions      map[string]*TriggerExecution
 	mutex           sync.RWMutex
-	running         bool
+	// syncStop ends the periodic reconcile loop started by Start; syncInterval
+	// is how often it runs (triggerSyncInterval unless a test shortens it).
+	syncStop     chan struct{}
+	syncInterval time.Duration
+	running      bool
 }
 
 // NewTriggerManager creates a new trigger manager
@@ -160,6 +164,7 @@ func (tm *TriggerManagerImpl) Start(ctx context.Context) error {
 	}
 
 	tm.running = true
+	tm.startStoreSync()
 
 	logger.InfoCtx(ctx, "Trigger manager started successfully")
 	return nil
@@ -178,6 +183,11 @@ func (tm *TriggerManagerImpl) Stop(ctx context.Context) error {
 	logger := tm.logger.WithTenant(tenantID)
 
 	logger.InfoCtx(ctx, "Stopping trigger manager")
+
+	if tm.syncStop != nil {
+		close(tm.syncStop)
+		tm.syncStop = nil
+	}
 
 	// Stop all components
 	var errs []error
@@ -344,6 +354,7 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigger) error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
+	tm.reconcileFromStoreLocked(ctx)
 
 	tenantID := extractTenantFromContext(ctx)
 	logger := tm.logger.WithTenant(tenantID)
@@ -429,6 +440,7 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID string) error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
+	tm.reconcileFromStoreLocked(ctx)
 
 	tenantID := extractTenantFromContext(ctx)
 	logger := tm.logger.WithTenant(tenantID)
@@ -479,6 +491,7 @@ func (tm *TriggerManagerImpl) DeleteTrigger(ctx context.Context, triggerID strin
 
 // GetTrigger retrieves a trigger by ID
 func (tm *TriggerManagerImpl) GetTrigger(ctx context.Context, triggerID string) (*Trigger, error) {
+	tm.reconcileFromStore(ctx)
 	tm.mutex.RLock()
 	defer tm.mutex.RUnlock()
 
@@ -501,6 +514,7 @@ func (tm *TriggerManagerImpl) GetTrigger(ctx context.Context, triggerID string) 
 
 // ListTriggers lists triggers with optional filtering
 func (tm *TriggerManagerImpl) ListTriggers(ctx context.Context, filter *TriggerFilter) ([]*Trigger, error) {
+	tm.reconcileFromStore(ctx)
 	tm.mutex.RLock()
 	defer tm.mutex.RUnlock()
 
@@ -558,6 +572,7 @@ func (tm *TriggerManagerImpl) DisableTrigger(ctx context.Context, triggerID stri
 
 // ExecuteTrigger manually executes a trigger
 func (tm *TriggerManagerImpl) ExecuteTrigger(ctx context.Context, triggerID string, data map[string]interface{}) (*TriggerExecution, error) {
+	tm.reconcileFromStore(ctx)
 	tm.mutex.RLock()
 	trigger, exists := tm.triggers[triggerID]
 	tm.mutex.RUnlock()
@@ -645,6 +660,7 @@ func (tm *TriggerManagerImpl) ExecuteTrigger(ctx context.Context, triggerID stri
 
 // GetTriggerExecutions retrieves execution history for a trigger
 func (tm *TriggerManagerImpl) GetTriggerExecutions(ctx context.Context, triggerID string, limit int) ([]*TriggerExecution, error) {
+	tm.reconcileFromStore(ctx)
 	tm.mutex.RLock()
 	defer tm.mutex.RUnlock()
 
@@ -824,6 +840,7 @@ func (tm *TriggerManagerImpl) unregisterTriggerFromHandler(ctx context.Context, 
 func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID string, status TriggerStatus) error {
 	tm.mutex.Lock()
 	defer tm.mutex.Unlock()
+	tm.reconcileFromStoreLocked(ctx)
 
 	tenantID := extractTenantFromContext(ctx)
 	logger := tm.logger.WithTenant(tenantID)
@@ -957,6 +974,129 @@ func (tm *TriggerManagerImpl) loadTriggersFromStorage(ctx context.Context) error
 	return nil
 }
 
+// triggerSyncInterval is how often each controller node reconciles its trigger
+// registrations with the shared trigger store (Issue #4660).
+const triggerSyncInterval = 15 * time.Second
+
+// startStoreSync starts the periodic reconcile loop. Caller holds tm.mutex.
+func (tm *TriggerManagerImpl) startStoreSync() {
+	if tm.triggerStore == nil || tm.syncStop != nil {
+		return
+	}
+	interval := tm.syncInterval
+	if interval <= 0 {
+		interval = triggerSyncInterval
+	}
+	stop := make(chan struct{})
+	tm.syncStop = stop
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				tm.reconcileFromStore(context.Background())
+			}
+		}
+	}()
+}
+
+// reconcileFromStore brings this node's trigger registrations in line with the
+// shared trigger store (Issue #4660). See reconcileFromStoreLocked.
+func (tm *TriggerManagerImpl) reconcileFromStore(ctx context.Context) {
+	if tm.triggerStore == nil {
+		return
+	}
+	tm.mutex.Lock()
+	defer tm.mutex.Unlock()
+	tm.reconcileFromStoreLocked(ctx)
+}
+
+// reconcileFromStoreLocked makes the durable trigger store the source of truth
+// for this node (Issue #4660). Every controller node in a cluster runs its own
+// trigger manager over one shared store, and each previously read only its own
+// in-memory map, loaded once at start: a trigger created, changed or deleted
+// through another node was invisible here, a schedule armed only on the node it
+// was created on never fired when another node held the scheduler lease, and a
+// webhook was reachable only through its creating node. Triggers new or changed
+// in the store are (re)registered, and triggers gone from it are unregistered
+// and dropped. Caller holds tm.mutex for writing.
+func (tm *TriggerManagerImpl) reconcileFromStoreLocked(ctx context.Context) {
+	if tm.triggerStore == nil {
+		return
+	}
+	records, err := tm.triggerStore.ListTriggers(ctx, business.TriggerStoreFilter{})
+	if err != nil {
+		tm.logger.WarnCtx(ctx, "failed to reconcile triggers with the store", "error", logging.SanitizeLogValue(err.Error()))
+		return
+	}
+
+	inStore := make(map[string]bool, len(records))
+	for _, record := range records {
+		inStore[record.ID] = true
+		existing, known := tm.triggers[record.ID]
+		// Any difference from this node's copy is a change: the store is the
+		// source of truth, and UpdatedAt is stamped by whichever node wrote it,
+		// so "newer" would skip every edit made through a node whose clock is
+		// behind this one's.
+		if known && record.UpdatedAt.Equal(existing.UpdatedAt) {
+			continue
+		}
+		restored, restoreErr := tm.restoreTriggerFromRecord(ctx, record)
+		if restoreErr != nil {
+			// A never-seen trigger is skipped. A known one whose record changed
+			// fails closed: the change may be a deactivation or a rotated or
+			// revoked credential, so the old registration must not stay armed.
+			// Its UpdatedAt is left as it was, so the next reconcile retries.
+			if known {
+				if existing.Status == TriggerStatusActive && tm.handlersReady() {
+					if unregErr := tm.unregisterTriggerFromHandler(ctx, existing); unregErr != nil {
+						tm.logger.WarnCtx(ctx, "failed to unregister trigger that could not be restored",
+							"trigger_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(unregErr.Error()))
+					}
+				}
+				existing.Status = TriggerStatusError
+			}
+			continue
+		}
+		if known && existing.Status == TriggerStatusActive && tm.handlersReady() {
+			if unregErr := tm.unregisterTriggerFromHandler(ctx, existing); unregErr != nil {
+				tm.logger.WarnCtx(ctx, "failed to unregister changed trigger",
+					"trigger_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(unregErr.Error()))
+			}
+		}
+		if restored.Status == TriggerStatusActive {
+			if regErr := tm.registerTriggerWithHandler(ctx, restored); regErr != nil {
+				tm.logger.WarnCtx(ctx, "failed to register trigger from the store",
+					"trigger_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(regErr.Error()))
+				restored.Status = TriggerStatusError
+			}
+		}
+		tm.triggers[record.ID] = restored
+	}
+
+	for id, trigger := range tm.triggers {
+		if inStore[id] {
+			continue
+		}
+		if trigger.Status == TriggerStatusActive && tm.handlersReady() {
+			if unregErr := tm.unregisterTriggerFromHandler(ctx, trigger); unregErr != nil {
+				tm.logger.WarnCtx(ctx, "failed to unregister deleted trigger",
+					"trigger_id", logging.SanitizeLogValue(id), "error", logging.SanitizeLogValue(unregErr.Error()))
+			}
+		}
+		delete(tm.triggers, id)
+	}
+}
+
+// handlersReady reports whether the scheduler, webhook handler and SIEM
+// integration are wired, so unregistering cannot dereference a missing one.
+func (tm *TriggerManagerImpl) handlersReady() bool {
+	return tm.scheduler != nil && tm.webhookHandler != nil && tm.siemIntegration != nil
+}
+
 func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger *Trigger) error {
 	if tm.triggerStore == nil {
 		return nil
@@ -1066,7 +1206,16 @@ func (tm *TriggerManagerImpl) saveTriggerToStorage(ctx context.Context, trigger 
 	}
 	record.ConfigPayload = configBytes
 
-	return tm.triggerStore.StoreTrigger(ctx, record)
+	if err := tm.triggerStore.StoreTrigger(ctx, record); err != nil {
+		return err
+	}
+	// Mirror the timestamp as the store recorded it (stores keep less precision
+	// than time.Time), so this node's copy compares equal to the record and the
+	// next reconcile does not mistake its own write for a change (Issue #4660).
+	if stored, err := tm.triggerStore.GetTrigger(ctx, record.ID); err == nil {
+		trigger.UpdatedAt = stored.UpdatedAt
+	}
+	return nil
 }
 
 func (tm *TriggerManagerImpl) deleteTriggerFromStorage(ctx context.Context, triggerID string) error {
