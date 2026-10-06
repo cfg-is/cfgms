@@ -12,22 +12,20 @@ import (
 )
 
 // TestCIRunnerProvisionWorkflowDescriptor loads the CI-runner provisioning
-// descriptor via the workflow engine's loader and asserts its structure.
+// descriptor as a flat workflow.Workflow and asserts its structure.
 //
 // NOTE: the descriptor uses api/http/while step types with typed api:/http:/loop:
 // blocks. These are represented by the rich workflow.Workflow / Step model and
-// are loaded by the engine's actual loader (Engine.loadWorkflowFromPath ->
-// yaml.Unmarshal into Workflow) — the same path the engine runs at execution
-// time and the same flat format as github-app-runner-token.yaml. (The separate
+// are decoded by yaml.Unmarshal into Workflow — the format cfg workflow run
+// submits and the controller stores (the engine never reads workflow files
+// itself, Issue #4638) — the same flat format as github-app-runner-token.yaml. (The separate
 // features/workflow/parser.go Parser models only task/sequential/parallel/
 // conditional steps and a `workflow:`-wrapped format; it cannot represent
 // api/http/while steps, so it is not the loader for this descriptor.)
 func TestCIRunnerProvisionWorkflowDescriptor(t *testing.T) {
-	engine := &Engine{} // loadWorkflowFromPath only reads+unmarshals; no engine state needed
-
-	wf, err := engine.loadWorkflowFromPath("examples/cirunner-provision.yaml")
+	wf, err := loadWorkflowFileForTest("examples/cirunner-provision.yaml")
 	// (a) YAML parses without error.
-	require.NoError(t, err, "descriptor must parse via the workflow engine loader")
+	require.NoError(t, err, "descriptor must parse as a flat Workflow")
 	assert.Equal(t, "cirunner-provision", wf.Name)
 
 	// (b) Step sequence is api -> stage(task) -> http -> while.

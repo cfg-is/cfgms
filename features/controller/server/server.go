@@ -2458,6 +2458,9 @@ func initializeWorkflowHandler(
 	setHARoleExecutor := workflownodes.NewSetHARoleNodeExecutor(configStore, configService)
 	moveResourceToClusterExecutor := workflownodes.NewMoveResourceToClusterNodeExecutor(configStore, configService)
 	workflowEngine := workflow.NewEngine(moduleFactory, logger, secrets, nil, nil, setHARoleExecutor, moveResourceToClusterExecutor)
+	// Composed workflows (nested steps, error workflows, components) resolve by
+	// name from the executing tenant's workflow store (Issue #4638).
+	workflowEngine.SetWorkflowResolver(workflow.NewStoreWorkflowResolver(configStore))
 
 	// workflowEngineAdapter bridges workflow.Engine to trigger.WorkflowTrigger.
 	// Triggers resolve workflows by name from their own tenant's store.

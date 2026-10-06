@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -745,7 +743,7 @@ func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
 	}
 	engine.RegisterWorkflow(want)
 
-	got, err := engine.loadWorkflowByName("my-workflow")
+	got, _, err := engine.loadWorkflowByName(context.Background(), nil, "my-workflow")
 	require.NoError(t, err)
 	assert.Equal(t, want.Name, got.Name)
 	require.Len(t, got.Steps, 1)
@@ -755,43 +753,9 @@ func TestEngine_LoadWorkflowByName_Hit(t *testing.T) {
 func TestEngine_LoadWorkflowByName_Miss(t *testing.T) {
 	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
 
-	_, err := engine.loadWorkflowByName("nonexistent-workflow")
+	_, _, err := engine.loadWorkflowByName(context.Background(), nil, "nonexistent-workflow")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nonexistent-workflow")
-}
-
-// --- loadWorkflowFromPath tests ---
-
-func TestEngine_LoadWorkflowFromPath_Valid(t *testing.T) {
-	const yamlContent = `
-name: disk-workflow
-variables:
-  greeting: hello
-steps:
-  - name: greet
-    type: delay
-    delay:
-      duration: 1ms
-      message: "hello"
-`
-	dir := t.TempDir()
-	wfPath := filepath.Join(dir, "disk-workflow.yaml")
-	require.NoError(t, os.WriteFile(wfPath, []byte(yamlContent), 0600))
-
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
-	got, err := engine.loadWorkflowFromPath(wfPath)
-	require.NoError(t, err)
-	assert.Equal(t, "disk-workflow", got.Name)
-	assert.Equal(t, "hello", got.Variables["greeting"])
-	require.Len(t, got.Steps, 1)
-	assert.Equal(t, "greet", got.Steps[0].Name)
-}
-
-func TestEngine_LoadWorkflowFromPath_Missing(t *testing.T) {
-	engine := NewEngine(createTestFactory(), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
-	_, err := engine.loadWorkflowFromPath("/nonexistent/path/workflow.yaml")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "/nonexistent/path/workflow.yaml")
 }
 
 func TestRingHealthExecutor_NilReturnsError(t *testing.T) {
