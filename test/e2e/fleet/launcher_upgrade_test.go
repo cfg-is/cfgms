@@ -213,9 +213,16 @@ func TestFleetLauncherManagedUpgradeHappyPath(t *testing.T) {
 	// even if the test fails mid-way.
 	t.Cleanup(func() { restoreBareStewdInContainer(t, launcherTestContainer) })
 
+	// The controller keeps the killed process's connection_state=connected until it
+	// notices the drop, so convergence alone would let the upgrade be sent to the
+	// dead stream. Wait for the launcher-supervised steward's own new session first
+	// (Issue #4671).
+	sessionsBefore := suite.stewardLogCount(t, launcherTestContainer, stewardSessionMarkers...)
 	killBareStewdAndWrapper(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
+	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
+		"launcher-supervised steward must open a new control session within 60 s")
 
 	// The launcher sets CFGMS_STEWARD_LAUNCHER_MANAGED=1 on its child automatically
 	// (see lifecycle.go:execOnce); we just wait for the steward to reconnect.
@@ -302,9 +309,16 @@ func TestFleetLauncherManagedUpgradeBrokenBinaryRollback(t *testing.T) {
 	// ── Step 1: Transition to launcher-supervised steward ────────────────────────
 	t.Cleanup(func() { restoreBareStewdInContainer(t, launcherTestContainer) })
 
+	// The controller keeps the killed process's connection_state=connected until it
+	// notices the drop, so convergence alone would let the upgrade be sent to the
+	// dead stream. Wait for the launcher-supervised steward's own new session first
+	// (Issue #4671).
+	sessionsBefore := suite.stewardLogCount(t, launcherTestContainer, stewardSessionMarkers...)
 	killBareStewdAndWrapper(t, launcherTestContainer)
 	installLauncherLayout(t, launcherTestContainer, launcherInitialVersion)
 	startLauncherSupervised(t, launcherTestContainer, launcherRegistrationToken)
+	require.True(t, suite.waitForNewStewardLogEntry(t, launcherTestContainer, sessionsBefore, 60*time.Second, stewardSessionMarkers...),
+		"launcher-supervised steward must open a new control session within 60 s")
 
 	require.True(t, suite.waitForConvergence(t, stewardID, 60*time.Second),
 		"launcher-supervised steward must connect within 60 s")
