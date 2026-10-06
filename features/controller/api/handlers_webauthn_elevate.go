@@ -204,6 +204,7 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 
 	// Extract source IP for throttle key and session binding.
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
 	// Check per-session and per-IP throttle before the expensive FinishLogin call.
 	if blocked, wait := s.checkElevateThrottle("session:" + sessID); blocked {
@@ -214,8 +215,8 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"Too many failed attempts — try again later", "THROTTLED")
 		return
 	}
-	if sourceIP != "" {
-		if blocked, wait := s.checkElevateThrottle("ip:" + sourceIP); blocked {
+	if ipKey != "" {
+		if blocked, wait := s.checkElevateThrottle("ip:" + ipKey); blocked {
 			s.logger.Warn("Step-up finish: per-IP throttle active",
 				"source_ip", logging.SanitizeLogValue(sourceIP),
 				"retry_after_seconds", int(wait.Seconds()))
@@ -237,8 +238,8 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.recordElevateFailure("session:" + sessID)
-		if sourceIP != "" {
-			s.recordElevateFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordElevateFailure("ip:" + ipKey)
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
@@ -264,8 +265,8 @@ func (s *Server) handleStepUpFinish(w http.ResponseWriter, r *http.Request) {
 			"stored_count", storedSignCount,
 			"response_count", newSignCount)
 		s.recordElevateFailure("session:" + sessID)
-		if sourceIP != "" {
-			s.recordElevateFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordElevateFailure("ip:" + ipKey)
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")

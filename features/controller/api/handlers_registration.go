@@ -21,6 +21,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/cfgis/cfgms/features/rbac/authdefense"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
@@ -1355,6 +1356,26 @@ func isTrustedProxyIP(ip net.IP, trustedProxies []net.IPNet) bool {
 		}
 	}
 	return false
+}
+
+// clientIPKey is the single per-IP throttle key resolver for the controller
+// API. It resolves the client address through trusted_proxies (extractSourceIP)
+// and normalises it with authdefense.IPKey, so IPv6 clients are bucketed by
+// their /64 and IPv4 clients per address. Every per-IP auth throttle — the
+// auth-defense middleware and the passkey-login, step-up elevation and
+// operator-payload-sign throttles — keys on this value so none can drift.
+// s.trustedProxies is read per request, never captured at construction.
+func (s *Server) clientIPKey(r *http.Request) string {
+	return authdefense.IPKey(extractSourceIP(r, s.trustedProxies))
+}
+
+// serverIPExtractor adapts Server.clientIPKey to authdefense.IPExtractor.
+type serverIPExtractor struct {
+	s *Server
+}
+
+func (e serverIPExtractor) Extract(r *http.Request) string {
+	return e.s.clientIPKey(r)
 }
 
 // emitRegistrationManagementAudit records an audit event for a registration management action

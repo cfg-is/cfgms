@@ -394,6 +394,7 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 	}
 
 	sourceIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ipKey := s.clientIPKey(r) // Issue #4573: trusted-proxy-aware, IPv6 /64-bucketed
 
 	if blocked, wait := s.checkSignThrottle("session:" + sessID); blocked {
 		s.logger.Warn("Operator-payload sign finish: per-session throttle active",
@@ -403,8 +404,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"Too many failed attempts — try again later", "THROTTLED")
 		return
 	}
-	if sourceIP != "" {
-		if blocked, wait := s.checkSignThrottle("ip:" + sourceIP); blocked {
+	if ipKey != "" {
+		if blocked, wait := s.checkSignThrottle("ip:" + ipKey); blocked {
 			s.logger.Warn("Operator-payload sign finish: per-IP throttle active",
 				"source_ip", logging.SanitizeLogValue(sourceIP),
 				"retry_after_seconds", int(wait.Seconds()))
@@ -429,8 +430,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"session_id", logging.SanitizeLogValue(sessID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.recordSignFailure("session:" + sessID)
-		if sourceIP != "" {
-			s.recordSignFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordSignFailure("ip:" + ipKey)
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
@@ -450,8 +451,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"source_ip", logging.SanitizeLogValue(sourceIP),
 			"error", logging.SanitizeLogValue(err.Error()))
 		s.recordSignFailure("session:" + sessID)
-		if sourceIP != "" {
-			s.recordSignFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordSignFailure("ip:" + ipKey)
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
@@ -475,8 +476,8 @@ func (s *Server) handleOperatorPayloadSignFinish(w http.ResponseWriter, r *http.
 			"stored_count", storedSignCount,
 			"response_count", newSignCount)
 		s.recordSignFailure("session:" + sessID)
-		if sourceIP != "" {
-			s.recordSignFailure("ip:" + sourceIP)
+		if ipKey != "" {
+			s.recordSignFailure("ip:" + ipKey)
 		}
 		s.writeErrorResponse(w, http.StatusBadRequest,
 			"WebAuthn verification failed", "WEBAUTHN_VERIFY_ERROR")
