@@ -563,6 +563,11 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 		}
 	}
 
+	// Before the new cert exists, so "current" still names the cert being replaced.
+	if err := m.seedSigningCursor(ctx); err != nil {
+		return nil, err
+	}
+
 	newCert, err := m.ca.GenerateSigningCertificate(&SigningCertConfig{
 		CommonName:   "cfgms-config-signer",
 		ValidityDays: 1095,
@@ -581,6 +586,31 @@ func (m *Manager) rotateSigningCertificate(overlapWindowDays int, force bool) (*
 	}
 
 	return newCert, nil
+}
+
+// seedSigningCursor records the controller's current signing cert in the cursor
+// when no rotation has written it yet. The cursor is written only by rotation,
+// and a transition records the cursor's previous current serial as rotating, so
+// without the seed the first rotation would not record the cert it replaces —
+// the cert stewards trust — and the on-connect push to a steward that missed
+// the rotation would be signed with a key that steward rejects (Issue #4686).
+// A controller with no signing cert yet has nothing to retain.
+func (m *Manager) seedSigningCursor(ctx context.Context) error {
+	cursor, err := m.cursor.LoadCursor(ctx)
+	if err != nil {
+		return fmt.Errorf("load signing cursor: %w", err)
+	}
+	if cursor != nil && cursor.CurrentSerial != "" {
+		return nil
+	}
+	current, err := m.GetCurrentCertForPurpose(PurposeSigning)
+	if err != nil {
+		return nil
+	}
+	if _, err := m.cursor.TransitionCursor(ctx, current.SerialNumber, 0, false); err != nil {
+		return fmt.Errorf("seed signing cursor with current serial: %w", err)
+	}
+	return nil
 }
 
 // purposeToType maps a CertificatePurpose to its underlying CertificateType.

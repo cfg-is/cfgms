@@ -229,3 +229,57 @@ func TestRotateSigningCertificateConcurrency(t *testing.T) {
 	assert.Equal(t, 1, successes, "exactly one concurrent rotation must succeed")
 	assert.Equal(t, goroutines-1, inProgressErrors, "all other goroutines must report rotation in progress")
 }
+
+// TestRotateSigningCertificate_FirstRotationRecordsReplacedCert verifies that the
+// first rotation on a controller — one whose cursor has never been written —
+// records the signing cert it replaces as RotatingSerial. Stewards trust that
+// cert; without it the on-connect push to a steward that missed the rotation is
+// signed with a key the steward does not trust (Issue #4686).
+func TestRotateSigningCertificate_FirstRotationRecordsReplacedCert(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(map[bool]string{false: "rotate", true: "force"}[force], func(t *testing.T) {
+			m := newTestManager(t)
+			require.NoError(t, m.EnsureSigningCertificate(&SigningCertConfig{
+				CommonName:   "cfgms-config-signer",
+				ValidityDays: 30,
+				KeySize:      2048,
+			}))
+			original, err := m.GetCurrentCertForPurpose(PurposeSigning)
+			require.NoError(t, err)
+
+			cursor, err := m.GetSigningCursorState()
+			require.NoError(t, err)
+			require.Nil(t, cursor, "precondition: no rotation has written the cursor yet")
+
+			var newCert *Certificate
+			if force {
+				newCert, err = m.ForceRotateSigningCertificate(30)
+			} else {
+				newCert, err = m.RotateSigningCertificate(30)
+			}
+			require.NoError(t, err)
+
+			cursor, err = m.GetSigningCursorState()
+			require.NoError(t, err)
+			require.NotNil(t, cursor)
+			assert.Equal(t, newCert.SerialNumber, cursor.CurrentSerial)
+			assert.Equal(t, original.SerialNumber, cursor.RotatingSerial,
+				"the first rotation must record the replaced signing cert as rotating")
+			assert.Equal(t, 30, cursor.OverlapWindowDays)
+		})
+	}
+}
+
+// A controller with no signing cert at all has nothing to retain: the first
+// rotation still succeeds and leaves RotatingSerial empty.
+func TestRotateSigningCertificate_FirstRotationWithoutSigningCert(t *testing.T) {
+	m := newTestManager(t)
+	newCert, err := m.RotateSigningCertificate(30)
+	require.NoError(t, err)
+
+	cursor, err := m.GetSigningCursorState()
+	require.NoError(t, err)
+	require.NotNil(t, cursor)
+	assert.Equal(t, newCert.SerialNumber, cursor.CurrentSerial)
+	assert.Empty(t, cursor.RotatingSerial)
+}
