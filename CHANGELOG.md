@@ -274,6 +274,10 @@ management, and a fleet-wide tenant-containment hardening pass. See
     presence relay on admin mTLS bundle clients (Issue #4508).
   - Certificates are back-dated so they verify on trailing clocks (Issue #4536); schema init
     upgrades pre-#3754/#3757 Postgres databases (Issue #4499).
+  - Cluster mode honours `storage.cluster.s3` for the installer blob store (bucket, region,
+    S3-compatible endpoint, credentials via `${VAR}`/`<VAR>_FILE`), with each
+    `CFGMS_S3_INSTALLER_*` variable overriding its key; it was documented but ignored, leaving
+    installers failing against the default AWS endpoint (Issue #4662).
 - RBAC `DeleteRole`/`DeleteSubject` deadlocks on the non-reentrant mutex (Issues #4322, #4351).
 - Flatfile storage renames with POSIX semantics on Windows so readers are never blocked
   (Issue #4262); file logging provider no longer leaks handles after Close on Windows
