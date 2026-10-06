@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cache"
+	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	storageif "github.com/cfgis/cfgms/pkg/storage/interfaces"
 	cfgconfig "github.com/cfgis/cfgms/pkg/storage/interfaces/config"
@@ -545,10 +546,128 @@ func (s *SOPSSecretStore) compareAndSwapUnderLock(ctx context.Context, expectedV
 	return int(written.Version), true, nil
 }
 
+// errBadSecretRef is returned for a reference with no "<tenant_id>/<key>" split.
+var errBadSecretRef = errors.New("secret key must be in format 'tenant_id/key' or tenant ID must be provided")
+
+// secretRefSplits returns every (tenant, key) reading of a combined "<tenant_id>/<key>"
+// reference, leftmost separator first. The string alone is ambiguous: tenant IDs are
+// hierarchical paths ("msp-a/client-1") and secret keys may contain "/" too
+// ("m365/<id>/token"), so the reference is resolved against the store rather than
+// split at a fixed position (Issue #4574).
+func secretRefSplits(ref string) [][2]string {
+	var out [][2]string
+	for i := 0; i < len(ref); i++ {
+		if ref[i] != '/' {
+			continue
+		}
+		if i == 0 || i == len(ref)-1 {
+			continue
+		}
+		out = append(out, [2]string{ref[:i], ref[i+1:]})
+	}
+	return out
+}
+
+// Shadowing assumption: leftmost-first means a record under tenant "a" named "b/<k>"
+// would shadow tenant "a/b" key "<k>". That cannot arise on the flatfile backend, the
+// one SOPS stores on by default, because flatfile rejects "/" in a config name (pinned
+// by TestFlatfileBackend_RejectsSlashInSecretName). On a backend that accepts "/" in
+// names, a caller that knows the tenant should use TenantSecretAccessor, which never
+// resolves a combined reference — the API-key paths do.
+//
+// resolveSecretRef finds the (tenant, key) reading of ref whose record exists,
+// trying split points left to right — so every reference that resolved under the
+// former first-separator split resolves identically, and "tenant-a/child/<key>"
+// resolves to tenant "tenant-a/child" once "tenant-a" + "child/<key>" is found
+// absent. Lookups are bounded by the number of separators in ref.
+//
+// A candidate the backend rejects as malformed (a flatfile name containing "/") or
+// reports missing is passed over. If no candidate exists the result wraps
+// ErrSecretNotFound when any candidate was a clean miss; otherwise the first error is
+// returned, so a storage fault is never reported as not-found.
+func (s *SOPSSecretStore) resolveSecretRef(ctx context.Context, ref string) (string, string, *cfgconfig.ConfigEntry, error) {
+	splits := secretRefSplits(ref)
+	if len(splits) == 0 {
+		return "", "", nil, errBadSecretRef
+	}
+	var firstErr error
+	sawMiss := false
+	for _, sp := range splits {
+		entry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID:  sp[0],
+			Namespace: "secrets",
+			Name:      sp[1],
+		})
+		if err == nil {
+			return sp[0], sp[1], entry, nil
+		}
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			sawMiss = true
+			continue
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if sawMiss {
+		// The reference is deliberately omitted: it may embed a credential hash.
+		return "", "", nil, secretsif.ErrSecretNotFound
+	}
+	return "", "", nil, fmt.Errorf("failed to retrieve secret: %w", firstErr)
+}
+
+// resolveSecretRefOrLeftmost is resolveSecretRef for operations that must still
+// address a record whose current entry is gone (version history): when no reading
+// exists it falls back to the leftmost split, the historical behaviour.
+func (s *SOPSSecretStore) resolveSecretRefOrLeftmost(ctx context.Context, ref string) (string, string, error) {
+	tenantID, key, _, err := s.resolveSecretRef(ctx, ref)
+	if err == nil {
+		return tenantID, key, nil
+	}
+	splits := secretRefSplits(ref)
+	if len(splits) == 0 {
+		return "", "", errBadSecretRef
+	}
+	return splits[0][0], splits[0][1], nil
+}
+
 // GetSecret retrieves a secret
 // M-AUTH-1: Retrieves secret from ConfigStore, automatically decrypted by SOPS
 func (s *SOPSSecretStore) GetSecret(ctx context.Context, key string) (*secretsif.Secret, error) {
 	return s.getSecretWithTenant(ctx, "", key)
+}
+
+var _ secretsif.TenantSecretAccessor = (*SOPSSecretStore)(nil)
+
+// GetTenantSecret reads the secret key in tenantID, addressed explicitly so no
+// reference resolution is involved (secretsif.TenantSecretAccessor, Issue #4574). It
+// always reads the backing store, never this instance's cache, so a change made
+// through another store instance (another controller node) is observed at once.
+func (s *SOPSSecretStore) GetTenantSecret(ctx context.Context, tenantID, key string) (*secretsif.Secret, error) {
+	if tenantID == "" || key == "" {
+		return nil, secretsif.ErrTenantRequired
+	}
+	configEntry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+		TenantID:  tenantID,
+		Namespace: "secrets",
+		Name:      key,
+	})
+	if err != nil {
+		if errors.Is(err, cfgconfig.ErrConfigNotFound) {
+			return nil, secretsif.ErrSecretNotFound
+		}
+		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
+	}
+	return s.decodeSecretEntry(configEntry, tenantID, key)
+}
+
+// DeleteTenantSecret deletes the secret key in tenantID, addressed explicitly
+// (secretsif.TenantSecretAccessor, Issue #4574).
+func (s *SOPSSecretStore) DeleteTenantSecret(ctx context.Context, tenantID, key string) error {
+	if tenantID == "" || key == "" {
+		return secretsif.ErrTenantRequired
+	}
+	return s.deleteSecretIn(ctx, tenantID, key)
 }
 
 // getSecretWithTenant retrieves a secret with explicit tenant ID
@@ -568,53 +687,35 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 		}
 	}
 
-	// Extract tenant ID from key if not provided (format: tenant_id/secret_key)
+	var configEntry *cfgconfig.ConfigEntry
 	if tenantID == "" {
-		parts := strings.SplitN(key, "/", 2)
-		if len(parts) == 2 {
-			tenantID = parts[0]
-			key = parts[1]
-		} else {
-			return nil, fmt.Errorf("secret key must be in format 'tenant_id/key' or tenant ID must be provided")
+		// Resolve the combined "<tenant_id>/<key>" reference against the store.
+		t, k, entry, err := s.resolveSecretRef(ctx, key)
+		if err != nil {
+			if errors.Is(err, secretsif.ErrSecretNotFound) {
+				return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
+			}
+			return nil, err
 		}
-	}
-
-	// Retrieve from ConfigStore
-	configKey := &cfgconfig.ConfigKey{
-		TenantID:  tenantID,
-		Namespace: "secrets",
-		Name:      key,
-	}
-
-	configEntry, err := s.configStore.GetConfig(ctx, configKey)
-	if err != nil {
-		if err == cfgconfig.ErrConfigNotFound {
-			return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
+		tenantID, key, configEntry = t, k, entry
+	} else {
+		entry, err := s.configStore.GetConfig(ctx, &cfgconfig.ConfigKey{
+			TenantID:  tenantID,
+			Namespace: "secrets",
+			Name:      key,
+		})
+		if err != nil {
+			if err == cfgconfig.ErrConfigNotFound {
+				return nil, fmt.Errorf("secret not found: %s: %w", key, secretsif.ErrSecretNotFound)
+			}
+			return nil, fmt.Errorf("failed to retrieve secret: %w", err)
 		}
-		return nil, fmt.Errorf("failed to retrieve secret: %w", err)
+		configEntry = entry
 	}
 
-	plaintext, err := s.decrypt(configEntry.Data, tenantID, key)
+	secret, err := s.decodeSecretEntry(configEntry, tenantID, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt secret: %w", err)
-	}
-
-	// Parse the authenticated plaintext only after decryption succeeds.
-	var secret secretsif.Secret
-	if err := json.Unmarshal(plaintext, &secret); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal secret: %w", err)
-	}
-	// The encrypted payload's own Version field is stamped once at write time and
-	// never updated on subsequent writes (writeSecretEntry always marshals
-	// Version: 1) — it is not a reliable version number. The ConfigStore's own
-	// auto-incrementing Version is authoritative and is what CompareAndSwapSecret
-	// keys on, so every read path must report it, not the stale payload value
-	// (Issue #3775).
-	secret.Version = int(configEntry.Version)
-
-	// Check expiration
-	if s.isExpired(&secret) {
-		return nil, fmt.Errorf("secret expired: %s", key)
+		return nil, err
 	}
 
 	// Update cache if enabled
@@ -627,7 +728,35 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 				cacheTTL = remainingTTL
 			}
 		}
-		_ = s.cache.Set(cacheKey, &secret, cacheTTL)
+		_ = s.cache.Set(cacheKey, secret, cacheTTL)
+	}
+
+	return secret, nil
+}
+
+// decodeSecretEntry decrypts and parses a stored secret entry, refusing an expired one.
+func (s *SOPSSecretStore) decodeSecretEntry(configEntry *cfgconfig.ConfigEntry, tenantID, key string) (*secretsif.Secret, error) {
+	plaintext, err := s.decrypt(configEntry.Data, tenantID, key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
+	}
+
+	// Parse the authenticated plaintext only after decryption succeeds.
+	var secret secretsif.Secret
+	if err := json.Unmarshal(plaintext, &secret); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal secret: %w: %w", secretsif.ErrSecretUndecryptable, err)
+	}
+	// The encrypted payload's own Version field is stamped once at write time and
+	// never updated on subsequent writes (writeSecretEntry always marshals
+	// Version: 1) — it is not a reliable version number. The ConfigStore's own
+	// auto-incrementing Version is authoritative and is what CompareAndSwapSecret
+	// keys on, so every read path must report it, not the stale payload value
+	// (Issue #3775).
+	secret.Version = int(configEntry.Version)
+
+	// Check expiration
+	if s.isExpired(&secret) {
+		return nil, fmt.Errorf("secret expired: %s: %w", key, secretsif.ErrSecretExpired)
 	}
 
 	return &secret, nil
@@ -636,14 +765,25 @@ func (s *SOPSSecretStore) getSecretWithTenant(ctx context.Context, tenantID, key
 // DeleteSecret deletes a secret
 // M-AUTH-1: Deletes secret from ConfigStore
 func (s *SOPSSecretStore) DeleteSecret(ctx context.Context, key string) error {
-	// Extract tenant ID from key (format: tenant_id/secret_key)
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, _, err := s.resolveSecretRef(ctx, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, errBadSecretRef):
+			return fmt.Errorf("secret key must be in format 'tenant_id/key'")
+		case errors.Is(err, secretsif.ErrSecretNotFound):
+			// The key is deliberately omitted: it may be a credential hash.
+			return secretsif.ErrSecretNotFound
+		}
+		// Not %w-wrapped: storage errors embed the filesystem path, which
+		// contains the secret key.
+		return errors.New("failed to delete secret: storage error")
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
+	return s.deleteSecretIn(ctx, tenantID, secretKey)
+}
 
+// deleteSecretIn deletes the secret secretKey in tenantID.
+func (s *SOPSSecretStore) deleteSecretIn(ctx context.Context, tenantID, secretKey string) error {
 	// Delete from ConfigStore
 	configKey := &cfgconfig.ConfigKey{
 		TenantID:  tenantID,
@@ -698,14 +838,28 @@ func (s *SOPSSecretStore) ListSecrets(ctx context.Context, filter *secretsif.Sec
 		if config.Key == nil {
 			continue
 		}
+		// The secret key is the config name (buildSecretEntry), so a KeyPrefix
+		// filter is applied before paying for a decrypt (Issue #4574).
+		if filter.KeyPrefix != "" && !strings.HasPrefix(config.Key.Name, filter.KeyPrefix) {
+			continue
+		}
 		plaintext, decryptErr := s.decrypt(config.Data, config.Key.TenantID, config.Key.Name)
 		if decryptErr != nil {
-			return nil, fmt.Errorf("failed to decrypt secret metadata: %w", decryptErr)
+			// A listing skips a record it cannot open rather than failing outright:
+			// one corrupt or foreign-keyed record must not hide every other secret
+			// (e.g. take down all API-key authentication). Direct reads
+			// (getSecretWithTenant) still fail closed on the same condition. The
+			// record name is not logged: it may be a credential hash.
+			logging.ForComponent("secrets").Warn("Skipping secret that failed to decrypt while listing",
+				"tenant_id", logging.SanitizeLogValue(config.Key.TenantID))
+			continue
 		}
 		// Parse secret to get metadata
 		var secret secretsif.Secret
 		if err := json.Unmarshal(plaintext, &secret); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal secret metadata: %w", err)
+			logging.ForComponent("secrets").Warn("Skipping secret that failed to parse while listing",
+				"tenant_id", logging.SanitizeLogValue(config.Key.TenantID))
+			continue
 		}
 
 		// Apply additional filters
@@ -788,13 +942,11 @@ func (s *SOPSSecretStore) StoreSecrets(ctx context.Context, secrets map[string]*
 // GetSecretVersion retrieves a specific version of a secret
 // M-AUTH-1: Version retrieval using git history
 func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, version int) (*secretsif.Secret, error) {
-	// Extract tenant ID from key
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, err := s.resolveSecretRefOrLeftmost(ctx, key)
+	if err != nil {
+		return nil, err
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
 
 	// Get version from ConfigStore
 	configKey := &cfgconfig.ConfigKey{
@@ -825,13 +977,11 @@ func (s *SOPSSecretStore) GetSecretVersion(ctx context.Context, key string, vers
 // ListSecretVersions lists all versions of a secret
 // M-AUTH-1: Version history using git log
 func (s *SOPSSecretStore) ListSecretVersions(ctx context.Context, key string) ([]*secretsif.SecretVersion, error) {
-	// Extract tenant ID from key
-	parts := strings.SplitN(key, "/", 2)
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("secret key must be in format 'tenant_id/key'")
+	// Resolve the combined "<tenant_id>/<key>" reference against the store.
+	tenantID, secretKey, err := s.resolveSecretRefOrLeftmost(ctx, key)
+	if err != nil {
+		return nil, err
 	}
-	tenantID := parts[0]
-	secretKey := parts[1]
 
 	// Get version history from ConfigStore
 	configKey := &cfgconfig.ConfigKey{

@@ -3,6 +3,7 @@
 package authdefense
 
 import (
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/cache"
@@ -11,6 +12,10 @@ import (
 // IPRateLimiter implements Tier 1 per-IP rate limiting using a ring buffer
 // of failure timestamps stored in pkg/cache.Cache with LRU eviction.
 type IPRateLimiter struct {
+	// mu serialises access to the per-IP rings. A ring is a mutable value shared
+	// through the cache, so concurrent failures from one source (the common case
+	// under a credential flood) would otherwise race on it and lose updates.
+	mu     sync.Mutex
 	cache  *cache.Cache
 	clock  Clock
 	limit  int
@@ -79,6 +84,8 @@ func NewIPRateLimiter(cfg AuthDefenseConfig, clock Clock) *IPRateLimiter {
 
 // RecordFailure records an authentication failure for the given IP
 func (l *IPRateLimiter) RecordFailure(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	now := l.clock.Now()
 
 	val, found := l.cache.Get(ip)
@@ -96,6 +103,8 @@ func (l *IPRateLimiter) RecordFailure(ip string) {
 
 // IsRateLimited checks whether the given IP has exceeded the failure threshold
 func (l *IPRateLimiter) IsRateLimited(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	val, found := l.cache.Get(ip)
 	if !found {
 		return false

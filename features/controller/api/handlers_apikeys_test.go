@@ -284,15 +284,14 @@ func TestHandleCreateAPIKey_AgentDevRole_SetsCorrectPermissions(t *testing.T) {
 	assert.NotEmpty(t, outer.Data["key"], "plaintext key must be returned on creation")
 }
 
-// TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200 covers the pre-existing error path
-// at handlers_apikeys.go:300-304: a key injected only into memory (never persisted to the
-// secret store) triggers a DeleteSecret failure, but the handler returns 200 because the
-// in-memory entry is already removed.
-func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
+// TestHandleDeleteAPIKey_LocalOnlyKey_Returns200 covers a key that exists only in this
+// node's cache with no durable record (the env-gated test keys seeded in New): it is
+// not in the secret store, so the handler removes the cache entry and returns 200
+// (Issue #4574 moved store-backed keys to a store-first delete).
+func TestHandleDeleteAPIKey_LocalOnlyKey_Returns200(t *testing.T) {
 	server := setupTestServer(t)
 
-	// Inject a key directly into memory, bypassing the secret store, so that
-	// the subsequent DeleteSecret call returns "secret not found".
+	// Inject a key directly into memory, bypassing the secret store.
 	key := &APIKey{
 		ID:          "memory-only-key-id",
 		Key:         "memory-only-key-secret",
@@ -305,14 +304,13 @@ func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/memory-only-key-id", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "memory-only-key-id"})
-	// Issue #4334: the handler now enforces tenant containment before deleting —
-	// an unscoped (root) caller here exercises the pre-existing secret-store-failure
-	// path this test targets, independent of that new check.
+	// Issue #4334: the handler enforces tenant containment before deleting — a
+	// root-scoped caller here exercises the local-only path independent of that check.
 	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 	rec := httptest.NewRecorder()
 	server.handleDeleteAPIKey(rec, req)
 
-	// The handler must return 200: memory was cleared even though secret-store deletion failed.
+	// The handler must return 200: the local-only entry was removed.
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "deleted")
 
@@ -320,7 +318,7 @@ func TestHandleDeleteAPIKey_SecretStoreFails_StillReturns200(t *testing.T) {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
 	for _, k := range server.apiKeys {
-		assert.NotEqual(t, "memory-only-key-id", k.ID, "key must be removed from memory even when secret store deletion fails")
+		assert.NotEqual(t, "memory-only-key-id", k.ID, "local-only key must be removed from memory")
 	}
 }
 
@@ -507,25 +505,18 @@ func TestHandleDeleteAPIKey_SecretStoreFailure_LogsNoKeyOrHash(t *testing.T) {
 	logger := &captureAllLogger{}
 	server := setupTestServerWithLogger(t, logger)
 
-	key := &APIKey{
-		ID:          "log-leak-key-id",
-		Key:         "log-leak-key-secret-value",
-		Name:        "Log Leak Key",
-		Permissions: []string{"steward:read"},
-		CreatedAt:   time.Now().UTC(),
-		TenantID:    "agent-test/1",
-	}
-	injectAPIKey(server, key)
+	apiKey, keyID := mintStoreAPIKey(t, server, []string{"steward:read"}, "agent-test")
+	server.secretStore = &errDeleteSecretStore{SecretStore: server.secretStore}
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/log-leak-key-id", nil)
-	req = mux.SetURLVars(req, map[string]string{"id": "log-leak-key-id"})
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/"+keyID, nil)
+	req = mux.SetURLVars(req, map[string]string{"id": keyID})
 	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
 	rec := httptest.NewRecorder()
 	server.handleDeleteAPIKey(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	out := logger.captured()
 	assert.Contains(t, out, "Failed to delete API key from secret store")
-	assert.NotContains(t, out, key.Key)
-	assert.NotContains(t, out, hashAPIKey(key.Key))
+	assert.NotContains(t, out, apiKey)
+	assert.NotContains(t, out, hashAPIKey(apiKey))
 }
