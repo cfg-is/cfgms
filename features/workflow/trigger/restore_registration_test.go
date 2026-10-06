@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,9 +161,10 @@ func TestNestedTenantTriggerCredential_RestoreAndDelete(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sm.Close() })
 	triggerStore := sm.GetTriggerStore()
-	secrets := newTestSecretStore(t)
-	accessor, ok := secrets.(secretsif.TenantSecretAccessor)
+	inner := newTestSecretStore(t)
+	accessor, ok := inner.(secretsif.TenantSecretAccessor)
 	require.True(t, ok, "the SOPS store must address secrets by tenant")
+	secrets := &countingTenantSecretStore{SecretStore: inner, accessor: accessor}
 
 	token := make([]byte, 16)
 	_, err = rand.Read(token)
@@ -198,4 +200,27 @@ func TestNestedTenantTriggerCredential_RestoreAndDelete(t *testing.T) {
 	require.NoError(t, restarted.DeleteTrigger(ctx, "msp-hook"))
 	_, err = accessor.GetTenantSecret(context.Background(), tenant, ref)
 	assert.ErrorIs(t, err, secretsif.ErrSecretNotFound, "deleting the trigger must remove its credential")
+
+	assert.Positive(t, secrets.gets.Load(), "credentials must be read by (tenant, ref)")
+	assert.Positive(t, secrets.deletes.Load(), "credentials must be deleted by (tenant, ref)")
+}
+
+// countingTenantSecretStore is the real SOPS store, counting the tenant-explicit
+// calls so the test pins that the manager addresses credentials by (tenant, ref)
+// rather than through the combined key.
+type countingTenantSecretStore struct {
+	secretsif.SecretStore
+	accessor secretsif.TenantSecretAccessor
+	gets     atomic.Int64
+	deletes  atomic.Int64
+}
+
+func (s *countingTenantSecretStore) GetTenantSecret(ctx context.Context, tenantID, key string) (*secretsif.Secret, error) {
+	s.gets.Add(1)
+	return s.accessor.GetTenantSecret(ctx, tenantID, key)
+}
+
+func (s *countingTenantSecretStore) DeleteTenantSecret(ctx context.Context, tenantID, key string) error {
+	s.deletes.Add(1)
+	return s.accessor.DeleteTenantSecret(ctx, tenantID, key)
 }
