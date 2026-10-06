@@ -68,7 +68,7 @@ func (s *Server) handleGetStewardConnection(w http.ResponseWriter, r *http.Reque
 	// Tenant isolation: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" && stewardInfo.TenantID != callerTenant {
+	if callerTenant != "" && stewardInfo.TenantID != callerTenant { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 		return
@@ -125,7 +125,7 @@ func (s *Server) handleListAllConnections(w http.ResponseWriter, r *http.Request
 	// fleet-wide read is marked system-internal: a bare context is refused
 	// (Issue #4665).
 	clusterCtx := ctxkeys.WithSystem(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		clusterCtx = context.WithValue(r.Context(), ctxkeys.TenantID, callerTenant)
 	}
 	allStewards := s.controllerService.ListFleetStewards(clusterCtx)

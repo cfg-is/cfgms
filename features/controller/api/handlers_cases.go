@@ -36,11 +36,11 @@ func (s *Server) CasesStore() business.CaseStore {
 }
 
 // caseInCallerSubtree reports whether a case's tenant falls within the caller's
-// tenant subtree. An empty callerTenant means the caller has global scope and
-// all cases are visible. Mirrors the subtree check used by ip-trust and
-// registration-token handlers.
+// tenant subtree, for reading cases. An empty callerTenant means the caller has
+// global scope and all cases are visible. Writes go through tenantAccessForScope
+// instead (Issue #4665).
 func caseInCallerSubtree(caseTenantID, callerTenant string) bool {
-	if callerTenant == "" {
+	if callerTenant == "" { //architecture:allow-root-scope -- read breadth for cases, used only by read paths
 		return true
 	}
 	return caseTenantID == callerTenant || strings.HasPrefix(caseTenantID, callerTenant+"/")
@@ -157,21 +157,24 @@ func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := callerTenantSubtree(r)
-	// Validate the supplied tenant_id: must be within the caller's subtree.
-	// If not supplied, default to the caller's own tenant.
+	// Validate the supplied tenant_id: it must pass the caller's tenant decision —
+	// a root caller subject to the ADR-025 boundary needs a crossing for a tenant
+	// below root (Issue #4665). If not supplied, the case belongs to the caller's
+	// own tenant (the root tenant for a root caller).
 	tenantID := req.TenantID
 	if tenantID == "" {
-		tenantID = callerTenant
+		own, ok := callerOwnTenant(r.Context())
+		if !ok {
+			s.writeErrorResponse(w, http.StatusForbidden, "No tenant scope", "NO_TENANT_SCOPE")
+			return
+		}
+		tenantID = own
 	}
-	if !caseInCallerSubtree(tenantID, callerTenant) {
-		s.writeErrorResponse(w, http.StatusForbidden,
-			"tenant_id is outside caller's tenant subtree", "TENANT_OUTSIDE_SUBTREE")
-		return
-	}
-	if tenantID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"tenant_id is required for global-scope callers", "TENANT_ID_REQUIRED")
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenantID, "POST /api/v1/cases"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, tenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"tenant_id is outside caller's tenant subtree", "TENANT_OUTSIDE_SUBTREE")
+		}
 		return
 	}
 
@@ -302,9 +305,10 @@ func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	callerTenant := callerTenantSubtree(r)
-	if !caseInCallerSubtree(existing.TenantID, callerTenant) {
-		http.Error(w, "not found", http.StatusNotFound)
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), existing.TenantID, "PUT /api/v1/cases/{id}"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, existing.TenantID) {
+			http.Error(w, "not found", http.StatusNotFound)
+		}
 		return
 	}
 
@@ -352,10 +356,13 @@ func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusOK, caseToResponse(existing))
 }
 
-// loadCallerCase retrieves a case by ID and verifies it falls within the
-// caller's tenant subtree. Writes the appropriate HTTP error and returns nil
-// when access is denied, so callers should return immediately on nil.
-func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id string) *business.Case {
+// loadCallerCase retrieves a case by ID and verifies the caller may reach it.
+// A read (write == false) follows the caller's read breadth; a write passes the
+// caller's tenant decision, so a root caller subject to the ADR-025 boundary
+// needs a crossing to change a case below root (Issue #4665). Writes the
+// appropriate HTTP error and returns nil when access is denied, so callers
+// should return immediately on nil.
+func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id, route string, write bool) *business.Case {
 	c, err := s.casesStore.GetCase(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, business.ErrCaseNotFound) {
@@ -367,6 +374,15 @@ func (s *Server) loadCallerCase(w http.ResponseWriter, r *http.Request, id strin
 			"error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "failed to get case", http.StatusInternalServerError)
 		return nil
+	}
+	if write {
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), c.TenantID, route); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, c.TenantID) {
+				http.Error(w, "not found", http.StatusNotFound)
+			}
+			return nil
+		}
+		return c
 	}
 	if !caseInCallerSubtree(c.TenantID, callerTenantSubtree(r)) {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -578,7 +594,7 @@ func (s *Server) handleAddPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := s.loadCallerCase(w, r, id)
+	c := s.loadCallerCase(w, r, id, "POST /api/v1/cases/{id}/pins", true)
 	if c == nil {
 		return
 	}
@@ -642,7 +658,7 @@ func (s *Server) handleRemovePin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := s.loadCallerCase(w, r, id)
+	c := s.loadCallerCase(w, r, id, "DELETE /api/v1/cases/{id}/pins/{pin_id}", true)
 	if c == nil {
 		return
 	}

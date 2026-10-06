@@ -1491,13 +1491,15 @@ func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 	// Resolve the steward's registered tenant from the controller registry.
 	// This is the authoritative cross-tenant check — it cannot be bypassed by
 	// the caller supplying a fabricated steward_tenant_path in the request body.
+	// The live registry is per-node, so a steward that is offline or attached to a
+	// peer controller is resolved from its durable record (stewardOwnerTenant), as
+	// every other steward-scoped handler does (Issue #4665).
 	stewardTenantLookup := func(stewardID string) string {
-		if s.controllerService != nil {
-			if info, ok := s.controllerService.GetStewardInfo(stewardID); ok {
-				return info.TenantID
-			}
+		if s.controllerService == nil {
+			return ""
 		}
-		return ""
+		tenant, _ := s.stewardOwnerTenant(context.Background(), stewardID)
+		return tenant
 	}
 	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
 	rollbackHandler.tenantAccess = s.tenantAccessForScope
@@ -2119,7 +2121,7 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 		}
 		callerTenant := callerTenantFilter(r.Context())
 		info, exists := s.controllerService.GetStewardInfo(stewardID)
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- telemetry stream is a read; root read breadth (ADR-025 A7.2)
 			stewardTenant := ""
 			if exists {
 				stewardTenant = info.TenantID

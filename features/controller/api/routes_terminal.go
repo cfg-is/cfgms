@@ -75,7 +75,7 @@ func (s *Server) tenantScopedTerminalWrapper(next http.Handler) http.Handler {
 		callerTenant := callerTenantFilter(r.Context())
 		info, exists := s.controllerService.GetStewardInfo(stewardID)
 
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers; a root caller is decided by authorizeTenantAccess below
 			stewardTenant := ""
 			if exists {
 				stewardTenant = info.TenantID

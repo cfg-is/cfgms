@@ -308,7 +308,7 @@ func (s *Server) handleGetRevocationManifest(w http.ResponseWriter, r *http.Requ
 	// Authorization before resource state: a scoped caller learns nothing about
 	// controller configuration from this endpoint.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- read of the revocation manifest; root receives the fleet-wide manifest
 		s.logger.Warn("Denied tenant-scoped access to fleet-wide revocation manifest",
 			"caller_tenant", logging.SanitizeLogValue(callerTenant))
 		s.writeErrorResponse(w, http.StatusForbidden,

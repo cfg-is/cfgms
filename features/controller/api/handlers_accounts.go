@@ -1076,7 +1076,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
 		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			if meta.TenantID != callerTenant && !strings.HasPrefix(meta.TenantID, callerTenant+"/") {
 				continue
 			}

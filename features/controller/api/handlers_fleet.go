@@ -178,7 +178,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 	tid := callerTenantFilter(r.Context())
 
 	filter := fleet.Filter{}
-	if tid != "" {
+	if tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		filter.TenantSubtree = tid
 	}
 

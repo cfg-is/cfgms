@@ -743,7 +743,7 @@ func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Req
 
 	result := make([]PendingCredentialRequestInfo, 0, len(metas))
 	for _, m := range metas {
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			if m.TenantID != callerTenant && !strings.HasPrefix(m.TenantID, callerTenant+"/") {
 				continue
 			}

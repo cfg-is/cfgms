@@ -77,10 +77,18 @@ func (s *Server) handleConfigPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Authorize caller: tenant-scoped callers may only push configs labelled with
-	// their own tenant. Admin callers (TenantID == "") may push any cfg.TenantID,
-	// but the fan-out is still scoped to that specific tenant — never left empty.
-	if tenantID != "" && tenantID != cfg.TenantID {
+	// their own tenant. A root caller may push any cfg.TenantID that passes its
+	// tenant decision — a root caller subject to the ADR-025 boundary needs a
+	// crossing for a tenant below root (Issue #4665) — and the fan-out is still
+	// scoped to that specific tenant, never left empty.
+	if tenantID != "" && tenantID != cfg.TenantID { //architecture:allow-root-scope -- tenant-scoped callers: exact tenant match
 		s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
+		return
+	}
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), cfg.TenantID, "POST /api/v1/config/push"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, cfg.TenantID) {
+			s.respondError(w, http.StatusForbidden, "caller may only push configs for their own tenant")
+		}
 		return
 	}
 

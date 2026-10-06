@@ -928,7 +928,7 @@ func (s *Server) handleApproveRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant: a scoped caller may only approve refreshes within their tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-scoped callers only; a root caller passes authorizeTenantAccess below, refused as 404 like every other outcome
 		sameTenant := entry.TenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {
@@ -1091,14 +1091,9 @@ func (s *Server) handleRejectRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross-tenant: a scoped caller may only reject refreshes within their tenant hierarchy.
-	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
-		sameTenant := entry.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(entry.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
-			http.Error(w, "pending refresh not found", http.StatusNotFound)
-			return
-		}
+	if !s.isAuthorizedForTenant(r.Context(), callerTenantScope(r), entry.TenantID, "POST /api/v1/stewards/refresh/{pending_id}/reject") {
+		http.Error(w, "pending refresh not found", http.StatusNotFound)
+		return
 	}
 
 	if err := s.pendingRefreshStore.UpdateRefreshStatus(r.Context(), pendingID, business.PendingRefreshStatusRejected); err != nil {
@@ -1127,7 +1122,7 @@ func (s *Server) handleGetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {
@@ -1164,7 +1159,7 @@ func (s *Server) handleSetRefreshPolicy(w http.ResponseWriter, r *http.Request) 
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant hierarchy.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {

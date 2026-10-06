@@ -68,7 +68,7 @@ func (s *Server) handleGetAssurancePolicy(w http.ResponseWriter, r *http.Request
 
 	// Cross-tenant: a scoped caller may only read policy for their own tenant or descendants.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {
@@ -108,7 +108,7 @@ func (s *Server) handleSetAssurancePolicy(w http.ResponseWriter, r *http.Request
 
 	// Cross-tenant: a scoped caller may only write policy for their own tenant or descendants.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- tenant-path route; requirePermission's boundary gate applies the crossing to a root caller
 		sameTenant := tenantID == callerTenant
 		ancestorTenant := strings.HasPrefix(tenantID, callerTenant+"/")
 		if !sameTenant && !ancestorTenant {

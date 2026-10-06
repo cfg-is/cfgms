@@ -103,6 +103,23 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 		return entry.Status
 	}
 
+	server.SetCasesStore(sm.GetCaseStore())
+	// newMSPSteward registers a steward of the client tenant for a route that
+	// consumes it (decommission, move).
+	newMSPSteward := func(t *testing.T, id string) string {
+		t.Helper()
+		require.NoError(t, server.stewardStore.RegisterSteward(ctx, &business.StewardRecord{
+			ID: id, TenantID: msp, Status: business.StewardStatusActive,
+		}))
+		require.NoError(t, server.controllerService.RegisterSteward(id, msp, "localhost:7101", "online"))
+		return id
+	}
+	notChallenged := func(t *testing.T, rec *httptest.ResponseRecorder, _ string) {
+		assert.NotEqual(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "tenant_crossing_required")
+		assert.NotEqual(t, http.StatusNotFound, rec.Code, "the route must act on the record: %s", rec.Body.String())
+	}
+
 	routes := []struct {
 		name string
 		// call sends the request; it may seed per-call state first.
@@ -155,6 +172,63 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 			},
 		},
 		{
+			name: "steward visibility",
+			call: func(t *testing.T, token, _ string) *httptest.ResponseRecorder {
+				return send(t, token, http.MethodPatch, "/api/v1/stewards/"+stewardID+"/visibility", map[string]bool{"hidden": false})
+			},
+			allowed: func(t *testing.T, rec *httptest.ResponseRecorder, _ string) {
+				assert.Less(t, rec.Code, 300, rec.Body.String())
+			},
+		},
+		{
+			name: "steward decommission",
+			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
+				id := newMSPSteward(t, "e2e-decom-"+suffix)
+				return send(t, token, http.MethodDelete, "/api/v1/stewards/"+id, nil)
+			},
+			allowed: func(t *testing.T, rec *httptest.ResponseRecorder, _ string) {
+				assert.Less(t, rec.Code, 300, rec.Body.String())
+			},
+		},
+		{
+			name: "steward move",
+			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
+				id := newMSPSteward(t, "e2e-move-"+suffix)
+				return send(t, token, http.MethodPost, "/api/v1/stewards/"+id+"/move", map[string]string{"new_tenant_id": testRootTenantID})
+			},
+			allowed: notChallenged,
+		},
+		{
+			name: "session revoke",
+			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
+				target, _, err := sessMgr.Issue(ctx, "e2e-msp-user-"+suffix, "cfg-cli", msp)
+				require.NoError(t, err)
+				return send(t, token, http.MethodDelete, "/api/v1/sessions/"+target.ID, nil)
+			},
+			allowed: func(t *testing.T, rec *httptest.ResponseRecorder, _ string) {
+				assert.Less(t, rec.Code, 300, rec.Body.String())
+			},
+		},
+		{
+			name: "case create",
+			call: func(t *testing.T, token, _ string) *httptest.ResponseRecorder {
+				return send(t, token, http.MethodPost, "/api/v1/cases", map[string]interface{}{
+					"tenant_id": msp,
+					"ticket":    map[string]interface{}{"title": map[string]string{"value": "e2e", "source": "operator"}},
+				})
+			},
+			allowed: notChallenged,
+		},
+		{
+			name: "config push",
+			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
+				return send(t, token, http.MethodPost, "/api/v1/config/push", map[string]string{
+					"config_id": "e2e-cfg-" + suffix, "version": "1", "tenant_id": msp, "selector": "all",
+				})
+			},
+			allowed: notChallenged,
+		},
+		{
 			name: "registration approve-all",
 			bulk: true,
 			call: func(t *testing.T, token, suffix string) *httptest.ResponseRecorder {
@@ -192,4 +266,16 @@ func TestRootSessionCrossingBoundary_EndToEnd(t *testing.T) {
 			})
 		})
 	}
+
+	// A rollback target whose owner neither the registry nor the durable store
+	// knows cannot be held to the crossing, so a boundary-subject root is refused
+	// before the rollback manager — which would otherwise admit any root caller —
+	// is reached (Issue #4665).
+	t.Run("rollback points for an unresolved target", func(t *testing.T) {
+		rec := send(t, rootSession(t, "e2e-root-unresolved"), http.MethodGet,
+			"/api/v1/rollback/points?target_type=device&target_id=e2e-unknown-steward", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"rollback_points":[]`)
+		assert.NotContains(t, rec.Body.String(), "repository not found", "the request must not reach the rollback manager")
+	})
 }

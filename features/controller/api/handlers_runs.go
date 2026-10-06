@@ -229,7 +229,7 @@ func (s *Server) authRunAccess(w http.ResponseWriter, r *http.Request) (principa
 		return nil, "", false
 	}
 	tenantID = callerTenantFilter(r.Context())
-	if tenantID == "" && principal.Assurance == session.AssuranceMachine {
+	if tenantID == "" && principal.Assurance == session.AssuranceMachine { //architecture:allow-root-scope -- refuses a machine credential with no tenant; not a grant
 		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
 		return nil, "", false
 	}
@@ -396,7 +396,7 @@ func (s *Server) handlePostRunScript(w http.ResponseWriter, r *http.Request) {
 	// store with an empty tenant key (which is undefined/store-dependent) — Issue #1990.
 	var paramPlatformBindings map[string]string
 	var requiredAPIScope []string
-	if s.privilegeStore != nil && tenantID != "" {
+	if s.privilegeStore != nil && tenantID != "" { //architecture:allow-root-scope -- skips per-tenant privilege metadata for root; not a grant
 		meta, loadErr := s.loadPrivilegeMetadata(r.Context(), tenantID, req.ScriptID)
 		if loadErr == nil && meta != nil {
 			paramPlatformBindings = meta.ParamPlatformBindings
@@ -520,7 +520,7 @@ func (s *Server) handlePostRunCommand(w http.ResponseWriter, r *http.Request) {
 	// caller has fleet-wide reach (Issue #4665).
 	// selector.Parse populates filter.IDs (comma-OR list); filter.DeviceID is the
 	// legacy query-param path only.
-	if execTenant := callerTenantFilter(r.Context()); execTenant != "" {
+	if execTenant := callerTenantFilter(r.Context()); execTenant != "" { //architecture:allow-root-scope -- tenant callers' id: targets; a root caller's targets pass resolveAuthorizedRunTargets
 		for _, targetID := range filter.IDs {
 			switch s.enforceExecTenantScope(r.Context(), targetID, execTenant) {
 			case execScopeForbidden:

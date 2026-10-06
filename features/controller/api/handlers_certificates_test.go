@@ -1403,13 +1403,14 @@ func TestHandleProvisionCertificate_ValidityDaysExceedsMaximum_Returns400(t *tes
 }
 
 // TestHandleProvisionCertificate_ExplicitCommonName_Returns201 verifies an explicit
-// common_name is used instead of the steward_id default.
+// common_name is used instead of the steward_id default, while the organization is
+// always the steward certificate organization (Issue #4665).
 func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) {
 	server, certMgr, _ := setupProvisionTestServer(t)
 	peer := newAdminPeerCert(t, certMgr)
 
 	rec := postProvision(server, peer,
-		`{"steward_id":"steward-prov-02","common_name":"steward-prov-02.example.com","organization":"Example Org"}`)
+		`{"steward_id":"steward-prov-02","common_name":"steward-prov-02.example.com"}`)
 
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
@@ -1421,7 +1422,7 @@ func TestHandleProvisionCertificate_ExplicitCommonName_Returns201(t *testing.T) 
 	issued, err := cert.ParseCertificateFromPEM([]byte(resp.Data.CertificatePEM))
 	require.NoError(t, err)
 	assert.Equal(t, "steward-prov-02.example.com", issued.Subject.CommonName)
-	assert.Contains(t, issued.Subject.Organization, "Example Org")
+	assert.Equal(t, []string{internaldelivery.StewardCertOrganization}, issued.Subject.Organization)
 }
 
 // TestHandleProvisionCertificate_ProvisioningFailure_Returns500 verifies that a real

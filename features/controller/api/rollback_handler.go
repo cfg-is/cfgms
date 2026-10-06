@@ -60,14 +60,20 @@ func callerTenantScope(r *http.Request) ctxkeys.TenantScope {
 // server's tenant decision, crossing included (Issue #4665). It returns the
 // decision and the resolved tenant. When the lookup is unavailable
 // (stewardTenantLookup is nil — e.g. in unit tests) or returns no result (unknown
-// target), the target is allowed and the underlying manager call decides — the
-// same resolvedTenant != "" guard ExecuteRollback uses.
+// target), the underlying manager call decides — it refuses an unresolved target
+// for every tenant-scoped caller (Issue #4340) — except for a root caller subject
+// to the ADR-025 crossing boundary, which the manager would admit: with no owner
+// established no crossing can be evaluated, so that caller is refused here
+// (Issue #4665).
 func (h *RollbackHandler) targetTenantAccess(r *http.Request, targetID, route string) (tenantAuthDecision, string) {
 	if h.stewardTenantLookup == nil {
 		return tenantAuthAllowed, ""
 	}
 	resolvedTenant := h.stewardTenantLookup(targetID)
 	if resolvedTenant == "" {
+		if principal, _ := r.Context().Value(principalContextKey).(*Principal); subjectToTenantCrossingBoundary(principal) && callerTenantScope(r).IsRoot() { //architecture:allow-root-scope -- refuses, not grants: an unresolved target for a boundary-subject root
+			return tenantAuthDenied, ""
+		}
 		return tenantAuthAllowed, ""
 	}
 	return tenantScopeDecision(r.Context(), h.tenantAccess, callerTenantScope(r), resolvedTenant, route), resolvedTenant
@@ -264,10 +270,10 @@ func (h *RollbackHandler) ExecuteRollback(w http.ResponseWriter, r *http.Request
 	//   Phase 2 (fallback): caller-supplied steward_tenant_path field — used when
 	//     stewardTenantLookup is nil (e.g. handler unit tests).
 	scopeTenant := callerTenantFilter(r.Context())
-	if scopeTenant == "" && principal != nil && !principal.GlobalScope {
+	if scopeTenant == "" && principal != nil && !principal.GlobalScope { //architecture:allow-root-scope -- confines a principal with no scope to its own tenant; not a grant
 		scopeTenant = principal.TenantID
 	}
-	if scopeTenant == "" {
+	if scopeTenant == "" { //architecture:allow-root-scope -- an explicitly root caller: the target passes refuseTarget, the server tenant decision
 		// An explicitly root caller: the target steward's tenant passes the server's
 		// tenant decision, so a root caller subject to the ADR-025 boundary needs a
 		// crossing to roll back a client tenant's steward (Issue #4665).

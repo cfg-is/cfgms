@@ -119,7 +119,7 @@ func paginateStewards(stewards []StewardInfo, limit, offset int) StewardListPage
 func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	// Extract tenant from authenticated context (same pattern as handleUpdateStewardConfig).
 	tenantID := ""
-	if tid := callerTenantFilter(r.Context()); tid != "" {
+	if tid := callerTenantFilter(r.Context()); tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 		tenantID = tid
 	}
 
@@ -550,7 +550,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 	// principals have TenantID="" meaning no scope restriction.
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		info, ok := s.controllerService.GetStewardInfo(stewardID)
 		stewardTenant := ""
 		if ok {
@@ -1155,13 +1155,11 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		}
 		// Cross-tenant scope check using the in-memory record's TenantID (fallback path).
 		// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
-		if callerTenant != "" {
-			sameTenant := memInfo.TenantID == callerTenant
-			ancestorTenant := strings.HasPrefix(memInfo.TenantID, callerTenant+"/")
-			if !sameTenant && !ancestorTenant {
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), memInfo.TenantID, "DELETE /api/v1/stewards/{id}"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, memInfo.TenantID) {
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
 			}
+			return
 		}
 		// Backfill a durable record before tombstoning — must succeed before any in-memory
 		// updates (mirrors the "durable write must succeed first" invariant). Populate at
@@ -1177,17 +1175,15 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	} else {
-		// Cross-tenant scope check using the durable record's TenantID as the authoritative source.
-		// Admin mTLS (empty callerTenant) has global scope; API-key callers are rejected at the
-		// TierMTLSOnly gate before reaching here, so callerTenant is always from an mTLS principal.
-		if callerTenant != "" {
-			sameTenant := record.TenantID == callerTenant
-			ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
-			if !sameTenant && !ancestorTenant {
+		// Cross-tenant scope check using the durable record's TenantID as the authoritative
+		// source; a root caller subject to the ADR-025 boundary needs a crossing for a
+		// steward in a tenant below root (Issue #4665).
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), record.TenantID, "DELETE /api/v1/stewards/{id}"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
 				// 404 instead of 403 to avoid existence disclosure across tenant boundaries.
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-				return
 			}
+			return
 		}
 	}
 
@@ -1299,13 +1295,11 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Tenant-scope check: 404 instead of 403 to avoid existence disclosure across tenant boundaries.
-	if callerTenant != "" {
-		sameTenant := record.TenantID == callerTenant
-		ancestorTenant := strings.HasPrefix(record.TenantID, callerTenant+"/")
-		if !sameTenant && !ancestorTenant {
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), record.TenantID, "PATCH /api/v1/stewards/{id}/visibility"); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, record.TenantID) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
-			return
 		}
+		return
 	}
 
 	// Durable write first — hard-fail the request on error.
@@ -1399,7 +1393,7 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
 	// A root caller has fleet-wide reach; anyone else is confined (Issue #4665).
 	callerTenantID := callerTenantFilter(r.Context())
-	if callerTenantID != "" {
+	if callerTenantID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		tenantMatch := stewardInfo.TenantID == callerTenantID ||
 			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
 		if !tenantMatch {
@@ -1527,7 +1521,7 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
 	callerTenant := callerTenantFilter(r.Context())
 	info, exists := s.controllerService.GetStewardInfo(stewardID)
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := ""
 		if exists {
 			stewardTenant = info.TenantID
@@ -1735,11 +1729,37 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 	callerTenantID := callerTenantFilter(r.Context())
 
 	// Dual-admin authorization (Issue #2342).
-	// An unscoped (root) admin (callerTenantID == "") is always permitted; the move is
-	// recorded as a privileged cross-tenant action. A scoped admin must have scope that is
-	// an ancestor of (or equal to) BOTH source AND destination via the anchored-prefix form.
-	// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
-	if callerTenantID != "" {
+	// An explicitly root caller (callerTenantID == "") may move across tenants — the move
+	// is recorded as a privileged cross-tenant action — but both the source and the
+	// destination tenant must pass its tenant decision, so a root caller subject to the
+	// ADR-025 boundary needs a crossing for each tenant below root it touches (Issue
+	// #4665). A scoped admin must have scope that is an ancestor of (or equal to) BOTH
+	// source AND destination via the anchored-prefix form. The "/" separator boundary
+	// prevents "tenant-a" from matching "tenant-abc".
+	if callerTenantID == "" { //architecture:allow-root-scope -- an explicitly root caller: both tenants pass tenantAccessForScope here
+		for _, tenant := range []string{oldTenantID, newTenantID} {
+			access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenant, "POST /api/v1/stewards/{id}/move")
+			if access == tenantAuthAllowed {
+				continue
+			}
+			reason := "tenant_outside_boundary"
+			if access == tenantAuthNeedsCrossing {
+				reason = "tenant_crossing_required"
+			}
+			s.emitMoveAudit(r, stewardID, oldTenantID, newTenantID, principal,
+				business.AuditEventSecurityEvent, "steward_move",
+				business.AuditResultDenied, business.AuditSeverityCritical,
+				map[string]interface{}{
+					"decision": "denied",
+					"reason":   reason,
+				})
+			if !s.writeTenantCrossingIfNeeded(w, access, tenant) {
+				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
+			}
+			return
+		}
+	}
+	if callerTenantID != "" { //architecture:allow-root-scope -- tenant-scoped callers: source and destination must both be in the caller subtree
 		sourceInScope := oldTenantID == callerTenantID || strings.HasPrefix(oldTenantID, callerTenantID+"/")
 		destInScope := newTenantID == callerTenantID || strings.HasPrefix(newTenantID, callerTenantID+"/")
 		if !sourceInScope || !destInScope {
@@ -1887,7 +1907,7 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		business.AuditResultSuccess, business.AuditSeverityHigh,
 		map[string]interface{}{
 			"decision":                "approved",
-			"privileged_cross_tenant": callerTenantID == "",
+			"privileged_cross_tenant": callerTenantID == "", //architecture:allow-root-scope -- audit detail, not an access decision
 		})
 
 	s.writeSuccessResponse(w, map[string]any{

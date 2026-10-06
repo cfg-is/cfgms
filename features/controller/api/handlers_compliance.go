@@ -159,7 +159,7 @@ func (s *Server) handleGetStewardCompliance(w http.ResponseWriter, r *http.Reque
 	// steward compliance data. 404 (not 403) avoids disclosing steward existence
 	// across tenants — matching tenantScopedTerminalWrapper behavior.
 	callerTenant := callerTenantFilter(r.Context())
-	if callerTenant != "" {
+	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := stewardInfo.TenantID
 		sameTenant := stewardTenant == callerTenant
 		descendantTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
@@ -253,7 +253,7 @@ func (s *Server) handleGetStewardComplianceReport(w http.ResponseWriter, r *http
 	// Cross-tenant guard: mirroring tenantScopedTerminalWrapper — 404 to avoid
 	// disclosing steward existence across tenants.
 	callerTenantR := callerTenantFilter(r.Context())
-	if callerTenantR != "" {
+	if callerTenantR != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		stewardTenant := stewardInfo.TenantID
 		sameTenant := stewardTenant == callerTenantR
 		descendantTenant := strings.HasPrefix(stewardTenant, callerTenantR+"/")
@@ -350,7 +350,7 @@ func (s *Server) handleGetComplianceSummary(w http.ResponseWriter, r *http.Reque
 	// Collect steward IDs while applying tenant scoping from the steward registry.
 	stewardsByTenant := make(map[string][]string) // tenantID → steward IDs
 	for _, st := range s.controllerService.ListFleetStewards(r.Context()) {
-		if callerTenant != "" {
+		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			sameTenant := st.TenantID == callerTenant
 			descendantTenant := strings.HasPrefix(st.TenantID, callerTenant+"/")
 			if !sameTenant && !descendantTenant {

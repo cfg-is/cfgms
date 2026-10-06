@@ -135,7 +135,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	callerTenant := callerTenantFilter(r.Context())
 	items := make([]sessionListItem, 0, len(all))
 	for _, sess := range all {
-		if callerTenant != "" && sess.TenantID != callerTenant {
+		if callerTenant != "" && sess.TenantID != callerTenant { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			continue
 		}
 		items = append(items, sessionListItem{
@@ -194,9 +194,13 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Tenant-scope check: a tenant-scoped caller may only revoke sessions in its own
-	// tenant. A root caller retains cross-tenant reach, matching the rule
-	// handleSessionList already applies.
-	if callerTenant := callerTenantFilter(r.Context()); callerTenant != "" && target.TenantID != callerTenant {
+	// tenant. A root caller may revoke a session in any tenant its tenant decision
+	// admits — a root caller subject to the ADR-025 boundary needs a crossing for a
+	// tenant below root (Issue #4665).
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), target.TenantID, "DELETE /api/v1/sessions/{id}"); access != tenantAuthAllowed {
+		if s.writeTenantCrossingIfNeeded(w, access, target.TenantID) {
+			return
+		}
 		s.logger.Warn("Cross-tenant session revoke denied",
 			"session_id", logging.SanitizeLogValue(sessionID),
 			"session_tenant", logging.SanitizeLogValue(target.TenantID),

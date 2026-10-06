@@ -1107,14 +1107,21 @@ through `TenantScope`.
   by the same `authorizeTenantAccess` decision as a tenant path variable, through one
   function (`tenantAccessForScope`): creating, changing, deleting, approving, revoking or
   provisioning an account, certificate, cert binding, enrolment token, credential request,
-  registration or registration token, API key, role or RBAC subject, rollout, run, rollback
-  or steward config, and dispatching a batch job, upgrade, osquery query or signed operator
-  payload. The root tenant's own records are reachable; a record owned by a tenant below
+  registration, registration token or refresh, API key, role or RBAC subject, case, session,
+  rollout, run, rollback or steward config; moving, hiding or decommissioning a steward;
+  pushing configuration; and dispatching a batch job, upgrade, osquery query or signed
+  operator payload. A rollback target whose owner cannot be established is refused for such
+  a caller, since no crossing can be evaluated for it. The root tenant's own records are reachable; a record owned by a tenant below
   root needs an active grant or break-glass crossing and otherwise answers with the
   crossing challenge (Decision 3). Bulk actions (approve-all, approve-by-CIDR) skip the
   records the caller may not act on, as A2.5 reads bulk lists. Routes that were open to a
   root session only by its unset scope before this amendment are judged the same way, so
   none of them widens.
+- **Provisioned certificates are steward leaves.** Certificate provisioning, for every
+  caller, stamps the steward Organization, refuses any other, and refuses an identity that
+  names a controller cluster node, so the endpoint can never mint a controller peer
+  identity. Signing-CA rotation stays with a certificate-authenticated root principal; a
+  root web or Bearer session cannot perform it.
 - **Read breadth is unchanged.** List endpoints, and by-ID reads of records a list already
   shows (a steward, an account, a command, a job, a push or upgrade record, a certificate),
   keep root's existing fleet-wide breadth: such a read is no stricter than the list it
@@ -1122,8 +1129,9 @@ through `TenantScope`.
   crossing, as Decision 4 implies for business data, is a separate decision this amendment
   does not take.
 - **Enforced by an architecture rule.** In `features/controller/api`, any root-allow
-  decision made outside `tenantAccessForScope` — a `TenantScope.IsRoot()` branch, or an
-  `isWithinTenantScope` call fed the root caller's empty filter — must carry
+  decision made outside `tenantAccessForScope` — a `TenantScope.IsRoot()` branch, an
+  `isWithinTenantScope` call fed the root caller's empty filter, or a hand-written
+  comparison of that filter with `""` — must carry
   `//architecture:allow-root-scope -- <reason>` on the same line
   (`TestRootScopeDecisionsGoThroughTenantAccess`). Handlers that are not `*Server`
   (the rollback handler) are given the server's decision function rather than a copy of it.

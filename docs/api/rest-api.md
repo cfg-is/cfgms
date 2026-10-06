@@ -796,15 +796,20 @@ tenant, and a `steward_id` with no record at all, are both refused with `403 FOR
 — without a record the target cannot be attributed to the caller's subtree, and this
 endpoint returns a signed certificate together with its private key. New-device
 onboarding is therefore a root/unscoped operation, or follows the steward's
-registration to a tenant. Root/unscoped callers may provision for any steward.
+registration to a tenant. Root callers may provision for any steward, subject to the
+tenant-crossing boundary (see [Tenant Scope](#tenant-scope)) for every existing steward
+the certificate would name.
 
 **Certificate subject:** for a tenant-scoped caller, `common_name` is always the
 resolved steward's own ID and `organization` is always the steward certificate
 organization; an explicit value for either is accepted only when it already matches,
 and refused with `403 FORBIDDEN` otherwise. The subject — not `steward_id` — is what
 peers authenticate on, so a request-supplied subject would let a caller pass the
-containment check with one steward and receive a certificate naming another.
-Root/unscoped callers may set both fields freely.
+containment check with one steward and receive a certificate naming another. A root
+caller may choose `common_name`. For every caller, the certificate's organization is
+always the steward certificate organization — any other `organization` is refused with
+`403 FORBIDDEN` — and a `steward_id` or `common_name` naming a controller cluster node is
+refused with `403 FORBIDDEN`, so this endpoint never mints a controller peer identity.
 
 **Validity ceiling:** `validity_days` may not exceed 825. A request above the ceiling
 is refused with `400 BAD_REQUEST` — the requested period is never silently clamped
@@ -843,6 +848,10 @@ retiring the old one after an overlap window.
 
 **Authentication:** Required (mTLS admin certificate, `AssuranceStrong`)  
 **Required permission:** `certificate:rotate`
+
+**Caller:** a certificate-authenticated root principal (admin certificate). A root web or
+Bearer session is refused with `403 FORBIDDEN`: rotation replaces the chain every steward
+verifies operator commands against.
 
 **Tenant scope:** the signing CA is a single fleet-wide resource, not owned by any
 one tenant — rotating it replaces the chain every tenant's certificates verify

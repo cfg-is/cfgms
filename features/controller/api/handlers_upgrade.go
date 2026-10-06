@@ -142,7 +142,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		filter.TenantSubtree = parsedTenantPath
-	} else if callerTenantID != "" {
+	} else if callerTenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
 		filter.TenantSubtree = callerTenantID
 	}
 
@@ -255,7 +255,7 @@ func (s *Server) handleDispatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		// (Issue #1999).
 		recordTenantID := callerTenantID
 		authMethod := "api_key"
-		if callerTenantID == "" {
+		if callerTenantID == "" { //architecture:allow-root-scope -- record attribution, not an access decision
 			recordTenantID = st.TenantID
 			authMethod = "mtls_admin"
 		}
@@ -495,7 +495,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	// (== original tenant by the isolation check above), so per-tenant status/listing
 	// stays consistent (Issue #1999).
 	effectiveTenantID := callerTenantID
-	if callerTenantID == "" {
+	if callerTenantID == "" { //architecture:allow-root-scope -- record attribution, not an access decision
 		effectiveTenantID = original.TenantID
 	}
 	// Blob namespace: the rollback binary is read from the caller's namespace, the same place
@@ -572,7 +572,7 @@ func (s *Server) handleUpgradeRollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rollbackAuthMethod := "api_key"
-	if callerTenantID == "" {
+	if callerTenantID == "" { //architecture:allow-root-scope -- record attribution, not an access decision
 		rollbackAuthMethod = "mtls_admin"
 	}
 	rollbackUpgradeID := uuid.New().String()

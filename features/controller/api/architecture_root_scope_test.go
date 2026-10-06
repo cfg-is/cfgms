@@ -35,17 +35,55 @@ var rootScopeExemptFuncs = map[string]bool{
 
 var funcNamePattern = regexp.MustCompile(`^func (?:\([^)]*\) )?(\w+)`)
 
+// callerTenantAssign matches a variable assigned the caller's tenant filter —
+// "" for a root caller — from callerTenantFilter, callerTenantID or
+// authRunAccess (whose second result is that filter).
+var callerTenantAssign = regexp.MustCompile(
+	`(?:^|[\s(])(\w+)\s*:?=\s*(?:s\.)?(?:callerTenantFilter|callerTenantID)\(` +
+		`|(?:^|\s)\w+,\s*(\w+),\s*\w+\s*:?=\s*s\.authRunAccess\(`)
+
+// inlineCallerTenantCompare matches the filter compared with "" without a
+// variable in between.
+var inlineCallerTenantCompare = regexp.MustCompile(`(?:callerTenantFilter|callerTenantID)\([^)]*\)\s*[!=]=\s*""`)
+
+// comparesCallerTenant reports whether line compares the caller's tenant filter
+// with "" — the hand-written form of "is this caller root" — either inline or
+// through a variable the current function assigned from it.
+func comparesCallerTenant(line string, callerVars map[string]bool) bool {
+	if inlineCallerTenantCompare.MatchString(line) {
+		return true
+	}
+	for name := range callerVars {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*[!=]=\s*""`).MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkRootAllowCalls returns "path:line: text" for every root-allow call in src
 // that is outside an exempt function and lacks the annotation with a reason.
 func checkRootAllowCalls(path string, src []byte) []string {
 	var violations []string
 	currentFunc := ""
+	callerVars := map[string]bool{}
 	for i, line := range strings.Split(string(src), "\n") {
 		if m := funcNamePattern.FindStringSubmatch(line); m != nil {
 			currentFunc = m[1]
+			callerVars = map[string]bool{}
 		}
 		code := strings.TrimSpace(line)
-		if strings.HasPrefix(code, "//") || !rootAllowPattern.MatchString(line) {
+		if strings.HasPrefix(code, "//") {
+			continue
+		}
+		if m := callerTenantAssign.FindStringSubmatch(line); m != nil {
+			for _, name := range m[1:] {
+				if name != "" && name != "_" {
+					callerVars[name] = true
+				}
+			}
+		}
+		if !rootAllowPattern.MatchString(line) && !comparesCallerTenant(line, callerVars) {
 			continue
 		}
 		if strings.HasPrefix(code, "func isWithinTenantScope(") || rootScopeExemptFuncs[currentFunc] {
@@ -76,10 +114,12 @@ func checkRootAllowCalls(path string, src []byte) []string {
 // Annotate, don't weaken: if the rule fires on a legitimate decision, add the
 // annotation with the reason rather than an exemption.
 //
-// Known evasion limits: the rule matches calls by name, line by line. It does
-// not see a root decision made by comparing callerTenantFilter's result with ""
-// by hand, nor one reached through a local wrapper. Both are violations of the
-// same intent.
+// It also covers the hand-written form: comparing the caller's tenant filter
+// (from callerTenantFilter, callerTenantID or authRunAccess) with "".
+//
+// Known evasion limits: the rule matches by name, line by line, within one
+// function. It does not follow the filter through a parameter, a struct field
+// or a local wrapper. Those are violations of the same intent.
 func TestRootScopeDecisionsGoThroughTenantAccess(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
