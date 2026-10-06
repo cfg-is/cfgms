@@ -25,9 +25,11 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/config"
 	"github.com/cfgis/cfgms/features/controller/initialization"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/cert"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	blob "github.com/cfgis/cfgms/pkg/storage/interfaces/blob"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // newFSBlobStore creates a temporary filesystem BlobStore for tests.
@@ -846,4 +848,78 @@ func TestHandleDownloadInstallPackage_RouterNoAuth(t *testing.T) {
 	// Must succeed — the download route is public.
 	assert.Equal(t, http.StatusOK, rec.Code, "download endpoint must be accessible without auth")
 	assert.Equal(t, "application/gzip", rec.Header().Get("Content-Type"))
+}
+
+// serverWithRootTenant returns a blob-backed test server whose root tenant — the
+// single parentless tenant — is rootID instead of the conventional "root".
+func serverWithRootTenant(t *testing.T, rootID string) (*Server, blob.BlobStore) {
+	t.Helper()
+	server, store := setupTestServerWithBlobStore(t)
+	ctx := context.Background()
+	// The manager refuses to delete the root tenant, so swap it in the store
+	// behind the manager.
+	v, ok := testTenantStores.Load(server.tenantManager)
+	require.True(t, ok, "server was not built by a setupTestServer variant")
+	ts := v.(tenant.Store)
+	require.NoError(t, ts.DeleteTenant(ctx, testRootTenantID))
+	now := time.Now()
+	require.NoError(t, ts.CreateTenant(ctx, &business.TenantData{
+		ID: rootID, Name: rootID, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
+	require.Equal(t, rootID, server.rootTenantID(ctx), "precondition: the root tenant resolves by position")
+	return server, store
+}
+
+func putInstaller(t *testing.T, store blob.BlobStore, tenantID, name string, content []byte) {
+	t.Helper()
+	require.NoError(t, store.PutBlob(context.Background(),
+		blob.BlobKey{TenantID: tenantID, Namespace: "installers", Name: name},
+		bytes.NewReader(content), blob.BlobMeta{ContentType: "application/octet-stream"}))
+}
+
+func downloadInstaller(server *Server, platform, arch string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/installer/download/"+platform+"/"+arch, nil)
+	req = withVars(req, map[string]string{"platform": platform, "arch": arch})
+	rec := httptest.NewRecorder()
+	server.handleDownloadInstallPackage(rec, req)
+	return rec
+}
+
+// TestHandleDownloadInstallPackage_LegacyRootNamespace guards Issue #4667: the
+// public download serves the positional root tenant's artifact, and — while a
+// deployment migrates — falls back, read-only, to an artifact uploaded under the
+// legacy literal "root" namespace the download used before #4634.
+func TestHandleDownloadInstallPackage_LegacyRootNamespace(t *testing.T) {
+	const linuxArtifact = "installer/linux-amd64/cfgms-steward-amd64"
+
+	t.Run("root tenant's own artifact", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("legacy root namespace fallback", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("legacy"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("root tenant's own artifact wins over the legacy one", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "linux-amd64", []byte("legacy"))
+		putInstaller(t, store, "acme-root", "linux-amd64", []byte("own"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, []byte("own"), extractTarGz(t, rec.Body.Bytes())[linuxArtifact])
+	})
+
+	t.Run("neither namespace has the artifact", func(t *testing.T) {
+		server, store := serverWithRootTenant(t, "acme-root")
+		putInstaller(t, store, legacyInstallerTenant, "windows-amd64", []byte("other platform"))
+		rec := downloadInstaller(server, "linux", "amd64")
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
 }
