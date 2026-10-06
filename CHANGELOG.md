@@ -424,6 +424,10 @@ management, and a fleet-wide tenant-containment hardening pass. See
   steward runs a correctly signed bundle installed in its module directory, but there is no shipped
   bundle signing tool, the controller does not fetch from module sources or cache module binaries,
   and stewards cannot pull modules from the controller. Tracked by Epic #4654.
+- **Workflow execution status is node-local.** A workflow execution's status and step results are
+  held in memory on the controller node that ran it: on a clustered controller, other nodes answer
+  `404` for it, and a restart forgets it. Workflow definitions and triggers are shared. Tracked by
+  Issue #4675.
 
 ## [0.9.7] - 2026-06-15
 
