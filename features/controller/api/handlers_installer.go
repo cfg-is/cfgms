@@ -403,6 +403,10 @@ func (s *Server) handleDownloadInstallPackage(w http.ResponseWriter, r *http.Req
 	servePublicDownload(w, r, archiveName, asset)
 }
 
+// legacyInstallerTenant is the tenant ID public installers were uploaded under
+// before the public download resolved the root tenant by position (#4634).
+const legacyInstallerTenant = "root"
+
 func (s *Server) buildInstallPackage(
 	r *http.Request,
 	platform, arch, archiveName string,
@@ -419,6 +423,21 @@ func (s *Server) buildInstallPackage(
 		Name:      platform + "-" + arch,
 	}
 	rc, meta, err := s.blobStore.GetBlob(r.Context(), key)
+	if errors.Is(err, blob.ErrBlobNotFound) && rootTenantID != legacyInstallerTenant {
+		// Compatibility read (Issue #4667): before #4634 the public download always
+		// looked up a tenant literally named "root", and operators were told to
+		// upload public installers there. A deployment whose root tenant has another
+		// ID keeps serving those artifacts, read-only, until they are re-uploaded
+		// as root; the root tenant's own artifact always wins.
+		legacyKey := key
+		legacyKey.TenantID = legacyInstallerTenant
+		rc, meta, err = s.blobStore.GetBlob(r.Context(), legacyKey)
+		if err == nil {
+			s.logger.Warn("Serving a public installer from the legacy root namespace; re-upload it as root",
+				"platform", logging.SanitizeLogValue(platform),
+				"arch", logging.SanitizeLogValue(arch))
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
