@@ -39,6 +39,10 @@ function parseSteward(value: unknown): Steward | null {
   if (typeof record.last_seen === 'string') steward.last_seen = record.last_seen
   if (typeof record.version === 'string') steward.version = record.version
   if (typeof record.hidden === 'boolean') steward.hidden = record.hidden
+  if (Array.isArray(record.tags)) {
+    const tags = record.tags.filter((t): t is string => typeof t === 'string')
+    if (tags.length > 0) steward.tags = tags
+  }
   if (typeof record.dna === 'object' && record.dna !== null) {
     const dna = record.dna as Record<string, unknown>
     let attributes: Record<string, string> = {}

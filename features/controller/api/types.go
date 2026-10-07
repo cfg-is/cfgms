@@ -41,6 +41,8 @@ type StewardInfo struct {
 	DNA         *DNAInfo          `json:"dna,omitempty"`
 	// Hidden is the operator-controlled fleet-view visibility flag (Issue #2918).
 	Hidden bool `json:"hidden,omitempty"`
+	// Tags are the steward's operator-assigned tags (Issue #4595). Omitted when empty.
+	Tags []string `json:"tags,omitempty"`
 	// ActiveSessions is 1 when the steward has an active ControlChannel stream,
 	// 0 otherwise. Each steward holds at most one stream at a time, so this is
 	// a binary sentinel, not a real connection count.

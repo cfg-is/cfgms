@@ -60,6 +60,9 @@ const CELL_CLASS: Record<string, string> = {
   mono: 'mono2',
 }
 
+/* Tag chips shown before the "+N" overflow chip (mockup fleet-bulk.html .tags). */
+const MAX_TAG_CHIPS = 3
+
 function Cell({
   column,
   steward,
@@ -110,6 +113,35 @@ function Cell({
     return (
       <td className={`c-${column.key}`} onClick={onRowSelect}>
         <span className="seen">{formatLastSeen(steward.last_seen, nowMs)}</span>
+      </td>
+    )
+  }
+  if (column.kind === 'tags') {
+    const tags = steward.tags ?? []
+    const shown = tags.slice(0, MAX_TAG_CHIPS)
+    const extra = tags.length - shown.length
+    return (
+      <td className={`c-${column.key}`} onClick={onRowSelect}>
+        {tags.length === 0 ? (
+          <span className="mut">—</span>
+        ) : (
+          <span className="tags">
+            {shown.map((tag) => (
+              <span key={tag} className="tag">
+                {tag}
+              </span>
+            ))}
+            {extra > 0 && (
+              <span
+                className="tag tag-more"
+                title={tags.slice(MAX_TAG_CHIPS).join(', ')}
+                aria-label={`${extra} more tags`}
+              >
+                +{extra}
+              </span>
+            )}
+          </span>
+        )}
       </td>
     )
   }

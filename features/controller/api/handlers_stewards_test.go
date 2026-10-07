@@ -4896,3 +4896,56 @@ func TestHandleValidateConfig_CrossTenant_Returns404(t *testing.T) {
 	require.NotNil(t, errResp.Error)
 	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
 }
+
+// Issue #4595: list items carry per-steward tags from one batch store read.
+func TestHandleListStewards_IncludesTags_ScopedCallerSeesOnlyVisibleRows(t *testing.T) {
+	server := setupTagServer(t)
+	ctx := context.Background()
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tag-a", "tenant-x", "addr", "registered", map[string]string{"hostname": "a"}))
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tag-b", "tenant-x", "addr", "registered", map[string]string{"hostname": "b"}))
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tag-c", "tenant-x", "addr", "registered", map[string]string{"hostname": "c"}))
+	require.NoError(t, server.controllerService.RegisterStewardWithAttributes(
+		"s-tag-other", "tenant-y", "addr", "registered", map[string]string{"hostname": "o"}))
+	require.NoError(t, server.tagStore.Set(ctx, "s-tag-a", []string{"prod", "web"}))
+	require.NoError(t, server.tagStore.Set(ctx, "s-tag-b", []string{"db"}))
+	require.NoError(t, server.tagStore.Set(ctx, "s-tag-other", []string{"secret"}))
+
+	// Unscoped caller, paginated: each row has its own tags; untagged omit the field.
+	req := withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/stewards?limit=10&offset=0", nil), "")
+	rec := httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page struct {
+		Data StewardListPage `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page))
+	got := map[string][]string{}
+	for _, st := range page.Data.Stewards {
+		got[st.ID] = st.Tags
+	}
+	assert.Equal(t, []string{"prod", "web"}, got["s-tag-a"])
+	assert.Equal(t, []string{"db"}, got["s-tag-b"])
+	assert.Empty(t, got["s-tag-c"])
+	assert.Equal(t, []string{"secret"}, got["s-tag-other"])
+
+	// Scoped caller: only its own rows, never the other tenant's tags.
+	req = withTenant(httptest.NewRequest(http.MethodGet, "/api/v1/stewards", nil), "tenant-x")
+	rec = httptest.NewRecorder()
+	server.handleListStewards(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "s-tag-other")
+	assert.NotContains(t, rec.Body.String(), "secret")
+	var list struct {
+		Data []StewardInfo `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&list))
+	require.Len(t, list.Data, 3)
+	for _, st := range list.Data {
+		if st.ID == "s-tag-a" {
+			assert.Equal(t, []string{"prod", "web"}, st.Tags)
+		}
+	}
+}

@@ -1095,6 +1095,11 @@ components:
           additionalProperties:
             type: string
           description: Steward performance metrics
+        tags:
+          type: array
+          items:
+            type: string
+          description: Operator-assigned steward tags; omitted when the steward has none
         dna:
           $ref: '#/components/schemas/DNAInfo'
 

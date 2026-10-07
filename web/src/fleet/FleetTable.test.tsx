@@ -383,3 +383,37 @@ describe('per-row visibility button (Story #2918 AC)', () => {
     expect(onRowSelect).not.toHaveBeenCalled()
   })
 })
+
+describe('tags column (Issue #4595)', () => {
+  const tagsColumn = COLUMNS.filter((c) => c.key === 'tags')
+
+  function renderTags(stewards: Steward[]) {
+    return render(
+      <MemoryRouter>
+        <FleetTable
+          stewards={stewards}
+          columns={tagsColumn}
+          sort={null}
+          onSort={() => {}}
+          nowMs={NOW_MS}
+        />
+      </MemoryRouter>,
+    )
+  }
+
+  it('renders up to three chips and a +N overflow count', () => {
+    renderTags([{ ...makeSteward('s1', 'host-1'), tags: ['a', 'b', 'c', 'd', 'e'] }])
+    for (const t of ['a', 'b', 'c']) expect(screen.getByText(t)).toBeInTheDocument()
+    expect(screen.queryByText('d')).not.toBeInTheDocument()
+    expect(screen.getByText('+2')).toBeInTheDocument()
+  })
+
+  it('renders no overflow chip at or under the limit and a dash when untagged', () => {
+    renderTags([
+      { ...makeSteward('s1', 'host-1'), tags: ['a', 'b'] },
+      makeSteward('s2', 'host-2'),
+    ])
+    expect(screen.queryByText(/^\+\d+$/)).not.toBeInTheDocument()
+    expect(screen.getByText('—')).toBeInTheDocument()
+  })
+})

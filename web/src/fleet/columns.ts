@@ -32,6 +32,7 @@ export interface Steward {
   version?: string
   dna?: StewardDNA | null
   hidden?: boolean
+  tags?: string[]
 }
 
 export interface StewardPage {
@@ -52,11 +53,12 @@ export type ColumnKey =
   | 'model'
   | 'mac'
   | 'ring'
+  | 'tags'
   | 'health'
   | 'seen'
 
 /* Cell typography per the design system: mono carries machine data. */
-export type CellKind = 'name' | 'muted' | 'mono' | 'health' | 'seen'
+export type CellKind = 'name' | 'muted' | 'mono' | 'tags' | 'health' | 'seen'
 
 export interface ColumnDef {
   key: ColumnKey
@@ -168,6 +170,14 @@ export const COLUMNS: readonly ColumnDef[] = [
     defaultVisible: false,
     kind: 'mono',
     value: (s) => attr(s, 'deployment_ring'),
+  },
+  {
+    key: 'tags',
+    label: 'Tags',
+    pickerLabel: 'Tags',
+    defaultVisible: false,
+    kind: 'tags',
+    value: (s) => (s.tags ?? []).join(', '),
   },
   {
     key: 'health',
