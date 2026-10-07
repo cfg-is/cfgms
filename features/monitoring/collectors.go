@@ -14,6 +14,7 @@ import (
 
 // metricsCollectionLoop runs the periodic metrics collection.
 func (sm *SystemMonitor) metricsCollectionLoop(ctx context.Context) {
+	done := sm.shutdownSignal()
 	ticker := time.NewTicker(sm.config.MetricsInterval)
 	defer ticker.Stop()
 
@@ -26,7 +27,7 @@ func (sm *SystemMonitor) metricsCollectionLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			sm.collectMetrics(ctx)
-		case <-sm.shutdownCh:
+		case <-done:
 			return
 		case <-ctx.Done():
 			return
@@ -102,6 +103,7 @@ func (sm *SystemMonitor) collectMetrics(ctx context.Context) {
 
 // resourceMonitoringLoop runs the periodic resource monitoring.
 func (sm *SystemMonitor) resourceMonitoringLoop(ctx context.Context) {
+	done := sm.shutdownSignal()
 	ticker := time.NewTicker(sm.config.ResourceInterval)
 	defer ticker.Stop()
 
@@ -109,7 +111,7 @@ func (sm *SystemMonitor) resourceMonitoringLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			sm.collectResourceMetrics(ctx)
-		case <-sm.shutdownCh:
+		case <-done:
 			return
 		case <-ctx.Done():
 			return
@@ -206,6 +208,7 @@ func (sm *SystemMonitor) checkResourceAlerts(ctx context.Context, metrics *Resou
 
 // healthCheckLoop runs periodic health checks.
 func (sm *SystemMonitor) healthCheckLoop(ctx context.Context) {
+	done := sm.shutdownSignal()
 	ticker := time.NewTicker(sm.config.HealthCheckInterval)
 	defer ticker.Stop()
 
@@ -213,7 +216,7 @@ func (sm *SystemMonitor) healthCheckLoop(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			sm.performHealthChecks(ctx)
-		case <-sm.shutdownCh:
+		case <-done:
 			return
 		case <-ctx.Done():
 			return

@@ -62,6 +62,9 @@ type SystemMonitor struct {
 	mu         sync.RWMutex
 	running    bool
 	shutdownCh chan struct{}
+	// shutdownClosed records that shutdownCh was closed by Stop, so the next
+	// Start re-arms a fresh channel instead of Stop closing it twice.
+	shutdownClosed bool
 
 	// Configuration
 	config *MonitorConfig
@@ -301,6 +304,22 @@ func (sm *SystemMonitor) RegisterCollector(name string, collector MetricsCollect
 		"component_name", collector.GetComponentName())
 }
 
+// shutdownSignal returns the current shutdown channel. Loops capture it once at
+// start so a later restart's fresh channel cannot revive a loop that is exiting.
+func (sm *SystemMonitor) shutdownSignal() <-chan struct{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.shutdownCh
+}
+
+// GetCollector returns the collector registered under name.
+func (sm *SystemMonitor) GetCollector(name string) (MetricsCollector, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	c, ok := sm.collectors[name]
+	return c, ok
+}
+
 // RegisterWatcher registers an event watcher for system events.
 func (sm *SystemMonitor) RegisterWatcher(eventType string, watcher SystemEventWatcher) {
 	sm.mu.Lock()
@@ -324,6 +343,10 @@ func (sm *SystemMonitor) Start(ctx context.Context) error {
 		return fmt.Errorf("system monitor is already running")
 	}
 	sm.running = true
+	if sm.shutdownClosed {
+		sm.shutdownCh = make(chan struct{})
+		sm.shutdownClosed = false
+	}
 	sm.mu.Unlock()
 
 	ctx, span := sm.tracer.Start(ctx, "system_monitor.start")
@@ -382,6 +405,8 @@ func (sm *SystemMonitor) Stop(ctx context.Context) error {
 		return nil
 	}
 	sm.running = false
+	shutdownCh := sm.shutdownCh
+	sm.shutdownClosed = true
 	sm.mu.Unlock()
 
 	ctx, span := sm.tracer.Start(ctx, "system_monitor.stop")
@@ -409,7 +434,7 @@ func (sm *SystemMonitor) Stop(ctx context.Context) error {
 	}
 
 	// Signal shutdown and wait for goroutines
-	close(sm.shutdownCh)
+	close(shutdownCh)
 
 	// Wait for graceful shutdown, respecting context timeout
 	select {

@@ -4,7 +4,9 @@ package monitoring
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -15,10 +17,25 @@ import (
 // configuration services, RBAC systems, and certificate management.
 type ControllerCollector struct {
 	logger     logging.Logger
+	mu         sync.RWMutex // guards services
 	services   map[string]ControllerService
 	startTime  time.Time
 	lastUpdate time.Time
 }
+
+// GenericProbeFailureMessage is the only message exposed for a service whose
+// health probe returned an error. The raw error is logged, never returned.
+const GenericProbeFailureMessage = "Health check failed"
+
+var (
+	// ErrServiceNotFound is returned by the service accessors when no service is
+	// registered under the requested name.
+	ErrServiceNotFound = errors.New("controller service not registered")
+
+	// ErrServiceMetricsUnavailable is returned when a registered service could
+	// not produce metrics. It deliberately carries none of the probe's error text.
+	ErrServiceMetricsUnavailable = errors.New("service metrics unavailable")
+)
 
 // ControllerService defines the interface for controller service monitoring.
 type ControllerService interface {
@@ -96,30 +113,100 @@ func NewControllerCollector(logger logging.Logger) *ControllerCollector {
 // RegisterService registers a controller service for monitoring.
 func (cc *ControllerCollector) RegisterService(service ControllerService) {
 	serviceName := service.GetServiceName()
+	cc.mu.Lock()
 	cc.services[serviceName] = service
+	cc.mu.Unlock()
 
 	cc.logger.Info("Registered controller service for monitoring",
 		"service_name", serviceName)
+}
+
+func (cc *ControllerCollector) snapshotServices() map[string]ControllerService {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	out := make(map[string]ControllerService, len(cc.services))
+	for k, v := range cc.services {
+		out[k] = v
+	}
+	return out
+}
+
+func (cc *ControllerCollector) lookupService(name string) (ControllerService, bool) {
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	svc, ok := cc.services[name]
+	return svc, ok
+}
+
+// GetServiceHealth probes the named registered service and returns its health
+// in a form that is safe to serve to API callers: Details is always dropped,
+// and a probe error is replaced by GenericProbeFailureMessage (the raw error is
+// logged, sanitized). Returns ErrServiceNotFound when no service has that name.
+func (cc *ControllerCollector) GetServiceHealth(ctx context.Context, name string) (ServiceHealth, error) {
+	svc, ok := cc.lookupService(name)
+	if !ok {
+		return ServiceHealth{}, ErrServiceNotFound
+	}
+
+	health, err := svc.GetServiceHealth(ctx)
+	if err != nil {
+		cc.logger.WarnCtx(ctx, "Controller service health probe failed",
+			"service_name", logging.SanitizeLogValue(name),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return ServiceHealth{
+			ServiceName: name,
+			Status:      "unhealthy",
+			Message:     GenericProbeFailureMessage,
+			LastChecked: time.Now(),
+		}, nil
+	}
+
+	health.ServiceName = name
+	health.Details = nil
+	if health.LastChecked.IsZero() {
+		health.LastChecked = time.Now()
+	}
+	return health, nil
+}
+
+// GetServiceMetrics returns the named registered service's metrics. Returns
+// ErrServiceNotFound for an unknown name and ErrServiceMetricsUnavailable when
+// the probe fails (the raw error is logged, sanitized, and not returned).
+func (cc *ControllerCollector) GetServiceMetrics(ctx context.Context, name string) (map[string]interface{}, error) {
+	svc, ok := cc.lookupService(name)
+	if !ok {
+		return nil, ErrServiceNotFound
+	}
+
+	metrics, err := svc.GetServiceMetrics(ctx)
+	if err != nil {
+		cc.logger.WarnCtx(ctx, "Controller service metrics probe failed",
+			"service_name", logging.SanitizeLogValue(name),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil, ErrServiceMetricsUnavailable
+	}
+	return metrics, nil
 }
 
 // CollectMetrics implements the MetricsCollector interface.
 func (cc *ControllerCollector) CollectMetrics(ctx context.Context) (map[string]interface{}, error) {
 	startTime := time.Now()
 
+	services := cc.snapshotServices()
 	metrics := &ControllerMetrics{
-		ServicesCount:  len(cc.services),
+		ServicesCount:  len(services),
 		Uptime:         time.Since(cc.startTime),
 		LastUpdated:    time.Now(),
 		ServiceMetrics: make(map[string]interface{}),
 	}
 
 	// Collect metrics from each registered service
-	for serviceName, service := range cc.services {
+	for serviceName, service := range services {
 		serviceMetrics, err := service.GetServiceMetrics(ctx)
 		if err != nil {
 			cc.logger.WarnCtx(ctx, "Failed to collect service metrics",
-				"service_name", serviceName,
-				"error", err)
+				"service_name", logging.SanitizeLogValue(serviceName),
+				"error", logging.SanitizeLogValue(err.Error()))
 			continue
 		}
 
@@ -130,7 +217,7 @@ func (cc *ControllerCollector) CollectMetrics(ctx context.Context) (map[string]i
 	}
 
 	// Calculate service health distribution
-	cc.calculateServiceHealth(ctx, metrics)
+	cc.calculateServiceHealth(ctx, services, metrics)
 
 	// Convert to map for interface compliance
 	result := map[string]interface{}{
@@ -180,18 +267,19 @@ func (cc *ControllerCollector) GetHealthStatus(ctx context.Context) (HealthStatu
 	healthyCount := 0
 	degradedCount := 0
 	unhealthyCount := 0
-	totalServices := len(cc.services)
+	services := cc.snapshotServices()
+	totalServices := len(services)
 
 	healthDetails := make(map[string]interface{})
 
 	// Check health of each service
-	for serviceName, service := range cc.services {
+	for serviceName, service := range services {
 		health, err := service.GetServiceHealth(ctx)
 		if err != nil {
 			unhealthyCount++
 			healthDetails[serviceName] = map[string]interface{}{
 				"status": "unhealthy",
-				"error":  err.Error(),
+				"error":  GenericProbeFailureMessage,
 			}
 			continue
 		}
@@ -322,8 +410,8 @@ func (cc *ControllerCollector) aggregateServiceMetrics(metrics *ControllerMetric
 }
 
 // calculateServiceHealth calculates the health distribution of services.
-func (cc *ControllerCollector) calculateServiceHealth(ctx context.Context, metrics *ControllerMetrics) {
-	for _, service := range cc.services {
+func (cc *ControllerCollector) calculateServiceHealth(ctx context.Context, services map[string]ControllerService, metrics *ControllerMetrics) {
+	for _, service := range services {
 		health, err := service.GetServiceHealth(ctx)
 		if err != nil {
 			metrics.UnhealthyServices++
