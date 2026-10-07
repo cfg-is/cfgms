@@ -44,6 +44,7 @@ pkg/storage/interfaces/
 | `dna_history_store.go` | `DNAHistoryStore` | DNA history access interface used by drift detection |
 | `batch_job_store.go` | `BatchJobStore`, `ErrBatchJobNotFound` | Fleet rolling-batch update job persistence (types in `features/controller/batchjob`) |
 | `case_store.go` | `CaseStore`, `Case`, `Ticket`, `TicketField`, `Pin`, `PinRef`, `ContentEntry` | Cockpit investigation cases: per-field-provenanced ticket, graph-reference pins, typed content entries (ADR-022 §8). `Case.Version` + `CaseStore.UpdateCaseCAS` are the compare-and-swap update path (Issue #3895) — see "Compare-and-Swap Writes" below |
+| `approval_store.go` | `ApprovalStore`, `WorkflowApproval`, `ErrApprovalNotFound`, `ErrApprovalAlreadyDecided`, `ErrApprovalAlreadyClaimed` | Durable, tenant-scoped workflow approvals (Issue #4607). `DecideApproval` and `ClaimResume` are compare-and-set transitions (one winner across nodes; a resume claim older than its lease is re-claimable); `ExpireDue` flips overdue pending approvals. Holds only a `CheckpointRef` into the secrets provider, never checkpoint contents. Conformance: `ApprovalStoreContract` |
 
 Sentinel errors live in the sub-packages: `business.ErrNotSupported`,
 `business.ErrImmutable`, `business.ErrStewardNotFound`,

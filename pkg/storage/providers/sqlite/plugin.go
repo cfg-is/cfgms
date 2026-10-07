@@ -525,6 +525,7 @@ func (p *SQLiteProvider) OpenBusinessStores(path string) (*interfaces.BusinessSt
 		TenantCrossing:      &SQLiteTenantCrossingStore{db: db},
 		Case:                &SQLiteCaseStore{db: db},
 		Lease:               &SQLiteLeaseStore{db: db},
+		Approval:            &SQLiteApprovalStore{db: db},
 	}, nil
 }
 
@@ -556,6 +557,15 @@ func (p *SQLiteProvider) CreateNonceStore(config map[string]interface{}) (busine
 		return nil, err
 	}
 	return &SQLiteNonceStore{db: db}, nil
+}
+
+// CreateApprovalStore returns a SQLite-backed ApprovalStore (Issue #4607).
+func (p *SQLiteProvider) CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error) {
+	db, err := openAndInit(getPath(config))
+	if err != nil {
+		return nil, err
+	}
+	return &SQLiteApprovalStore{db: db}, nil
 }
 
 // CreateLeaseStore returns a SQLite-backed LeaseStore — the fenced singleton-claim

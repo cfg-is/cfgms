@@ -541,6 +541,20 @@ func (p *DatabaseProvider) CreateAlertStore(config map[string]interface{}) (busi
 	return store, nil
 }
 
+// CreateApprovalStore creates a PostgreSQL-backed ApprovalStore shared by every
+// controller node (Issue #4607).
+func (p *DatabaseProvider) CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error) {
+	db, err := p.sharedPool(config)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database configuration: %w", err)
+	}
+	store, err := NewDatabaseApprovalStore(db, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database approval store: %w", err)
+	}
+	return store, nil
+}
+
 func (p *DatabaseProvider) CreateRegistrationTokenStore(config map[string]interface{}) (business.RegistrationTokenStore, error) {
 	// Get the provider's shared connection pool
 	db, err := p.sharedPool(config)

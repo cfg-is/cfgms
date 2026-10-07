@@ -57,6 +57,7 @@ type BusinessStoreBundle struct {
 	TenantCrossing      business.TenantCrossingStore    // ADR-025 Decision 2: tenant-crossing grants and break-glass
 	Case                business.CaseStore              // ADR-022 §8: cockpit investigation cases
 	Lease               business.LeaseStore             // ADR-031 Decision 5: fenced singleton-claim leases
+	Approval            business.ApprovalStore          // Issue #4607: durable workflow approvals
 }
 
 // BusinessStoreOpener is an optional StorageProvider extension. A provider that
@@ -223,6 +224,7 @@ type StorageProvider interface {
 	CreatePendingRegistrationStore(config map[string]interface{}) (business.PendingRegistrationStore, error)
 	CreateIPTrustStore(config map[string]interface{}) (business.IPTrustStore, error)
 	CreateAlertStore(config map[string]interface{}) (business.AlertStore, error)
+	CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error)
 
 	// Provider capabilities and metadata
 	GetCapabilities() ProviderCapabilities
@@ -752,6 +754,12 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 	}
 	appendIfCloser(&openedStores, alertStore)
 
+	approvalStore, err := provider.CreateApprovalStore(config)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create approval store: %w", err)
+	}
+	appendIfCloser(&openedStores, approvalStore)
+
 	// Nonce store (Issue #3755, ADR-031 amendment to ADR-011). Single-provider mode
 	// is a live deployment shape — features/controller/server routes
 	// storage.provider == "database" here — so skipping this leaves nonceStore nil
@@ -826,6 +834,7 @@ func CreateAllStoresFromConfig(providerName string, config map[string]interface{
 		pushStore:              pushStore,
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
+		approvalStore:          approvalStore,
 		nonceStore:             nonceStore,
 		leaseStore:             leaseStore,
 		routingStore:           routingStore,
@@ -851,6 +860,7 @@ type StorageManager struct {
 	pendingRegistrationStore business.PendingRegistrationStore
 	ipTrustStore             business.IPTrustStore
 	alertStore               business.AlertStore               // Issue #3266: alert acknowledge and silence
+	approvalStore            business.ApprovalStore            // Issue #4607: durable workflow approvals
 	pendingRefreshStore      business.PendingRefreshStore      // Issue #2098: registration-refresh approval queue
 	refreshPolicyStore       business.RefreshPolicyStore       // Issue #2098: per-tenant refresh policy
 	assurancePolicyStore     business.AssurancePolicyStore     // Issue #2845: per-tenant assurance-policy overrides
@@ -976,6 +986,17 @@ func (sm *StorageManager) GetAlertStore() business.AlertStore {
 // SetAlertStore wires the alert store after construction.
 func (sm *StorageManager) SetAlertStore(s business.AlertStore) {
 	sm.alertStore = s
+}
+
+// GetApprovalStore returns the durable workflow approval store (Issue #4607).
+// Returns nil when the current storage provider does not support approval storage.
+func (sm *StorageManager) GetApprovalStore() business.ApprovalStore {
+	return sm.approvalStore
+}
+
+// SetApprovalStore wires the approval store after construction.
+func (sm *StorageManager) SetApprovalStore(s business.ApprovalStore) {
+	sm.approvalStore = s
 }
 
 // GetPendingRefreshStore returns the pending-refresh approval queue (Issue #2098).
@@ -1223,6 +1244,7 @@ func (sm *StorageManager) Close() error {
 		sm.pendingRegistrationStore,
 		sm.ipTrustStore,
 		sm.alertStore,
+		sm.approvalStore,
 		sm.refreshPolicyStore,
 		sm.pendingRefreshStore,
 		sm.assurancePolicyStore,
@@ -1449,6 +1471,11 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		return nil, fmt.Errorf("cluster storage: failed to create alert store: %w", err)
 	}
 	appendIfCloser(&openedStores, alertStore)
+	approvalStore, err := provider.CreateApprovalStore(dbCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("cluster storage: failed to create approval store: %w", err)
+	}
+	appendIfCloser(&openedStores, approvalStore)
 	pendingRegStore, err := provider.CreatePendingRegistrationStore(dbCfg)
 	if err != nil && !errors.Is(err, business.ErrNotSupported) {
 		return nil, fmt.Errorf("cluster storage: failed to create pending registration store: %w", err)
@@ -1471,6 +1498,7 @@ func CreateClusterStorageManager(pgConnStr, sessionHMACKey string, _ map[string]
 		pushStore:              pushStore,
 		ipTrustStore:           ipTrustStore,
 		alertStore:             alertStore,
+		approvalStore:          approvalStore,
 	}
 	if pendingRegStore != nil {
 		sm.SetPendingRegistrationStore(pendingRegStore)
@@ -1790,6 +1818,9 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 			sm.SetNonceStore(nonceStore)
 		}
 		sm.SetLeaseStore(bundle.Lease)
+		if bundle.Approval != nil {
+			sm.SetApprovalStore(bundle.Approval)
+		}
 		constructed = true
 		return sm, nil
 	}
@@ -1850,6 +1881,17 @@ func CreateOSSStorageManager(flatfileRoot, sqliteConnStr string) (*StorageManage
 	sm.SetAlertStore(alertStore)
 	if nonceStore != nil {
 		sm.SetNonceStore(nonceStore)
+	}
+	// Approval store (Issue #4607): business data, so it comes from the SQLite
+	// provider. The bundle path above takes bundle.Approval from the shared handle;
+	// this fallback opens its own.
+	approvalStore, err := sqProvider.CreateApprovalStore(sqliteCfg)
+	if err != nil && !errors.Is(err, business.ErrNotSupported) {
+		return nil, fmt.Errorf("failed to create approval store (sqlite): %w", err)
+	}
+	if approvalStore != nil {
+		sm.SetApprovalStore(approvalStore)
+		appendIfCloser(&openedStores, approvalStore)
 	}
 	// Wire lease store if the SQLite provider implements LeaseStoreCreator (ADR-031
 	// Decision 5). The bundle path above takes bundle.Lease from the shared handle;

@@ -287,6 +287,21 @@ func (p *FlatFileProvider) CreateAlertStore(config map[string]interface{}) (busi
 	return store, nil
 }
 
+// CreateApprovalStore creates a flat-file-backed ApprovalStore.
+// Config map must contain "root" (string): the root directory.
+// Approvals are stored at <root>/approvals/workflow_approvals.json with atomic writes.
+func (p *FlatFileProvider) CreateApprovalStore(config map[string]interface{}) (business.ApprovalStore, error) {
+	root, err := getRootFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	store, err := NewFlatFileApprovalStore(root)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: failed to create approval store: %w", err)
+	}
+	return store, nil
+}
+
 // CreateNonceStore creates a flat-file-backed NonceStore (Issue #3755, ADR-031
 // amendment to ADR-011). Implements interfaces.NonceStoreCreator.
 // Config map must contain "root" (string): the root directory.

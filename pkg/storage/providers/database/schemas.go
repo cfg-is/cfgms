@@ -1326,6 +1326,10 @@ func (s DatabaseSchemas) CreateAllTables(ctx context.Context, db *sql.DB) error 
 		return err
 	}
 
+	if err := s.CreateWorkflowApprovalsTable(ctx, db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1911,6 +1915,7 @@ func (s DatabaseSchemas) DropAllTables(ctx context.Context, db *sql.DB) error {
 		"DROP TABLE IF EXISTS sessions;",
 		"DROP TABLE IF EXISTS session_token_store;",
 		"DROP TABLE IF EXISTS cfgms_alert_states;",
+		"DROP TABLE IF EXISTS cfgms_workflow_approvals;",
 		// Issue #3401: omitted here, so pending-registration rows survived
 		// setupTestDatabase and every re-run of the store's tests failed with
 		// "already exists" on the second and later runs.
@@ -2037,6 +2042,47 @@ func (s DatabaseSchemas) CreateAlertStatesTable(ctx context.Context, db *sql.DB)
 	for _, idx := range indexes {
 		if _, err := db.ExecContext(ctx, idx); err != nil {
 			return fmt.Errorf("failed to create cfgms_alert_states index: %w", err)
+		}
+	}
+	return nil
+}
+
+// CreateWorkflowApprovalsTable creates the cfgms_workflow_approvals table backing
+// business.ApprovalStore (Issue #4607). Rows are keyed by (tenant_id, approval_id)
+// and visible to every controller node. checkpoint_ref is a reference into the
+// secrets provider; checkpoint contents are never stored here. The partial indexes
+// serve the pending-list, expiry sweep and resume-recovery queries.
+func (s DatabaseSchemas) CreateWorkflowApprovalsTable(ctx context.Context, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cfgms_workflow_approvals (
+			tenant_id           TEXT NOT NULL,
+			approval_id         TEXT NOT NULL,
+			workflow_name       TEXT NOT NULL DEFAULT '',
+			execution_id        TEXT NOT NULL DEFAULT '',
+			step_id             TEXT NOT NULL DEFAULT '',
+			step_name           TEXT NOT NULL DEFAULT '',
+			message             TEXT NOT NULL DEFAULT '',
+			approver_permission TEXT NOT NULL DEFAULT '',
+			requested_by        TEXT NOT NULL DEFAULT '',
+			status              TEXT NOT NULL DEFAULT 'pending',
+			requested_at        TIMESTAMP WITH TIME ZONE NOT NULL,
+			expires_at          TIMESTAMP WITH TIME ZONE,
+			decided_by          TEXT NOT NULL DEFAULT '',
+			decided_at          TIMESTAMP WITH TIME ZONE,
+			justification       TEXT NOT NULL DEFAULT '',
+			checkpoint_ref      TEXT NOT NULL DEFAULT '',
+			resume_claimed_by   TEXT NOT NULL DEFAULT '',
+			resume_claimed_at   TIMESTAMP WITH TIME ZONE,
+			resumed_at          TIMESTAMP WITH TIME ZONE,
+			PRIMARY KEY (tenant_id, approval_id)
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_workflow_approvals_pending ON cfgms_workflow_approvals(tenant_id, requested_at) WHERE status = 'pending';",
+		"CREATE INDEX IF NOT EXISTS idx_workflow_approvals_expiry ON cfgms_workflow_approvals(expires_at) WHERE status = 'pending' AND expires_at IS NOT NULL;",
+		"CREATE INDEX IF NOT EXISTS idx_workflow_approvals_unresumed ON cfgms_workflow_approvals(status) WHERE resumed_at IS NULL AND status IN ('approved', 'rejected');",
+	}
+	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("failed to create cfgms_workflow_approvals table: %w", err)
 		}
 	}
 	return nil

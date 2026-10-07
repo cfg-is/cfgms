@@ -440,6 +440,10 @@ func (p *testNoPushStoreProvider) CreateAlertStore(_ map[string]interface{}) (bu
 	return nil, business.ErrNotSupported
 }
 
+func (p *testNoPushStoreProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // TestPushStoreRequirement_OSSCompositeStartsCleanly verifies that the push
 // store requirement does not block startup in the OSS composite (flatfile+SQLite)
 // deployment shape, where SQLite supplies a non-nil PushStore.

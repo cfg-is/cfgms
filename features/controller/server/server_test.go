@@ -87,6 +87,10 @@ func (p *testNonClusterProvider) CreateAlertStore(_ map[string]interface{}) (bus
 	return nil, business.ErrNotSupported
 }
 
+func (p *testNonClusterProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
+	return nil, business.ErrNotSupported
+}
+
 // testClusterProvider implements interfaces.StorageProvider with ClusterCapable() == true.
 // All store factory methods return business.ErrNotSupported. Used to isolate the S3 gate
 // in assertClusterBackendsReady without requiring a real Postgres connection.
@@ -142,6 +146,10 @@ func (p *testClusterProvider) CreateIPTrustStore(_ map[string]interface{}) (busi
 	return nil, business.ErrNotSupported
 }
 func (p *testClusterProvider) CreateAlertStore(_ map[string]interface{}) (business.AlertStore, error) {
+	return nil, business.ErrNotSupported
+}
+
+func (p *testClusterProvider) CreateApprovalStore(_ map[string]interface{}) (business.ApprovalStore, error) {
 	return nil, business.ErrNotSupported
 }
 
