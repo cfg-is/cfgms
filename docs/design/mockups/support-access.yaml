@@ -1,0 +1,4 @@
+file: support-access.html
+order: 16
+status: **Reference**
+what: MSP **Support access** page (Epic #4701 · #4724) — own nav entry / `/support-access` route. **Give support access** takes a duration only (1/4/8/24 h): no named person, the grant opens the MSP to all root support and each use is audited per person. Access list of grants and break-glass rows (status, who, reason + justification as literal text) with inline-confirm **Revoke / End now / Deny**; emergency-contact editor. Ready / Loading / Error / Empty / Root-session states; renders directly with its own **State / Theme** strip; both themes.

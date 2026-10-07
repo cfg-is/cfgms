@@ -1,0 +1,4 @@
+file: crossing-prompt.html
+order: 15
+status: **Reference**
+what: Root **crossing prompt** (Epic #4701 · #4723) — the modal a root-scoped operator gets when opening an MSP that needs a crossing. Root sees **MSP names only**, never client tenant names. Path 1 (recommended) is guidance to ask the MSP for support access; path 2 is the **break-glass** form (reason category, 10–1000 character justification with live count, MSP-is-notified note). Prompt / Filled / Error / **Waiting for a second approver** / Granted-and-retried states. Renders directly with its own **State / Theme** strip; both themes.
