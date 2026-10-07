@@ -148,14 +148,16 @@ Multi-term selectors always contain spaces and must be quoted.
 `--yes` (`-y`) is a persistent flag on the `cfg steward` command tree, accepted
 by every subcommand unconditionally. Its effect is limited to suppressing the
 interactive confirmation prompt that appears when a **mutating** verb
-(`exec`, `run-command`, `run-script`, `upgrade`, `move`, `decommission`) is
-about to act on more than one steward.
+(`exec`, `run-command`, `run-script`, `upgrade`, `move`, `decommission`,
+`service`, `process`) is about to act on more than one steward.
 
 **Boundaries:**
 
 - **Read-only verbs** (`list`, `status`, `dna`, `logs`, `modules`): `--yes` is
   accepted but has no visible effect. These verbs never prompt regardless.
-- **Single-match mutating runs**: no prompt, no effect from `--yes`.
+- **Single-match mutating runs**: no prompt, no effect from `--yes` — except
+  `service ... stop` and `process ... end`, which prompt even for one steward
+  (fail closed on a non-interactive stdin) unless `--yes` is given.
 - **Multi-match mutating runs with `--yes`**: prompt is suppressed; the command
   proceeds immediately.
 - **Multi-match mutating runs without `--yes`** on a non-interactive stdin: the
@@ -290,4 +292,17 @@ cfg steward move 'acme-corp/web-*' --to-tenant acme-corp/us-east --yes
 
 # Decommission stewards matching a tag, with JSON output
 cfg steward decommission 'tag:decom' --yes --json
+
+# Restart a service on every matched steward (prompts: more than one match)
+cfg steward service 'tag:print' restart --name spooler --justification "stuck queue"
+
+# End a process on one steward (prompts: end always asks)
+cfg steward process web-01 end --pid 4120 --image notepad.exe --justification "hung"
 ```
+
+`service <selector> <start|stop|restart> --name <service>` and
+`process <selector> <end|suspend|resume> --pid <n> --image <name>` sign one
+operator envelope per matched steward and print a result per steward. Both
+require `--justification`; `--wait-timeout` (default 90s) bounds the wait for each
+steward's result. See the
+[operator guide](../deployment/cfg-operator-guide.md#acting-on-a-service-or-process).

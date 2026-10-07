@@ -565,6 +565,43 @@ The controller stores `SHA-256(token)`, not the token value itself. If the
 controller's database is exfiltrated, the raw token values are not recoverable.
 Token values are also sanitised from all controller log output.
 
+## Acting on a Service or Process
+
+An operator can start, stop or restart a service, or end, suspend or resume a
+process, on the stewards a selector matches. The action is signed with your
+payload-signing credential (`cfg credential request-signing-cert` creates one);
+the steward verifies that signature itself, so the controller cannot alter the
+action in transit.
+
+```sh
+cfg steward service web-01 restart --name spooler --justification "stuck queue"
+cfg steward process 'tag:kiosk' end --pid 4120 --image notepad.exe \
+  --justification "hung" --yes
+```
+
+For each matched steward, in turn, the CLI signs one envelope whose only target
+is that steward, submits it, polls the run, and prints a result:
+
+| Result | Meaning |
+|--------|---------|
+| `ok` | The steward performed the action |
+| `refused: the steward will not act on itself` | The target is the steward's own service or process |
+| `refused: the process at that PID is not the one named` | The PID now belongs to a different image |
+| `unsupported` | The steward cannot perform that action |
+| `failed` | The action was attempted and failed |
+| `expired, not run` | The steward did not collect the action in time; it did not run |
+| `sent, no result reported: the action may have run` | Delivered, but no result came back |
+| `not submitted` | The CLI stopped before this steward (see below) |
+
+The exit code is 0 only when every steward is `ok`. `--json` prints only a JSON
+object keyed by steward on stdout; progress goes to stderr.
+
+These actions need a strong step-up. If the step-up takes longer than the
+5-minute envelope lifetime, the CLI signs a fresh envelope and asks again once;
+a second expiry fails with "signature expired during step-up; run the command
+again". If the controller answers `429 ACTION_BUDGET_EXCEEDED`, the CLI stops
+submitting and reports the remaining stewards as not submitted.
+
 ## Quick Reference
 
 | Task | Command |
@@ -580,6 +617,7 @@ Token values are also sanitised from all controller log output.
 | Cancel an approved-but-uncollected request (administrator) | `cfg credential cancel-request <request-id>` |
 | List unbound enrolment-flow certificates (administrator) | `cfg credential list-orphaned` |
 | Revoke a listed unbound certificate (administrator) | `cfg credential revoke-orphaned <serial>` |
+| Start/stop/restart a service, or end/suspend/resume a process | `cfg steward service` / `cfg steward process` |
 | Check active session | `cfg connections current` |
 | List all connections | `cfg connections list` |
 | Disconnect | `cfg disconnect` |
