@@ -126,14 +126,19 @@ function formatDate(iso: string | null): string {
   }).format(new Date(iso))
 }
 
+const MAX_LABEL_LENGTH = 64
+const LAST_KEY_NOTE = 'You can’t remove your only passkey — you’d be locked out.'
+
 function CredentialRow({
   cred,
   onRevoke,
   revoking,
+  locked,
 }: {
   cred: CredentialInfo
   onRevoke: (id: string) => void
   revoking: boolean
+  locked: boolean
 }) {
   const label = cred.label || cred.id.slice(0, 12) + '…'
   const transports = cred.transport?.join(', ') || '—'
@@ -156,13 +161,19 @@ function CredentialRow({
         <button
           type="button"
           className="btn danger"
-          disabled={revoking}
+          disabled={revoking || locked}
           onClick={() => onRevoke(cred.id)}
           aria-label={`Remove passkey ${label}`}
+          title={locked ? LAST_KEY_NOTE : undefined}
           data-testid="revoke-btn"
         >
           {revoking ? 'Removing…' : 'Remove'}
         </button>
+        {locked && (
+          <div className="mut" data-testid="last-key-note">
+            {LAST_KEY_NOTE}
+          </div>
+        )}
       </td>
     </tr>
   )
@@ -184,6 +195,7 @@ export default function PasskeysView() {
 
   const [addState, setAddState] = useState<'idle' | 'busy' | 'error'>('idle')
   const [addError, setAddError] = useState<string | null>(null)
+  const [addLabel, setAddLabel] = useState('')
 
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [revokeError, setRevokeError] = useState<string | null>(null)
@@ -228,6 +240,7 @@ export default function PasskeysView() {
     if (!username) return
     setAddState('busy')
     setAddError(null)
+    const label = addLabel.trim().slice(0, MAX_LABEL_LENGTH)
     try {
       // Begin: server issues a creation challenge (step-up gated via apiFetch interceptor).
       const beginResp = await apiFetch(
@@ -290,7 +303,7 @@ export default function PasskeysView() {
       }
 
       const finishResp = await apiFetch(
-        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/register/finish`,
+        `/api/v1/accounts/${encodeURIComponent(username)}/webauthn/register/finish${label ? `?label=${encodeURIComponent(label)}` : ''}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -304,6 +317,7 @@ export default function PasskeysView() {
         return
       }
       setAddState('idle')
+      setAddLabel('')
       await loadCredentials()
     } catch (e) {
       // NotAllowedError = user cancelled or timed out (not a server error).
@@ -347,6 +361,7 @@ export default function PasskeysView() {
   }
 
   const credList = credentials ?? []
+  const lastKey = credList.length === 1
 
   return (
     <div className="view-root" data-testid="passkeys-view">
@@ -409,7 +424,29 @@ export default function PasskeysView() {
         </div>
       )}
 
+      {lastKey && !loadError && (
+        <div className="notice warn" data-testid="backup-nudge">
+          <div className="ic">!</div>
+          <h3>Add a backup passkey</h3>
+          <p>
+            You have only one. If you lose this device you’ll need an admin reset to get back in —
+            register a phone, laptop, or security key as a backup.
+          </p>
+        </div>
+      )}
+
       <div className="tbar">
+        <input
+          type="text"
+          className="input"
+          value={addLabel}
+          maxLength={MAX_LABEL_LENGTH}
+          onChange={(e) => setAddLabel(e.target.value)}
+          disabled={addState === 'busy'}
+          placeholder="Label (optional), e.g. iPhone 15"
+          aria-label="Passkey label"
+          data-testid="add-label-input"
+        />
         <button
           type="button"
           className="btn"
@@ -488,6 +525,7 @@ export default function PasskeysView() {
                   cred={cred}
                   onRevoke={() => setConfirmId(cred.id)}
                   revoking={revokingId === cred.id}
+                  locked={lastKey}
                 />
               )
             })}

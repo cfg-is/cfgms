@@ -132,7 +132,7 @@ function route(input: RequestInfo | URL): Response {
   if (url.endsWith('/webauthn/register/begin')) {
     return registerBeginQueue.next()
   }
-  if (url.endsWith('/webauthn/register/finish')) {
+  if (url.split('?')[0]?.endsWith('/webauthn/register/finish')) {
     return registerFinishQueue.next()
   }
   if (url.includes('/webauthn/revoke/')) {
@@ -267,12 +267,14 @@ describe('PasskeysView', () => {
     expect(screen.queryByText('MacBook Touch ID')).toBeNull()
   })
 
-  it('shows anti-lockout alert on 409 LAST_CREDENTIAL', async () => {
-    listQueue.push(() => makeListResp([CRED_A]))
+  it('shows anti-lockout alert on 409 LAST_CREDENTIAL (server backstop for a stale list)', async () => {
+    // The client list shows two keys (Remove enabled) but the server already
+    // sees only one — the backstop refusal must still surface the alert.
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
     await renderView()
     await waitFor(() => screen.getAllByTestId('passkey-row'))
 
-    fireEvent.click(screen.getByTestId('revoke-btn'))
+    fireEvent.click(screen.getByRole('button', { name: /MacBook Touch ID/i }))
     await waitFor(() => expect(screen.getByTestId('confirm-revoke-btn')).toBeInTheDocument())
 
     revokeQueue.push(() => makeErrorResp(409, 'LAST_CREDENTIAL', 'Cannot remove the last passkey'))
@@ -280,8 +282,120 @@ describe('PasskeysView', () => {
     fireEvent.click(screen.getByTestId('confirm-revoke-btn'))
 
     await waitFor(() => expect(screen.getByTestId('last-cred-alert')).toBeInTheDocument())
-    // Row must still be present.
-    expect(screen.getAllByTestId('passkey-row')).toHaveLength(1)
+    // Rows must still be present.
+    expect(screen.getAllByTestId('passkey-row')).toHaveLength(2)
+  })
+
+  it('locks Remove and shows the backup nudge with exactly one passkey', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    expect(screen.getByTestId('revoke-btn')).toBeDisabled()
+    expect(screen.getByTestId('last-key-note')).toBeInTheDocument()
+    expect(screen.getByTestId('backup-nudge')).toBeInTheDocument()
+  })
+
+  it('enables Remove and hides the nudge with two or more passkeys', async () => {
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    for (const btn of screen.getAllByTestId('revoke-btn')) expect(btn).toBeEnabled()
+    expect(screen.queryByTestId('backup-nudge')).toBeNull()
+    expect(screen.queryByTestId('last-key-note')).toBeNull()
+  })
+
+  it('falls back to the credential-id fragment when a passkey has no label', async () => {
+    listQueue.push(() => makeListResp([{ ...CRED_A, label: '' }, CRED_B]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+    expect(screen.getByText('aGVsbG8…')).toBeInTheDocument()
+  })
+
+  async function addPasskeyWithLabel(typed: string | null) {
+    credentialsCreate.mockImplementation(() =>
+      Promise.resolve({
+        id: 'new-cred',
+        type: 'public-key',
+        rawId: new TextEncoder().encode('new-cred').buffer as ArrayBuffer,
+        response: {
+          clientDataJSON: new TextEncoder().encode('{}').buffer as ArrayBuffer,
+          attestationObject: new TextEncoder().encode('att').buffer as ArrayBuffer,
+        },
+      } as unknown as PublicKeyCredential),
+    )
+    registerBeginQueue.push(() =>
+      jsonResponse(200, {
+        data: {
+          publicKey: {
+            challenge: 'AAAA',
+            rp: { name: 'CFGMS', id: 'example.com' },
+            user: { id: 'AAAA', name: USERNAME, displayName: USERNAME },
+            pubKeyCredParams: [],
+          },
+        },
+      }),
+    )
+    registerFinishQueue.push(() => jsonResponse(200, { data: { ok: true } }))
+    if (typed !== null) {
+      fireEvent.change(screen.getByTestId('add-label-input'), { target: { value: typed } })
+    }
+    fireEvent.click(screen.getByTestId('add-passkey-btn'))
+  }
+
+  function finishUrl(): string | undefined {
+    const call = fetchMock.mock.calls.find(([input]) => String(input).includes('/webauthn/register/finish'))
+    return call ? String(call[0]) : undefined
+  }
+
+  it('sends the label on register/finish, shows it in the list, and re-enables Remove', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+    expect(screen.getByTestId('revoke-btn')).toBeDisabled()
+
+    listQueue.push(() =>
+      makeListResp([
+        CRED_A,
+        { ...CRED_B, id: 'bmV3', label: 'Work & Phone' },
+      ]),
+    )
+    await addPasskeyWithLabel('  Work & Phone  ')
+
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toContain('/webauthn/register/finish?label=Work%20%26%20Phone')
+    expect(screen.getByText('Work & Phone')).toBeInTheDocument()
+    for (const btn of screen.getAllByTestId('revoke-btn')) expect(btn).toBeEnabled()
+    expect(screen.queryByTestId('backup-nudge')).toBeNull()
+    expect((screen.getByTestId('add-label-input') as HTMLInputElement).value).toBe('')
+  })
+
+  it('sends no label param when the label is empty', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await addPasskeyWithLabel(null)
+
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toMatch(/\/webauthn\/register\/finish$/)
+  })
+
+  it('caps the label input at 64 characters', async () => {
+    listQueue.push(() => makeListResp([CRED_A]))
+    await renderView()
+    await waitFor(() => screen.getAllByTestId('passkey-row'))
+
+    const input = screen.getByTestId('add-label-input') as HTMLInputElement
+    expect(input.maxLength).toBe(64)
+
+    listQueue.push(() => makeListResp([CRED_A, CRED_B]))
+    await addPasskeyWithLabel('x'.repeat(80))
+    await waitFor(() => expect(screen.getAllByTestId('passkey-row')).toHaveLength(2))
+    expect(finishUrl()).toContain(`?label=${'x'.repeat(64)}`)
+    expect(finishUrl()).not.toContain('x'.repeat(65))
   })
 
   it('shows revoke error banner on server error', async () => {
