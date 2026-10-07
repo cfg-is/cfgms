@@ -59,6 +59,7 @@ type workflowMeta struct {
 	Description string                 `yaml:"description,omitempty"`
 	Version     string                 `yaml:"version,omitempty"`
 	Variables   map[string]interface{} `yaml:"variables,omitempty"`
+	Inputs      []InputSpec            `yaml:"inputs,omitempty"`
 	Steps       []stepDefinition       `yaml:"steps"`
 	Timeout     string                 `yaml:"timeout,omitempty"`
 	OnFailure   string                 `yaml:"on_failure,omitempty"`
@@ -97,6 +98,7 @@ func (p *Parser) convertDefinition(def workflowDefinition) (Workflow, error) {
 		Description: def.Workflow.Description,
 		Version:     def.Workflow.Version,
 		Variables:   def.Workflow.Variables,
+		Inputs:      def.Workflow.Inputs,
 	}
 
 	// Parse timeout
@@ -212,6 +214,10 @@ func (p *Parser) ValidateWorkflow(workflow Workflow) error {
 	// Validate steps
 	if len(workflow.Steps) == 0 {
 		return fmt.Errorf("workflow must have at least one step")
+	}
+
+	if err := ValidateInputSpecs(workflow.Inputs); err != nil {
+		return err
 	}
 
 	// Validate each step

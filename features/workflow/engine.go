@@ -124,6 +124,16 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 
 // ExecuteWorkflow starts execution of a workflow
 func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variables map[string]interface{}) (*WorkflowExecution, error) {
+	// Enforce the workflow's declared inputs. This is the single enforcement
+	// point: triggers and sub-workflow calls reach here without the HTTP
+	// handler. A violating run never starts; a failed execution carrying the
+	// error is recorded and returned alongside the *InputsError.
+	resolvedInputs, inputErr := workflow.ResolveInputs(variables)
+	if inputErr != nil {
+		return e.recordRejectedExecution(ctx, workflow, inputErr), inputErr
+	}
+	variables = resolvedInputs
+
 	// Clone steps before assigning IDs so each execution has its own private
 	// copy of the Step structs. Without this, concurrent calls share the same
 	// underlying array and the ID assignment races with goroutines launched for
@@ -1373,4 +1383,40 @@ func retryConfigForStep(step Step) *RetryConfig {
 		}
 	}
 	return nil
+}
+
+// recordRejectedExecution stores an execution that failed before starting
+// (its inputs violated the workflow's declaration) so the failure is visible
+// in the execution history. No steps run.
+func (e *Engine) recordRejectedExecution(ctx context.Context, workflow Workflow, cause error) *WorkflowExecution {
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	execCtx, cancel := context.WithCancel(ctx)
+	execution := &WorkflowExecution{
+		ID:           generateExecutionID(),
+		WorkflowName: workflow.Name,
+		TenantID:     tenantID,
+		Status:       StatusFailed,
+		StartTime:    time.Now(),
+		StepResults:  make(map[string]StepResult),
+		Variables:    make(map[string]interface{}),
+		Context:      execCtx,
+		Cancel:       cancel,
+		Done:         make(chan struct{}),
+	}
+	execution.SetError(cause.Error())
+	endTime := time.Now()
+	execution.SetEndTime(&endTime)
+	cancel()
+	close(execution.Done)
+
+	e.mutex.Lock()
+	e.executions[execution.ID] = execution
+	e.mutex.Unlock()
+
+	e.logger.WithTenant(tenantID).WarnCtx(ctx, "Workflow execution rejected: invalid inputs",
+		"operation", "workflow_execute",
+		"execution_id", execution.ID,
+		"workflow", logging.SanitizeLogValue(workflow.Name),
+		"error", logging.SanitizeLogValue(cause.Error()))
+	return execution
 }

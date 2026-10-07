@@ -1398,3 +1398,86 @@ func assertStepID(t *testing.T, step map[string]json.RawMessage, wantID, wantNam
 	assert.Equal(t, wantID, id, "step %q: wrong id", wantName)
 	assert.Equal(t, wantName, name, "step with id %q: wrong name", wantID)
 }
+
+// --- declared inputs ---------------------------------------------------------
+
+func inputsWorkflowBody(name string) []byte {
+	return mustMarshal(CreateWorkflowRequest{
+		Name: name,
+		Steps: []workflow.Step{
+			{Name: "step1", Type: workflow.StepTypeTask},
+		},
+		Inputs: []workflow.InputSpec{
+			{Name: "host", Type: workflow.InputTypeString, Required: true},
+			{Name: "env", Type: workflow.InputTypeEnum, Options: []string{"dev", "prod"}, Default: "dev"},
+		},
+	})
+}
+
+func postWorkflow(t *testing.T, router *mux.Router, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, bytes.NewReader(body))
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestWorkflowHandler_Inputs_CreateGetRoundTrip(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+	require.Equal(t, http.StatusCreated, postWorkflow(t, router, "/workflows", inputsWorkflowBody("in-wf")).Code)
+
+	req := withTenantContext(httptest.NewRequest("GET", "/workflows/in-wf", nil), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp workflow.VersionedWorkflow
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Inputs, 2)
+	assert.Equal(t, "host", resp.Inputs[0].Name)
+	assert.True(t, resp.Inputs[0].Required)
+	assert.Equal(t, []string{"dev", "prod"}, resp.Inputs[1].Options)
+}
+
+func TestWorkflowHandler_Inputs_CreateRejectsInvalidDeclaration(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+	body := mustMarshal(CreateWorkflowRequest{
+		Name:   "bad-in",
+		Steps:  []workflow.Step{{Name: "s", Type: workflow.StepTypeTask}},
+		Inputs: []workflow.InputSpec{{Name: "tenant_id", Type: workflow.InputTypeString}},
+	})
+	assert.Equal(t, http.StatusBadRequest, postWorkflow(t, router, "/workflows", body).Code)
+}
+
+func TestWorkflowHandler_Inputs_ExecuteMissingRequiredReturns400(t *testing.T) {
+	h, _, eng := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+	require.Equal(t, http.StatusCreated, postWorkflow(t, router, "/workflows", inputsWorkflowBody("in-wf")).Code)
+
+	rec := postWorkflow(t, router, "/workflows/in-wf/execute", []byte(`{"inputs":{}}`))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var resp struct {
+		Fields []workflow.InputFieldError `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Fields, 1)
+	assert.Equal(t, "host", resp.Fields[0].Field)
+
+	execs, err := eng.ListExecutions()
+	require.NoError(t, err)
+	for _, ex := range execs {
+		assert.Equal(t, workflow.StatusFailed, ex.GetStatus(), "no execution may have started")
+	}
+}
+
+func TestWorkflowHandler_Inputs_ExecuteEnumOutsideOptionsReturns400(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+	require.Equal(t, http.StatusCreated, postWorkflow(t, router, "/workflows", inputsWorkflowBody("in-wf")).Code)
+
+	rec := postWorkflow(t, router, "/workflows/in-wf/execute", []byte(`{"inputs":{"host":"a","env":"qa"}}`))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "qa")
+}

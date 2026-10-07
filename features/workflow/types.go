@@ -60,6 +60,10 @@ type Workflow struct {
 	// Variables define workflow-level variables that can be used in steps
 	Variables map[string]interface{} `yaml:"variables,omitempty" json:"variables,omitempty"`
 
+	// Inputs declare the typed, validated parameters a run accepts. They are
+	// enforced by Engine.ExecuteWorkflow and merged into the execution variables.
+	Inputs []InputSpec `yaml:"inputs,omitempty" json:"inputs,omitempty"`
+
 	// Steps define the execution flow of the workflow
 	Steps []Step `yaml:"steps" json:"steps"`
 
