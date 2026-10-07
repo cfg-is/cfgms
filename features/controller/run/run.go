@@ -52,12 +52,42 @@ const (
 	JobStatusCompleted JobStatus = "completed"
 	JobStatusFailed    JobStatus = "failed"
 	JobStatusCancelled JobStatus = "cancelled"
+
+	// Steward-action job statuses (Issue #4625). Dispatched means the action was
+	// sent to the steward and no result has come back. Expired means it was never
+	// delivered before its TTL ("expired, not run"). NoResult means it was sent
+	// but never reported ("sent, no result reported": the action may have run).
+	JobStatusDispatched JobStatus = "dispatched"
+	JobStatusExpired    JobStatus = "expired"
+	JobStatusNoResult   JobStatus = "no_result"
 )
 
 // IsTerminal reports whether the job status is a terminal state.
 func (s JobStatus) IsTerminal() bool {
-	return s == JobStatusCompleted || s == JobStatusFailed || s == JobStatusCancelled
+	switch s {
+	case JobStatusCompleted, JobStatusFailed, JobStatusCancelled, JobStatusExpired, JobStatusNoResult:
+		return true
+	}
+	return false
 }
+
+// Run kinds. An empty Kind is a script run.
+const (
+	RunKindScript        = "script"
+	RunKindStewardAction = "steward_action"
+)
+
+// Steward-action result codes recorded on JobRecord.ResultCode. The first five
+// are reported by the steward; the last two are recorded by the controller.
+const (
+	ResultCodeOK             = "ok"
+	ResultCodeSelfProtect    = "self_protect"
+	ResultCodeProcessChanged = "process_changed"
+	ResultCodeUnsupported    = "unsupported"
+	ResultCodeFailed         = "failed"
+	ResultCodeExpired        = "expired"
+	ResultCodeNoResult       = "no_result"
+)
 
 // RunRecord is the durable tracking record for a multi-steward script dispatch.
 // One RunRecord fans out to one JobRecord per matched steward.
@@ -74,6 +104,12 @@ type RunRecord struct {
 	JobCount      int                    `json:"job_count"`
 	CompletedJobs int                    `json:"completed_jobs"`
 	FailedJobs    int                    `json:"failed_jobs"`
+
+	// Kind is RunKindScript (or empty) for script runs and RunKindStewardAction
+	// for a structured steward action (Issue #4625). ActionJSON holds
+	// {verb, target_kind, target_name, parameters} for an action run.
+	Kind       string `json:"kind,omitempty"`
+	ActionJSON []byte `json:"-"`
 }
 
 // JobRecord tracks the dispatch state for one steward within a run.
@@ -92,6 +128,11 @@ type JobRecord struct {
 	Output   string `json:"output,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
+
+	// ResultCode is the steward-action outcome (Issue #4625); empty for scripts.
+	// DispatchedAt is when an action job was handed to its steward.
+	ResultCode   string     `json:"result_code,omitempty"`
+	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
 }
 
 // ExecutionGrant records a per-execution API access grant created at dispatch time.
@@ -122,6 +163,22 @@ type RunStore interface {
 	UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error
 	UpdateRunStatus(runID string, status RunStatus) error
 	UpdateRunCounts(runID string, completedJobs, failedJobs int) error
+
+	// Steward-action jobs (Issue #4625).
+
+	// UpdateJobResultCode records a steward-action result code on a job.
+	UpdateJobResultCode(jobID, code string) error
+	// MarkJobDispatched is a compare-and-set from pending to dispatched that
+	// stamps DispatchedAt; it reports whether the job changed.
+	MarkJobDispatched(jobID string, at time.Time) (changed bool, err error)
+	// ListStaleActionJobs returns steward-action jobs with no result that are
+	// still pending and were created before pendingBefore, or dispatched before
+	// dispatchedBefore, across all runs and tenants.
+	ListStaleActionJobs(pendingBefore, dispatchedBefore time.Time) ([]*JobRecord, error)
+	// ExpireJobIfStatus is a compare-and-set: it moves the job to the terminal
+	// status resultCode (recording resultCode as its result code) only when its
+	// current status equals fromStatus, and reports whether the job changed.
+	ExpireJobIfStatus(jobID string, fromStatus JobStatus, resultCode string, at time.Time) (changed bool, err error)
 
 	// Grant management for zero-trust script API access (Issue #1675).
 
@@ -185,7 +242,9 @@ CREATE TABLE IF NOT EXISTS script_runs (
     shell          TEXT,
     job_count      INTEGER DEFAULT 0,
     completed_jobs INTEGER DEFAULT 0,
-    failed_jobs    INTEGER DEFAULT 0
+    failed_jobs    INTEGER DEFAULT 0,
+    kind           TEXT NOT NULL DEFAULT 'script',
+    action_json    TEXT
 );`
 	const createJobs = `
 CREATE TABLE IF NOT EXISTS script_run_jobs (
@@ -198,7 +257,9 @@ CREATE TABLE IF NOT EXISTS script_run_jobs (
     completed_at  DATETIME,
     output        TEXT,
     stderr        TEXT,
-    exit_code     INTEGER
+    exit_code     INTEGER,
+    result_code   TEXT,
+    dispatched_at DATETIME
 );`
 	const createJobsIndex = `
 CREATE INDEX IF NOT EXISTS idx_srj_run_id ON script_run_jobs(run_id);`
@@ -230,32 +291,53 @@ CREATE INDEX IF NOT EXISTS idx_eg_device ON execution_grants(device_id, executio
 	if err := s.migrateJobColumns(); err != nil {
 		return fmt.Errorf("run store init: migrate jobs columns: %w", err)
 	}
+	if err := s.migrateRunColumns(); err != nil {
+		return fmt.Errorf("run store init: migrate runs columns: %w", err)
+	}
 	return nil
 }
 
-// migrateJobColumns adds the output/stderr/exit_code columns to script_run_jobs
-// when they are missing. It inspects the live schema via PRAGMA table_info so it
-// is idempotent across repeated calls and across sqlite driver versions.
+// migrateJobColumns adds the columns script_run_jobs gained after its first
+// release when they are missing: output/stderr/exit_code (Issue #1995) and the
+// steward-action result_code/dispatched_at (Issue #4625).
 func (s *RunStoreSQL) migrateJobColumns() error {
-	existing, err := s.jobColumns()
-	if err != nil {
-		return err
-	}
-
-	wanted := []struct {
-		name string
-		ddl  string
-	}{
+	return s.addMissingColumns("script_run_jobs", []columnDDL{
 		{"output", "ALTER TABLE script_run_jobs ADD COLUMN output TEXT"},
 		{"stderr", "ALTER TABLE script_run_jobs ADD COLUMN stderr TEXT"},
 		{"exit_code", "ALTER TABLE script_run_jobs ADD COLUMN exit_code INTEGER"},
+		{"result_code", "ALTER TABLE script_run_jobs ADD COLUMN result_code TEXT"},
+		{"dispatched_at", "ALTER TABLE script_run_jobs ADD COLUMN dispatched_at DATETIME"},
+	})
+}
+
+// migrateRunColumns adds the steward-action kind/action_json columns to
+// script_runs when they are missing (Issue #4625). Existing rows take the
+// 'script' default, so runs created before steward actions read back as script.
+func (s *RunStoreSQL) migrateRunColumns() error {
+	return s.addMissingColumns("script_runs", []columnDDL{
+		{"kind", "ALTER TABLE script_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'script'"},
+		{"action_json", "ALTER TABLE script_runs ADD COLUMN action_json TEXT"},
+	})
+}
+
+type columnDDL struct {
+	name string
+	ddl  string
+}
+
+// addMissingColumns inspects the live schema via PRAGMA table_info so it is
+// idempotent across repeated calls and across sqlite driver versions.
+func (s *RunStoreSQL) addMissingColumns(table string, wanted []columnDDL) error {
+	existing, err := s.tableColumns(table)
+	if err != nil {
+		return err
 	}
 	for _, c := range wanted {
 		if existing[c.name] {
 			continue
 		}
 		if _, err := s.db.Exec(c.ddl); err != nil {
-			return fmt.Errorf("add column %s: %w", c.name, err)
+			return fmt.Errorf("add column %s.%s: %w", table, c.name, err)
 		}
 	}
 	return nil
@@ -263,7 +345,16 @@ func (s *RunStoreSQL) migrateJobColumns() error {
 
 // jobColumns returns the set of column names currently defined on script_run_jobs.
 func (s *RunStoreSQL) jobColumns() (map[string]bool, error) {
-	rows, err := s.db.Query("PRAGMA table_info(script_run_jobs)")
+	return s.tableColumns("script_run_jobs")
+}
+
+// tableColumns returns the set of column names currently defined on table. The
+// table name is a package constant, never caller input.
+func (s *RunStoreSQL) tableColumns(table string) (map[string]bool, error) {
+	if table != "script_runs" && table != "script_run_jobs" {
+		return nil, fmt.Errorf("inspect schema: unexpected table %q", table)
+	}
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return nil, fmt.Errorf("inspect schema: %w", err)
 	}
@@ -300,8 +391,12 @@ func (s *RunStoreSQL) CreateRun(r *RunRecord) error {
 	const q = `
 INSERT INTO script_runs
     (run_id, tenant_id, created_by, created_at, status, filter_json,
-     script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs, kind, action_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	kind := r.Kind
+	if kind == "" {
+		kind = RunKindScript
+	}
 	_, err = s.db.Exec(q,
 		r.RunID, r.TenantID,
 		nullableStr(r.CreatedBy),
@@ -310,6 +405,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		nullableStr(r.InlineContent),
 		nullableStr(string(r.Shell)),
 		r.JobCount, r.CompletedJobs, r.FailedJobs,
+		kind, nullableStr(string(r.ActionJSON)),
 	)
 	return err
 }
@@ -318,30 +414,38 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 func (s *RunStoreSQL) CreateJob(j *JobRecord) error {
 	const q = `
 INSERT INTO script_run_jobs
-    (job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	var completedAt interface{}
+    (job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code,
+     result_code, dispatched_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	var completedAt, dispatchedAt interface{}
 	if j.CompletedAt != nil {
 		completedAt = *j.CompletedAt
+	}
+	if j.DispatchedAt != nil {
+		dispatchedAt = *j.DispatchedAt
 	}
 	_, err := s.db.Exec(q,
 		j.JobID, j.RunID, j.DeviceID,
 		nullableStr(j.ExecutionID),
 		string(j.Status), j.CreatedAt, completedAt,
 		nullableStr(j.Output), nullableStr(j.Stderr), j.ExitCode,
+		nullableStr(j.ResultCode), dispatchedAt,
 	)
 	return err
 }
 
-// GetRun returns the run record for runID, or ErrNotFound if not found.
-func (s *RunStoreSQL) GetRun(runID string) (*RunRecord, error) {
-	const q = `
+const runSelectCols = `
 SELECT run_id, tenant_id, created_by, created_at, status, filter_json,
-       script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs
-FROM script_runs
-WHERE run_id = ?`
+       script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs,
+       kind, action_json
+FROM script_runs`
 
-	row := s.db.QueryRow(q, runID)
+// rowScanner is satisfied by *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanRun(row rowScanner) (*RunRecord, error) {
 	r := &RunRecord{}
 	var (
 		createdBy     sql.NullString
@@ -349,25 +453,44 @@ WHERE run_id = ?`
 		scriptRef     sql.NullString
 		inlineContent sql.NullString
 		shell         sql.NullString
+		kind          sql.NullString
+		actionJSON    sql.NullString
 	)
-	err := row.Scan(
+	if err := row.Scan(
 		&r.RunID, &r.TenantID, &createdBy, &r.CreatedAt,
 		(*string)(&r.Status), &filterJSON,
 		&scriptRef, &inlineContent, &shell,
 		&r.JobCount, &r.CompletedJobs, &r.FailedJobs,
-	)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("run store get run: %w", err)
+		&kind, &actionJSON,
+	); err != nil {
+		return nil, err
 	}
 	r.CreatedBy = createdBy.String
 	r.ScriptRef = scriptRef.String
 	r.InlineContent = inlineContent.String
 	r.Shell = scriptmodule.ShellType(shell.String)
+	r.Kind = kind.String
+	if r.Kind == "" {
+		r.Kind = RunKindScript
+	}
+	if actionJSON.Valid && actionJSON.String != "" {
+		r.ActionJSON = []byte(actionJSON.String)
+	}
 	if filterJSON.Valid && filterJSON.String != "" {
 		_ = json.Unmarshal([]byte(filterJSON.String), &r.Filter)
+	}
+	return r, nil
+}
+
+// GetRun returns the run record for runID, or ErrNotFound if not found.
+func (s *RunStoreSQL) GetRun(runID string) (*RunRecord, error) {
+	r, err := scanRun(s.db.QueryRow(runSelectCols+`
+WHERE run_id = ?`, runID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("run store get run: %w", err)
 	}
 	return r, nil
 }
@@ -376,22 +499,17 @@ WHERE run_id = ?`
 // When tenantID is non-empty only runs belonging to that tenant are returned.
 // An empty tenantID returns all runs (for global-scope admin callers).
 func (s *RunStoreSQL) ListRuns(tenantID string, limit, offset int) ([]*RunRecord, error) {
-	const selectCols = `
-SELECT run_id, tenant_id, created_by, created_at, status, filter_json,
-       script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs
-FROM script_runs`
-
 	var (
 		rows *sql.Rows
 		err  error
 	)
 	if tenantID != "" {
-		rows, err = s.db.Query(selectCols+`
+		rows, err = s.db.Query(runSelectCols+`
 WHERE tenant_id = ?
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?`, tenantID, limit, offset)
 	} else {
-		rows, err = s.db.Query(selectCols+`
+		rows, err = s.db.Query(runSelectCols+`
 ORDER BY created_at DESC
 LIMIT ? OFFSET ?`, limit, offset)
 	}
@@ -402,28 +520,9 @@ LIMIT ? OFFSET ?`, limit, offset)
 
 	var runs []*RunRecord
 	for rows.Next() {
-		r := &RunRecord{}
-		var (
-			createdBy     sql.NullString
-			filterJSON    sql.NullString
-			scriptRef     sql.NullString
-			inlineContent sql.NullString
-			shell         sql.NullString
-		)
-		if err := rows.Scan(
-			&r.RunID, &r.TenantID, &createdBy, &r.CreatedAt,
-			(*string)(&r.Status), &filterJSON,
-			&scriptRef, &inlineContent, &shell,
-			&r.JobCount, &r.CompletedJobs, &r.FailedJobs,
-		); err != nil {
+		r, err := scanRun(rows)
+		if err != nil {
 			return nil, fmt.Errorf("run store list runs scan: %w", err)
-		}
-		r.CreatedBy = createdBy.String
-		r.ScriptRef = scriptRef.String
-		r.InlineContent = inlineContent.String
-		r.Shell = scriptmodule.ShellType(shell.String)
-		if filterJSON.Valid && filterJSON.String != "" {
-			_ = json.Unmarshal([]byte(filterJSON.String), &r.Filter)
 		}
 		runs = append(runs, r)
 	}
@@ -433,15 +532,55 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return runs, nil
 }
 
+const jobSelectCols = `job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code,
+       result_code, dispatched_at`
+
+// jobSelectColsQualified is jobSelectCols prefixed with the "j" alias for the
+// jobs/runs join in ListStaleActionJobs. It is a literal so the query text is
+// never built at runtime; a test keeps it in step with jobSelectCols.
+const jobSelectColsQualified = `j.job_id, j.run_id, j.device_id, j.execution_id, j.status, j.created_at, j.completed_at, j.output, j.stderr, j.exit_code,
+       j.result_code, j.dispatched_at`
+
+func scanJob(row rowScanner) (*JobRecord, error) {
+	j := &JobRecord{}
+	var (
+		executionID  sql.NullString
+		completedAt  sql.NullTime
+		output       sql.NullString
+		stderr       sql.NullString
+		exitCode     sql.NullInt64
+		resultCode   sql.NullString
+		dispatchedAt sql.NullTime
+	)
+	if err := row.Scan(
+		&j.JobID, &j.RunID, &j.DeviceID, &executionID,
+		(*string)(&j.Status), &j.CreatedAt, &completedAt,
+		&output, &stderr, &exitCode, &resultCode, &dispatchedAt,
+	); err != nil {
+		return nil, err
+	}
+	j.ExecutionID = executionID.String
+	if completedAt.Valid {
+		t := completedAt.Time
+		j.CompletedAt = &t
+	}
+	if dispatchedAt.Valid {
+		t := dispatchedAt.Time
+		j.DispatchedAt = &t
+	}
+	j.Output = output.String
+	j.Stderr = stderr.String
+	j.ExitCode = int(exitCode.Int64)
+	j.ResultCode = resultCode.String
+	return j, nil
+}
+
 // ListRunJobs returns all job records for runID ordered by created_at ASC.
 func (s *RunStoreSQL) ListRunJobs(runID string) ([]*JobRecord, error) {
-	const q = `
-SELECT job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code
+	rows, err := s.db.Query(`SELECT `+jobSelectCols+`
 FROM script_run_jobs
 WHERE run_id = ?
-ORDER BY created_at ASC`
-
-	rows, err := s.db.Query(q, runID)
+ORDER BY created_at ASC`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("run store list jobs: %w", err)
 	}
@@ -449,33 +588,89 @@ ORDER BY created_at ASC`
 
 	var jobs []*JobRecord
 	for rows.Next() {
-		j := &JobRecord{}
-		var executionID sql.NullString
-		var completedAt sql.NullTime
-		var output sql.NullString
-		var stderr sql.NullString
-		var exitCode sql.NullInt64
-		if err := rows.Scan(
-			&j.JobID, &j.RunID, &j.DeviceID, &executionID,
-			(*string)(&j.Status), &j.CreatedAt, &completedAt,
-			&output, &stderr, &exitCode,
-		); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, fmt.Errorf("run store scan job: %w", err)
 		}
-		j.ExecutionID = executionID.String
-		if completedAt.Valid {
-			t := completedAt.Time
-			j.CompletedAt = &t
-		}
-		j.Output = output.String
-		j.Stderr = stderr.String
-		j.ExitCode = int(exitCode.Int64)
 		jobs = append(jobs, j)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("run store list jobs rows: %w", err)
 	}
 	return jobs, nil
+}
+
+// UpdateJobResultCode records a steward-action result code on a job.
+func (s *RunStoreSQL) UpdateJobResultCode(jobID, code string) error {
+	_, err := s.db.Exec(`UPDATE script_run_jobs SET result_code = ? WHERE job_id = ?`, nullableStr(code), jobID)
+	return err
+}
+
+// MarkJobDispatched moves a pending job to dispatched and stamps dispatched_at.
+// The WHERE clause makes it a compare-and-set: a job that is no longer pending
+// (for instance already expired by a sweep) is left untouched.
+func (s *RunStoreSQL) MarkJobDispatched(jobID string, at time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE script_run_jobs SET status = ?, dispatched_at = ?
+WHERE job_id = ? AND status = ?`, string(JobStatusDispatched), at.UTC(), jobID, string(JobStatusPending))
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res)
+}
+
+// ListStaleActionJobs returns steward-action jobs with no result that are still
+// pending and created before pendingBefore, or dispatched before dispatchedBefore.
+// The time comparison runs in Go: sqlite stores times as text, and only the
+// small set of open action jobs is read.
+func (s *RunStoreSQL) ListStaleActionJobs(pendingBefore, dispatchedBefore time.Time) ([]*JobRecord, error) {
+	rows, err := s.db.Query(`SELECT `+jobSelectColsQualified+`
+FROM script_run_jobs j JOIN script_runs r ON r.run_id = j.run_id
+WHERE r.kind = ? AND j.completed_at IS NULL AND (j.result_code IS NULL OR j.result_code = '')
+  AND j.status IN (?, ?)
+ORDER BY j.created_at ASC`, RunKindStewardAction, string(JobStatusPending), string(JobStatusDispatched))
+	if err != nil {
+		return nil, fmt.Errorf("run store list stale action jobs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var stale []*JobRecord
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("run store scan stale action job: %w", err)
+		}
+		switch {
+		case j.Status == JobStatusPending && j.CreatedAt.Before(pendingBefore):
+			stale = append(stale, j)
+		case j.Status == JobStatusDispatched && j.DispatchedAt != nil && j.DispatchedAt.Before(dispatchedBefore):
+			stale = append(stale, j)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run store list stale action jobs rows: %w", err)
+	}
+	return stale, nil
+}
+
+// ExpireJobIfStatus is a compare-and-set from fromStatus to the terminal status
+// resultCode. The single conditional UPDATE is atomic: of several concurrent
+// callers exactly one matches the status predicate and reports changed.
+func (s *RunStoreSQL) ExpireJobIfStatus(jobID string, fromStatus JobStatus, resultCode string, at time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE script_run_jobs
+SET status = ?, result_code = ?, completed_at = ?
+WHERE job_id = ? AND status = ?`, resultCode, resultCode, at.UTC(), jobID, string(fromStatus))
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res)
+}
+
+func rowsChanged(res sql.Result) (bool, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
 // UpdateJobStatus sets the status and optionally the executionID for a job.
@@ -714,7 +909,14 @@ func (m *Manager) RecordJobResult(_ context.Context, runID, jobID, executionID s
 	if err := m.store.UpdateJobResult(jobID, jobStatus, executionID, output, stderr, exitCode); err != nil {
 		return fmt.Errorf("record job completion: update job %s: %w", jobID, err)
 	}
+	return m.refreshRun(runID)
+}
 
+// refreshRun recomputes a run's job counts from its jobs and, once every job is
+// terminal, moves the run to completed (or failed when any job failed, expired
+// or produced no result). A run that is already terminal (e.g. cancelled) is
+// left untouched so a late callback cannot resurrect it.
+func (m *Manager) refreshRun(runID string) error {
 	jobs, err := m.store.ListRunJobs(runID)
 	if err != nil {
 		return fmt.Errorf("record job completion: list jobs for run %s: %w", runID, err)
@@ -726,7 +928,7 @@ func (m *Manager) RecordJobResult(_ context.Context, runID, jobID, executionID s
 		switch j.Status {
 		case JobStatusCompleted:
 			completed++
-		case JobStatusFailed:
+		case JobStatusFailed, JobStatusExpired, JobStatusNoResult:
 			failedCount++
 		case JobStatusCancelled:
 			// Terminal, but counts toward neither completed nor failed.
@@ -759,6 +961,126 @@ func (m *Manager) RecordJobResult(_ context.Context, runID, jobID, executionID s
 		return fmt.Errorf("record job completion: update run status for run %s: %w", runID, err)
 	}
 	return nil
+}
+
+// ClaimActionDispatch is the compare-and-set that must succeed before a
+// steward-action command is sent: it moves the job from pending to dispatched.
+// It reports claimed == false when the job is no longer pending — already
+// dispatched (status "dispatched": the action was sent, never send it twice) or
+// closed by the expiry sweep or a cancel — and returns the job's current status.
+func (m *Manager) ClaimActionDispatch(_ context.Context, runID, jobID string, at time.Time) (claimed bool, status string, err error) {
+	changed, err := m.store.MarkJobDispatched(jobID, at)
+	if err != nil {
+		return false, "", fmt.Errorf("claim action dispatch: job %s: %w", jobID, err)
+	}
+	if changed {
+		return true, string(JobStatusDispatched), nil
+	}
+	jobs, err := m.store.ListRunJobs(runID)
+	if err != nil {
+		return false, "", fmt.Errorf("claim action dispatch: list jobs for run %s: %w", runID, err)
+	}
+	for _, j := range jobs {
+		if j.JobID == jobID {
+			return false, string(j.Status), nil
+		}
+	}
+	return false, "", fmt.Errorf("claim action dispatch: job %s: %w", jobID, ErrNotFound)
+}
+
+// RecordActionResult records a steward-action outcome: the result code is
+// persisted on the job and the job moves to completed (ok) or failed (any other
+// code). A code outside the known set is recorded as failed so a steward cannot
+// write arbitrary text into the run record. The run advances as for scripts.
+func (m *Manager) RecordActionResult(ctx context.Context, runID, jobID, executionID, resultCode string) error {
+	code := NormalizeResultCode(resultCode)
+	if err := m.store.UpdateJobResultCode(jobID, code); err != nil {
+		return fmt.Errorf("record action result: update job %s: %w", jobID, err)
+	}
+	exitCode := 0
+	if code != ResultCodeOK {
+		exitCode = 1
+	}
+	return m.RecordJobResult(ctx, runID, jobID, executionID, code != ResultCodeOK, "", "", exitCode)
+}
+
+// NormalizeResultCode maps a steward-reported result code to the recorded set.
+// The codes a steward reports are kept; anything else (including empty) is failed.
+func NormalizeResultCode(code string) string {
+	switch code {
+	case ResultCodeOK, ResultCodeSelfProtect, ResultCodeProcessChanged, ResultCodeUnsupported,
+		ResultCodeFailed, "not_found", "permission_denied":
+		return code
+	}
+	return ResultCodeFailed
+}
+
+// ExpireActionJobs closes steward-action jobs that will never report. A job
+// still pending past scriptmodule.StewardActionTTL ends "expired" ("expired, not
+// run"); one dispatched but unreported past scriptmodule.StewardActionTimeout
+// ends "no_result" ("sent, no result reported": the action may have run).
+//
+// Every node's dispatcher runs this sweep, so each transition is a
+// compare-and-set in the store. Only the caller whose update changed the row
+// tears down the queue entry, advances the run and returns the job — a node that
+// loses the race does nothing and audits nothing. The jobs this call closed are
+// returned (alongside any error for the ones it could not process) so the
+// dispatcher can audit each exactly once.
+func (m *Manager) ExpireActionJobs(ctx context.Context, now time.Time) ([]scriptmodule.ExpiredActionJob, error) {
+	stale, err := m.store.ListStaleActionJobs(now.Add(-scriptmodule.StewardActionTTL), now.Add(-scriptmodule.StewardActionTimeout))
+	if err != nil {
+		return nil, fmt.Errorf("expire action jobs: list stale jobs: %w", err)
+	}
+
+	var (
+		closed []scriptmodule.ExpiredActionJob
+		errs   []error
+	)
+	for _, job := range stale {
+		if ctx.Err() != nil {
+			errs = append(errs, ctx.Err())
+			break
+		}
+		code, detail := ResultCodeExpired, "expired, not run"
+		if job.Status == JobStatusDispatched {
+			code, detail = ResultCodeNoResult, "sent, no result reported"
+		}
+		changed, err := m.store.ExpireJobIfStatus(job.JobID, job.Status, code, now)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("expire action job %s: %w", job.JobID, err))
+			continue
+		}
+		if !changed {
+			continue
+		}
+
+		// The entry must not be re-dispatched, and the device slot is freed.
+		if job.ExecutionID != "" {
+			if m.executionQueue != nil {
+				_ = m.executionQueue.CancelExecution(job.DeviceID, job.ExecutionID) //nolint:errcheck // entry may already be gone from the active queue
+			}
+			if m.lockReleaser != nil {
+				m.lockReleaser.ReleaseDeviceForCancelledExecution(job.DeviceID, job.ExecutionID)
+			}
+		}
+		if err := m.refreshRun(job.RunID); err != nil {
+			errs = append(errs, err)
+		}
+
+		expired := scriptmodule.ExpiredActionJob{
+			RunID: job.RunID, JobID: job.JobID, DeviceID: job.DeviceID, ExecutionID: job.ExecutionID,
+			ResultCode: code, Detail: detail, At: now,
+		}
+		if run, err := m.store.GetRun(job.RunID); err == nil {
+			expired.TenantID = run.TenantID
+			expired.CreatedBy = run.CreatedBy
+			if len(run.ActionJSON) > 0 {
+				_ = json.Unmarshal(run.ActionJSON, &expired.Action) //nolint:errcheck // a malformed action leaves the audit fields empty
+			}
+		}
+		closed = append(closed, expired)
+	}
+	return closed, errors.Join(errs...)
 }
 
 // CreateGrant creates a JIT relay grant. Called by the dispatcher at dispatch time.

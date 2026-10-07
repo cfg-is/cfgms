@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configsignature "github.com/cfgis/cfgms/features/config/signature"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/run"
 	script "github.com/cfgis/cfgms/features/modules/stdlib/script"
 	cpinterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
@@ -1701,4 +1702,476 @@ func TestDispatcherWithoutTermSourceSendsZero(t *testing.T) {
 
 	require.Len(t, controlPlane.sent, 1)
 	assert.Zero(t, controlPlane.sent[0].Command.Term)
+}
+
+// ----------------------------------------------------------------------------
+// Steward actions — Issue #4625
+// ----------------------------------------------------------------------------
+
+// recordingActionAudit is a real ActionAuditSink that keeps what it is given.
+type recordingActionAudit struct {
+	mu   sync.Mutex
+	jobs []ExpiredActionJob
+}
+
+func (a *recordingActionAudit) RecordActionExpired(_ context.Context, job ExpiredActionJob) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.jobs = append(a.jobs, job)
+}
+
+func (a *recordingActionAudit) recorded() []ExpiredActionJob {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]ExpiredActionJob(nil), a.jobs...)
+}
+
+type actionHarness struct {
+	cp      *testControlPlane
+	q       *script.ExecutionQueue
+	keys    *script.EphemeralKeyManager
+	store   *run.RunStoreSQL
+	manager *run.Manager
+	d       *Dispatcher
+	audit   *recordingActionAudit
+}
+
+const testActionTerm = uint64(1)<<32 + 9
+
+// newActionHarness wires a dispatcher, a run manager over a single-connection
+// sqlite store, a real queue and a recording audit sink.
+func newActionHarness(t *testing.T) *actionHarness {
+	t.Helper()
+	db := mustOpenMemDB(t)
+	db.SetMaxOpenConns(1) // an in-memory sqlite database is per connection
+	store := run.NewRunStoreSQL(db)
+	require.NoError(t, store.Init(context.Background()))
+
+	keys := script.NewEphemeralKeyManager()
+	t.Cleanup(keys.Stop)
+	q := script.NewExecutionQueue(script.NewExecutionMonitor(), keys, time.Hour, "https://localhost:8080", nil, nil, time.Hour)
+	t.Cleanup(q.Stop)
+
+	cp := &testControlPlane{}
+	d, err := New(&Config{
+		Queue:        q,
+		ControlPlane: cp,
+		Signer:       testCommandSigner{},
+		TermSource:   staticTermSource{term: testActionTerm},
+		PollInterval: 24 * time.Hour,
+		Logger:       logging.NewNoopLogger(),
+	})
+	require.NoError(t, err)
+	manager := run.NewManager(store, q)
+	manager.SetDeviceLockReleaser(d)
+	d.SetRunCompletionSink(manager)
+	audit := &recordingActionAudit{}
+	d.SetActionAuditSink(audit)
+	require.NoError(t, d.Start(context.Background()))
+	t.Cleanup(d.Stop)
+
+	return &actionHarness{cp: cp, q: q, keys: keys, store: store, manager: manager, d: d, audit: audit}
+}
+
+var (
+	x509ActionProof = &run.CommandSignature{
+		Algorithm: "ecdsa-sha256",
+		Value:     "c2lnbmF0dXJlLXZhbHVl+/==",
+		PublicKey: "-----BEGIN PUBLIC KEY-----\nMFkw\n-----END PUBLIC KEY-----\n",
+	}
+	webAuthnActionProof = &run.CommandSignature{
+		WebAuthnAuthenticatorData: "YXV0aC1kYXRh",
+		WebAuthnClientDataJSON:    "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0In0",
+		WebAuthnSignature:         "d2ViYXV0aG4tc2ln",
+		WebAuthnCredentialID:      "Y3JlZC1pZA",
+		WebAuthnManifest:          `{"manifest":{"k":"v \u00e9 \"quoted\""},"signature":"x"}`,
+	}
+)
+
+// enqueueAction creates a steward-action run for one device through the real
+// constructor and returns the run and its only job.
+func (h *actionHarness) enqueueAction(t *testing.T, device, verb string, proof *run.CommandSignature) (string, *run.JobRecord) {
+	t.Helper()
+	runID, err := run.SynthesizeActionRunForDevices(context.Background(), h.manager, h.q,
+		[]fleet.StewardResult{{ID: device, TenantID: "tenant-a"}}, "tenant-a", "admin", fleet.Filter{},
+		script.StewardActionSpec{Verb: verb, TargetKind: "service", TargetName: "spooler", Parameters: map[string]string{}},
+		proof, []string{device, "steward-other"}, "nonce-"+verb+"-"+device, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	return runID, h.onlyJob(t, runID)
+}
+
+func (h *actionHarness) onlyJob(t *testing.T, runID string) *run.JobRecord {
+	t.Helper()
+	jobs, err := h.manager.ListRunJobs(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	return jobs[0]
+}
+
+func (h *actionHarness) lockHeld(device string) bool {
+	h.d.lockMetaMu.Lock()
+	defer h.d.lockMetaMu.Unlock()
+	_, held := h.d.lockMetaMap[device]
+	return held
+}
+
+func (h *actionHarness) completeAction(t *testing.T, device, executionID string, details map[string]interface{}) {
+	t.Helper()
+	details["execution_id"] = executionID
+	require.NoError(t, h.cp.injectEvent(context.Background(), &controlplaneTypes.Event{
+		ID: "evt-" + executionID, Type: controlplaneTypes.EventScriptCompleted,
+		StewardID: device, Timestamp: time.Now(), Details: details,
+	}))
+}
+
+// TestDispatcher_StewardAction_SendsSignedStewardActionWithEnvelopeIntact covers
+// the x509 and WebAuthn envelopes: the sent command is steward_action (not
+// execute_script), carries the controller's signature and fencing term, forwards
+// the stored operator envelope byte for byte, and never prepares a script.
+func TestDispatcher_StewardAction_SendsSignedStewardActionWithEnvelopeIntact(t *testing.T) {
+	for name, proof := range map[string]*run.CommandSignature{"x509": x509ActionProof, "webauthn": webAuthnActionProof} {
+		t.Run(name, func(t *testing.T) {
+			h := newActionHarness(t)
+			const device = "steward-act-1"
+			runID, job := h.enqueueAction(t, device, "service.restart", proof)
+
+			// Prepare would generate an ephemeral key for this entry; it must not run.
+			var stored *script.QueuedExecution
+			for _, qe := range h.q.PeekForDevice(device) {
+				stored = qe
+			}
+			require.NotNil(t, stored)
+			require.Equal(t, script.QueueKindStewardAction, stored.Kind)
+
+			h.d.OnHeartbeat(device)
+			require.Eventually(t, func() bool { return h.cp.sentCount() == 1 }, 2*time.Second, 10*time.Millisecond)
+
+			sent := h.cp.lastSent()
+			require.NotNil(t, sent)
+			assert.Equal(t, controlplaneTypes.CommandStewardAction, sent.Command.Type)
+			assert.Equal(t, device, sent.Command.StewardID)
+			assert.Equal(t, testActionTerm, sent.Command.Term, "the fencing term is stamped")
+			require.NotNil(t, sent.Signature, "the outer command is signed by the controller signer")
+			assert.Equal(t, "controller-envelope-signature", sent.Signature.Signature)
+
+			p := sent.Command.Params
+			assert.Equal(t, job.ExecutionID, p["execution_id"])
+			assert.Equal(t, "service.restart", p["verb"])
+			assert.Equal(t, map[string]string{"kind": "service", "name": "spooler"}, p["target"])
+			assert.Equal(t, map[string]string{}, p["parameters"])
+			assert.NotContains(t, p, "script_content")
+			assert.NotContains(t, p, "shell")
+			assert.NotContains(t, p, "environment")
+
+			// The stored envelope equals the params the steward receives.
+			for key, want := range stored.Metadata {
+				switch key {
+				case "workflow_run_id", "job_id", "tenant_id":
+					assert.NotContains(t, p, key, "run linkage is not forwarded to the steward")
+				case "targets":
+					assert.Equal(t, []string{device, "steward-other"}, p["targets"])
+				default:
+					assert.Equal(t, want, p[key], "envelope field %s is forwarded byte for byte", key)
+				}
+			}
+			if proof.WebAuthnManifest != "" {
+				assert.Equal(t, proof.WebAuthnManifest, p["webauthn_manifest"])
+				assert.NotContains(t, p, "signature_value")
+			} else {
+				assert.Equal(t, proof.Value, p["signature_value"])
+				assert.Equal(t, proof.PublicKey, p["signature_public_key"])
+				assert.NotContains(t, p, "webauthn_signature")
+			}
+
+			assert.Zero(t, h.keys.GetKeyCount(), "no script was prepared, so no ephemeral key exists")
+			got := h.onlyJob(t, runID)
+			assert.Equal(t, run.JobStatusDispatched, got.Status)
+			require.NotNil(t, got.DispatchedAt)
+			assert.True(t, h.lockHeld(device), "the device slot is held until the steward reports")
+		})
+	}
+}
+
+func TestDispatcher_StewardAction_PrepareExecutionIsNeverCalled(t *testing.T) {
+	// A script dispatch with GenerateAPIKey creates an ephemeral key in
+	// PrepareExecutionForDevice; the same flag on an action entry must not.
+	h := newActionHarness(t)
+	const device = "steward-noprepare"
+	require.NoError(t, h.q.QueueExecution(device, &script.QueuedExecution{
+		ExecutionID: "exec-noprepare", Kind: script.QueueKindStewardAction,
+		Action:         &script.StewardActionSpec{Verb: "service.start", TargetKind: "service", TargetName: "x"},
+		GenerateAPIKey: true,
+		Metadata: map[string]interface{}{
+			"signature_algorithm": "a", "signature_value": "v", "signature_public_key": "k",
+		},
+	}))
+	h.d.dispatchForDevice(context.Background(), device)
+	require.Equal(t, 1, h.cp.sentCount())
+	assert.Equal(t, controlplaneTypes.CommandStewardAction, h.cp.lastSent().Command.Type)
+	assert.Zero(t, h.keys.GetKeyCount())
+}
+
+func TestDispatcher_StewardAction_WithoutProofIsNeverSentAndJobFails(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-noproof"
+	now := time.Now().UTC()
+	require.NoError(t, h.store.CreateRun(&run.RunRecord{
+		RunID: "run-noproof", TenantID: "tenant-a", CreatedAt: now, Status: run.RunStatusRunning, JobCount: 1,
+		Kind: run.RunKindStewardAction, ActionJSON: []byte(`{"verb":"service.stop","target_kind":"service","target_name":"x"}`),
+	}))
+	require.NoError(t, h.store.CreateJob(&run.JobRecord{
+		JobID: "job-noproof", RunID: "run-noproof", DeviceID: device, ExecutionID: "exec-noproof",
+		Status: run.JobStatusPending, CreatedAt: now,
+	}))
+	// A partial credential (no public key) is not a proof either.
+	require.NoError(t, h.q.QueueExecution(device, &script.QueuedExecution{
+		ExecutionID: "exec-noproof", Kind: script.QueueKindStewardAction,
+		Action: &script.StewardActionSpec{Verb: "service.stop", TargetKind: "service", TargetName: "x"},
+		Metadata: map[string]interface{}{
+			"workflow_run_id": "run-noproof", "job_id": "job-noproof",
+			"signature_algorithm": "ecdsa-sha256", "signature_value": "v",
+			"nonce": "n", "expires_at": now.Add(time.Minute).Format(time.RFC3339), "targets": []string{device},
+		},
+	}))
+
+	h.d.dispatchForDevice(context.Background(), device)
+
+	assert.Zero(t, h.cp.sentCount(), "an action without an operator proof is never sent")
+	job := h.onlyJob(t, "run-noproof")
+	assert.Equal(t, run.JobStatusFailed, job.Status)
+	assert.Equal(t, run.ResultCodeFailed, job.ResultCode)
+	assert.Empty(t, h.q.PeekForDevice(device), "the queue entry is closed, not left to be re-dispatched")
+	assert.False(t, h.lockHeld(device), "the device slot is released")
+}
+
+func TestDispatcher_StewardAction_SendFailureFailsJob(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-sendfail"
+	runID, _ := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.cp.setSendErr(errors.New("steward session dropped"))
+
+	h.d.dispatchForDevice(context.Background(), device)
+
+	job := h.onlyJob(t, runID)
+	assert.Equal(t, run.JobStatusFailed, job.Status, "an action that could not be delivered is not left dispatched")
+	assert.Equal(t, run.ResultCodeFailed, job.ResultCode)
+	assert.False(t, h.lockHeld(device))
+}
+
+func TestDispatcher_StewardAction_NeverResentOnceDispatched(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-resend"
+	_, _ = h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+	require.Equal(t, 1, h.cp.sentCount())
+
+	// The slot is freed (e.g. the controller restarted) and the entry comes back
+	// from the queue as dispatched-but-unacknowledged.
+	h.d.releaseDevice(device)
+	h.d.dispatchForDevice(context.Background(), device)
+	assert.Equal(t, 1, h.cp.sentCount(), "an action already sent is never sent twice")
+	assert.False(t, h.lockHeld(device))
+	assert.Len(t, h.q.PeekForDevice(device), 1, "the entry is kept so a late result can still be linked")
+}
+
+func TestDispatcher_StewardAction_ClosedJobIsNeverSent(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-closed"
+	runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+
+	// The sweep closed the job but its queue entry was not cancelled (e.g. the
+	// closing node crashed in between): the dispatcher's claim must still refuse.
+	changed, err := h.store.ExpireJobIfStatus(job.JobID, run.JobStatusPending, run.ResultCodeExpired, time.Now())
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	h.d.dispatchForDevice(context.Background(), device)
+
+	assert.Zero(t, h.cp.sentCount())
+	assert.Equal(t, run.JobStatusExpired, h.onlyJob(t, runID).Status)
+	assert.Empty(t, h.q.PeekForDevice(device))
+}
+
+func TestDispatcher_StewardAction_CompletionRecordsResultCode(t *testing.T) {
+	cases := []struct {
+		name       string
+		details    map[string]interface{}
+		wantCode   string
+		wantStatus run.JobStatus
+		wantRun    run.RunStatus
+	}{
+		{"ok", map[string]interface{}{"result_code": "ok", "exit_code": float64(0)}, "ok", run.JobStatusCompleted, run.RunStatusCompleted},
+		{"self_protect", map[string]interface{}{"result_code": "self_protect", "exit_code": float64(1)}, "self_protect", run.JobStatusFailed, run.RunStatusFailed},
+		{"process_changed", map[string]interface{}{"result_code": "process_changed", "exit_code": float64(1)}, "process_changed", run.JobStatusFailed, run.RunStatusFailed},
+		{"unsupported", map[string]interface{}{"result_code": "unsupported", "exit_code": float64(1)}, "unsupported", run.JobStatusFailed, run.RunStatusFailed},
+		{"no code, zero exit", map[string]interface{}{"exit_code": float64(0)}, "ok", run.JobStatusCompleted, run.RunStatusCompleted},
+		{"no code, non-zero exit", map[string]interface{}{"exit_code": float64(1)}, "failed", run.JobStatusFailed, run.RunStatusFailed},
+		{"unknown code is bounded", map[string]interface{}{"result_code": "<script>alert(1)</script>", "exit_code": float64(0)}, "failed", run.JobStatusFailed, run.RunStatusFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newActionHarness(t)
+			const device = "steward-complete"
+			runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+			h.d.dispatchForDevice(context.Background(), device)
+			require.Equal(t, 1, h.cp.sentCount())
+
+			h.completeAction(t, device, job.ExecutionID, tc.details)
+
+			got := h.onlyJob(t, runID)
+			assert.Equal(t, tc.wantCode, got.ResultCode)
+			assert.Equal(t, tc.wantStatus, got.Status)
+			r, err := h.manager.GetRun(context.Background(), runID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantRun, r.Status)
+			assert.False(t, h.lockHeld(device), "completion releases the device slot")
+			assert.Empty(t, h.q.PeekForDevice(device), "the queue entry is acknowledged")
+		})
+	}
+}
+
+func TestDispatcher_StewardAction_CommandFailedRecordsFailed(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-cmdfail"
+	runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+
+	require.NoError(t, h.cp.injectCommandFailed(context.Background(), device, job.ExecutionID, "envelope rejected"))
+
+	got := h.onlyJob(t, runID)
+	assert.Equal(t, run.JobStatusFailed, got.Status)
+	assert.Equal(t, run.ResultCodeFailed, got.ResultCode)
+}
+
+func TestDispatcher_StewardAction_PendingPastTTLIsExpiredNotRunAndAudited(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-expire"
+	runID, job := h.enqueueAction(t, device, "service.stop", x509ActionProof)
+
+	// Past the entry's TTL nothing has delivered it.
+	h.d.sweepActionJobsAt(context.Background(), time.Now().Add(script.StewardActionTTL+time.Second))
+	h.d.dispatchForDevice(context.Background(), device)
+
+	assert.Zero(t, h.cp.sentCount(), "an action past its TTL is never dispatched")
+	got := h.onlyJob(t, runID)
+	assert.Equal(t, run.JobStatusExpired, got.Status)
+	assert.Equal(t, run.ResultCodeExpired, got.ResultCode)
+	r, err := h.manager.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Equal(t, run.RunStatusFailed, r.Status, "a run whose only job expired is not left running")
+
+	audited := h.audit.recorded()
+	require.Len(t, audited, 1)
+	assert.Equal(t, "expired", audited[0].ResultCode)
+	assert.Equal(t, "expired, not run", audited[0].Detail)
+	assert.Equal(t, job.JobID, audited[0].JobID)
+	assert.Equal(t, runID, audited[0].RunID)
+	assert.Equal(t, device, audited[0].DeviceID)
+	assert.Equal(t, "tenant-a", audited[0].TenantID)
+	assert.Equal(t, "admin", audited[0].CreatedBy)
+	assert.Equal(t, "service.stop", audited[0].Action.Verb)
+	assert.Equal(t, "spooler", audited[0].Action.TargetName)
+
+	h.d.sweepActionJobsAt(context.Background(), time.Now().Add(time.Hour))
+	assert.Len(t, h.audit.recorded(), 1, "an already-closed job is not audited again")
+}
+
+func TestDispatcher_StewardAction_FreshActionIsNotExpired(t *testing.T) {
+	h := newActionHarness(t)
+	_, job := h.enqueueAction(t, "steward-fresh", "service.stop", x509ActionProof)
+	h.d.sweepActionJobsAt(context.Background(), time.Now())
+	assert.Empty(t, h.audit.recorded())
+	assert.Equal(t, run.JobStatusPending, h.onlyJob(t, job.RunID).Status)
+}
+
+func TestDispatcher_StewardAction_DispatchedNeverReportedEndsNoResultAndReleasesLock(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-noresult"
+	runID, job := h.enqueueAction(t, device, "service.restart", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+	require.Equal(t, 1, h.cp.sentCount())
+
+	// The device slot lives exactly as long as the action's timeout.
+	h.d.lockMetaMu.Lock()
+	assert.Equal(t, script.StewardActionTimeout, h.d.lockMetaMap[device].lockTTL)
+	h.d.lockMetaMu.Unlock()
+
+	// Inside the bound nothing is closed.
+	h.d.sweepActionJobsAt(context.Background(), time.Now().Add(script.StewardActionTimeout-10*time.Second))
+	assert.Empty(t, h.audit.recorded())
+	assert.Equal(t, run.JobStatusDispatched, h.onlyJob(t, runID).Status)
+
+	// Past the bound it ends no_result and is audited.
+	h.d.sweepActionJobsAt(context.Background(), time.Now().Add(script.StewardActionTimeout+time.Second))
+	got := h.onlyJob(t, runID)
+	assert.Equal(t, run.JobStatusNoResult, got.Status)
+	assert.Equal(t, run.ResultCodeNoResult, got.ResultCode)
+	audited := h.audit.recorded()
+	require.Len(t, audited, 1)
+	assert.Equal(t, "no_result", audited[0].ResultCode)
+	assert.Equal(t, "sent, no result reported", audited[0].Detail)
+	assert.Equal(t, job.ExecutionID, audited[0].ExecutionID)
+	assert.Empty(t, h.q.PeekForDevice(device), "the entry is cancelled so the action cannot be re-dispatched")
+	assert.False(t, h.lockHeld(device), "the closing sweep frees the device slot on this node")
+}
+
+func TestDispatcher_StewardAction_LockSweepReleasesAfterTimeoutBound(t *testing.T) {
+	h := newActionHarness(t)
+	const device = "steward-lockbound"
+	_, _ = h.enqueueAction(t, device, "service.stop", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+	require.True(t, h.lockHeld(device))
+
+	h.d.sweepExpiredLocks()
+	assert.True(t, h.lockHeld(device), "the slot is held inside the bound")
+
+	h.d.lockMetaMu.Lock()
+	meta := h.d.lockMetaMap[device]
+	meta.acquiredAt = time.Now().Add(-script.StewardActionTimeout - time.Second)
+	h.d.lockMetaMap[device] = meta
+	h.d.lockMetaMu.Unlock()
+	h.d.sweepExpiredLocks()
+	assert.False(t, h.lockHeld(device), "the slot is released once the 60 s bound has passed — not the 2x script grace")
+
+	// The unreported action ends no_result (and leaves the queue), then the
+	// released device takes the next action.
+	h.d.sweepActionJobsAt(context.Background(), time.Now().Add(script.StewardActionTimeout+time.Second))
+	_, _ = h.enqueueAction(t, device, "service.start", x509ActionProof)
+	h.d.dispatchForDevice(context.Background(), device)
+	assert.Equal(t, 2, h.cp.sentCount())
+}
+
+func TestDispatcher_StewardAction_ConcurrentSweepsAuditOnce(t *testing.T) {
+	h := newActionHarness(t)
+	runID, _ := h.enqueueAction(t, "steward-race", "service.stop", x509ActionProof)
+	at := time.Now().Add(script.StewardActionTTL + time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.d.sweepActionJobsAt(context.Background(), at)
+		}()
+	}
+	wg.Wait()
+
+	assert.Len(t, h.audit.recorded(), 1, "exactly one audit event")
+	assert.Equal(t, run.JobStatusExpired, h.onlyJob(t, runID).Status, "exactly one terminal status")
+}
+
+// TestDispatcher_ScriptEntriesAreUntouchedByActionSweep guards script behaviour:
+// an old pending script job is never closed by the action sweep.
+func TestDispatcher_ScriptEntriesAreUntouchedByActionSweep(t *testing.T) {
+	h := newActionHarness(t)
+	now := time.Now().UTC().Add(-time.Hour)
+	require.NoError(t, h.store.CreateRun(&run.RunRecord{RunID: "run-script-old", TenantID: "t", CreatedAt: now, Status: run.RunStatusRunning, JobCount: 1}))
+	require.NoError(t, h.store.CreateJob(&run.JobRecord{JobID: "job-script-old", RunID: "run-script-old", DeviceID: "d", Status: run.JobStatusPending, CreatedAt: now}))
+
+	h.d.sweepActionJobsAt(context.Background(), time.Now())
+
+	assert.Empty(t, h.audit.recorded())
+	jobs, err := h.manager.ListRunJobs(context.Background(), "run-script-old")
+	require.NoError(t, err)
+	assert.Equal(t, run.JobStatusPending, jobs[0].Status)
 }

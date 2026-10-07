@@ -43,14 +43,26 @@ func nullJSON(b []byte) interface{} {
 }
 
 const scriptRunColumns = `run_id, tenant_id, created_by, created_at, status, filter_json,
-	script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs`
+	script_ref, inline_content, shell, job_count, completed_jobs, failed_jobs, kind, action_json`
+
+const scriptRunJobColumns = `job_id, run_id, device_id, execution_id, status,
+	created_at, completed_at, output, stderr, exit_code, result_code, dispatched_at`
+
+// runKindOrScript normalises the empty kind to the script default.
+func runKindOrScript(kind string) string {
+	if kind == "" {
+		return business.ScriptRunKindScript
+	}
+	return kind
+}
 
 // CreateRun implements business.ScriptRunStore.
 func (s *DatabaseScriptRunStore) CreateRun(ctx context.Context, r *business.ScriptRun) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO script_runs (`+scriptRunColumns+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		r.RunID, r.TenantID, r.CreatedBy, r.CreatedAt.UTC(), r.Status, nullJSON(r.FilterJSON),
-		r.ScriptRef, r.InlineContent, r.Shell, r.JobCount, r.CompletedJobs, r.FailedJobs)
+		r.ScriptRef, r.InlineContent, r.Shell, r.JobCount, r.CompletedJobs, r.FailedJobs,
+		runKindOrScript(r.Kind), nullJSON(r.ActionJSON))
 	if err != nil {
 		return fmt.Errorf("database: create script run: %w", err)
 	}
@@ -64,10 +76,11 @@ func (s *DatabaseScriptRunStore) CreateJob(ctx context.Context, j *business.Scri
 		completedAt = j.CompletedAt.UTC()
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO script_run_jobs
-		(job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		(job_id, run_id, device_id, execution_id, status, created_at, completed_at, output, stderr, exit_code,
+		 result_code, dispatched_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		j.JobID, j.RunID, j.DeviceID, j.ExecutionID, j.Status, j.CreatedAt.UTC(), completedAt,
-		j.Output, j.Stderr, j.ExitCode)
+		j.Output, j.Stderr, j.ExitCode, j.ResultCode, nullTime(j.DispatchedAt))
 	if err != nil {
 		return fmt.Errorf("database: create script run job: %w", err)
 	}
@@ -76,13 +89,17 @@ func (s *DatabaseScriptRunStore) CreateJob(ctx context.Context, j *business.Scri
 
 func scanScriptRun(row rowScanner) (*business.ScriptRun, error) {
 	r := &business.ScriptRun{}
-	var filter sql.NullString
+	var filter, action sql.NullString
 	if err := row.Scan(&r.RunID, &r.TenantID, &r.CreatedBy, &r.CreatedAt, &r.Status, &filter,
-		&r.ScriptRef, &r.InlineContent, &r.Shell, &r.JobCount, &r.CompletedJobs, &r.FailedJobs); err != nil {
+		&r.ScriptRef, &r.InlineContent, &r.Shell, &r.JobCount, &r.CompletedJobs, &r.FailedJobs,
+		&r.Kind, &action); err != nil {
 		return nil, err
 	}
 	if filter.Valid {
 		r.FilterJSON = []byte(filter.String)
+	}
+	if action.Valid {
+		r.ActionJSON = []byte(action.String)
 	}
 	return r, nil
 }
@@ -132,27 +149,30 @@ func (s *DatabaseScriptRunStore) ListRuns(ctx context.Context, tenantID string, 
 	return runs, nil
 }
 
-// ListRunJobs implements business.ScriptRunStore.
-func (s *DatabaseScriptRunStore) ListRunJobs(ctx context.Context, runID string) ([]*business.ScriptRunJob, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT job_id, run_id, device_id, execution_id, status,
-		created_at, completed_at, output, stderr, exit_code
-		FROM script_run_jobs WHERE run_id = $1 ORDER BY created_at ASC`, runID)
-	if err != nil {
-		return nil, fmt.Errorf("database: list script run jobs: %w", err)
+func scanScriptRunJob(row rowScanner) (*business.ScriptRunJob, error) {
+	j := &business.ScriptRunJob{}
+	var completedAt, dispatchedAt sql.NullTime
+	if err := row.Scan(&j.JobID, &j.RunID, &j.DeviceID, &j.ExecutionID, &j.Status,
+		&j.CreatedAt, &completedAt, &j.Output, &j.Stderr, &j.ExitCode, &j.ResultCode, &dispatchedAt); err != nil {
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	if completedAt.Valid {
+		t := completedAt.Time
+		j.CompletedAt = &t
+	}
+	if dispatchedAt.Valid {
+		t := dispatchedAt.Time
+		j.DispatchedAt = &t
+	}
+	return j, nil
+}
 
+func collectScriptRunJobs(rows *sql.Rows) ([]*business.ScriptRunJob, error) {
 	var jobs []*business.ScriptRunJob
 	for rows.Next() {
-		j := &business.ScriptRunJob{}
-		var completedAt sql.NullTime
-		if err := rows.Scan(&j.JobID, &j.RunID, &j.DeviceID, &j.ExecutionID, &j.Status,
-			&j.CreatedAt, &completedAt, &j.Output, &j.Stderr, &j.ExitCode); err != nil {
+		j, err := scanScriptRunJob(rows)
+		if err != nil {
 			return nil, fmt.Errorf("database: scan script run job: %w", err)
-		}
-		if completedAt.Valid {
-			t := completedAt.Time
-			j.CompletedAt = &t
 		}
 		jobs = append(jobs, j)
 	}
@@ -161,6 +181,21 @@ func (s *DatabaseScriptRunStore) ListRunJobs(ctx context.Context, runID string) 
 	}
 	return jobs, nil
 }
+
+// ListRunJobs implements business.ScriptRunStore.
+func (s *DatabaseScriptRunStore) ListRunJobs(ctx context.Context, runID string) ([]*business.ScriptRunJob, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+scriptRunJobColumns+`
+		FROM script_run_jobs WHERE run_id = $1 ORDER BY created_at ASC`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("database: list script run jobs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectScriptRunJobs(rows)
+}
+
+// jobColumnsQualified is scriptRunJobColumns prefixed for the jobs/runs join.
+const jobColumnsQualified = `j.job_id, j.run_id, j.device_id, j.execution_id, j.status,
+	j.created_at, j.completed_at, j.output, j.stderr, j.exit_code, j.result_code, j.dispatched_at`
 
 func nullTime(t *time.Time) interface{} {
 	if t == nil {
@@ -194,6 +229,61 @@ func (s *DatabaseScriptRunStore) UpdateJobResult(ctx context.Context, jobID, sta
 		return fmt.Errorf("database: update script run job result: %w", err)
 	}
 	return nil
+}
+
+// UpdateJobResultCode implements business.ScriptRunStore.
+func (s *DatabaseScriptRunStore) UpdateJobResultCode(ctx context.Context, jobID, code string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs SET result_code = $1 WHERE job_id = $2`, code, jobID); err != nil {
+		return fmt.Errorf("database: update script run job result code: %w", err)
+	}
+	return nil
+}
+
+// MarkJobDispatched implements business.ScriptRunStore.
+func (s *DatabaseScriptRunStore) MarkJobDispatched(ctx context.Context, jobID string, at time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs SET status = 'dispatched', dispatched_at = $1
+		WHERE job_id = $2 AND status = 'pending'`, at.UTC(), jobID)
+	if err != nil {
+		return false, fmt.Errorf("database: mark script run job dispatched: %w", err)
+	}
+	return rowsChanged(res)
+}
+
+// ListStaleActionJobs implements business.ScriptRunStore.
+func (s *DatabaseScriptRunStore) ListStaleActionJobs(ctx context.Context, pendingBefore, dispatchedBefore time.Time) ([]*business.ScriptRunJob, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumnsQualified+`
+		FROM script_run_jobs j JOIN script_runs r ON r.run_id = j.run_id
+		WHERE r.kind = $1 AND j.completed_at IS NULL AND j.result_code = ''
+		  AND ((j.status = 'pending' AND j.created_at < $2)
+		    OR (j.status = 'dispatched' AND j.dispatched_at < $3))
+		ORDER BY j.created_at ASC`,
+		business.ScriptRunKindStewardAction, pendingBefore.UTC(), dispatchedBefore.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("database: list stale action jobs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return collectScriptRunJobs(rows)
+}
+
+// ExpireJobIfStatus implements business.ScriptRunStore. The single conditional
+// UPDATE is atomic: of several concurrent callers exactly one matches the
+// status predicate and reports changed.
+func (s *DatabaseScriptRunStore) ExpireJobIfStatus(ctx context.Context, jobID, fromStatus, resultCode string, at time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE script_run_jobs
+		SET status = $1, result_code = $1, completed_at = $2
+		WHERE job_id = $3 AND status = $4`, resultCode, at.UTC(), jobID, fromStatus)
+	if err != nil {
+		return false, fmt.Errorf("database: expire script run job: %w", err)
+	}
+	return rowsChanged(res)
+}
+
+func rowsChanged(res sql.Result) (bool, error) {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("database: rows affected: %w", err)
+	}
+	return n > 0, nil
 }
 
 // UpdateRunStatus implements business.ScriptRunStore.

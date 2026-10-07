@@ -79,6 +79,11 @@ type Dispatcher struct {
 	// before Start; nil when no run manager is wired.
 	runSink RunCompletionSink
 
+	// actionAudit, when set, receives every steward action the expiry sweep
+	// closes without a steward result (Issue #4625). Set once via
+	// SetActionAuditSink or Config.ActionAudit before Start.
+	actionAudit ActionAuditSink
+
 	// grantManager, when set, creates and consumes per-execution relay grants
 	// (Issue #1675). Set once via SetGrantManager before Start; nil = no grants.
 	grantManager GrantManager
@@ -116,6 +121,31 @@ type RunCompletionSink interface {
 	// execution result (stdout/stderr/exit code) so `cfg steward exec` can surface
 	// output (Issue #1995, root cause D).
 	RecordJobResult(ctx context.Context, runID, jobID, executionID string, failed bool, output, stderr string, exitCode int) error
+
+	// ClaimActionDispatch is the compare-and-set a steward action must win before
+	// it is sent: pending → dispatched. claimed is false when the job is no longer
+	// pending; status is then its current status ("dispatched" means the action
+	// was already sent and must not be sent again) (Issue #4625).
+	ClaimActionDispatch(ctx context.Context, runID, jobID string, at time.Time) (claimed bool, status string, err error)
+	// RecordActionResult records a steward action's result code and advances the
+	// job and run (Issue #4625).
+	RecordActionResult(ctx context.Context, runID, jobID, executionID, resultCode string) error
+	// ExpireActionJobs closes steward-action jobs that will never report — pending
+	// past their TTL ("expired"), or dispatched but unreported past their bound
+	// ("no_result") — and returns the jobs this caller closed. The transition is a
+	// compare-and-set in the shared store, so across nodes each job is returned to
+	// exactly one caller (Issue #4625).
+	ExpireActionJobs(ctx context.Context, now time.Time) ([]ExpiredActionJob, error)
+}
+
+// ExpiredActionJob describes a steward action closed without a steward result.
+type ExpiredActionJob = script.ExpiredActionJob
+
+// ActionAuditSink is the dispatcher's narrow handle on the audit log. The expiry
+// sweep passes it every action it closed as "expired" (never delivered) or
+// "no_result" (sent, never reported) so neither outcome disappears (Issue #4625).
+type ActionAuditSink interface {
+	RecordActionExpired(ctx context.Context, job ExpiredActionJob)
 }
 
 // GrantManager creates and consumes per-execution relay grants (Issue #1675).
@@ -157,6 +187,10 @@ type Config struct {
 	// Decision 6), so a cluster without it can never run ad-hoc scripts
 	// (Issue #4510). Nil sends term 0 (single-server behaviour).
 	TermSource TermSource
+	// ActionAudit receives each steward action the expiry sweep closes without a
+	// result. Optional: when nil the closure is still logged and recorded on the
+	// job, but not written to the audit log.
+	ActionAudit ActionAuditSink
 	// PollInterval is how often the background loop polls all devices.
 	// Defaults to 30 s when zero.
 	PollInterval time.Duration
@@ -202,6 +236,7 @@ func New(cfg *Config) (*Dispatcher, error) {
 		isLocallyConnected:  cfg.IsLocallyConnected,
 		termSource:          cfg.TermSource,
 		requireSignedAdhoc:  cfg.RequireSignedAdhoc,
+		actionAudit:         cfg.ActionAudit,
 		pollInterval:        interval,
 		logger:              cfg.Logger,
 		lockMetaMap:         make(map[string]lockMetaEntry),
@@ -217,6 +252,12 @@ func New(cfg *Config) (*Dispatcher, error) {
 // Start so the field is published before the event subscription begins.
 func (d *Dispatcher) SetRunCompletionSink(sink RunCompletionSink) {
 	d.runSink = sink
+}
+
+// SetActionAuditSink wires the audit handle that records steward actions closed
+// without a result (Issue #4625). Must be called before Start.
+func (d *Dispatcher) SetActionAuditSink(sink ActionAuditSink) {
+	d.actionAudit = sink
 }
 
 // SetGrantManager wires the grant manager for zero-trust script API access
@@ -317,6 +358,18 @@ func (d *Dispatcher) tryAcquireDevice(deviceID string) bool {
 // executionID and its computed TTL. Called immediately after DequeueForDevice
 // returns the execution so the cancel and TTL-sweep paths can match by ID.
 func (d *Dispatcher) setLockExecution(deviceID, executionID string, timeout time.Duration) {
+	ttl := time.Duration(0)
+	if timeout > 0 {
+		ttl = time.Duration(float64(timeout) * d.lockGraceMultiplier)
+	}
+	d.setLockExecutionTTL(deviceID, executionID, ttl)
+}
+
+// setLockExecutionTTL is setLockExecution with an explicit lock TTL (zero keeps
+// the default). A steward action's lock lives exactly as long as its timeout, with
+// no grace multiplier: the expiry sweep closes the job at that bound, so the
+// device slot must be free by then (Issue #4625).
+func (d *Dispatcher) setLockExecutionTTL(deviceID, executionID string, ttl time.Duration) {
 	d.lockMetaMu.Lock()
 	defer d.lockMetaMu.Unlock()
 	entry, ok := d.lockMetaMap[deviceID]
@@ -324,8 +377,8 @@ func (d *Dispatcher) setLockExecution(deviceID, executionID string, timeout time
 		return
 	}
 	entry.executionID = executionID
-	if timeout > 0 {
-		entry.lockTTL = time.Duration(float64(timeout) * d.lockGraceMultiplier)
+	if ttl > 0 {
+		entry.lockTTL = ttl
 	}
 	d.lockMetaMap[deviceID] = entry
 }
@@ -421,9 +474,9 @@ func (d *Dispatcher) sweepExpiredLocks() {
 	}
 }
 
-// pollLoop fires sweepExpiredLocks then dispatchAll on each poll interval tick.
-// sweepExpiredLocks runs first so that any freed device slots are immediately
-// available for the following dispatchAll.
+// pollLoop fires sweepExpiredLocks, sweepActionJobs then dispatchAll on each poll
+// interval tick. The sweeps run first so that any freed device slots are
+// immediately available for the following dispatchAll.
 // The initial dispatch on startup is handled synchronously by Start.
 func (d *Dispatcher) pollLoop() {
 	defer d.wg.Done()
@@ -437,6 +490,7 @@ func (d *Dispatcher) pollLoop() {
 			return
 		case <-ticker.C:
 			d.sweepExpiredLocks()
+			d.sweepActionJobs(d.ctx)
 			d.dispatchAll(d.ctx)
 		}
 	}
@@ -502,6 +556,13 @@ func (d *Dispatcher) dispatchForDevice(ctx context.Context, deviceID string) {
 	// after dispatchTimeout so they can be picked up in a future cycle.
 	exec := executions[0]
 
+	// A steward action takes its own path: no script is prepared, no relay grant
+	// is created, and the command is steward_action, not execute_script.
+	if script.IsStewardAction(exec.Kind) {
+		d.dispatchStewardAction(ctx, deviceID, exec)
+		return
+	}
+
 	// Record executionID and lock TTL now that we know the execution.
 	d.setLockExecution(deviceID, exec.ExecutionID, exec.Timeout)
 
@@ -556,6 +617,27 @@ func (d *Dispatcher) currentTerm() uint64 {
 		return 0
 	}
 	return d.termSource.GetTerm()
+}
+
+// signCommand wraps cmd in a SignedCommand, signing it with the controller's
+// command signer when one is configured. The signature covers the whole command
+// as sent; it is the controller's outer layer and is independent of any operator
+// envelope carried in the params.
+func (d *Dispatcher) signCommand(cmd *controlplaneTypes.Command) (*controlplaneTypes.SignedCommand, error) {
+	signed := &controlplaneTypes.SignedCommand{Command: *cmd}
+	if d.signer != nil {
+		rawParams := controlplaneTypes.InterfaceParamsToStringMap(cmd.Params)
+		cmdBytes, err := controlplaneTypes.CommandSigningBytes(cmd, rawParams)
+		if err != nil {
+			return nil, fmt.Errorf("marshal command for signing: %w", err)
+		}
+		sig, err := d.signer.Sign(cmdBytes)
+		if err != nil {
+			return nil, fmt.Errorf("sign command: %w", err)
+		}
+		signed.Signature = sig
+	}
+	return signed, nil
 }
 
 // sendCommand builds and transmits a CommandExecuteScript via the control plane.
@@ -636,18 +718,9 @@ func (d *Dispatcher) sendCommand(ctx context.Context, deviceID string, exec *scr
 		Term:      d.currentTerm(),
 	}
 
-	signed := &controlplaneTypes.SignedCommand{Command: *cmd}
-	if d.signer != nil {
-		rawParams := controlplaneTypes.InterfaceParamsToStringMap(cmd.Params)
-		cmdBytes, err := controlplaneTypes.CommandSigningBytes(cmd, rawParams)
-		if err != nil {
-			return fmt.Errorf("marshal command for signing: %w", err)
-		}
-		sig, err := d.signer.Sign(cmdBytes)
-		if err != nil {
-			return fmt.Errorf("sign command: %w", err)
-		}
-		signed.Signature = sig
+	signed, err := d.signCommand(cmd)
+	if err != nil {
+		return err
 	}
 	if d.requireSignedAdhoc && (signed.Signature == nil ||
 		signed.Signature.Signature == "" ||
@@ -765,7 +838,7 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	// job_id, and idempotent flag through QueuedExecution.Metadata (Issue #1673,
 	// Issue #1674).
 	var runID, jobID string
-	var isIdempotent bool
+	var isIdempotent, isAction bool
 	var retryCount int
 	var origQE *script.QueuedExecution
 	for _, qe := range d.queue.PeekForDevice(deviceID) {
@@ -774,13 +847,26 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 			jobID, _ = qe.Metadata["job_id"].(string)
 			isIdempotent, _ = qe.Metadata["idempotent"].(bool)
 			retryCount = metaInt(qe.Metadata["retry_count"])
+			isAction = script.IsStewardAction(qe.Kind)
 			origQE = qe
 			break
 		}
 	}
 
+	// A steward action reports a result code, not script output. The code decides
+	// the recorded outcome; an action is never retried — it was authorized once,
+	// for one nonce (Issue #4625).
+	var actionResultCode string
+	if isAction {
+		actionResultCode = stewardActionResultCode(event, commandFailed)
+		state = script.QueueStateCompleted
+		if actionResultCode != "ok" {
+			state = script.QueueStateFailed
+		}
+	}
+
 	// Determine whether to retry before acknowledging, so we hold the full QE.
-	shouldRetry := state == script.QueueStateFailed && isIdempotent && retryCount < 1
+	shouldRetry := !isAction && state == script.QueueStateFailed && isIdempotent && retryCount < 1
 
 	// AcknowledgeCompletion moves the queue entry out of the active set. A failure
 	// here (e.g. the entry was already evicted by a dispatch-timeout sweep) must NOT
@@ -835,7 +921,15 @@ func (d *Dispatcher) handleCompletionEvent(ctx context.Context, event *controlpl
 	// Advance run/job tracking only when not retrying. On retry, the job remains
 	// in-progress until the retry execution reaches a terminal state. This runs
 	// even when AcknowledgeCompletion failed so the job cannot be stuck pending.
-	if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
+	if isAction && d.runSink != nil && runID != "" && jobID != "" {
+		if err := d.runSink.RecordActionResult(ctx, runID, jobID, executionID, actionResultCode); err != nil {
+			d.logger.Error("Failed to record steward action result in run store",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(executionID),
+				"run_id", logging.SanitizeLogValue(runID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	} else if !shouldRetry && d.runSink != nil && runID != "" && jobID != "" {
 		var output, stderr string
 		var exitCode int
 		if result != nil {
@@ -900,4 +994,230 @@ func extractMetaStringSlice(meta map[string]interface{}, key string) []string {
 		return s
 	}
 	return nil
+}
+
+// Steward-action dispatch and expiry (Issue #4625).
+
+// actionProofKeys are the operator-envelope credential keys of a steward action.
+// An action must carry a complete X.509 or WebAuthn credential to be sent.
+var (
+	actionX509Keys     = []string{"signature_algorithm", "signature_value", "signature_public_key"}
+	actionWebAuthnKeys = []string{"webauthn_authenticator_data", "webauthn_client_data_json", "webauthn_signature", "webauthn_credential_id"}
+	// actionEnvelopeKeys are forwarded byte for byte from the entry metadata:
+	// the credential keys plus the manifest, nonce and expiry the steward needs to
+	// verify them. The controller never re-signs or strips them.
+	actionEnvelopeKeys = append(append(append([]string{}, actionX509Keys...), actionWebAuthnKeys...),
+		"webauthn_manifest", "nonce", "expires_at")
+)
+
+const jobStatusDispatched = "dispatched"
+
+// hasOperatorProof reports whether meta carries a complete operator credential.
+func hasOperatorProof(meta map[string]interface{}) bool {
+	complete := func(keys []string) bool {
+		for _, key := range keys {
+			if v, _ := meta[key].(string); v == "" {
+				return false
+			}
+		}
+		return true
+	}
+	return complete(actionX509Keys) || complete(actionWebAuthnKeys)
+}
+
+// dispatchStewardAction delivers one steward-action entry. The caller holds the
+// device lock and has already moved the entry to dispatched.
+//
+// With a run sink the job must first win the pending → dispatched compare-and-set:
+// an action the expiry sweep already closed is never sent, and one already
+// dispatched is never sent twice. An entry without a complete operator
+// credential is never sent; its job ends failed. The lock stays held until the
+// steward reports (or the lock sweep frees it after the action's timeout).
+func (d *Dispatcher) dispatchStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution) {
+	timeout := exec.Timeout
+	if timeout <= 0 {
+		timeout = script.StewardActionTimeout
+	}
+	d.setLockExecutionTTL(deviceID, exec.ExecutionID, timeout)
+
+	runID, _ := exec.Metadata["workflow_run_id"].(string)
+	jobID, _ := exec.Metadata["job_id"].(string)
+	tracked := d.runSink != nil && runID != "" && jobID != ""
+
+	if tracked {
+		claimed, status, err := d.runSink.ClaimActionDispatch(ctx, runID, jobID, time.Now().UTC())
+		switch {
+		case err != nil:
+			// The entry stays dispatched and is returned again on the next cycle.
+			d.logger.Error("Failed to claim steward action for dispatch",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"error", logging.SanitizeLogValue(err.Error()))
+			d.releaseDevice(deviceID)
+			return
+		case !claimed && status == jobStatusDispatched:
+			// Already sent: the steward rejects a replayed nonce, and the sweep
+			// reports no_result if it never answers. The entry is kept so a late
+			// result can still be linked to its job.
+			d.logger.Warn("Steward action already sent; not re-sending",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID))
+			d.releaseDevice(deviceID)
+			return
+		case !claimed:
+			// Closed (expired or cancelled) before delivery: never send it.
+			d.logger.Warn("Steward action job is closed; not sending",
+				"device_id", logging.SanitizeLogValue(deviceID),
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"job_status", logging.SanitizeLogValue(status))
+			_ = d.queue.CancelExecution(deviceID, exec.ExecutionID) //nolint:errcheck // entry may already be gone
+			d.releaseDevice(deviceID)
+			return
+		}
+	}
+
+	if !hasOperatorProof(exec.Metadata) {
+		d.failStewardAction(ctx, deviceID, exec, tracked, "steward action has no operator proof")
+		d.releaseDevice(deviceID)
+		return
+	}
+
+	if err := d.sendStewardAction(ctx, deviceID, exec); err != nil {
+		d.failStewardAction(ctx, deviceID, exec, tracked, "failed to send steward_action command")
+		d.logger.Error("Failed to send steward_action command",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		d.releaseDevice(deviceID)
+	}
+}
+
+// failStewardAction ends an action that cannot be delivered: the job records
+// result "failed" and the queue entry is acknowledged failed.
+func (d *Dispatcher) failStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution, tracked bool, reason string) {
+	d.logger.Error("Steward action not delivered",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"reason", reason)
+	if tracked {
+		runID, _ := exec.Metadata["workflow_run_id"].(string)
+		jobID, _ := exec.Metadata["job_id"].(string)
+		if err := d.runSink.RecordActionResult(ctx, runID, jobID, exec.ExecutionID, "failed"); err != nil {
+			d.logger.Error("Failed to record undelivered steward action",
+				"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+	}
+	if err := d.queue.AcknowledgeCompletion(exec.ExecutionID, deviceID, script.QueueStateFailed,
+		&script.ExecutionResult{ExitCode: 1, Stderr: reason}); err != nil {
+		d.logger.Warn("Failed to acknowledge undelivered steward action",
+			"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// sendStewardAction builds and transmits a CommandStewardAction. It is the
+// sibling of sendCommand for actions: the params are the action itself plus the
+// operator envelope exactly as stored on the entry, the outer command is signed
+// by the same signer and fencing term as every controller command, and there is
+// no script, relay grant or signed-ad-hoc rule.
+func (d *Dispatcher) sendStewardAction(ctx context.Context, deviceID string, exec *script.QueuedExecution) error {
+	spec := exec.Action
+	if spec == nil {
+		return fmt.Errorf("steward action entry %s has no action", exec.ExecutionID)
+	}
+	parameters := spec.Parameters
+	if parameters == nil {
+		parameters = map[string]string{}
+	}
+	params := map[string]interface{}{
+		"execution_id": exec.ExecutionID,
+		"verb":         spec.Verb,
+		"target":       map[string]string{"kind": spec.TargetKind, "name": spec.TargetName},
+		"parameters":   parameters,
+	}
+	for _, key := range actionEnvelopeKeys {
+		if value, ok := exec.Metadata[key].(string); ok && value != "" {
+			params[key] = value
+		}
+	}
+	if targets := extractMetaStringSlice(exec.Metadata, "targets"); len(targets) > 0 {
+		params["targets"] = targets
+	}
+
+	cmd := &controlplaneTypes.Command{
+		ID:        uuid.New().String(),
+		Type:      controlplaneTypes.CommandStewardAction,
+		StewardID: deviceID,
+		Timestamp: time.Now(),
+		Params:    params,
+		Term:      d.currentTerm(),
+	}
+	signed, err := d.signCommand(cmd)
+	if err != nil {
+		return err
+	}
+	if err := d.controlPlane.SendCommand(ctx, signed); err != nil {
+		return fmt.Errorf("send command: %w", err)
+	}
+
+	d.logger.Info("Sent steward_action command",
+		"device_id", logging.SanitizeLogValue(deviceID),
+		"execution_id", logging.SanitizeLogValue(exec.ExecutionID),
+		"verb", logging.SanitizeLogValue(spec.Verb))
+	return nil
+}
+
+// stewardActionResultCode reads the result code from a completion event. A
+// command_failed event, or a result with neither a code nor a zero exit code, is
+// "failed". The run manager bounds the code to its known set when recording it.
+func stewardActionResultCode(event *controlplaneTypes.Event, commandFailed bool) string {
+	if commandFailed {
+		return "failed"
+	}
+	if code, _ := event.Details["result_code"].(string); code != "" {
+		return code
+	}
+	switch exit := event.Details["exit_code"].(type) {
+	case float64:
+		if exit == 0 {
+			return "ok"
+		}
+	case int:
+		if exit == 0 {
+			return "ok"
+		}
+	}
+	return "failed"
+}
+
+// sweepActionJobs closes steward-action jobs that will never report and audits
+// each one. Every node runs this on its poll loop; the run store's compare-and-set
+// returns a closed job to exactly one caller, so each is audited exactly once.
+func (d *Dispatcher) sweepActionJobs(ctx context.Context) {
+	d.sweepActionJobsAt(ctx, time.Now().UTC())
+}
+
+// sweepActionJobsAt is sweepActionJobs evaluated at now.
+func (d *Dispatcher) sweepActionJobsAt(ctx context.Context, now time.Time) {
+	if d.runSink == nil {
+		return
+	}
+	closed, err := d.runSink.ExpireActionJobs(ctx, now)
+	if err != nil {
+		d.logger.Error("Steward action expiry sweep failed",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+	for _, job := range closed {
+		d.logger.Warn("Steward action closed without a result",
+			"event", "steward_action_"+job.ResultCode,
+			"device_id", logging.SanitizeLogValue(job.DeviceID),
+			"execution_id", logging.SanitizeLogValue(job.ExecutionID),
+			"run_id", logging.SanitizeLogValue(job.RunID),
+			"verb", logging.SanitizeLogValue(job.Action.Verb),
+			"detail", job.Detail)
+		if d.actionAudit != nil {
+			d.actionAudit.RecordActionExpired(ctx, job)
+		}
+	}
 }

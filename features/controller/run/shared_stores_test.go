@@ -79,3 +79,43 @@ func TestSharedStores_RunAcceptedOnOneNodeCompletesOnAnother(t *testing.T) {
 	require.Len(t, jobs, 1)
 	assert.Equal(t, "HOST-B", jobs[0].Output)
 }
+
+// TestSharedStores_ActionEnvelopeSurvivesRoundTripAcrossNodes enqueues a steward
+// action through node A's store and dequeues it through node B's: Kind, Action
+// and the whole operator envelope arrive unchanged (Issue #4625).
+func TestSharedStores_ActionEnvelopeSurvivesRoundTripAcrossNodes(t *testing.T) {
+	ctx := context.Background()
+	nodeA := newControllerNode(t)
+	nodeB := newControllerNode(t)
+	device := fmt.Sprintf("steward-envelope-%d", time.Now().UnixNano())
+	proof := &CommandSignature{
+		Algorithm: "ecdsa-sha256", Value: "c2ln+/==", PublicKey: "-----BEGIN PUBLIC KEY-----\n<k>&\n-----END PUBLIC KEY-----\n",
+	}
+	expiresAt := time.Now().Add(time.Minute)
+	spec := scriptmodule.StewardActionSpec{Verb: "service.stop", TargetKind: "service", TargetName: "spooler", Parameters: map[string]string{"a": "b"}}
+
+	runID, err := SynthesizeActionRunForDevices(ctx, nodeA.manager, nodeA.queue,
+		[]fleet.StewardResult{{ID: device, TenantID: "tenant-x"}}, "tenant-x", "admin", fleet.Filter{},
+		spec, proof, []string{device, "other"}, "nonce-"+device, expiresAt)
+	require.NoError(t, err)
+
+	run, err := nodeB.manager.GetRun(ctx, runID)
+	require.NoError(t, err)
+	assert.Equal(t, RunKindStewardAction, run.Kind, "the run kind survives the shared run store")
+	assert.JSONEq(t, `{"verb":"service.stop","target_kind":"service","target_name":"spooler","parameters":{"a":"b"}}`, string(run.ActionJSON))
+
+	claimed, err := nodeB.queue.DequeueForDevice(device)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	qe := claimed[0]
+	assert.Equal(t, scriptmodule.QueueKindStewardAction, qe.Kind)
+	require.NotNil(t, qe.Action)
+	assert.Equal(t, spec, *qe.Action)
+	assert.Equal(t, scriptmodule.StewardActionTimeout, qe.Timeout)
+	assert.Equal(t, proof.Algorithm, qe.Metadata["signature_algorithm"])
+	assert.Equal(t, proof.Value, qe.Metadata["signature_value"])
+	assert.Equal(t, proof.PublicKey, qe.Metadata["signature_public_key"])
+	assert.Equal(t, "nonce-"+device, qe.Metadata["nonce"])
+	assert.Equal(t, expiresAt.UTC().Format(time.RFC3339), qe.Metadata["expires_at"])
+	assert.ElementsMatch(t, []interface{}{device, "other"}, qe.Metadata["targets"])
+}

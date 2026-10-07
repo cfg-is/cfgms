@@ -36,6 +36,7 @@ func toBusinessRun(r *RunRecord) (*business.ScriptRun, error) {
 		Status: string(r.Status), FilterJSON: filter, ScriptRef: r.ScriptRef,
 		InlineContent: r.InlineContent, Shell: string(r.Shell),
 		JobCount: r.JobCount, CompletedJobs: r.CompletedJobs, FailedJobs: r.FailedJobs,
+		Kind: r.Kind, ActionJSON: r.ActionJSON,
 	}, nil
 }
 
@@ -45,6 +46,7 @@ func fromBusinessRun(b *business.ScriptRun) *RunRecord {
 		Status: RunStatus(b.Status), ScriptRef: b.ScriptRef, InlineContent: b.InlineContent,
 		Shell: scriptmodule.ShellType(b.Shell), JobCount: b.JobCount,
 		CompletedJobs: b.CompletedJobs, FailedJobs: b.FailedJobs,
+		Kind: b.Kind, ActionJSON: b.ActionJSON,
 	}
 	if len(b.FilterJSON) > 0 {
 		_ = json.Unmarshal(b.FilterJSON, &r.Filter)
@@ -57,6 +59,16 @@ func fromBusinessJob(b *business.ScriptRunJob) *JobRecord {
 		JobID: b.JobID, RunID: b.RunID, DeviceID: b.DeviceID, ExecutionID: b.ExecutionID,
 		Status: JobStatus(b.Status), CreatedAt: b.CreatedAt, CompletedAt: b.CompletedAt,
 		Output: b.Output, Stderr: b.Stderr, ExitCode: b.ExitCode,
+		ResultCode: b.ResultCode, DispatchedAt: b.DispatchedAt,
+	}
+}
+
+func toBusinessJob(j *JobRecord) *business.ScriptRunJob {
+	return &business.ScriptRunJob{
+		JobID: j.JobID, RunID: j.RunID, DeviceID: j.DeviceID, ExecutionID: j.ExecutionID,
+		Status: string(j.Status), CreatedAt: j.CreatedAt, CompletedAt: j.CompletedAt,
+		Output: j.Output, Stderr: j.Stderr, ExitCode: j.ExitCode,
+		ResultCode: j.ResultCode, DispatchedAt: j.DispatchedAt,
 	}
 }
 
@@ -78,11 +90,7 @@ func (s *sharedRunStore) CreateRun(r *RunRecord) error {
 }
 
 func (s *sharedRunStore) CreateJob(j *JobRecord) error {
-	return s.store.CreateJob(context.Background(), &business.ScriptRunJob{
-		JobID: j.JobID, RunID: j.RunID, DeviceID: j.DeviceID, ExecutionID: j.ExecutionID,
-		Status: string(j.Status), CreatedAt: j.CreatedAt, CompletedAt: j.CompletedAt,
-		Output: j.Output, Stderr: j.Stderr, ExitCode: j.ExitCode,
-	})
+	return s.store.CreateJob(context.Background(), toBusinessJob(j))
 }
 
 func (s *sharedRunStore) GetRun(runID string) (*RunRecord, error) {
@@ -126,6 +134,30 @@ func (s *sharedRunStore) UpdateJobStatus(jobID string, status JobStatus, executi
 
 func (s *sharedRunStore) UpdateJobResult(jobID string, status JobStatus, executionID, output, stderr string, exitCode int) error {
 	return s.store.UpdateJobResult(context.Background(), jobID, string(status), executionID, output, stderr, exitCode, completedAtFor(status))
+}
+
+func (s *sharedRunStore) UpdateJobResultCode(jobID, code string) error {
+	return s.store.UpdateJobResultCode(context.Background(), jobID, code)
+}
+
+func (s *sharedRunStore) MarkJobDispatched(jobID string, at time.Time) (bool, error) {
+	return s.store.MarkJobDispatched(context.Background(), jobID, at)
+}
+
+func (s *sharedRunStore) ListStaleActionJobs(pendingBefore, dispatchedBefore time.Time) ([]*JobRecord, error) {
+	bs, err := s.store.ListStaleActionJobs(context.Background(), pendingBefore, dispatchedBefore)
+	if err != nil {
+		return nil, err
+	}
+	jobs := make([]*JobRecord, 0, len(bs))
+	for _, b := range bs {
+		jobs = append(jobs, fromBusinessJob(b))
+	}
+	return jobs, nil
+}
+
+func (s *sharedRunStore) ExpireJobIfStatus(jobID string, fromStatus JobStatus, resultCode string, at time.Time) (bool, error) {
+	return s.store.ExpireJobIfStatus(context.Background(), jobID, string(fromStatus), resultCode, at)
 }
 
 func (s *sharedRunStore) UpdateRunStatus(runID string, status RunStatus) error {

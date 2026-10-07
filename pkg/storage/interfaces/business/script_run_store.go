@@ -19,9 +19,15 @@ var ErrExecutionGrantNotFound = errors.New("execution grant not found or expired
 // grant exists but has already been consumed.
 var ErrExecutionGrantConsumed = errors.New("execution grant already consumed")
 
-// ScriptRun is the durable record for one multi-steward script or command run.
-// Status values and the filter encoding are owned by the run feature; the store
-// persists them verbatim.
+// Run kinds. An empty Kind is stored and read back as ScriptRunKindScript.
+const (
+	ScriptRunKindScript        = "script"
+	ScriptRunKindStewardAction = "steward_action"
+)
+
+// ScriptRun is the durable record for one multi-steward script, command or
+// steward-action run. Status values and the filter encoding are owned by the
+// run feature; the store persists them verbatim.
 type ScriptRun struct {
 	RunID         string
 	TenantID      string
@@ -35,6 +41,12 @@ type ScriptRun struct {
 	JobCount      int
 	CompletedJobs int
 	FailedJobs    int
+	// Kind is ScriptRunKindScript or ScriptRunKindStewardAction. Empty is stored
+	// as ScriptRunKindScript, so runs created before this field read back as script.
+	Kind string
+	// ActionJSON is {verb, target_kind, target_name, parameters} for a
+	// steward-action run; empty for a script run.
+	ActionJSON []byte
 }
 
 // ScriptRunJob tracks one steward's share of a ScriptRun.
@@ -49,6 +61,11 @@ type ScriptRunJob struct {
 	Output      string
 	Stderr      string
 	ExitCode    int
+	// ResultCode is the steward-action outcome (ok, self_protect, process_changed,
+	// unsupported, failed, expired, no_result); empty for script jobs.
+	ResultCode string
+	// DispatchedAt is when a steward-action job was handed to its steward.
+	DispatchedAt *time.Time
 }
 
 // ExecutionGrant is a per-execution API access grant created at dispatch time.
@@ -81,6 +98,22 @@ type ScriptRunStore interface {
 	UpdateJobStatus(ctx context.Context, jobID, status, executionID string, completedAt *time.Time) error
 	// UpdateJobResult is UpdateJobStatus plus the captured execution result.
 	UpdateJobResult(ctx context.Context, jobID, status, executionID, output, stderr string, exitCode int, completedAt *time.Time) error
+	// UpdateJobResultCode records a steward-action result code on a job without
+	// touching the job's status or captured output.
+	UpdateJobResultCode(ctx context.Context, jobID, code string) error
+	// MarkJobDispatched is a compare-and-set from "pending" to "dispatched" that
+	// stamps dispatched_at. It reports whether the row changed; a job that is no
+	// longer pending (e.g. already expired by a sweep) is left untouched.
+	MarkJobDispatched(ctx context.Context, jobID string, at time.Time) (changed bool, err error)
+	// ListStaleActionJobs returns steward-action jobs, across all runs and
+	// tenants, with no result that are still "pending" and were created before
+	// pendingBefore, or "dispatched" before dispatchedBefore.
+	ListStaleActionJobs(ctx context.Context, pendingBefore, dispatchedBefore time.Time) ([]*ScriptRunJob, error)
+	// ExpireJobIfStatus is a compare-and-set: it moves the job to the terminal
+	// status resultCode (with that result code and completed_at = at) only when
+	// the job's current status equals fromStatus, and reports whether the row
+	// changed. Exactly one of several concurrent callers sees changed == true.
+	ExpireJobIfStatus(ctx context.Context, jobID, fromStatus, resultCode string, at time.Time) (changed bool, err error)
 	UpdateRunStatus(ctx context.Context, runID, status string) error
 	UpdateRunCounts(ctx context.Context, runID string, completedJobs, failedJobs int) error
 	CreateExecutionGrant(ctx context.Context, grant *ExecutionGrant) error
