@@ -9,7 +9,7 @@
  * type selector and variable row editor (Story #3213).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach } from 'vitest'
 import WorkflowDrawer from './WorkflowDrawer.tsx'
 import type { VersionedWorkflow } from './useWorkflows.ts'
@@ -53,6 +53,8 @@ interface WorkflowApi {
   puts: Record<string, unknown>[]
   offline: boolean
   storeFails: boolean
+  triggers: Record<string, unknown>[]
+  calls: string[]
   handle: typeof fetch
 }
 
@@ -65,6 +67,30 @@ function createWorkflowApi(): WorkflowApi {
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const method = (init?.method ?? 'GET').toUpperCase()
+    api.calls.push(`${method} ${url}`)
+
+    if (method === 'GET' && /\/api\/v1\/triggers$/.test(url)) {
+      return Promise.resolve(
+        jsonResponse(200, { triggers: api.triggers, count: api.triggers.length }),
+      )
+    }
+    if (method === 'POST' && /\/api\/v1\/triggers\/[^/]+\/(enable|disable)$/.test(url)) {
+      return Promise.resolve(jsonResponse(200, { status: 'ok' }))
+    }
+    if (method === 'POST' && /\/api\/v1\/workflows\/[^/]+\/execute$/.test(url)) {
+      return Promise.resolve(jsonResponse(202, { execution_id: 'exec-new' }))
+    }
+    if (method === 'POST' && /\/executions\/[^/]+\/cancel$/.test(url)) {
+      return Promise.resolve(jsonResponse(200, { status: 'cancelled' }))
+    }
+    if (method === 'GET' && /\/api\/v1\/workflows\/[^/]+\/executions\/[^/]+$/.test(url)) {
+      return Promise.resolve(
+        jsonResponse(200, {
+          id: 'exec-new', workflow_name: 'onboard-user', status: 'running',
+          start_time: '2026-01-01T00:00:00Z',
+        }),
+      )
+    }
 
     if (method === 'GET' && /\/api\/v1\/workflows\/[^/]+\/executions$/.test(url)) {
       return Promise.resolve(
@@ -83,6 +109,8 @@ function createWorkflowApi(): WorkflowApi {
     puts: [],
     offline: false,
     storeFails: false,
+    triggers: [],
+    calls: [],
     handle: route as typeof fetch,
   }
   return api
@@ -688,5 +716,86 @@ describe('WorkflowDrawer — Steps tab security (A9.1)', () => {
     const nameInput = screen.getByTestId('step-name-input') as HTMLInputElement
     expect(nameInput.value).toBe(xssName)
     expect((window as unknown as Record<string, unknown>).__xss_step).toBeUndefined()
+  })
+})
+
+describe('WorkflowDrawer — Run tab (WorkflowExecutionView)', () => {
+  it('lists executions from the API, executes, and cancels a running one', async () => {
+    api.executions = [
+      makeExecution({ id: 'exec-run', status: 'running' }),
+      makeExecution({ id: 'exec-old', status: 'completed' }),
+    ]
+    renderDrawer()
+    expect(await screen.findAllByTestId('exec-row')).toHaveLength(2)
+    expect(screen.queryByText(/coming in a later story/)).toBeNull()
+
+    fireEvent.click(screen.getByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+    await waitFor(() =>
+      expect(api.calls).toContain('POST /api/v1/workflows/onboard-user/execute'),
+    )
+
+    fireEvent.click((await screen.findAllByTestId('cancel-exec-btn'))[0]!)
+    fireEvent.click(screen.getByTestId('cancel-confirm-btn'))
+    await waitFor(() =>
+      expect(api.calls).toContain(
+        'POST /api/v1/workflows/onboard-user/executions/exec-run/cancel',
+      ),
+    )
+  })
+
+  it('shows the empty state when there are no executions', async () => {
+    renderDrawer()
+    expect(await screen.findByTestId('exec-empty')).toBeInTheDocument()
+  })
+
+  it('shows the error state when the executions request fails', async () => {
+    api.offline = true
+    renderDrawer()
+    expect(await screen.findAllByRole('alert')).not.toHaveLength(0)
+  })
+})
+
+describe('WorkflowDrawer — Schedule tab (TriggerPanel)', () => {
+  it('shows only this workflow\'s triggers and Disable hits the disable endpoint', async () => {
+    api.triggers = [
+      { id: 'trig-1', name: 'mine', type: 'schedule', status: 'active', workflow_name: 'onboard-user' },
+      { id: 'trig-2', name: 'other', type: 'manual', status: 'active', workflow_name: 'other-wf' },
+    ]
+    renderDrawer()
+    fireEvent.click(screen.getByTestId('drawer-tab-schedule'))
+    const rows = await screen.findAllByTestId('trigger-row')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toHaveTextContent('mine')
+    expect(screen.queryByText('other')).toBeNull()
+    expect(screen.queryByText(/coming in a later story/)).toBeNull()
+
+    fireEvent.click(screen.getByTestId('trigger-toggle-btn'))
+    await waitFor(() =>
+      expect(api.calls).toContain('POST /api/v1/triggers/trig-1/disable'),
+    )
+  })
+
+  it('shows the empty state when no trigger targets the workflow', async () => {
+    api.triggers = [
+      { id: 'trig-2', name: 'other', type: 'manual', status: 'active', workflow_name: 'other-wf' },
+    ]
+    renderDrawer()
+    fireEvent.click(screen.getByTestId('drawer-tab-schedule'))
+    expect(await screen.findByTestId('trigger-empty')).toBeInTheDocument()
+  })
+
+  it('pre-fills the workflow name on a new trigger', async () => {
+    renderDrawer()
+    fireEvent.click(screen.getByTestId('drawer-tab-schedule'))
+    fireEvent.click(await screen.findByTestId('toggle-trigger-create-btn'))
+    expect(screen.getByTestId('trigger-workflow-input')).toHaveValue('onboard-user')
+  })
+
+  it('shows the error state when the triggers request fails', async () => {
+    api.offline = true
+    renderDrawer()
+    fireEvent.click(screen.getByTestId('drawer-tab-schedule'))
+    expect((await screen.findAllByRole('alert')).length).toBeGreaterThan(0)
   })
 })

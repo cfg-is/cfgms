@@ -33,6 +33,11 @@ function triggerStatusTone(status: string): string {
 
 interface TriggerPanelProps {
   onClose: () => void
+  /*
+   * When set (the workflow drawer's Schedule tab), the list shows only this
+   * workflow's triggers and a new trigger's workflow field defaults to it.
+   */
+  workflowName?: string
 }
 
 interface TriggerForm {
@@ -44,23 +49,27 @@ interface TriggerForm {
   webhookPath: string
 }
 
-function defaultForm(): TriggerForm {
+function defaultForm(workflowName = ''): TriggerForm {
   return {
     name: '',
     type: 'manual',
-    workflowName: '',
+    workflowName,
     description: '',
     scheduleExpression: '',
     webhookPath: '',
   }
 }
 
-export default function TriggerPanel({ onClose }: TriggerPanelProps) {
-  const { triggers, loading, error, retry } = useTriggerList()
+export default function TriggerPanel({ onClose, workflowName }: TriggerPanelProps) {
+  const { triggers: allTriggers, loading, error, retry } = useTriggerList()
+  const triggers =
+    workflowName === undefined
+      ? allTriggers
+      : allTriggers.filter((t) => t.workflow_name === workflowName)
 
   const [formMode, setFormMode] = useState<'create' | 'edit' | null>(null)
   const [editingTriggerId, setEditingTriggerId] = useState<string | null>(null)
-  const [form, setForm] = useState<TriggerForm>(defaultForm)
+  const [form, setForm] = useState<TriggerForm>(() => defaultForm(workflowName))
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
@@ -127,7 +136,7 @@ export default function TriggerPanel({ onClose }: TriggerPanelProps) {
       }
       setFormMode(null)
       setEditingTriggerId(null)
-      setForm(defaultForm())
+      setForm(defaultForm(workflowName))
       retry()
     } catch (cause: unknown) {
       const verb = formMode === 'edit' ? 'Update' : 'Create'
@@ -248,7 +257,7 @@ export default function TriggerPanel({ onClose }: TriggerPanelProps) {
             } else {
               setFormMode('create')
               setEditingTriggerId(null)
-              setForm(defaultForm())
+              setForm(defaultForm(workflowName))
               setFormError(null)
             }
           }}
@@ -366,7 +375,7 @@ export default function TriggerPanel({ onClose }: TriggerPanelProps) {
               onClick={() => {
                 setFormMode(null)
                 setEditingTriggerId(null)
-                setForm(defaultForm())
+                setForm(defaultForm(workflowName))
                 setFormError(null)
               }}
             >

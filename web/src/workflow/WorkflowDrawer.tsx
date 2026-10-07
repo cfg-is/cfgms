@@ -6,8 +6,8 @@
  * Positioned absolute inside .workspace so the list table rows never
  * reflow when the drawer opens or closes.
  *
- * Tab slots: Run (F3), Schedule (#2986), Preview (F4) are placeholder panes;
- * sibling stories mount their content here. Steps tab (Story #3213) restores
+ * Tab slots: Run (WorkflowExecutionView) and Schedule (TriggerPanel, filtered
+ * to this workflow) are mounted (#4580); Preview (F4) is still a placeholder. Steps tab (Story #3213) restores
  * the structured step authoring and variable editor lost in #3039.
  *
  * Last-run status pill: derived from useWorkflowExecutions(workflow.name) —
@@ -33,6 +33,8 @@ import { useState } from 'react'
 import { apiFetch } from '../api/client.ts'
 import type { VersionedWorkflow, WorkflowExecution, WorkflowStep } from './useWorkflows.ts'
 import { useWorkflowExecutions } from './useWorkflows.ts'
+import WorkflowExecutionView from './WorkflowExecutionView.tsx'
+import TriggerPanel from './TriggerPanel.tsx'
 import { useTenantScope } from '../shell/TenantScopeContext.tsx'
 
 type DrawerTab = 'run' | 'schedule' | 'preview' | 'steps'
@@ -674,12 +676,18 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
       <div className="dbody" role="tabpanel">
         {activeTab === 'run' && (
           <div data-testid="drawer-pane-run">
-            <p className="mut">Run and execution history — coming in a later story.</p>
+            <WorkflowExecutionView
+              workflowName={workflow.name}
+              onClose={() => setActiveTab('steps')}
+            />
           </div>
         )}
         {activeTab === 'schedule' && (
           <div data-testid="drawer-pane-schedule">
-            <p className="mut">Triggers and schedule — coming in a later story.</p>
+            <TriggerPanel
+              workflowName={workflow.name}
+              onClose={() => setActiveTab('steps')}
+            />
           </div>
         )}
         {activeTab === 'preview' && (
