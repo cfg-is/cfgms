@@ -151,10 +151,9 @@ assembled answer; any card can be peeled back to raw telemetry for deeper tiers.
   (Connected / Connecting / Disconnected / Denied using the same state-pill
   semantics as §4's other pills), session meta, and a Clear / Copy / Disconnect
   header. Non-happy states are first-class, not fallback text — **Disconnected**
-  offers Reconnect, **Denied** explains the RBAC rejection. Warm-terminal tokens
-  (light-mode only today; dark-mode xterm theming is an open item, tracked
-  alongside the other §7 items) come from `web-ui-design-tokens.css`, not a
-  separate xterm theme file.
+  offers Reconnect, **Denied** explains the RBAC rejection. Terminal colours
+  come from `web-ui-design-tokens.css` (resolved at terminal creation and on
+  every light/dark toggle), not a separate xterm theme file.
 - **Sortable data table** (Story #2766; convention established in `FleetTable.tsx`) —
   click any `<th>` to sort by that column; a second click on the same header reverses
   direction. Sort state is `{ key: string; direction: 1 | -1 }` (from `FleetTable.tsx`)

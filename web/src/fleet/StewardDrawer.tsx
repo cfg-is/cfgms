@@ -13,7 +13,8 @@
  * StewardAssetPage — this drawer is only the in-app overlay.
  */
 import { useEffect, useRef, useState } from 'react'
-import DnaDrawer from './DnaDrawer.tsx'
+import DnaDrawer, { useStewardDna, type StewardDnaState } from './DnaDrawer.tsx'
+import ShellTab from './ShellTab.tsx'
 import LiveActivityTab from './LiveActivityTab.tsx'
 
 type DrawerTabKey = 'dna' | 'config' | 'shell' | 'live'
@@ -27,7 +28,7 @@ interface DrawerTabSpec {
 const DRAWER_TABS: readonly DrawerTabSpec[] = [
   { key: 'dna', label: 'DNA', soon: false },
   { key: 'config', label: 'Config', soon: true },
-  { key: 'shell', label: 'Shell', soon: true },
+  { key: 'shell', label: 'Shell', soon: false },
   { key: 'live', label: 'Live Activity', soon: false },
 ]
 
@@ -43,14 +44,30 @@ function SoonPanel({ label }: { label: string }) {
 function DrawerTabPanel({
   tabKey,
   stewardId,
+  dnaState,
 }: {
   tabKey: DrawerTabKey
   stewardId: string
+  dnaState: StewardDnaState
 }) {
-  if (tabKey === 'dna') return <DnaDrawer stewardId={stewardId} />
+  if (tabKey === 'dna') return <DnaDrawer stewardId={stewardId} state={dnaState} />
   if (tabKey === 'live') return <LiveActivityTab stewardId={stewardId} />
   if (tabKey === 'config') return <SoonPanel label="Config" />
-  return <SoonPanel label="Shell" />
+  // Mounted only while the Shell tab is active, so no WebSocket opens earlier.
+  return <ShellTab stewardId={stewardId} />
+}
+
+/** Client-side download of the already-fetched DNA; nothing is sent anywhere. */
+function downloadJson(filename: string, value: unknown): void {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 export default function StewardDrawer({
@@ -62,6 +79,14 @@ export default function StewardDrawer({
 }) {
   const [expanded, setExpanded] = useState(false)
   const [activeTab, setActiveTab] = useState<DrawerTabKey>('dna')
+  const dnaState = useStewardDna(stewardId)
+  const exportDna = dnaState.current?.dna
+  const exportDisabledReason =
+    dnaState.current === null
+      ? 'DNA is still loading'
+      : exportDna === undefined
+        ? 'DNA is unavailable for this steward'
+        : undefined
   const tabRefs = useRef<Map<DrawerTabKey, HTMLButtonElement>>(new Map())
 
   useEffect(() => {
@@ -111,8 +136,22 @@ export default function StewardDrawer({
 
           <button
             type="button"
+            className="btn"
+            style={{ marginLeft: 'auto' }}
+            data-testid="drawer-export-dna"
+            disabled={exportDisabledReason !== undefined}
+            title={exportDisabledReason ?? 'Download this steward\u2019s DNA as JSON'}
+            onClick={() => {
+              if (exportDna !== undefined) downloadJson(`${stewardId}-dna.json`, exportDna)
+            }}
+          >
+            Export DNA
+          </button>
+
+          <button
+            type="button"
             className="icobtn"
-            style={{ width: 30, height: 30, marginLeft: 'auto' }}
+            style={{ width: 30, height: 30 }}
             aria-label={expanded ? 'Collapse drawer' : 'Expand drawer'}
             data-testid="drawer-expand-toggle"
             onClick={() => setExpanded((e) => !e)}
@@ -197,7 +236,7 @@ export default function StewardDrawer({
           className="db"
           style={{ flex: 1, overflow: 'auto' }}
         >
-          <DrawerTabPanel tabKey={activeTab} stewardId={stewardId} />
+          <DrawerTabPanel tabKey={activeTab} stewardId={stewardId} dnaState={dnaState} />
         </div>
       </aside>
     </>

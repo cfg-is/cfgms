@@ -192,16 +192,20 @@ function KVRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-/** DNA content panel — rendered inside the DNA tab of StewardAssetPage or the overlay drawer.
- * Accepts an explicit stewardId prop; falls back to useParams for the route-driven case. */
-export default function DnaDrawer({ stewardId: propId }: { stewardId?: string } = {}) {
-  const { id: paramId = '' } = useParams<{ id: string }>()
-  const stewardId = propId !== undefined ? propId : paramId
+export interface StewardDnaState {
+  /** null while the request is in flight; otherwise the DNA or an error. */
+  current: { dna?: StewardDNAInfo; error?: string } | null
+  retry: () => void
+}
+
+/** Fetches one steward's DNA. `enabled=false` skips the request (caller supplies its own state). */
+export function useStewardDna(stewardId: string, enabled = true): StewardDnaState {
   const [attempt, setAttempt] = useState(0)
   const [outcome, setOutcome] = useState<FetchOutcome | null>(null)
   const key = `${stewardId}:${attempt}`
 
   useEffect(() => {
+    if (!enabled) return
     let cancelled = false
     const path = `/api/v1/stewards/${encodeURIComponent(stewardId)}/dna`
     apiFetch(path)
@@ -226,9 +230,26 @@ export default function DnaDrawer({ stewardId: propId }: { stewardId?: string } 
     return () => {
       cancelled = true
     }
-  }, [key, stewardId])
+  }, [key, stewardId, enabled])
 
-  const current = outcome?.key === key ? outcome : null
+  return {
+    current: outcome?.key === key ? outcome : null,
+    retry: () => setAttempt((n) => n + 1),
+  }
+}
+
+/** DNA content panel — rendered inside the DNA tab of StewardAssetPage or the overlay drawer.
+ * Accepts an explicit stewardId prop; falls back to useParams for the route-driven case.
+ * `state` lets a parent that already fetched the DNA share it instead of fetching again. */
+export default function DnaDrawer({
+  stewardId: propId,
+  state,
+}: { stewardId?: string; state?: StewardDnaState } = {}) {
+  const { id: paramId = '' } = useParams<{ id: string }>()
+  const stewardId = propId !== undefined ? propId : paramId
+  const own = useStewardDna(stewardId, state === undefined)
+  const { current, retry } = state ?? own
+
   const dna = current?.dna
 
   const otherAttrs =
@@ -262,7 +283,7 @@ export default function DnaDrawer({ stewardId: propId }: { stewardId?: string } 
             <button
               type="button"
               className="btn"
-              onClick={() => setAttempt((n) => n + 1)}
+              onClick={retry}
             >
               Retry
             </button>
