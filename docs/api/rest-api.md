@@ -1872,6 +1872,42 @@ Test connectivity to a tenant's config source (e.g., validate git repository acc
 
 - `id` (path): Tenant ID
 
+#### GET /api/v1/billing/report
+
+Cross-MSP billing report. Lists every MSP (direct child of the root tenant) with its sizes and metrics, and sizes each of its clients under an opaque label. Both billing reports are projections of one aggregation, so their numbers cannot disagree.
+
+**Authentication:** Required  
+**Required permission:** `tenant:billing-read`  
+**Who may call:** a root-scoped caller, a caller bound to the root tenant, or an unscoped certificate-authenticated caller. A certificate authenticates, it does not authorize: the caller must still hold `tenant:billing-read`. A root-scoped caller needs no grant or crossing. Any other caller gets `403` (`BILLING_ROOT_ONLY`) and no data.
+
+**Response (`200 OK`):** `data.msps`, one entry per MSP:
+
+- `id`, `name`: the MSP.
+- `tech_count`, `endpoint_count`: the MSP's whole subtree.
+- `client_count`: number of clients.
+- `metrics`: `endpoints_online` (active), `endpoints_offline` (lost), `endpoints_pending` (registered), `endpoints_by_platform` (`windows`, `linux`, `darwin`, `other`) and `endpoints_by_version`.
+- `msp_own`: `tech_count` and `endpoint_count` attached to the MSP itself rather than to a client.
+- `clients`: `[{label, endpoint_count, tech_count}]`.
+
+A client is a direct child of an MSP with its whole subtree rolled up into it. Endpoint counts exclude stewards in a terminal state (deregistered, archived, dormant, revoked). Tech counts exclude disabled accounts.
+
+`label` is a stable, opaque identifier stored with the client. The response carries no client name, no client tenant ID and no client-level metrics, host names, IP addresses or steward IDs. No route accepts a label: used as a tenant ID it is an unknown tenant (`404`). Reading this report is not individually audited; root's billing visibility is standing and disclosed.
+
+#### GET /api/v1/tenants/{id}/billing-report
+
+The same report for the subtree of one tenant, with real client names and IDs.
+
+**Authentication:** Required  
+**Required permission:** `tenant:billing-read`
+
+**Parameters:**
+
+- `id` (path): Tenant ID (typically an MSP)
+
+**Response (`200 OK`):** `data` has `id`, `name`, `tech_count`, `endpoint_count`, `client_count`, `metrics` and `msp_own` as above, and `clients: [{id, name, endpoint_count, tech_count}]`. Counting rules are those of `GET /api/v1/billing/report`.
+
+**Errors:** a caller outside `{id}`'s subtree, or an unknown tenant, gets `404`. A root-scoped caller without an active crossing into `{id}` gets the tenant-crossing step-up challenge (`401`).
+
 #### DELETE /api/v1/tenants/{id}/access-grants/{crossing_id}
 
 End an active tenant crossing (a client-granted access grant or a break-glass elevation) early. The crossing stops granting access immediately.

@@ -1970,10 +1970,11 @@ func (s *Server) requirePermission(resourceType, action string) func(http.Handle
 					// tenant:read, tenant:update and tenant:manage (suspend, config-source/test)
 					// all resolve a single tenant by ID and must return an identical 404 for
 					// "doesn't exist" and "exists but out of my subtree" (ADR-025 existence-oracle
-					// prevention, Issue #3125; extended to tenant:manage by Issue #3181) — a 403
+					// prevention, Issue #3125; extended to tenant:manage by Issue #3181 and to
+					// tenant:billing-read by ADR-025 Amendment 6) — a 403
 					// here would let a caller distinguish the two cases via status code alone,
 					// before ever reaching the handler's own isCallerAuthorizedForTenant check.
-					if resourceType == "tenant" && (action == "read" || action == "update" || action == "manage") {
+					if resourceType == "tenant" && (action == "read" || action == "update" || action == "manage" || action == "billing-read") {
 						s.writeErrorResponse(w, http.StatusNotFound, "tenant not found", "TENANT_NOT_FOUND")
 						return
 					}

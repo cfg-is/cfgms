@@ -94,11 +94,12 @@ var knownPermissions = map[string]bool{
 	// Compliance
 	"compliance:read-summary": true,
 	// Tenant management
-	"tenant:create": true, // Issue #3195: was in permissionAssurance but missing here
-	"tenant:list":   true,
-	"tenant:read":   true,
-	"tenant:update": true,
-	"tenant:manage": true,
+	"tenant:create":       true, // Issue #3195: was in permissionAssurance but missing here
+	"tenant:list":         true,
+	"tenant:read":         true,
+	"tenant:billing-read": true, // ADR-025 Amendment 6: GET /billing/report, GET /tenants/{id}/billing-report
+	"tenant:update":       true,
+	"tenant:manage":       true,
 	// Tenant deletion pipeline (ADR-027 Decisions 3-4, Issue #3182)
 	"tenant:delete":         true,
 	"tenant:approve-delete": true,
