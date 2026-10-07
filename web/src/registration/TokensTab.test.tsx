@@ -45,6 +45,7 @@ function makeToken(overrides: Partial<Record<string, unknown>> = {}) {
     token_prefix: 'reg_a1b2c3',
     tenant_id: 'root/msp-a/prod',
     group: 'prod bulk enroll',
+    label: 'Front-desk laptops',
     created_at: '2026-07-10T00:00:00Z',
     expires_at: '2026-08-10T00:00:00Z',
     revoked: false,
@@ -97,6 +98,7 @@ describe('parseToken', () => {
       token_prefix: 'reg_a1b2c3',
       tenant_id: 'root/msp-a/prod',
       group: 'prod bulk enroll',
+      label: 'Front-desk laptops',
       created_at: '2026-07-10T00:00:00Z',
       expires_at: '2026-08-10T00:00:00Z',
       revoked: false,
@@ -278,6 +280,68 @@ describe('TokensTab — field rendering', () => {
     await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
     const row = screen.getAllByTestId('token-row')[0]!
     expect(within(row).getByTestId('token-group')).toHaveTextContent('—')
+  })
+})
+
+describe('TokensTab — label', () => {
+  it('renders the label column as text', async () => {
+    fetchMock.mockResolvedValue(makeTokensResponse([makeToken()]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    expect(screen.getByRole('columnheader', { name: 'Label' })).toBeInTheDocument()
+    const row = screen.getAllByTestId('token-row')[0]!
+    expect(within(row).getByTestId('token-label')).toHaveTextContent('Front-desk laptops')
+  })
+
+  it('renders an em-dash for an empty or absent label', async () => {
+    fetchMock.mockResolvedValue(
+      makeTokensResponse([makeToken({ label: '' }), makeToken({ token_id: 'x2', token_prefix: 'reg_zzzzzz', label: undefined })]),
+    )
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    for (const row of screen.getAllByTestId('token-row')) {
+      expect(within(row).getByTestId('token-label')).toHaveTextContent('—')
+    }
+  })
+
+  it('never interprets a label as markup', async () => {
+    fetchMock.mockResolvedValue(
+      makeTokensResponse([makeToken({ label: '<img src=x onerror=alert(1)>' })]),
+    )
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('tokens-table')).toBeInTheDocument())
+    const cell = screen.getAllByTestId('token-label')[0]!
+    expect(cell).toHaveTextContent('<img src=x onerror=alert(1)>')
+    expect(cell.querySelector('img')).toBeNull()
+  })
+
+  it('sends the trimmed label on mint and omits it when blank', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ token: 'reg_secret_value_123456', token_id: 'u1' }, 201))
+      .mockResolvedValueOnce(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.change(screen.getByTestId('mint-label'), { target: { value: '  Branch office  ' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    const post = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST')!
+    expect(JSON.parse((post[1] as RequestInit).body as string)).toMatchObject({ label: 'Branch office' })
+  })
+
+  it('omits label from the mint request when blank', async () => {
+    fetchMock
+      .mockResolvedValueOnce(makeTokensResponse([]))
+      .mockResolvedValueOnce(jsonResponse({ token: 'reg_secret_value_123456', token_id: 'u1' }, 201))
+      .mockResolvedValueOnce(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    fireEvent.change(screen.getByTestId('mint-controller-url'), { target: { value: 'https://ctrl.example.com' } })
+    fireEvent.click(screen.getByTestId('mint-btn'))
+    await waitFor(() => expect(screen.getByTestId('secret-once-modal')).toBeInTheDocument())
+    const post = fetchMock.mock.calls.find((c) => (c[1] as RequestInit | undefined)?.method === 'POST')!
+    expect(JSON.parse((post[1] as RequestInit).body as string)).not.toHaveProperty('label')
   })
 })
 

@@ -1318,7 +1318,7 @@ Registration tokens authorise steward self-registration. The token encodes the t
 
 #### GET /api/v1/registration/tokens
 
-List registration tokens. Each entry includes `token_id` (stable UUID, safe to expose) and `token_prefix`, never the secret.
+List registration tokens. Each entry includes `token_id` (stable UUID, safe to expose) and `token_prefix`, never the secret, plus the optional operator-written `label` (omitted when the token was minted without one).
 
 **Authentication:** Required  
 **Required permission:** `registration:list-tokens`
@@ -1332,6 +1332,8 @@ rejected with `403 FORBIDDEN`.
 #### POST /api/v1/registration/tokens
 
 Create a new registration token. The response includes the full secret (`token`) and the stable `token_id` — this is the only time the secret is returned.
+
+**Request body:** `tenant_id` (required), `controller_url` (required), `group` (optional), `expires_in` (optional), and `label` (optional). `label` is free text for operators — at most 100 characters, printable only; an over-length label or one containing control characters is rejected with `400`. It is stored as-is, returned in the create and list responses, recorded (sanitised) in the creation audit event, and is never part of the token secret or its lookup key. It cannot be edited after mint, and a rotated token does not inherit it.
 
 **Authentication:** Required  
 **Required permission:** `registration:create-token`

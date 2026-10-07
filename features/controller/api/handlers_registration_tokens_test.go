@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1218,4 +1219,92 @@ func TestRegistrationTokenMutations_SucceedOnNonAuthoritativeNode(t *testing.T) 
 	require.NoError(t, err)
 	assert.True(t, revoked.Revoked, "the revocation must be durable on a non-authoritative node")
 	assert.False(t, revoked.IsValid())
+}
+
+func TestCreateRegistrationToken_Label(t *testing.T) {
+	server, _ := setupTestServerWithTokenStore(t)
+
+	post := func(t *testing.T, label string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(registration.TokenCreateRequest{
+			TenantID:      "label-tenant",
+			ControllerURL: "grpc://controller.example.com:7443",
+			Label:         label,
+		})
+		require.NoError(t, err)
+		req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("label round-trips through create and list", func(t *testing.T) {
+		rec := post(t, "Front-desk laptops")
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var created TokenResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		assert.Equal(t, "Front-desk laptops", created.Label)
+
+		req := makeAdminRequest(t, "GET", "/api/v1/registration/tokens?tenant_id=label-tenant", nil)
+		listRec := httptest.NewRecorder()
+		server.router.ServeHTTP(listRec, req)
+		require.Equal(t, http.StatusOK, listRec.Code)
+		var list TokenListResponse
+		require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+		var found bool
+		for _, tk := range list.Tokens {
+			if tk.TokenID == created.TokenID {
+				found = true
+				assert.Equal(t, "Front-desk laptops", tk.Label)
+				assert.Empty(t, tk.Token, "list must not expose the secret")
+			}
+		}
+		assert.True(t, found, "created token must appear in list")
+	})
+
+	t.Run("empty label allowed", func(t *testing.T) {
+		rec := post(t, "")
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var created TokenResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		assert.Empty(t, created.Label)
+	})
+
+	t.Run("max length label accepted", func(t *testing.T) {
+		assert.Equal(t, http.StatusCreated, post(t, strings.Repeat("a", 100)).Code)
+	})
+
+	t.Run("over-length label rejected", func(t *testing.T) {
+		assert.Equal(t, http.StatusBadRequest, post(t, strings.Repeat("a", 101)).Code)
+	})
+
+	t.Run("control-character labels rejected", func(t *testing.T) {
+		for _, l := range []string{"bad\nlabel", "bad\x00label", "tab\there", "esc\x1b[31m"} {
+			assert.Equal(t, http.StatusBadRequest, post(t, l).Code, "label %q", l)
+		}
+	})
+}
+
+func TestCreateRegistrationToken_LabelAuditSanitised(t *testing.T) {
+	server, _ := setupTestServerWithTokenStore(t)
+	ctx := context.Background()
+
+	body, err := json.Marshal(registration.TokenCreateRequest{
+		TenantID:      "audit-label-tenant",
+		ControllerURL: "grpc://controller.example.com:7443",
+		Label:         "Branch office",
+	})
+	require.NoError(t, err)
+	req := makeAdminRequest(t, "POST", "/api/v1/registration/tokens", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	require.NoError(t, server.auditManager.Flush(ctx))
+	entries, err := server.auditManager.QueryEntries(ctx, &business.AuditFilter{TenantID: "audit-label-tenant"})
+	require.NoError(t, err)
+	entry := findAuditEntryByAction(t, entries, "registration_token.created")
+	assert.Equal(t, "Branch office", entry.Details["label"])
 }

@@ -7,7 +7,7 @@
  * per handlers_registration_tokens.go (no {data:...} envelope).
  * Shape-validated by parseTokenList before any value reaches the DOM.
  *
- * Renders: token_prefix, tenant_id, group, created_at, expires_at, revoked.
+ * Renders: token_prefix, tenant_id, group, label, created_at, expires_at, revoked.
  * expires_at / revoked_at are optional (Go omitempty on pointer types) —
  * renders '—' when absent, matching the columns.ts em-dash convention.
  *
@@ -40,6 +40,7 @@ export interface RegistrationToken {
   token_prefix: string
   tenant_id: string
   group: string
+  label: string      // operator-written free text; '' when unset (Issue #4599)
   created_at: string
   expires_at: string | null
   revoked: boolean
@@ -76,6 +77,7 @@ export function parseToken(value: unknown): RegistrationToken | null {
     token_prefix,
     tenant_id: str(r.tenant_id),
     group: str(r.group),
+    label: str(r.label),
     created_at: str(r.created_at),
     expires_at: optStr(r.expires_at),
     revoked: bool(r.revoked),
@@ -205,6 +207,7 @@ interface MintFormProps {
 
 function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
   const [group, setGroup] = useState('')
+  const [label, setLabel] = useState('')
   const [controllerUrl, setControllerUrl] = useState('')
   const [expiresIn, setExpiresIn] = useState('')
   const [pending, setPending] = useState(false)
@@ -224,6 +227,7 @@ function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
         controller_url: controllerUrl.trim(),
       }
       if (group.trim() !== '') body.group = group.trim()
+      if (label.trim() !== '') body.label = label.trim()
       if (expiresIn.trim() !== '') body.expires_in = expiresIn.trim()
 
       const response = await apiFetch('/api/v1/registration/tokens', {
@@ -238,6 +242,7 @@ function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
       const data = (await response.json()) as Record<string, unknown>
       const secret = typeof data.token === 'string' ? data.token : ''
       setGroup('')
+      setLabel('')
       setControllerUrl('')
       setExpiresIn('')
       onReload()
@@ -275,6 +280,19 @@ function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
           onChange={(e) => setGroup(e.target.value)}
           placeholder="prod-enroll"
           data-testid="mint-group"
+        />
+      </div>
+      <div className="wf-field">
+        <label htmlFor="mint-label">Label (optional)</label>
+        <input
+          id="mint-label"
+          type="text"
+          className="wf-input"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          maxLength={100}
+          placeholder="Front-desk laptops"
+          data-testid="mint-label"
         />
       </div>
       <div className="wf-field">
@@ -316,6 +334,7 @@ function LoadingRows() {
           <span className="skel" style={{ width: '18%' }} />
           <span className="skel" style={{ width: '22%' }} />
           <span className="skel" style={{ width: '18%' }} />
+          <span className="skel" style={{ width: '15%' }} />
           <span className="skel" style={{ width: '15%' }} />
           <span className="skel" style={{ width: '15%' }} />
           <span className="skel" style={{ width: '10%' }} />
@@ -380,6 +399,7 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
         </td>
         <td data-testid="token-tenant">{token.tenant_id || '—'}</td>
         <td data-testid="token-group">{token.group || '—'}</td>
+        <td data-testid="token-label">{token.label || '—'}</td>
         <td className="mono2" data-testid="token-created">
           {token.created_at || '—'}
         </td>
@@ -427,7 +447,7 @@ function TokenRow({ token, onAction, actionPending, actionError }: TokenRowProps
       </tr>
       {actionError !== null && (
         <tr>
-          <td colSpan={7}>
+          <td colSpan={8}>
             <span
               className="wf-form-error"
               role="alert"
@@ -600,6 +620,7 @@ export default function TokensTab() {
                 <th>Token</th>
                 <th>Tenant</th>
                 <th>Group</th>
+                <th>Label</th>
                 <th>Created</th>
                 <th>Expires</th>
                 <th>Status</th>

@@ -1585,3 +1585,35 @@ func TestTenantStore_BillingLabelStableAcrossRestarts(t *testing.T) {
 	}
 	assert.Len(t, before, 3)
 }
+
+// TestBackfillRegistrationTokenLabel_LegacyRowsGetEmptyLabel verifies a
+// pre-existing registration_tokens table gains the label column (Issue #4599)
+// and that legacy rows read back with an empty label.
+func TestBackfillRegistrationTokenLabel_LegacyRowsGetEmptyLabel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-regtokens-label.db")
+	ctx := context.Background()
+
+	setup, err := openDB(dbPath)
+	require.NoError(t, err)
+	_, err = setup.ExecContext(ctx, legacyRegistrationTokensSchema)
+	require.NoError(t, err)
+	require.False(t, hasColumn(t, setup, "registration_tokens", "label"), "legacy table has no label column")
+	_, err = setup.ExecContext(ctx,
+		`INSERT INTO registration_tokens (token, tenant_id, controller_url, created_at)
+		 VALUES ('legacy-label', 'tenant-legacy', 'grpc://controller:7443', '2026-01-01T00:00:00Z')`)
+	require.NoError(t, err)
+	require.NoError(t, setup.Close())
+
+	db, err := openAndInit(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.True(t, hasColumn(t, db, "registration_tokens", "label"), "migration must add the label column")
+
+	store := &SQLiteRegistrationTokenStore{db: db}
+	got, err := store.GetToken(ctx, "legacy-label")
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Label)
+
+	// Idempotent re-run.
+	require.NoError(t, backfillRegistrationTokenID(ctx, db))
+}

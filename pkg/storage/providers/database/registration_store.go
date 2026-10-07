@@ -106,13 +106,14 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 	var storedID string
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO cfgms_registration_tokens
-			(token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			(token, id, tenant_id, controller_url, group_name, label, created_at, expires_at, revoked, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (token) DO UPDATE SET
 			id = COALESCE(NULLIF(cfgms_registration_tokens.id, ''), EXCLUDED.id),
 			tenant_id = EXCLUDED.tenant_id,
 			controller_url = EXCLUDED.controller_url,
 			group_name = EXCLUDED.group_name,
+			label = EXCLUDED.label,
 			expires_at = EXCLUDED.expires_at,
 			revoked = EXCLUDED.revoked,
 			revoked_at = EXCLUDED.revoked_at
@@ -122,6 +123,7 @@ func (s *DatabaseRegistrationTokenStore) SaveToken(ctx context.Context, token *b
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
+		token.Label,
 		token.CreatedAt,
 		nullTimeOrNil(token.ExpiresAt),
 		token.Revoked,
@@ -149,7 +151,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 
 	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		SELECT token, id, tenant_id, controller_url, group_name, label, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
 		WHERE token = $1`, lookupKey).Scan(
 		&token.Token,
@@ -157,6 +159,7 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 		&token.TenantID,
 		&token.ControllerURL,
 		&group,
+		&token.Label,
 		&token.CreatedAt,
 		&expiresAt,
 		&token.Revoked,
@@ -166,10 +169,11 @@ func (s *DatabaseRegistrationTokenStore) GetToken(ctx context.Context, tokenStr 
 		if err == sql.ErrNoRows {
 			// Read legacy plaintext rows so they can be rotated without downtime.
 			err = s.db.QueryRowContext(ctx, `
-				SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+				SELECT token, id, tenant_id, controller_url, group_name, label, created_at, expires_at, revoked, revoked_at
 				FROM cfgms_registration_tokens
 				WHERE token = $1`, tokenStr).Scan(
 				&token.Token, &id, &token.TenantID, &token.ControllerURL, &group,
+				&token.Label,
 				&token.CreatedAt, &expiresAt, &token.Revoked, &revokedAt,
 			)
 			if err == sql.ErrNoRows {
@@ -208,13 +212,14 @@ func (s *DatabaseRegistrationTokenStore) GetTokenByID(ctx context.Context, id st
 	var group sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT token, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		SELECT token, tenant_id, controller_url, group_name, label, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
 		WHERE id = $1`, id).Scan(
 		&token.Token,
 		&token.TenantID,
 		&token.ControllerURL,
 		&group,
+		&token.Label,
 		&token.CreatedAt,
 		&expiresAt,
 		&token.Revoked,
@@ -393,7 +398,7 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 	defer s.mutex.RUnlock()
 
 	query := `
-		SELECT token, id, tenant_id, controller_url, group_name, created_at, expires_at, revoked, revoked_at
+		SELECT token, id, tenant_id, controller_url, group_name, label, created_at, expires_at, revoked, revoked_at
 		FROM cfgms_registration_tokens
 		WHERE 1=1`
 	args := []interface{}{}
@@ -440,6 +445,7 @@ func (s *DatabaseRegistrationTokenStore) ListTokens(ctx context.Context, filter 
 			&token.TenantID,
 			&token.ControllerURL,
 			&group,
+			&token.Label,
 			&token.CreatedAt,
 			&expiresAt,
 			&token.Revoked,

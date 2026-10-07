@@ -6,7 +6,12 @@
 // auto-register with the controller using short API key-style tokens.
 package registration
 
-import "time"
+import (
+	"fmt"
+	"time"
+	"unicode"
+	"unicode/utf8"
+)
 
 // Token represents a registration token for steward deployment.
 // Newly issued tokens expire after a short default lifetime unless an explicit
@@ -27,6 +32,9 @@ type Token struct {
 
 	// Group is an optional group identifier
 	Group string `json:"group,omitempty"`
+
+	// Label is an optional operator-written free-text description (display only)
+	Label string `json:"label,omitempty"`
 
 	// CreatedAt is when the token was created
 	CreatedAt time.Time `json:"created_at"`
@@ -70,6 +78,31 @@ type TokenCreateRequest struct {
 	// Group is an optional group identifier
 	Group string `json:"group,omitempty"`
 
+	// Label is an optional operator-written free-text description (max MaxLabelLength
+	// characters, printable only — see ValidateLabel)
+	Label string `json:"label,omitempty"`
+
 	// ExpiresIn is the duration until token expires (e.g., "24h", "7d", "30d")
 	ExpiresIn string `json:"expires_in,omitempty"`
+}
+
+// MaxLabelLength is the maximum number of characters in a token label.
+const MaxLabelLength = 100
+
+// ValidateLabel checks an operator-written token label: at most MaxLabelLength
+// characters, valid UTF-8 and printable only (no control characters). The empty
+// label is allowed.
+func ValidateLabel(label string) error {
+	if !utf8.ValidString(label) {
+		return fmt.Errorf("label must be valid UTF-8")
+	}
+	if utf8.RuneCountInString(label) > MaxLabelLength {
+		return fmt.Errorf("label must be at most %d characters", MaxLabelLength)
+	}
+	for _, r := range label {
+		if !unicode.IsPrint(r) {
+			return fmt.Errorf("label must contain printable characters only")
+		}
+	}
+	return nil
 }

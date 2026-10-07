@@ -189,7 +189,20 @@ func backfillRegistrationTokenID(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("sqlite: registration_tokens back-fill (id) failed: %w", err)
 		}
 	}
-	return assignMissingRegistrationTokenIDs(ctx, db)
+	if err := assignMissingRegistrationTokenIDs(ctx, db); err != nil {
+		return err
+	}
+	labelPresent, err := columnExists(ctx, db, "registration_tokens", "label")
+	if err != nil {
+		return fmt.Errorf("sqlite: registration_tokens label-column probe failed: %w", err)
+	}
+	if !labelPresent {
+		// Operator-written label (Issue #4599); existing rows get an empty label.
+		if _, err := db.ExecContext(ctx, `ALTER TABLE registration_tokens ADD COLUMN label TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("sqlite: registration_tokens back-fill (label) failed: %w", err)
+		}
+	}
+	return nil
 }
 
 // assignMissingRegistrationTokenIDs gives every registration_tokens row without an id
@@ -736,6 +749,7 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			tenant_id      TEXT NOT NULL,
 			controller_url TEXT NOT NULL,
 			group_name     TEXT NOT NULL DEFAULT '',
+			label          TEXT NOT NULL DEFAULT '',
 			created_at     TEXT NOT NULL,
 			expires_at     TEXT,
 			revoked        INTEGER NOT NULL DEFAULT 0,

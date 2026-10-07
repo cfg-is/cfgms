@@ -106,6 +106,10 @@ type RegistrationTokenData struct {
 	// Group is an optional group identifier
 	Group string `json:"group,omitempty" yaml:"group,omitempty"`
 
+	// Label is an optional operator-written free-text description. It is display
+	// metadata only: never part of the token secret or its lookup key.
+	Label string `json:"label,omitempty" yaml:"label,omitempty"`
+
 	// CreatedAt is when the token was created
 	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
 

@@ -63,14 +63,15 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 	var storedID sql.NullString
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO registration_tokens
-			(token, id, tenant_id, controller_url, group_name, created_at,
+			(token, id, tenant_id, controller_url, group_name, label, created_at,
 			 expires_at, revoked, revoked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(token) DO UPDATE SET
 			id = COALESCE(NULLIF(registration_tokens.id, ''), excluded.id),
 			tenant_id = excluded.tenant_id,
 			controller_url = excluded.controller_url,
 			group_name = excluded.group_name,
+			label = excluded.label,
 			expires_at = excluded.expires_at,
 			revoked = excluded.revoked,
 			revoked_at = excluded.revoked_at
@@ -80,6 +81,7 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 		token.TenantID,
 		token.ControllerURL,
 		token.Group,
+		token.Label,
 		formatTime(token.CreatedAt),
 		nullTime(token.ExpiresAt),
 		boolToInt(token.Revoked),
@@ -96,14 +98,14 @@ func (s *SQLiteRegistrationTokenStore) SaveToken(ctx context.Context, token *bus
 func (s *SQLiteRegistrationTokenStore) GetToken(ctx context.Context, tokenStr string) (*business.RegistrationTokenData, error) {
 	lookupKey := business.RegistrationTokenLookupKey(tokenStr)
 	row := s.db.QueryRowContext(ctx, `
-		SELECT token, id, tenant_id, controller_url, group_name, created_at,
+		SELECT token, id, tenant_id, controller_url, group_name, label, created_at,
 		       expires_at, revoked, revoked_at
 		FROM registration_tokens WHERE token = ?`, lookupKey)
 	token, err := scanToken(row)
 	if err != nil && lookupKey != tokenStr {
 		// Read legacy plaintext rows so they can be rotated without downtime.
 		token, err = scanToken(s.db.QueryRowContext(ctx, `
-			SELECT token, id, tenant_id, controller_url, group_name, created_at,
+			SELECT token, id, tenant_id, controller_url, group_name, label, created_at,
 			       expires_at, revoked, revoked_at
 			FROM registration_tokens WHERE token = ?`, tokenStr))
 	}
@@ -119,7 +121,7 @@ func (s *SQLiteRegistrationTokenStore) GetTokenByID(ctx context.Context, id stri
 		return nil, fmt.Errorf("registration token not found")
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT token, id, tenant_id, controller_url, group_name, created_at,
+		SELECT token, id, tenant_id, controller_url, group_name, label, created_at,
 		       expires_at, revoked, revoked_at
 		FROM registration_tokens WHERE id = ?`, id)
 	return scanToken(row)
@@ -241,7 +243,7 @@ func (s *SQLiteRegistrationTokenStore) ReleaseTokenClaim(ctx context.Context, to
 
 // ListTokens returns registration tokens matching an optional filter.
 func (s *SQLiteRegistrationTokenStore) ListTokens(ctx context.Context, filter *business.RegistrationTokenFilter) ([]*business.RegistrationTokenData, error) {
-	query := `SELECT token, id, tenant_id, controller_url, group_name, created_at,
+	query := `SELECT token, id, tenant_id, controller_url, group_name, label, created_at,
 	                 expires_at, revoked, revoked_at
 	          FROM registration_tokens WHERE 1=1`
 	var args []interface{}
@@ -376,7 +378,7 @@ func scanToken(row *sql.Row) (*business.RegistrationTokenData, error) {
 	var revoked int
 
 	err := row.Scan(
-		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group,
+		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group, &t.Label,
 		&createdStr, &expiresAt, &revoked, &revokedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -397,7 +399,7 @@ func scanTokenRow(rows *sql.Rows) (*business.RegistrationTokenData, error) {
 	var revoked int
 
 	if err := rows.Scan(
-		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group,
+		&t.Token, &id, &t.TenantID, &t.ControllerURL, &t.Group, &t.Label,
 		&createdStr, &expiresAt, &revoked, &revokedAt,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan registration token row: %w", err)

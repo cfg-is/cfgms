@@ -565,3 +565,46 @@ func TestRegistrationStore_RotateToken_Race(t *testing.T) {
 	}
 	assert.Equal(t, 1, validCount, "exactly one valid token must exist after all rotations")
 }
+
+// TestRegistrationStore_LabelRoundTrip verifies the operator label (Issue #4599)
+// persists through save and every read path, and that a token saved without a
+// label reads back empty.
+func TestRegistrationStore_LabelRoundTrip(t *testing.T) {
+	store := newRegistrationStore(t)
+	ctx := context.Background()
+
+	labelled := &business.RegistrationTokenData{
+		Token:         "tok-labelled",
+		ID:            "aaaaaaaa-0000-4000-8000-0000000000a1",
+		TenantID:      "tenant-label",
+		ControllerURL: "https://controller.example.com",
+		Label:         "Front-desk laptops <b>2026</b>",
+	}
+	unlabelled := &business.RegistrationTokenData{
+		Token:         "tok-plain",
+		ID:            "aaaaaaaa-0000-4000-8000-0000000000a2",
+		TenantID:      "tenant-label",
+		ControllerURL: "https://controller.example.com",
+	}
+	require.NoError(t, store.SaveToken(ctx, labelled))
+	require.NoError(t, store.SaveToken(ctx, unlabelled))
+
+	got, err := store.GetToken(ctx, "tok-labelled")
+	require.NoError(t, err)
+	assert.Equal(t, labelled.Label, got.Label)
+
+	byID, err := store.GetTokenByID(ctx, labelled.ID)
+	require.NoError(t, err)
+	assert.Equal(t, labelled.Label, byID.Label)
+
+	listed, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-label"})
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	labels := map[string]string{}
+	for _, l := range listed {
+		labels[l.ID] = l.Label
+	}
+	assert.Equal(t, labelled.Label, labels[labelled.ID])
+	assert.Equal(t, "", labels[unlabelled.ID])
+
+}

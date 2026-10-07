@@ -424,3 +424,81 @@ func TestDatabaseGenerateTokenID(t *testing.T) {
 		seen[id] = struct{}{}
 	}
 }
+
+// TestDatabaseRegistrationStore_LabelRoundTrip verifies the operator label
+// (Issue #4599) persists through save and every read path.
+func TestDatabaseRegistrationStore_LabelRoundTrip(t *testing.T) {
+	store := newTestRegistrationStore(t)
+	ctx := context.Background()
+
+	labelled := &business.RegistrationTokenData{
+		ID:            "aaaaaaaa-0000-4000-8000-0000000000b1",
+		Token:         "db-labelled",
+		TenantID:      "tenant-label",
+		ControllerURL: "grpc://controller:7443",
+		Label:         "Front-desk laptops <b>2026</b>",
+		CreatedAt:     time.Now().UTC(),
+	}
+	unlabelled := &business.RegistrationTokenData{
+		ID:            "aaaaaaaa-0000-4000-8000-0000000000b2",
+		Token:         "db-plain",
+		TenantID:      "tenant-label",
+		ControllerURL: "grpc://controller:7443",
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, store.SaveToken(ctx, labelled))
+	require.NoError(t, store.SaveToken(ctx, unlabelled))
+
+	got, err := store.GetToken(ctx, "db-labelled")
+	require.NoError(t, err)
+	assert.Equal(t, labelled.Label, got.Label)
+
+	byID, err := store.GetTokenByID(ctx, labelled.ID)
+	require.NoError(t, err)
+	assert.Equal(t, labelled.Label, byID.Label)
+
+	listed, err := store.ListTokens(ctx, &business.RegistrationTokenFilter{TenantID: "tenant-label"})
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	labels := map[string]string{}
+	for _, l := range listed {
+		labels[l.ID] = l.Label
+	}
+	assert.Equal(t, labelled.Label, labels[labelled.ID])
+	assert.Equal(t, "", labels[unlabelled.ID])
+}
+
+// TestDatabaseRegistrationStore_LabelMigration verifies a table created before
+// the label column gains it with an empty default.
+func TestDatabaseRegistrationStore_LabelMigration(t *testing.T) {
+	db := setupTestDatabase(t)
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, `
+		CREATE TABLE cfgms_registration_tokens (
+			token VARCHAR(255) PRIMARY KEY,
+			id VARCHAR(36),
+			tenant_id VARCHAR(255) NOT NULL,
+			controller_url VARCHAR(1000) NOT NULL,
+			group_name VARCHAR(255) DEFAULT '',
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+			revoked BOOLEAN NOT NULL DEFAULT FALSE,
+			revoked_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+		)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO cfgms_registration_tokens (token, id, tenant_id, controller_url)
+		VALUES ('legacy-label', 'aaaaaaaa-0000-4000-8000-0000000000b3', 'tenant-legacy', 'grpc://controller:7443')`)
+	require.NoError(t, err)
+
+	schemas := NewDatabaseSchemas()
+	require.NoError(t, schemas.CreateRegistrationTokensTable(ctx, db))
+	require.NoError(t, schemas.CreateRegistrationTokensTable(ctx, db), "migration must be idempotent")
+
+	store := &DatabaseRegistrationTokenStore{db: db, config: nil, schemas: schemas}
+	got, err := store.GetToken(ctx, "legacy-label")
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Label)
+}
