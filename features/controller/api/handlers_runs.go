@@ -167,6 +167,18 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 		return "", fmt.Errorf("invalid operator signature: %w", err)
 	}
 
+	return s.verifyOperatorSigningCertificate(sig.PublicKey)
+}
+
+// verifyOperatorSigningCertificate applies the operator-credential trust checks shared
+// by every X.509-signed operator envelope: the certificate chains to the controller CA
+// for client authentication, carries the payload-signing marker, and is not revoked. It
+// returns the certificate's serial number. The signature itself is verified by the
+// caller; this establishes only that the key that made it is one the controller trusts.
+func (s *Server) verifyOperatorSigningCertificate(publicKeyPEM string) (string, error) {
+	if s.certManager == nil {
+		return "", fmt.Errorf("operator signing requires loaded controller signing roots")
+	}
 	caPEM, err := s.certManager.GetCACertificate()
 	if err != nil {
 		return "", fmt.Errorf("controller signing roots unavailable: %w", err)
@@ -179,7 +191,7 @@ func (s *Server) validatePublicBetaCommandSignature(content []byte, shell string
 	if err != nil {
 		return "", fmt.Errorf("controller signing roots are invalid: %w", err)
 	}
-	block, _ := pem.Decode([]byte(sig.PublicKey))
+	block, _ := pem.Decode([]byte(publicKeyPEM))
 	if block == nil {
 		return "", fmt.Errorf("operator signing certificate is not valid PEM")
 	}

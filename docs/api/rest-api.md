@@ -746,6 +746,35 @@ Get the current script execution status for a steward.
 
 - `id` (path): Steward ID
 
+### Signed Action Envelope
+
+Steward-action endpoints accept an operator-signed envelope instead of trusting the
+caller's session alone. The operator signs `operatorpayload.Envelope` with `shell` set to
+`steward-action`, `content` set to the canonical action JSON (`verb`, `target_kind`,
+`target_name`, `parameters`), `targets` set to exactly the one steward ID the request
+addresses, a single-use `nonce`, and an `expires_at`.
+
+The proof carries one credential block, never both:
+
+- **X.509** (`algorithm`, `value`, `public_key`): the signature is over the canonical
+  envelope bytes. The certificate must chain to the controller CA, carry the
+  payload-signing marker, and not be revoked. The credential identifier recorded is the
+  certificate serial.
+- **WebAuthn** (`authenticator_data`, `client_data_json`, `signature`, `credential_id`):
+  the raw assertion returned by `POST /api/v1/operator-payload/sign/finish`. The credential
+  must be registered to the authenticated caller, and its account must hold
+  `operator-payload:sign`. Verification at the API does not re-check or advance the sign
+  count, which `sign/finish` has already done.
+
+An envelope whose `expires_at` is past, or more than 5 minutes ahead, is refused, as is one
+whose signed `targets` are not exactly the addressed steward. A refused envelope returns
+`invalid operator signature` with no further detail.
+
+The controller forwards the signed envelope to the steward unchanged and never re-signs or
+strips it. For a WebAuthn proof it also attaches `webauthn_manifest`, a CA-signed roster of
+the credentials authorized for that steward's tenant, so the steward can verify the
+assertion independently. Nonce single-use is enforced by the steward.
+
 ### Certificate Management
 
 #### GET /api/v1/certificates
