@@ -438,7 +438,7 @@ outcome and is retired unbuilt. Verified on `origin/develop` 2026-09-10:
 
 #### v0.12.0 - M365 Foundation
 
-- [x] Enhanced Tenant Management (Issue #118 / PR #238 - 8 points) ✅ - M365TenantManager with GDAP discovery, health monitoring, bulk operations
+- [x] Enhanced Tenant Management (Issue #118 / PR #238 - 8 points) ✅ - GDAP discovery, health monitoring, bulk operations. `M365TenantManager` was removed in #4422: partner-delegated access now reads the customer tenant from the stored `OAuth2Config.CustomerTenantID` and validates the GDAP relationship when it mints each token
 - [ ] M365 CSP Infrastructure Setup (5 points) - Partner Center sandbox, GDAP relationships, enterprise app registration
 - [ ] Per-Tenant Token Storage and Management (Issue #119 - 10 points)
 - [ ] M365 Integration Validation (8 points) - GDAP discovery, consent flow, health monitoring tests
