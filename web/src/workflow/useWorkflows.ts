@@ -9,6 +9,7 @@
  *   GET  /api/v1/workflows/{name}/executions                 → useWorkflowExecutions
  *   GET  /api/v1/workflows/{name}/executions/{exec_id}       → useExecutionStatus (polls)
  *   GET  /api/v1/triggers                                     → useTriggerList
+ *   POST /api/v1/workflows/validate                          → useValidateWorkflow
  *
  * Security A9.1: workflow name, description, step names, and trigger fields
  * originate from user-supplied content. Every string field is coerced via
@@ -518,6 +519,85 @@ export function useExecutionStatus(
     loading: name !== null && execId !== null && current === null,
     error: name && execId ? (current?.error ?? null) : null,
   }
+}
+
+// ── useValidateWorkflow (server dry-run, Issue #4616) ────────────────────────
+
+export interface ValidationIssue {
+  path: string
+  step_name?: string
+  message: string
+}
+
+export interface ValidationResult {
+  valid: boolean
+  issues: ValidationIssue[]
+}
+
+export function parseValidationResult(value: unknown): ValidationResult | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  if (typeof r.valid !== 'boolean') return null
+  const issues: ValidationIssue[] = []
+  if (Array.isArray(r.issues)) {
+    for (const item of r.issues) {
+      if (typeof item !== 'object' || item === null) continue
+      const i = item as Record<string, unknown>
+      issues.push({
+        path: str(i.path),
+        step_name: i.step_name !== undefined ? str(i.step_name) : undefined,
+        message: str(i.message),
+      })
+    }
+  }
+  return { valid: r.valid && issues.length === 0, issues }
+}
+
+export interface UseValidateWorkflowResult {
+  validate: (body: Record<string, unknown>) => Promise<void>
+  result: ValidationResult | null
+  validating: boolean
+  error: string | null
+  reset: () => void
+}
+
+export function useValidateWorkflow(): UseValidateWorkflowResult {
+  const [result, setResult] = useState<ValidationResult | null>(null)
+  const [validating, setValidating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const reset = useCallback(() => {
+    setResult(null)
+    setError(null)
+  }, [])
+
+  const validate = useCallback(async (body: Record<string, unknown>) => {
+    setValidating(true)
+    setError(null)
+    setResult(null)
+    try {
+      const response = await apiFetch('/api/v1/workflows/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
+        throw new Error(
+          str(errBody.error) || `Validate failed — ${response.status}`,
+        )
+      }
+      const parsed = parseValidationResult(await response.json())
+      if (parsed === null) throw new Error('Validate failed — unexpected response shape')
+      setResult(parsed)
+    } catch (cause: unknown) {
+      setError(cause instanceof Error && cause.message ? cause.message : 'Validate failed')
+    } finally {
+      setValidating(false)
+    }
+  }, [])
+
+  return { validate, result, validating, error, reset }
 }
 
 // ── useTriggerList ────────────────────────────────────────────────────────────
