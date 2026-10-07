@@ -285,9 +285,9 @@ func TestAuthorizeRootScopedCaller_UnrelatedTopLevelTenant_Returns404NotChalleng
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestAuthorizeRootScopedCaller_ListSilentlyFilters verifies handleListTenants omits
-// descendants the root-scoped caller lacks a crossing for, rather than issuing a
-// challenge per item (a bulk list has no single resource to attach one to).
+// TestAuthorizeRootScopedCaller_ListSilentlyFilters verifies handleListTenants returns
+// descendants the root-scoped caller lacks a crossing for only as boundary rows (Issue
+// #4647), rather than issuing a challenge per item (a bulk list has no single resource to attach one to).
 func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 	server := setupCrossingTestServer(t)
 	ctx := context.Background()
@@ -314,7 +314,11 @@ func TestAuthorizeRootScopedCaller_ListSilentlyFilters(t *testing.T) {
 	ids := tenantIDsFromListResponse(t, rec.Body.Bytes())
 	assert.Contains(t, ids, "root")
 	assert.Contains(t, ids, "msp-a", "caller holds an active crossing for msp-a")
-	assert.NotContains(t, ids, "msp-b", "caller has no crossing for msp-b — silently omitted, not challenged")
+	byID := rowsByID(listAsPrincipal(t, server, caller))
+	require.Len(t, byID["msp-b"], 1, "no crossing for msp-b — a boundary row, not a challenge")
+	assert.Equal(t, true, byID["msp-b"][0]["boundary"])
+	require.Len(t, byID["msp-a"], 1)
+	assert.Equal(t, false, byID["msp-a"][0]["boundary"])
 }
 
 // TestEmptyCallerTenant_NoRootScopeMarker_RetainsUnscopedAccess is the regression

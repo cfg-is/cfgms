@@ -955,7 +955,12 @@ paths:
         Returns the tenants in the caller's visible scope. Each item carries the tenant
         record plus `device_count`, the number of stewards in the tenant's subtree
         within the caller's visible scope. Registered, active, lost and hidden stewards
-        count; terminal-state stewards (deregistered, revoked, archived, dormant) do not.
+        count; terminal-state stewards (deregistered, revoked, archived, dormant) and
+        disabled accounts do not. A root-scoped caller also receives a boundary row
+        (`boundary: true`, `accessible: false`) for each MSP, a direct child of the root
+        tenant, that it holds no crossing for: only `id`, `name`, `parent_id`, `status`,
+        `tech_count`, `device_count` and `client_count`. Clients below an MSP are never
+        listed. `device_count` here is `endpoint_count` in the billing reports.
       operationId: listTenants
       tags:
         - Tenants
@@ -986,6 +991,20 @@ paths:
                           type: integer
                           minimum: 0
                           description: Subtree steward count within the caller's visible scope.
+                        boundary:
+                          type: boolean
+                          description: True for a walled-off MSP boundary row.
+                        accessible:
+                          type: boolean
+                          description: False for a boundary row, true for a full row.
+                        tech_count:
+                          type: integer
+                          minimum: 0
+                          description: Boundary rows only. Enabled accounts in the MSP subtree.
+                        client_count:
+                          type: integer
+                          minimum: 0
+                          description: Boundary rows only. Number of direct client tenants; none is identified.
 
   /tenants/{id}/access-grants/{crossingId}:
     delete:

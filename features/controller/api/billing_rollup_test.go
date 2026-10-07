@@ -257,8 +257,9 @@ func TestSubtreeDeviceCounts_HiddenTenantExcludedFromVisibleAncestor(t *testing.
 			visible = append(visible, td)
 		}
 	}
-	counts, err := server.subtreeDeviceCounts(ctx, all, visible)
+	rollup, err := server.rollupTenants(ctx, all)
 	require.NoError(t, err)
+	counts := subtreeDeviceCounts(rollup, visible)
 	assert.Equal(t, 2, counts["bill-msp-a"], "own (1) + visible descendant (1); hidden bill-a1's two stewards excluded")
 	assert.Equal(t, 1, counts["bill-a1xy"])
 }

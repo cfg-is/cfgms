@@ -1761,8 +1761,29 @@ stewards in a terminal state (deregistered, revoked, archived, dormant) do not. 
 in tenants the caller cannot see are never included, so a scoped caller never counts a
 sibling's stewards.
 
+Every full row also carries `boundary: false` and `accessible: true`.
+
+**Boundary rows.** A root-scoped caller also receives one boundary row for each MSP (a
+direct child of the root tenant) it holds no active grant or break-glass crossing for.
+A boundary row is marked `boundary: true`, `accessible: false` and carries only `id`,
+`name`, `parent_id`, `status` (`active` or `suspended` only, never a suspension reason),
+`tech_count`, `device_count` and `client_count`. `client_count` is the number of direct
+client tenants of the MSP; no client is named or identified, and tenants below an MSP
+never appear in the list. The row grants nothing: `GET /api/v1/tenants/{id}` on it still
+returns the tenant-crossing challenge, and the row exists so break-glass has a target. An
+MSP the caller holds a crossing for appears only as its full row, never also as a
+boundary row. Callers that are not root-scoped never receive boundary rows.
+
+Counts exclude stewards in a terminal state (deregistered, archived, dormant, revoked)
+and disabled accounts. `tech_count` counts the MSP's accounts across its whole subtree.
+The list calls the steward count `device_count`; the billing reports call the same fact
+`endpoint_count`.
+
 ```json
-{"success": true, "data": [{"id": "msp-a", "name": "msp-a", "status": "active", "device_count": 214}]}
+{"success": true, "data": [
+  {"id": "root", "name": "root", "status": "active", "device_count": 0, "boundary": false, "accessible": true},
+  {"id": "msp-a", "name": "msp-a", "parent_id": "root", "status": "active", "boundary": true, "accessible": false, "tech_count": 4, "device_count": 214, "client_count": 12}
+]}
 ```
 
 #### POST /api/v1/tenants/{id}/config-source/test
