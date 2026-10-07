@@ -47,6 +47,10 @@ type QueuedExecution struct {
 	APIKeyPermissions []string               `json:"api_key_permissions"`
 	ExecutionContext  ExecutionContext       `json:"execution_context,omitempty"` // run-as context (system or logged_in_user)
 	Metadata          map[string]interface{} `json:"metadata"`
+	// Kind is QueueKindStewardAction for a structured steward action (Action is
+	// then set); empty or QueueKindScript for a script execution.
+	Kind   string             `json:"kind,omitempty"`
+	Action *StewardActionSpec `json:"action,omitempty"`
 }
 
 // NewExecutionQueue creates a new ExecutionQueue backed by the provided QueueStore.
@@ -122,12 +126,14 @@ func (q *ExecutionQueue) QueueExecution(deviceID string, execution *QueuedExecut
 		QueuedAt:          execution.QueuedAt,
 		ExpiresAt:         execution.ExpiresAt,
 		State:             QueueStateQueued,
-		ParamHash:         ComputeParamHash(scriptRef, deviceID, execution.Parameters),
+		ParamHash:         ComputeParamHash(scriptRef, deviceID, execution.Parameters, execution.Kind, execution.Action),
 		GenerateAPIKey:    execution.GenerateAPIKey,
 		APIKeyTTL:         execution.APIKeyTTL,
 		APIKeyPermissions: execution.APIKeyPermissions,
 		ExecutionContext:  execution.ExecutionContext,
 		Metadata:          execution.Metadata,
+		Kind:              execution.Kind,
+		Action:            execution.Action,
 	}
 
 	if err := q.store.Enqueue(entry); err != nil {
@@ -490,6 +496,18 @@ func entryToQueued(entry *QueueEntry) *QueuedExecution {
 		APIKeyTTL:         entry.APIKeyTTL,
 		APIKeyPermissions: entry.APIKeyPermissions,
 		ExecutionContext:  entry.ExecutionContext,
+		Kind:              entry.Kind,
+	}
+
+	if entry.Action != nil {
+		action := *entry.Action
+		if entry.Action.Parameters != nil {
+			action.Parameters = make(map[string]string, len(entry.Action.Parameters))
+			for k, v := range entry.Action.Parameters {
+				action.Parameters[k] = v
+			}
+		}
+		exec.Action = &action
 	}
 
 	if entry.Parameters != nil {

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 )
@@ -66,6 +65,10 @@ type QueueEntry struct {
 	APIKeyPermissions []string               `json:"api_key_permissions,omitempty"`
 	ExecutionContext  ExecutionContext       `json:"execution_context,omitempty"` // run-as context (system or logged_in_user)
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	// Kind is QueueKindStewardAction for a structured steward action; empty or
+	// QueueKindScript for a script execution. Action is set only for actions.
+	Kind   string             `json:"kind,omitempty"`
+	Action *StewardActionSpec `json:"action,omitempty"`
 }
 
 // QueueStoreStats provides aggregate statistics about the queue store.
@@ -123,25 +126,25 @@ type QueueStore interface {
 }
 
 // ComputeParamHash computes the dedup key for an execution:
-// sha256(scriptRef + "|" + deviceID + "|" + sorted_json(parameters))
-func ComputeParamHash(scriptRef, deviceID string, parameters map[string]string) string {
-	// Sort parameter keys for deterministic serialization
-	keys := make([]string, 0, len(parameters))
-	for k := range parameters {
-		keys = append(keys, k)
+// sha256(scriptRef + "|" + deviceID + "|" + sorted_json(parameters)).
+//
+// For a steward action the kind and the action (verb, target, parameters) are
+// folded in as well, so two different verbs on one target do not dedupe. A
+// script entry's hash is unchanged by the kind and action arguments.
+func ComputeParamHash(scriptRef, deviceID string, parameters map[string]string, kind string, action *StewardActionSpec) string {
+	if parameters == nil {
+		parameters = map[string]string{} // a nil map must hash like an empty one
 	}
-	sort.Strings(keys)
-
-	sorted := make(map[string]string, len(parameters))
-	for _, k := range keys {
-		sorted[k] = parameters[k]
-	}
-
-	paramsJSON, _ := json.Marshal(sorted)
+	paramsJSON, _ := json.Marshal(parameters) // encoding/json sorts map keys
 
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s|%s|", scriptRef, deviceID)
 	h.Write(paramsJSON)
+	if IsStewardAction(kind) {
+		actionJSON, _ := json.Marshal(action)
+		_, _ = fmt.Fprintf(h, "|%s|", kind)
+		h.Write(actionJSON)
+	}
 
 	return fmt.Sprintf("%x", h.Sum(nil))
 }

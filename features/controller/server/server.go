@@ -1361,7 +1361,10 @@ func New(cfg *config.Config, logger logging.Logger) (*Server, error) {
 			// Issue #4510: same term source as the command publisher below, so
 			// execute_script passes the steward fence like every other command.
 			TermSource: ha.CommandTermSource{Manager: haManager},
-			Logger:     logger,
+			// Issue #4625: steward actions the expiry sweep closes without a
+			// result ("expired" / "no_result") go to the durable audit log.
+			ActionAudit: dispatcher.NewAuditManagerSink(auditManager, logger),
+			Logger:      logger,
 		})
 		if dispatcherErr != nil {
 			return nil, fmt.Errorf("failed to initialize job dispatcher: %w", dispatcherErr)

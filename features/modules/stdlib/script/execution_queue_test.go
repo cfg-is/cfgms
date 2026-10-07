@@ -675,16 +675,16 @@ func TestParamHashDeterminism(t *testing.T) {
 	params2 := map[string]string{"c": "3", "a": "1", "b": "2"}
 	params3 := map[string]string{"b": "2", "c": "3", "a": "1"}
 
-	h1 := ComputeParamHash("script-ref", "device-001", params1)
-	h2 := ComputeParamHash("script-ref", "device-001", params2)
-	h3 := ComputeParamHash("script-ref", "device-001", params3)
+	h1 := ComputeParamHash("script-ref", "device-001", params1, "", nil)
+	h2 := ComputeParamHash("script-ref", "device-001", params2, "", nil)
+	h3 := ComputeParamHash("script-ref", "device-001", params3, "", nil)
 
 	assert.Equal(t, h1, h2, "param hash must be deterministic regardless of map order")
 	assert.Equal(t, h1, h3)
 
 	// Different params → different hash
 	different := map[string]string{"a": "1", "b": "9", "c": "3"}
-	hDiff := ComputeParamHash("script-ref", "device-001", different)
+	hDiff := ComputeParamHash("script-ref", "device-001", different, "", nil)
 	assert.NotEqual(t, h1, hDiff)
 }
 
@@ -1016,4 +1016,66 @@ func TestPrepareExecutionForDevice_LibraryScriptUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "echo from-repo", prepared.ScriptContent,
 		"library script must resolve from the repository, ignoring inline metadata")
+}
+
+// TestStewardActionEntryRoundTrip verifies that a steward-action entry keeps
+// Kind and Action through QueueExecution, the store and DequeueForDevice, and
+// that two different verbs on the same target are distinct entries (Issue #4625).
+func TestStewardActionEntryRoundTrip(t *testing.T) {
+	keyManager := NewEphemeralKeyManager()
+	defer keyManager.Stop()
+	queue := newTestQueue(NewExecutionMonitor(), keyManager, time.Hour, "")
+	defer queue.Stop()
+
+	action := func(verb string) *StewardActionSpec {
+		return &StewardActionSpec{Verb: verb, TargetKind: "service", TargetName: "spooler",
+			Parameters: map[string]string{"grace": "5"}}
+	}
+	enqueue := func(id, verb string) error {
+		return queue.QueueExecution("device-001", &QueuedExecution{
+			ExecutionID: id,
+			Kind:        QueueKindStewardAction,
+			Action:      action(verb),
+			Timeout:     StewardActionTimeout,
+			ExpiresAt:   time.Now().Add(StewardActionTTL),
+			Metadata:    map[string]interface{}{"nonce": "n-" + id},
+		})
+	}
+
+	require.NoError(t, enqueue("act-1", "service.stop"))
+	require.NoError(t, enqueue("act-2", "service.restart"), "a different verb on the same target is not a duplicate")
+	assert.ErrorIs(t, enqueue("act-3", "service.stop"), ErrDuplicateExecution, "the same verb and target dedupes")
+	assert.Equal(t, 2, queue.GetQueueDepth("device-001"))
+
+	got, err := queue.DequeueForDevice("device-001")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	byID := map[string]*QueuedExecution{got[0].ExecutionID: got[0], got[1].ExecutionID: got[1]}
+
+	stop := byID["act-1"]
+	require.NotNil(t, stop)
+	assert.Equal(t, QueueKindStewardAction, stop.Kind)
+	require.NotNil(t, stop.Action)
+	assert.Equal(t, *action("service.stop"), *stop.Action)
+	assert.Equal(t, StewardActionTimeout, stop.Timeout)
+	assert.Equal(t, "n-act-1", stop.Metadata["nonce"])
+	assert.Equal(t, "service.restart", byID["act-2"].Action.Verb)
+}
+
+// TestParamHashSeparatesStewardActions pins the hash contract: an action's kind
+// and spec change the hash, and a script's hash is unaffected by them.
+func TestParamHashSeparatesStewardActions(t *testing.T) {
+	stop := &StewardActionSpec{Verb: "service.stop", TargetKind: "service", TargetName: "x"}
+	start := &StewardActionSpec{Verb: "service.start", TargetKind: "service", TargetName: "x"}
+
+	assert.NotEqual(t,
+		ComputeParamHash("", "d", nil, QueueKindStewardAction, stop),
+		ComputeParamHash("", "d", nil, QueueKindStewardAction, start))
+	assert.NotEqual(t,
+		ComputeParamHash("", "d", nil, "", nil),
+		ComputeParamHash("", "d", nil, QueueKindStewardAction, stop))
+	assert.Equal(t,
+		ComputeParamHash("ref", "d", nil, "", nil),
+		ComputeParamHash("ref", "d", map[string]string{}, QueueKindScript, stop),
+		"a script hash ignores the action, and nil parameters hash like empty ones")
 }

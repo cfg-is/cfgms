@@ -967,8 +967,14 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 			shell          TEXT NOT NULL DEFAULT '',
 			job_count      INTEGER NOT NULL DEFAULT 0,
 			completed_jobs INTEGER NOT NULL DEFAULT 0,
-			failed_jobs    INTEGER NOT NULL DEFAULT 0
+			failed_jobs    INTEGER NOT NULL DEFAULT 0,
+			kind           TEXT NOT NULL DEFAULT 'script',
+			action_json    JSONB
 		);`,
+		// Migration for tables created before steward actions (Issue #4625): existing
+		// rows take the 'script' default.
+		"ALTER TABLE script_runs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'script';",
+		"ALTER TABLE script_runs ADD COLUMN IF NOT EXISTS action_json JSONB;",
 		"CREATE INDEX IF NOT EXISTS idx_script_runs_tenant_created ON script_runs(tenant_id, created_at DESC);",
 		`CREATE TABLE IF NOT EXISTS script_run_jobs (
 			job_id       TEXT PRIMARY KEY,
@@ -980,9 +986,14 @@ func (s DatabaseSchemas) CreateScriptRunTables(ctx context.Context, db *sql.DB) 
 			completed_at TIMESTAMP WITH TIME ZONE,
 			output       TEXT NOT NULL DEFAULT '',
 			stderr       TEXT NOT NULL DEFAULT '',
-			exit_code    INTEGER NOT NULL DEFAULT 0
+			exit_code    INTEGER NOT NULL DEFAULT 0,
+			result_code  TEXT NOT NULL DEFAULT '',
+			dispatched_at TIMESTAMP WITH TIME ZONE
 		);`,
+		"ALTER TABLE script_run_jobs ADD COLUMN IF NOT EXISTS result_code TEXT NOT NULL DEFAULT '';",
+		"ALTER TABLE script_run_jobs ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMP WITH TIME ZONE;",
 		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_run_id ON script_run_jobs(run_id);",
+		"CREATE INDEX IF NOT EXISTS idx_script_run_jobs_open ON script_run_jobs(status) WHERE status IN ('pending', 'dispatched');",
 		`CREATE TABLE IF NOT EXISTS execution_grants (
 			execution_id TEXT PRIMARY KEY,
 			device_id    TEXT NOT NULL,

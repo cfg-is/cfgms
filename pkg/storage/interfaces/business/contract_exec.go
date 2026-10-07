@@ -4,8 +4,10 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,7 +40,11 @@ func ScriptRunStoreContract(t *testing.T, store ScriptRunStore) {
 	assert.Equal(t, "hostname", got.InlineContent)
 	assert.Equal(t, "powershell", got.Shell)
 	assert.Equal(t, 2, got.JobCount)
-	assert.JSONEq(t, `{"IDs":["steward-1"]}`, string(got.FilterJSON))
+	var filter struct{ IDs []string }
+	require.NoError(t, json.Unmarshal(got.FilterJSON, &filter))
+	assert.Equal(t, []string{"steward-1"}, filter.IDs, "the filter round-trips")
+	assert.Equal(t, ScriptRunKindScript, got.Kind, "a run created without a kind reads back as script")
+	assert.Empty(t, got.ActionJSON)
 
 	runs, err := store.ListRuns(ctx, tenant, 10, 0)
 	require.NoError(t, err)
@@ -96,6 +102,138 @@ func ScriptRunStoreContract(t *testing.T, store ScriptRunStore) {
 	}))
 	_, err = store.LookupGrant(ctx, "steward-0", expiredID)
 	assert.ErrorIs(t, err, ErrExecutionGrantNotFound, "an expired grant is not found")
+
+	t.Run("steward action kind", func(t *testing.T) { stewardActionContract(t, store) })
+}
+
+// stewardActionContract covers the steward-action fields, the stale-job
+// listing and the compare-and-set expiry (Issue #4625).
+func stewardActionContract(t *testing.T, store ScriptRunStore) {
+	t.Helper()
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	tenant := "tenant-action-" + suffix
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	actionJSON := `{"verb":"service.restart","target_kind":"service","target_name":"spooler","parameters":{}}`
+
+	require.NoError(t, store.CreateRun(ctx, &ScriptRun{
+		RunID: "arun-" + suffix, TenantID: tenant, CreatedBy: "admin", CreatedAt: now, Status: "running",
+		Kind: ScriptRunKindStewardAction, ActionJSON: []byte(actionJSON), JobCount: 1,
+	}))
+	got, err := store.GetRun(ctx, "arun-"+suffix)
+	require.NoError(t, err)
+	assert.Equal(t, ScriptRunKindStewardAction, got.Kind)
+	assert.JSONEq(t, actionJSON, string(got.ActionJSON), "the action round-trips")
+
+	// A script run in the same store: stale listing must never return its jobs.
+	require.NoError(t, store.CreateRun(ctx, &ScriptRun{
+		RunID: "srun-" + suffix, TenantID: tenant, CreatedAt: now, Status: "running", Kind: ScriptRunKindScript, JobCount: 1,
+	}))
+	scriptRun, err := store.GetRun(ctx, "srun-"+suffix)
+	require.NoError(t, err)
+	assert.Equal(t, ScriptRunKindScript, scriptRun.Kind)
+
+	old := now.Add(-10 * time.Minute)
+	mk := func(run, id, status string, created time.Time) {
+		require.NoError(t, store.CreateJob(ctx, &ScriptRunJob{
+			JobID: id + "-" + suffix, RunID: run + "-" + suffix, DeviceID: "dev-" + id + "-" + suffix,
+			Status: status, CreatedAt: created,
+		}))
+	}
+	mk("arun", "pending-old", "pending", old)
+	mk("arun", "pending-fresh", "pending", now)
+	mk("arun", "dispatched-old", "pending", old)
+	mk("arun", "dispatched-fresh", "pending", old)
+	mk("arun", "done", "pending", old)
+	mk("srun", "script-old", "pending", old)
+
+	dispatchedAt := now.Add(-5 * time.Minute)
+	changed, err := store.MarkJobDispatched(ctx, "dispatched-old-"+suffix, dispatchedAt)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	changed, err = store.MarkJobDispatched(ctx, "dispatched-old-"+suffix, now)
+	require.NoError(t, err)
+	assert.False(t, changed, "only a pending job can be marked dispatched")
+	changed, err = store.MarkJobDispatched(ctx, "dispatched-fresh-"+suffix, now)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	completed := now
+	require.NoError(t, store.UpdateJobResult(ctx, "done-"+suffix, "completed", "", "", "", 0, &completed))
+	require.NoError(t, store.UpdateJobResultCode(ctx, "done-"+suffix, "ok"))
+
+	jobs, err := store.ListRunJobs(ctx, "arun-"+suffix)
+	require.NoError(t, err)
+	byID := map[string]*ScriptRunJob{}
+	for _, j := range jobs {
+		byID[j.JobID] = j
+	}
+	assert.Equal(t, "ok", byID["done-"+suffix].ResultCode, "the result code round-trips")
+	require.NotNil(t, byID["dispatched-old-"+suffix].DispatchedAt)
+	assert.True(t, dispatchedAt.Equal(*byID["dispatched-old-"+suffix].DispatchedAt), "dispatched_at round-trips")
+	assert.Equal(t, "dispatched", byID["dispatched-old-"+suffix].Status)
+	assert.Nil(t, byID["pending-old-"+suffix].DispatchedAt)
+
+	stale, err := store.ListStaleActionJobs(ctx, now.Add(-time.Minute), now.Add(-time.Minute))
+	require.NoError(t, err)
+	var staleIDs []string
+	for _, j := range stale {
+		if j.RunID == "arun-"+suffix || j.RunID == "srun-"+suffix {
+			staleIDs = append(staleIDs, j.JobID)
+		}
+	}
+	assert.ElementsMatch(t, []string{"pending-old-" + suffix, "dispatched-old-" + suffix}, staleIDs,
+		"stale = pending past its TTL and dispatched past its bound; not fresh, completed or script jobs")
+
+	t.Run("concurrent expiry has exactly one winner", func(t *testing.T) {
+		const callers = 8
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		errs := make(chan error, callers)
+		for i := 0; i < callers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ok, err := store.ExpireJobIfStatus(ctx, "pending-old-"+suffix, "pending", "expired", time.Now().UTC())
+				if err != nil {
+					errs <- err
+					return
+				}
+				if ok {
+					wins.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+		assert.Equal(t, int32(1), wins.Load(), "exactly one caller changes the row")
+
+		jobs, err := store.ListRunJobs(ctx, "arun-"+suffix)
+		require.NoError(t, err)
+		for _, j := range jobs {
+			if j.JobID == "pending-old-"+suffix {
+				assert.Equal(t, "expired", j.Status)
+				assert.Equal(t, "expired", j.ResultCode)
+				assert.NotNil(t, j.CompletedAt)
+			}
+		}
+
+		ok, err := store.ExpireJobIfStatus(ctx, "dispatched-old-"+suffix, "pending", "expired", time.Now().UTC())
+		require.NoError(t, err)
+		assert.False(t, ok, "a status mismatch changes nothing")
+		ok, err = store.ExpireJobIfStatus(ctx, "dispatched-old-"+suffix, "dispatched", "no_result", time.Now().UTC())
+		require.NoError(t, err)
+		assert.True(t, ok)
+
+		stale, err := store.ListStaleActionJobs(ctx, now.Add(-time.Minute), now.Add(-time.Minute))
+		require.NoError(t, err)
+		for _, j := range stale {
+			assert.NotEqual(t, "arun-"+suffix, j.RunID, "expired jobs are no longer stale")
+		}
+	})
 }
 
 // ExecutionQueueStoreContract verifies an ExecutionQueueStore's state machine

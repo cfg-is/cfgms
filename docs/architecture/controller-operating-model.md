@@ -790,7 +790,60 @@ The controller can send commands to stewards over the gRPC control plane service
 | `reconnect` | Instruct the steward to reconnect to the controller (used during HA failover) |
 | `execute_script` | Run an ad-hoc script (outside the cfg). `CommandExecuteScript` in `pkg/controlplane/types`; the controller dispatcher (`features/controller/dispatcher`) signs and sends it, the steward handles it in `features/steward/commands`. Reachable via `cfg steward run-script` and the REST API (`POST /api/v1/runs/script`). |
 
+| `steward_action` | Perform one verb from the steward's closed allowlist (`service.start`, `service.stop`, `service.restart`) against a typed target, authorized by an operator-signed envelope. `CommandStewardAction` in `pkg/controlplane/types`; the same dispatcher signs and sends it, the steward verifies the envelope and acts in `features/steward/commands`. See [Steward Actions](#steward-actions-in-the-execution-queue). |
+
 Commands are fire-and-forget with completion tracking — the controller publishes the command and monitors for completion/failure events.
+
+#### Steward Actions in the Execution Queue
+
+A steward action (verb, target kind, target name, parameters) travels the same
+shared queue as a script run (Issue #4528), as a run and queue entry of kind
+`steward_action` (Issue #4625):
+
+- **Record.** The run (`script_runs.kind`, `action_json`) and each device's job
+  (`script_run_jobs.result_code`, `dispatched_at`) are kept in the run store — the
+  shared database in cluster mode, SQLite on a single node. Runs that predate the
+  field read back as `script`. The queue entry carries `Kind`, the action spec and,
+  in its `Metadata`, the operator envelope exactly as the operator signed it: the
+  X.509 (`signature_*`) or WebAuthn (`webauthn_*`, including the manifest)
+  credential, `nonce`, `expires_at` and `targets`. The envelope is stored once, at
+  enqueue, so whichever node dispatches the entry sends the same bytes; the
+  controller signs only the outer command and never re-signs or strips the envelope.
+- **Delivery stays on the node holding the session.** Every node sees every entry;
+  only the node whose control-plane connection holds the steward dispatches it
+  (`IsLocallyConnected`), as for scripts. A non-owning node leaves the entry queued,
+  so an action accepted on node A is delivered by node B. The dispatcher branches
+  before script preparation: no script is resolved, no relay grant is created, and
+  the command is `steward_action`, signed with the controller's command signer and
+  the current fencing term. An entry without a complete operator credential is never
+  sent; its job ends `failed`.
+- **At most one send.** Before sending, the dispatcher moves the job
+  `pending → dispatched` with a compare-and-set in the run store. A job that the
+  expiry sweep already closed is not sent, and a job already dispatched is not sent
+  a second time.
+- **Completion records on any node.** The steward answers with `EventScriptCompleted`
+  whose `Details["result_code"]` is one of `ok`, `self_protect`, `process_changed`,
+  `unsupported`, `failed` (plus the steward's `not_found` and `permission_denied`);
+  anything else is recorded as `failed`. The node that receives the event links it
+  to the run through the shared queue entry and records the job's status
+  (`completed` for `ok`, `failed` otherwise) and `ResultCode` in the shared store,
+  so the node that accepted the request reads the result.
+- **Nothing disappears.** An action entry expires after 2 minutes
+  (`StewardActionTTL`) — a safety property, so a stale "stop service" cannot fire
+  when a steward reconnects later — and carries a 60 second timeout
+  (`StewardActionTimeout`), which is also the lifetime of its per-device slot. The
+  poll-loop sweep on every node closes what will never report:
+  a job still `pending` past its TTL ends `expired` (result code `expired`,
+  "expired, not run"); a job `dispatched` but unreported past the timeout ends
+  `no_result` ("sent, no result reported" — the action may have run). Each
+  transition is a compare-and-set (`ExpireJobIfStatus`), so only the one node whose
+  update changed the row cancels the queue entry, advances the run and passes the
+  job to the audit sink (`ActionAuditSink.RecordActionExpired`); a node that loses
+  the race writes and audits nothing. In the controller the sink is
+  `dispatcher.AuditManagerSink`, which writes a `steward_action_expired` or
+  `steward_action_no_result` entry to the durable audit log, attributed to the
+  operator who issued the action. An expired or `no_result` job counts as failed
+  when the run's status is computed.
 
 #### Cluster Command Delivery — Routing Table + Internal RPC + Outbox (ADR-031 Decision 3, Issue #3764)
 
