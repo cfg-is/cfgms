@@ -2327,6 +2327,32 @@ Validate a workflow definition without saving or running it. The body has the sa
 
 An approval step nested inside a parallel, loop, try, switch or conditional block is reported at its own path with "approval steps must be top-level". A valid definition returns `{"valid": true, "issues": []}`. A body that is not valid JSON returns `400 Bad Request`.
 
+### Parse and Render Workflow YAML
+
+Both endpoints use the server parser as the single authority for the YAML format, require `workflow:read`, and store and run nothing. Request bodies are capped at 10 MB (`413 Request Entity Too Large` above that).
+
+#### POST /api/v1/workflows/parse-yaml
+
+The body is a YAML workflow document (`Content-Type: application/yaml` or `text/plain`). The response carries the parsed workflow as JSON plus every validation issue, in the same shape as the validate endpoint.
+
+**Response:** `200 OK`
+
+```json
+{
+  "workflow": {"name": "onboard", "steps": []},
+  "valid": false,
+  "issues": [
+    {"path": "steps[1].config", "step_name": "install", "message": "config is required for task steps"}
+  ]
+}
+```
+
+A document that is not parseable YAML, or has an unparseable duration, returns `400 Bad Request` with the generic message `invalid workflow YAML`; the document is never echoed back.
+
+#### POST /api/v1/workflows/render-yaml
+
+The body is workflow JSON (same shape as workflow create). The response is the canonical YAML text (`Content-Type: application/yaml`), which parse-yaml reads back to an equal workflow. A body that is not valid JSON, or a workflow that uses fields the YAML format cannot express, returns `400 Bad Request`.
+
 ### Workflow Approvals
 
 An approval step suspends a run until an operator decides it. Both endpoints are scoped to the caller's tenant, resolved as for the workflow endpoints; an approval in another tenant is indistinguishable from an unknown ID and returns `404`.

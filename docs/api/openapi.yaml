@@ -753,6 +753,92 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /workflows/parse-yaml:
+    post:
+      summary: Parse a YAML workflow document
+      description: >
+        Parses a YAML workflow document with the server parser and returns the
+        workflow as JSON plus every validation issue found. Nothing is saved or
+        run. The body is capped at 10 MB (413 above that). Malformed YAML returns
+        400 with a generic message that does not echo the document. Requires the
+        workflow:read permission.
+      operationId: parseWorkflowYaml
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Parsed workflow and validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflow, valid, issues]
+                properties:
+                  workflow:
+                    type: object
+                    description: The parsed workflow (same shape as the workflow create request)
+                  valid:
+                    type: boolean
+                  issues:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, message]
+                      properties:
+                        path:
+                          type: string
+                        step_name:
+                          type: string
+                        message:
+                          type: string
+        '400':
+          description: The document is not a parseable workflow
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Body exceeds the request size limit
+
+  /workflows/render-yaml:
+    post:
+      summary: Render a workflow as canonical YAML
+      description: >
+        Renders a workflow definition as the canonical YAML that parse-yaml
+        reads. Nothing is saved or run. A workflow using fields the YAML format
+        cannot express returns 400 rather than being rendered lossily. Requires
+        the workflow:read permission.
+      operationId: renderWorkflowYaml
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Same shape as the workflow create request
+      responses:
+        '200':
+          description: Canonical YAML text
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '400':
+          description: Body is not valid JSON, or the workflow cannot be expressed as YAML
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: Body exceeds the request size limit
+
   /workflows/validate:
     post:
       summary: Validate a workflow definition (dry run)

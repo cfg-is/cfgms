@@ -724,3 +724,75 @@ func TestParser_ValidateWorkflowDetailed_MultipleIssues(t *testing.T) {
 		Steps: []Step{{Name: "a", Type: StepTypeTask, Module: "file", Config: map[string]interface{}{"k": "v"}}},
 	}))
 }
+
+const roundTripYAML = `workflow:
+  name: onboard
+  version: 1.0.0
+  inputs:
+    - name: region
+      type: string
+      required: true
+  steps:
+    - name: prep
+      type: task
+      module: file
+      config:
+        path: /tmp/x
+      timeout: 30s
+    - name: gate
+      type: approval
+      approval:
+        message: ship it?
+        approver_permission: workflow:approve
+        timeout: 1h
+    - name: tell
+      type: notify
+      notify:
+        url: https://notify.example.com/hook
+        title: done
+`
+
+func TestParser_ParseYAMLUnvalidated_ReturnsInvalidWorkflow(t *testing.T) {
+	p := NewParser()
+	data := []byte("workflow:\n  name: bad\n  steps:\n    - name: a\n      type: task\n")
+
+	_, err := p.ParseYAML(data)
+	require.Error(t, err, "ParseYAML must still validate")
+
+	wf, err := p.ParseYAMLUnvalidated(data)
+	require.NoError(t, err)
+	assert.Equal(t, "bad", wf.Name)
+	assert.NotEmpty(t, p.ValidateWorkflowDetailed(wf))
+}
+
+func TestParser_ParseYAMLUnvalidated_MalformedAndBadDuration(t *testing.T) {
+	p := NewParser()
+	_, err := p.ParseYAMLUnvalidated([]byte("workflow: [unclosed"))
+	assert.Error(t, err)
+	_, err = p.ParseYAMLUnvalidated([]byte("workflow:\n  name: x\n  timeout: notaduration\n  steps: []\n"))
+	assert.Error(t, err)
+}
+
+func TestParser_RenderYAML_RoundTrip(t *testing.T) {
+	p := NewParser()
+	first, err := p.ParseYAML([]byte(roundTripYAML))
+	require.NoError(t, err)
+
+	rendered, err := p.RenderYAML(first)
+	require.NoError(t, err)
+
+	second, err := p.ParseYAML(rendered)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+
+	again, err := p.RenderYAML(second)
+	require.NoError(t, err)
+	assert.Equal(t, string(rendered), string(again), "rendering is canonical")
+}
+
+func TestParser_RenderYAML_RejectsUnrepresentable(t *testing.T) {
+	p := NewParser()
+	wf := Workflow{Name: "w", Steps: []Step{{Name: "a", Type: StepTypeHTTP, HTTP: &HTTPConfig{URL: "https://x.example.com"}}}}
+	_, err := p.RenderYAML(wf)
+	assert.Error(t, err)
+}

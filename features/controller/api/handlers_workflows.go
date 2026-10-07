@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -128,6 +129,8 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) error {
 	// Approval routes precede /{id} so "approvals" is never read as a workflow name.
 	// /validate precedes /{id} so "validate" is never read as a workflow name.
 	router.Handle("/validate", wrap("read", h.handleValidateWorkflow)).Methods("POST")
+	router.Handle("/parse-yaml", wrap("read", h.handleParseWorkflowYAML)).Methods("POST")
+	router.Handle("/render-yaml", wrap("read", h.handleRenderWorkflowYAML)).Methods("POST")
 	router.Handle("/approvals", wrap("read", h.handleListApprovals)).Methods("GET")
 	router.Handle("/approvals/{approval_id}/decision", wrap("approve", h.handleDecideApproval)).Methods("POST")
 	router.Handle("/{id}", wrap("read", h.handleGetWorkflow)).Methods("GET")
@@ -402,6 +405,86 @@ func (h *WorkflowHandler) handleValidateWorkflow(w http.ResponseWriter, r *http.
 		issues = []workflow.ValidationIssue{}
 	}
 	h.sendJSON(w, http.StatusOK, ValidateWorkflowResponse{Valid: len(issues) == 0, Issues: issues})
+}
+
+// ParseYAMLResponse is the result of parsing a YAML workflow document (Issue #4613).
+type ParseYAMLResponse struct {
+	Workflow workflow.Workflow          `json:"workflow"`
+	Valid    bool                       `json:"valid"`
+	Issues   []workflow.ValidationIssue `json:"issues"`
+}
+
+// readBoundedBody reads the request body up to maxStructuredRequestBodyBytes and
+// answers 413 itself when the body is larger.
+func (h *WorkflowHandler) readBoundedBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxStructuredRequestBodyBytes))
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.sendError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			h.sendError(w, http.StatusBadRequest, "invalid request body")
+		}
+		return nil, false
+	}
+	return body, true
+}
+
+// handleParseWorkflowYAML handles POST /api/v1/workflows/parse-yaml. The body is
+// the YAML document; the server parser is the authority. It stores nothing.
+func (h *WorkflowHandler) handleParseWorkflowYAML(w http.ResponseWriter, r *http.Request) {
+	body, ok := h.readBoundedBody(w, r)
+	if !ok {
+		return
+	}
+	parser := workflow.NewParser()
+	wf, err := parser.ParseYAMLUnvalidated(body)
+	if err != nil {
+		// The error text can quote document content, so it is neither returned nor logged.
+		h.logger.Debug("workflow YAML rejected")
+		h.sendError(w, http.StatusBadRequest, "invalid workflow YAML")
+		return
+	}
+
+	issues := parser.ValidateWorkflowDetailed(wf)
+	if issues == nil {
+		issues = []workflow.ValidationIssue{}
+	}
+	h.sendJSON(w, http.StatusOK, ParseYAMLResponse{Workflow: wf, Valid: len(issues) == 0, Issues: issues})
+}
+
+// handleRenderWorkflowYAML handles POST /api/v1/workflows/render-yaml. The body
+// is workflow JSON; the response is the canonical YAML text. It stores nothing.
+func (h *WorkflowHandler) handleRenderWorkflowYAML(w http.ResponseWriter, r *http.Request) {
+	body, ok := h.readBoundedBody(w, r)
+	if !ok {
+		return
+	}
+	var req CreateWorkflowRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+
+	out, err := workflow.NewParser().RenderYAML(workflow.Workflow{
+		Name:           req.Name,
+		Description:    req.Description,
+		Version:        req.Version,
+		Steps:          req.Steps,
+		Variables:      req.Variables,
+		Inputs:         req.Inputs,
+		Timeout:        req.Timeout,
+		OnFailure:      req.OnFailure,
+		ErrorWorkflows: req.ErrorWorkflows,
+	})
+	if err != nil {
+		h.logger.Debug("workflow YAML render rejected")
+		h.sendError(w, http.StatusBadRequest, "workflow cannot be rendered as YAML")
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
 }
 
 // handleGetWorkflow handles GET /api/v1/workflows/{id}
