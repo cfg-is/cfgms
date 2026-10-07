@@ -20,8 +20,21 @@ import { apiFetch } from '../api/client.ts'
 import {
   useWorkflowExecutions,
   useExecutionStatus,
+  type InputSpec,
   type WorkflowExecution,
 } from './useWorkflows.ts'
+import RunInputsForm from './RunInputsForm.tsx'
+import {
+  RunError,
+  buildPayload,
+  initialValues,
+  requiredErrors,
+  startWorkflowRun,
+  withValue,
+  withoutError,
+  type FieldErrors,
+  type InputValues,
+} from './runInputs.ts'
 import { useEffect, useRef, useState } from 'react'
 
 function execStatusTone(status: string): string {
@@ -39,6 +52,7 @@ function execStatusTone(status: string): string {
   }
 }
 
+const NO_INPUTS: InputSpec[] = []
 const NON_TERMINAL = new Set(['pending', 'running', 'paused'])
 
 function ExecRow({
@@ -85,6 +99,8 @@ function ExecRow({
 
 interface WorkflowExecutionViewProps {
   workflowName: string
+  /** Declared workflow inputs; rendered as typed fields in the Execute dialog. */
+  inputs?: InputSpec[]
   onClose?: () => void
   /** Called with the polled active execution (null until one is started). */
   onExecutionChange?: (e: WorkflowExecution | null) => void
@@ -92,6 +108,7 @@ interface WorkflowExecutionViewProps {
 
 export default function WorkflowExecutionView({
   workflowName,
+  inputs = NO_INPUTS,
   onClose,
   onExecutionChange,
 }: WorkflowExecutionViewProps) {
@@ -120,10 +137,14 @@ export default function WorkflowExecutionView({
   const [executing, setExecuting] = useState(false)
   const [executeError, setExecuteError] = useState<string | null>(null)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [inputValues, setInputValues] = useState<InputValues>({})
+  const [inputErrors, setInputErrors] = useState<FieldErrors>({})
   const [execVarRows, setExecVarRows] = useState<Array<{ key: string; value: string }>>([])
 
   async function handleConfirmExecute() {
-    setConfirmExecute(false)
+    const errors = requiredErrors(inputs, inputValues)
+    setInputErrors(errors)
+    if (Object.keys(errors).length > 0) return
     setExecuting(true)
     setExecuteError(null)
     setActiveExecId(null)
@@ -132,31 +153,20 @@ export default function WorkflowExecutionView({
       if (key.trim()) variables[key.trim()] = value
     }
     try {
-      const response = await apiFetch(
-        `/api/v1/workflows/${encodeURIComponent(workflowName)}/execute`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variables }),
-        },
-      )
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => ({}))) as Record<
-          string,
-          unknown
-        >
-        throw new Error(
-          (errBody?.error as string) || `Execute failed — ${response.status}`,
-        )
-      }
-      const result = (await response.json()) as Record<string, unknown>
-      const execId = (result?.execution_id as string) || null
+      const execId = await startWorkflowRun(workflowName, buildPayload(inputs, inputValues), variables)
+      setConfirmExecute(false)
       setActiveExecId(execId)
       refreshExecutions()
     } catch (cause: unknown) {
-      setExecuteError(
-        cause instanceof Error && cause.message ? cause.message : 'Execute failed',
-      )
+      if (cause instanceof RunError && Object.keys(cause.fieldErrors).length > 0) {
+        // Keep the dialog open so the message shows at its field.
+        setInputErrors(cause.fieldErrors)
+      } else {
+        setConfirmExecute(false)
+        setExecuteError(
+          cause instanceof Error && cause.message ? cause.message : 'Execute failed',
+        )
+      }
     } finally {
       setExecuting(false)
     }
@@ -214,7 +224,11 @@ export default function WorkflowExecutionView({
           type="button"
           className="wf-btn"
           disabled={executing}
-          onClick={() => setConfirmExecute(true)}
+          onClick={() => {
+            setInputValues(initialValues(inputs))
+            setInputErrors({})
+            setConfirmExecute(true)
+          }}
           data-testid="execute-btn"
         >
           {executing ? 'Executing…' : 'Execute'}
@@ -355,6 +369,15 @@ export default function WorkflowExecutionView({
               This workflow will execute against real infrastructure. Ensure the
               workflow steps are correct before proceeding.
             </p>
+            <RunInputsForm
+              inputs={inputs}
+              values={inputValues}
+              errors={inputErrors}
+              onChange={(n, v) => {
+                setInputValues((prev) => withValue(prev, n, v))
+                setInputErrors((prev) => withoutError(prev, n))
+              }}
+            />
             <div className="wf-var-editor" data-testid="var-editor">
               <span className="wf-form-label">Variables</span>
               {execVarRows.map((row, idx) => (

@@ -43,11 +43,26 @@ import {
   useExecutionStatus,
   useValidateWorkflow,
   useWorkflowList,
+  type InputSpec,
   type ValidationIssue,
   type VersionedWorkflow,
   type WorkflowExecution,
 } from './useWorkflows.ts'
 import RunBar from './RunBar.tsx'
+import RunInputsForm from './RunInputsForm.tsx'
+import SchedulePanel from './SchedulePanel.tsx'
+import {
+  RunError,
+  buildPayload,
+  declarationProblem,
+  initialValues,
+  requiredErrors,
+  startWorkflowRun,
+  withValue,
+  withoutError,
+  type FieldErrors,
+  type InputValues,
+} from './runInputs.ts'
 import {
   PALETTE,
   addNode,
@@ -390,6 +405,11 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
   const [execId, setExecId] = useState<string | null>(null)
   const [runStartError, setRunStartError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [inputs, setInputs] = useState<InputSpec[]>(() => workflow.inputs ?? [])
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  const [runFormOpen, setRunFormOpen] = useState(false)
+  const [runValues, setRunValues] = useState<InputValues>({})
+  const [runErrors, setRunErrors] = useState<FieldErrors>({})
   const runName = isNew ? newName.trim() : workflow.name
   const run = useExecutionStatus(execId !== null ? runName : null, execId)
   const blocked = unsaveableFields(workflow.raw)
@@ -454,6 +474,7 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     if (workflow.description) body.description = workflow.description
     if (workflow.version) body.version = workflow.version
     if (workflow.variables !== undefined) body.variables = workflow.variables
+    if (inputs.length > 0) body.inputs = inputs
     // PUT rebuilds the workflow from the body; omitting timeout would turn a
     // bounded workflow into an unbounded one.
     if (typeof workflow.timeout === 'number') body.timeout = workflow.timeout
@@ -464,33 +485,47 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     await validation.validate(requestBody(runName, graphToSteps(graph)))
   }
 
-  async function handleRun() {
+  function handleRun() {
     if (dirty || isNew) {
       setNotice('Save the workflow before running it — Run executes the saved version, never an unsaved draft.')
       return
     }
+    if (inputs.length > 0) {
+      // Declared inputs need values first; the form's Start button runs.
+      setRunValues(initialValues(inputs))
+      setRunErrors({})
+      setRunFormOpen(true)
+      return
+    }
+    void startRun({})
+  }
+
+  async function startRun(payload: Record<string, string | boolean>) {
     setStarting(true)
     setRunStartError(null)
     setExecId(null)
     try {
-      const response = await apiFetch(`/api/v1/workflows/${encodeURIComponent(workflow.name)}/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variables: {} }),
-      })
-      if (!response.ok) {
-        const errBody = (await response.json().catch(() => ({}))) as Record<string, unknown>
-        throw new Error(typeof errBody.error === 'string' && errBody.error ? errBody.error : `Run failed — ${response.status}`)
-      }
-      const result = (await response.json()) as Record<string, unknown>
-      const id = typeof result.execution_id === 'string' && result.execution_id ? result.execution_id : null
+      const id = await startWorkflowRun(workflow.name, payload)
       if (id === null) throw new Error('Run failed — no execution id returned')
+      setRunFormOpen(false)
       setExecId(id)
     } catch (cause: unknown) {
-      setRunStartError(cause instanceof Error && cause.message ? cause.message : 'Run failed')
+      if (cause instanceof RunError && Object.keys(cause.fieldErrors).length > 0) {
+        setRunErrors(cause.fieldErrors)
+      } else {
+        setRunFormOpen(false)
+        setRunStartError(cause instanceof Error && cause.message ? cause.message : 'Run failed')
+      }
     } finally {
       setStarting(false)
     }
+  }
+
+  function handleStartWithInputs() {
+    const errors = requiredErrors(inputs, runValues)
+    setRunErrors(errors)
+    if (Object.keys(errors).length > 0) return
+    void startRun(buildPayload(inputs, runValues))
   }
 
   async function handleSave() {
@@ -498,6 +533,11 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
     const refusal = validateSteps(steps)
     if (refusal !== null) {
       setNotice(refusal)
+      return
+    }
+    const problem = declarationProblem(inputs)
+    if (problem !== null) {
+      setNotice(problem)
       return
     }
     const name = isNew ? newName.trim() : workflow.name
@@ -619,6 +659,15 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
         <button
           type="button"
           className="wf-btn-secondary"
+          onClick={() => setDrawerOpen((o) => !o)}
+          aria-expanded={drawerOpen}
+          data-testid="builder-schedule-toggle"
+        >
+          Schedule &amp; inputs{inputs.length > 0 ? ` (${inputs.length})` : ''}
+        </button>
+        <button
+          type="button"
+          className="wf-btn-secondary"
           onClick={handleValidate}
           disabled={validation.validating}
           data-testid="builder-validate"
@@ -669,6 +718,39 @@ function BuilderEditor({ workflow, isNew }: { workflow: VersionedWorkflow; isNew
               )}
             </>
           )}
+        </div>
+      )}
+
+      {drawerOpen && (
+        <SchedulePanel
+          inputs={inputs}
+          onInputsChange={(next) => {
+            setInputs(next)
+            setDirty(true)
+            setSaved(false)
+            setNotice(null)
+            validationReset()
+          }}
+          workflowName={isNew ? null : workflow.name}
+          onClose={() => setDrawerOpen(false)}
+        />
+      )}
+
+      {runFormOpen && (
+        <div className="bld-runform" data-testid="builder-run-form">
+          <RunInputsForm
+            inputs={inputs}
+            values={runValues}
+            errors={runErrors}
+            onChange={(n, v) => {
+              setRunValues((prev) => withValue(prev, n, v))
+              setRunErrors((prev) => withoutError(prev, n))
+            }}
+          />
+          <button type="button" className="wf-btn" onClick={handleStartWithInputs} disabled={starting} data-testid="builder-run-start">
+            {starting ? 'Starting…' : 'Start run'}
+          </button>
+          <button type="button" className="wf-btn-secondary" onClick={() => setRunFormOpen(false)}>Cancel</button>
         </div>
       )}
 

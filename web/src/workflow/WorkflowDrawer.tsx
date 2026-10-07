@@ -664,6 +664,7 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
           <div data-testid="drawer-pane-run" hidden={activeTab !== 'run'}>
             <WorkflowExecutionView
               workflowName={workflow.name}
+              inputs={workflow.inputs}
               onClose={() => setActiveTab('steps')}
               onExecutionChange={setActiveExecution}
             />
