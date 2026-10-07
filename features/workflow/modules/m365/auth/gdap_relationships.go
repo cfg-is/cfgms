@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-// Package gdap gdap_client implements Microsoft Partner Center API client
-// for GDAP (Granular Delegated Admin Privileges) operations.
+
+package auth
+
+// Partner-delegated tenant access (GDAP — Granular Delegated Admin Privileges).
 //
-// This client provides methods to:
-//   - Retrieve GDAP relationships from Partner Center API
-//   - Validate partner permissions and roles
-//   - Manage GDAP relationship lifecycle
-//   - Query customer tenant information via GDAP
-//
-// It integrates with the Microsoft Partner Center REST API to discover
-// and manage customer tenant relationships for MSP scenarios.
-package gdap
+// An MSP reaches a customer's M365 tenant through a GDAP relationship rather than
+// by holding that customer's own app credentials. This file holds the Partner
+// Center relationship client (GDAPClient) and the resolver that decides whether a
+// relationship grants what an operation needs (GDAPRelationshipResolver).
+// OAuth2Provider.GetAccessToken consults the resolver when the CFGMS tenant's own
+// stored OAuth2Config is marked partner-delegated (see delegated_token.go).
 
 import (
 	"context"
@@ -23,22 +22,79 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/pkg/logging"
 )
+
+// partnerCenterScope is the OAuth2 scope of a Partner Center API token. A token
+// carrying it is never valid as a Graph token.
+const partnerCenterScope = "https://api.partnercenter.microsoft.com/.default"
+
+// partnerCenterKeyPrefix namespaces Partner Center entries in the CredentialStore.
+// CredentialStore keys everything by a tenant ID string, and a CFGMS tenant's Graph
+// token and a partner's Partner Center token would otherwise resolve to the same
+// key (tokenKey(tenantID)) once both are in this package. GetAccessToken
+// additionally refuses any stored token carrying the Partner Center scope, so a
+// CFGMS tenant that happens to be named with this prefix still cannot be served a
+// Partner Center token as a Graph token.
+const partnerCenterKeyPrefix = "partnercenter:"
+
+// partnerCenterTokenKey returns the CredentialStore key under which the Partner
+// Center token for partnerTenantID is persisted.
+func partnerCenterTokenKey(partnerTenantID string) string {
+	return partnerCenterKeyPrefix + partnerTenantID
+}
+
+// GDAPRelationshipStatus represents the status of a GDAP relationship.
+type GDAPRelationshipStatus string
+
+const (
+	GDAPStatusPending    GDAPRelationshipStatus = "pending"
+	GDAPStatusActive     GDAPRelationshipStatus = "active"
+	GDAPStatusExpired    GDAPRelationshipStatus = "expired"
+	GDAPStatusTerminated GDAPRelationshipStatus = "terminated"
+)
+
+// GDAPRole represents a role assignment within a GDAP relationship.
+type GDAPRole struct {
+	RoleDefinitionID string `json:"role_definition_id"`
+	RoleName         string `json:"role_name"`
+	RoleDescription  string `json:"role_description"`
+}
+
+// GDAPRelationship represents a GDAP relationship with a customer tenant.
+type GDAPRelationship struct {
+	RelationshipID   string                 `json:"relationship_id"`
+	CustomerTenantID string                 `json:"customer_tenant_id"`
+	CustomerName     string                 `json:"customer_name"`
+	Status           GDAPRelationshipStatus `json:"status"`
+	Roles            []GDAPRole             `json:"roles"`
+	ExpiresAt        time.Time              `json:"expires_at"`
+	CreatedAt        time.Time              `json:"created_at"`
+	LastModified     time.Time              `json:"last_modified"`
+}
 
 // GDAPClient provides methods for interacting with Microsoft Partner Center API
 type GDAPClient struct {
 	httpClient      *http.Client
 	partnerTenantID string
-	credStore       auth.CredentialStore
+	credStore       CredentialStore
 	baseURL         string
+	// clientID/clientSecret, when both set, are the Partner Center credentials and
+	// the credential store is not consulted for them. OAuth2Provider always sets
+	// them from the delegating CFGMS tenant's own stored config, so a stored config
+	// can never name another CFGMS tenant's credentials by its partner tenant ID.
+	clientID     string
+	clientSecret string
+	// tokenKeyID, when set, scopes the persisted Partner Center token's
+	// credential-store key instead of partnerTenantID, so two CFGMS tenants naming
+	// the same partner tenant never share a persisted token.
+	tokenKeyID string
 	// tokenBaseURL is the Microsoft login base URL used to construct the OAuth2 token
 	// endpoint. Defaults to "https://login.microsoftonline.com"; overrideable in tests.
 	tokenBaseURL string
 
 	tokenMu     sync.Mutex
-	cachedToken *auth.AccessToken
+	cachedToken *AccessToken
 	logger      logging.Logger
 }
 
@@ -60,8 +116,28 @@ func NewGDAPClient(httpClient *http.Client, partnerTenantID string) *GDAPClient 
 }
 
 // SetCredentialStore sets the credential store for Partner Center authentication
-func (c *GDAPClient) SetCredentialStore(credStore auth.CredentialStore) {
+func (c *GDAPClient) SetCredentialStore(credStore CredentialStore) {
 	c.credStore = credStore
+}
+
+// SetClientCredentials sets the Partner Center client credentials directly. When
+// set, they take precedence over any config looked up in the credential store.
+func (c *GDAPClient) SetClientCredentials(clientID, clientSecret string) {
+	c.clientID = clientID
+	c.clientSecret = clientSecret
+}
+
+// SetTokenKeyID scopes the persisted Partner Center token key. See tokenKeyID.
+func (c *GDAPClient) SetTokenKeyID(id string) {
+	c.tokenKeyID = id
+}
+
+// persistedTokenKey returns the credential-store key for this client's token.
+func (c *GDAPClient) persistedTokenKey() string {
+	if c.tokenKeyID != "" {
+		return partnerCenterTokenKey(c.tokenKeyID)
+	}
+	return partnerCenterTokenKey(c.partnerTenantID)
 }
 
 // GetGDAPRelationships retrieves all GDAP relationships from Partner Center API
@@ -93,7 +169,7 @@ func (c *GDAPClient) GetGDAPRelationships(ctx context.Context) ([]GDAPRelationsh
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
+			c.logger.Warn("failed to close Partner Center API response body", "error", logging.SanitizeLogValue(closeErr.Error()))
 		}
 	}()
 
@@ -187,7 +263,7 @@ func (c *GDAPClient) GetGDAPRelationship(ctx context.Context, relationshipID str
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
+			c.logger.Warn("failed to close Partner Center API response body", "error", logging.SanitizeLogValue(closeErr.Error()))
 		}
 	}()
 
@@ -322,7 +398,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close Partner Center API response body", "error", closeErr)
+			c.logger.Warn("failed to close Partner Center API response body", "error", logging.SanitizeLogValue(closeErr.Error()))
 		}
 	}()
 
@@ -369,7 +445,7 @@ func (c *GDAPClient) GetCustomerInformation(ctx context.Context, customerTenantI
 // Credentials (client_id, client_secret) are loaded from the credential store using
 // the partner tenant ID as the key. The token is cached in memory and also persisted
 // back to the credential store for reuse across process restarts.
-func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessToken, error) {
+func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*AccessToken, error) {
 	if c.credStore == nil {
 		return nil, fmt.Errorf("credential store not configured for GDAP client")
 	}
@@ -384,7 +460,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 	c.tokenMu.Unlock()
 
 	// Check persisted token (valid across process restarts).
-	if stored, err := c.credStore.GetToken(c.partnerTenantID); err == nil && stored != nil &&
+	if stored, err := c.credStore.GetToken(c.persistedTokenKey()); err == nil && stored != nil &&
 		time.Now().Before(stored.ExpiresAt.Add(-60*time.Second)) {
 		c.tokenMu.Lock()
 		c.cachedToken = stored
@@ -392,15 +468,20 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 		return stored, nil
 	}
 
-	// Load partner credentials from the secrets store.
-	config, err := c.credStore.GetConfig(c.partnerTenantID)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"partner Center credentials not found for tenant %s: "+
-				"partner credentials (client_id and client_secret) must be stored in the "+
-				"secrets store before Partner Center token acquisition can proceed: %w",
-			c.partnerTenantID, err,
-		)
+	// Partner credentials: explicit credentials win; otherwise they are loaded
+	// from the secrets store keyed by the partner tenant ID.
+	config := &OAuth2Config{ClientID: c.clientID, ClientSecret: c.clientSecret}
+	if c.clientID == "" || c.clientSecret == "" {
+		stored, err := c.credStore.GetConfig(c.partnerTenantID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"partner Center credentials not found for tenant %s: "+
+					"partner credentials (client_id and client_secret) must be stored in the "+
+					"secrets store before Partner Center token acquisition can proceed: %w",
+				c.partnerTenantID, err,
+			)
+		}
+		config = stored
 	}
 	if config.ClientID == "" {
 		return nil, fmt.Errorf(
@@ -425,7 +506,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 		"grant_type":    {"client_credentials"},
 		"client_id":     {config.ClientID},
 		"client_secret": {config.ClientSecret},
-		"scope":         {"https://api.partnercenter.microsoft.com/.default"},
+		"scope":         {partnerCenterScope},
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
@@ -441,7 +522,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			c.logger.Warn("failed to close Partner Center token response body", "error", closeErr)
+			c.logger.Warn("failed to close Partner Center token response body", "error", logging.SanitizeLogValue(closeErr.Error()))
 		}
 	}()
 
@@ -463,7 +544,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 		return nil, fmt.Errorf("partner center token request failed with status %d", resp.StatusCode)
 	}
 
-	token := &auth.AccessToken{
+	token := &AccessToken{
 		Token:     tokenResp.AccessToken,
 		TokenType: tokenResp.TokenType,
 		ExpiresIn: tokenResp.ExpiresIn,
@@ -481,7 +562,7 @@ func (c *GDAPClient) getPartnerCenterToken(ctx context.Context) (*auth.AccessTok
 	c.tokenMu.Unlock()
 
 	// Persist to credential store for cross-process reuse (best-effort).
-	if storeErr := c.credStore.StoreToken(c.partnerTenantID, token); storeErr != nil {
+	if storeErr := c.credStore.StoreToken(c.persistedTokenKey(), token); storeErr != nil {
 		c.logger.Warn("failed to persist Partner Center token to credential store",
 			"tenant_id", logging.SanitizeLogValue(c.partnerTenantID),
 			"error", logging.SanitizeLogValue(storeErr.Error()))
@@ -518,46 +599,153 @@ type CustomerInfo struct {
 	Validation   *PartnerAccessValidation `json:"validation"`
 }
 
-// GDAPClientConfig represents configuration for the GDAP client
-type GDAPClientConfig struct {
-	PartnerTenantID     string   `json:"partner_tenant_id"`
-	PartnerClientID     string   `json:"partner_client_id"`
-	PartnerClientSecret string   `json:"partner_client_secret"`
-	PartnerCenterScopes []string `json:"partner_center_scopes"`
-	BaseURL             string   `json:"base_url,omitempty"`
+// GDAPRelationshipResolver discovers a partner's GDAP customer relationships and
+// validates that one grants what an operation requires. It is the receiver for the
+// relationship logic that previously lived on gdap.GDAPProvider.
+type GDAPRelationshipResolver struct {
+	partnerTenantID string
+	gdapClient      *GDAPClient
 }
 
-// ValidateGDAPClientConfig validates GDAP client configuration
-func ValidateGDAPClientConfig(config *GDAPClientConfig) error {
-	if config.PartnerTenantID == "" {
-		return fmt.Errorf("partner_tenant_id is required")
+// NewGDAPRelationshipResolver creates a resolver for one partner tenant. The
+// httpClient may be nil (a 30s-timeout client is used). Partner Center credentials
+// are supplied with SetClientCredentials or, for standalone use, through the
+// credential store set with SetCredentialStore.
+func NewGDAPRelationshipResolver(httpClient *http.Client, partnerTenantID string) *GDAPRelationshipResolver {
+	return &GDAPRelationshipResolver{
+		partnerTenantID: partnerTenantID,
+		gdapClient:      NewGDAPClient(httpClient, partnerTenantID),
+	}
+}
+
+// SetCredentialStore sets the credential store used to persist and load the
+// Partner Center token (and, absent explicit credentials, the partner config).
+func (r *GDAPRelationshipResolver) SetCredentialStore(credStore CredentialStore) {
+	r.gdapClient.SetCredentialStore(credStore)
+}
+
+// SetEndpoints overrides the Partner Center API base URL and the Microsoft login
+// base URL used to reach Partner Center (sovereign clouds, test servers). An empty
+// argument keeps the default.
+func (r *GDAPRelationshipResolver) SetEndpoints(partnerCenterBaseURL, loginBaseURL string) {
+	if partnerCenterBaseURL != "" {
+		r.gdapClient.baseURL = partnerCenterBaseURL
+	}
+	if loginBaseURL != "" {
+		r.gdapClient.tokenBaseURL = loginBaseURL
+	}
+}
+
+// SetTokenKeyID scopes the persisted Partner Center token key (see GDAPClient).
+func (r *GDAPRelationshipResolver) SetTokenKeyID(id string) {
+	r.gdapClient.SetTokenKeyID(id)
+}
+
+// SetClientCredentials sets the Partner Center client credentials directly.
+func (r *GDAPRelationshipResolver) SetClientCredentials(clientID, clientSecret string) {
+	r.gdapClient.SetClientCredentials(clientID, clientSecret)
+}
+
+// DiscoverGDAPCustomers returns the customer relationships that are currently
+// active and unexpired.
+func (r *GDAPRelationshipResolver) DiscoverGDAPCustomers(ctx context.Context) ([]GDAPRelationship, error) {
+	relationships, err := r.gdapClient.GetGDAPRelationships(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GDAP relationships: %w", err)
 	}
 
-	if config.PartnerClientID == "" {
-		return fmt.Errorf("partner_client_id is required")
+	activeRelationships := make([]GDAPRelationship, 0)
+	for _, rel := range relationships {
+		if rel.Status == GDAPStatusActive && time.Now().Before(rel.ExpiresAt) {
+			activeRelationships = append(activeRelationships, rel)
+		}
 	}
 
-	if config.PartnerClientSecret == "" {
-		return fmt.Errorf("partner_client_secret is required")
+	return activeRelationships, nil
+}
+
+// ValidateGDAPAccess validates that the partner has an active, unexpired GDAP
+// relationship with customerTenantID that grants every role in requiredRoles. The
+// error for a missing role names all of the missing roles.
+func (r *GDAPRelationshipResolver) ValidateGDAPAccess(ctx context.Context, customerTenantID string, requiredRoles []string) (*GDAPRelationship, error) {
+	relationships, err := r.DiscoverGDAPCustomers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover GDAP customers: %w", err)
 	}
 
-	// Validate Partner Center scopes
-	requiredScopes := []string{
-		"https://api.partnercenter.microsoft.com/user_impersonation",
+	var relationship *GDAPRelationship
+	for i := range relationships {
+		if relationships[i].CustomerTenantID == customerTenantID {
+			relationship = &relationships[i]
+			break
+		}
 	}
 
-	for _, requiredScope := range requiredScopes {
-		found := false
-		for _, scope := range config.PartnerCenterScopes {
-			if scope == requiredScope {
-				found = true
-				break
+	if relationship == nil {
+		return nil, fmt.Errorf("no active GDAP relationship found for tenant %s", customerTenantID)
+	}
+
+	if len(requiredRoles) > 0 {
+		availableRoles := make(map[string]bool)
+		for _, role := range relationship.Roles {
+			availableRoles[role.RoleName] = true
+		}
+
+		var missing []string
+		for _, requiredRole := range requiredRoles {
+			if !availableRoles[requiredRole] {
+				missing = append(missing, requiredRole)
 			}
 		}
-		if !found {
-			return fmt.Errorf("required Partner Center scope missing: %s", requiredScope)
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("GDAP relationship for tenant %s lacks required roles: %s",
+				customerTenantID, strings.Join(missing, ", "))
 		}
 	}
 
-	return nil
+	return relationship, nil
+}
+
+// GetGDAPRoleRequirements returns the GDAP roles that satisfy an M365 module
+// operation. moduleName is the module's declared name (module.yaml) and operation
+// is the modules.Module method, "Set" or "Get". Any one of the returned roles is
+// sufficient for the operation; an unmapped module or operation requires Global
+// Administrator.
+//
+// This was keyed by the deleted resource-management framework's resource type and
+// CRUD verb. The mapping onto the module contract is:
+//
+//	users              -> m365-entra-user
+//	groups             -> m365-entra-group
+//	conditional_access -> m365-conditional-access
+//	intune_policies    -> m365-intune-policy
+//	create/update/delete -> Set
+//	read/list            -> Get
+func (r *GDAPRelationshipResolver) GetGDAPRoleRequirements(moduleName, operation string) []string {
+	roleMap := map[string]map[string][]string{
+		"m365-entra-user": {
+			"Set": {"User Administrator", "Global Administrator"},
+			"Get": {"User Administrator", "Global Reader", "Directory Readers"},
+		},
+		"m365-entra-group": {
+			"Set": {"Groups Administrator", "Global Administrator"},
+			"Get": {"Groups Administrator", "Global Reader", "Directory Readers"},
+		},
+		"m365-conditional-access": {
+			"Set": {"Conditional Access Administrator", "Security Administrator", "Global Administrator"},
+			"Get": {"Conditional Access Administrator", "Security Administrator", "Security Reader", "Global Reader"},
+		},
+		"m365-intune-policy": {
+			"Set": {"Intune Administrator", "Global Administrator"},
+			"Get": {"Intune Administrator", "Global Reader"},
+		},
+	}
+
+	if moduleRoles, exists := roleMap[moduleName]; exists {
+		if operationRoles, exists := moduleRoles[operation]; exists {
+			return operationRoles
+		}
+	}
+
+	return []string{"Global Administrator"}
 }

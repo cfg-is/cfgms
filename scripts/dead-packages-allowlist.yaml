@@ -115,10 +115,6 @@ packages:
   # --- are unchanged from Issue #4317's original baseline entries. ----------
   - path: features/workflow/modules/m365
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/gdap
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/gdap/types
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: pkg/directory/providers/network_activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
 
@@ -151,20 +147,6 @@ packages:
       whose own caller is missing. Same follow-up as
       features/controller/directory; the fix is a caller two levels up in
       features/controller/server / cmd/controller, not in this package.
-
-  - path: features/saas
-    reason: >
-      WIRE (Issue #4345): multi-tenant SaaS provider/JWT/OAuth2
-      infrastructure with real security-hardening history (mock OAuth2/JWT
-      replaced with real implementations, cross-tenant token-mismatch
-      rejection). Its only consumer, features/workflow/modules/m365/gdap,
-      is itself unreachable — out of scope for #4345 (M365 module-wiring is
-      its own story). docs/product/roadmap.md still lists "SaaS Steward
-      using workflow engine foundation" and "Advanced multi-tenant SaaS
-      management" as open (unchecked) items. Wiring this package is
-      sequenced after, and should be decided jointly with, the M365
-      module-wiring story — deleting it would strand that tree's only
-      tenant-auth layer.
 
   # --- DELETE (Issue #4345): superseded, orphaned, or abandoned — a ---------
   # --- capability-map-then-delete follow-up is drafted in the #4345 ---------
