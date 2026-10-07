@@ -710,3 +710,26 @@ describe('TriggerPanel — security (A9.1)', () => {
     ).toBeUndefined()
   })
 })
+
+describe('TriggerPanel — workflowName filter', () => {
+  it('lists only the named workflow\'s triggers and defaults new triggers to it', async () => {
+    fetchMock.mockResolvedValue(
+      makeTriggersResponse([
+        makeTrigger({ id: 'a', name: 'keep-me', workflow_name: 'wf-1' }),
+        makeTrigger({ id: 'b', name: 'drop-me', workflow_name: 'wf-2' }),
+      ]),
+    )
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <TriggerPanel onClose={vi.fn()} workflowName="wf-1" />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getAllByTestId('trigger-row')).toHaveLength(1))
+    expect(screen.getByText('keep-me')).toBeInTheDocument()
+    expect(screen.queryByText('drop-me')).toBeNull()
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+    expect(screen.getByTestId('trigger-workflow-input')).toHaveValue('wf-1')
+  })
+})

@@ -85,7 +85,7 @@ function ExecRow({
 
 interface WorkflowExecutionViewProps {
   workflowName: string
-  onClose: () => void
+  onClose?: () => void
 }
 
 export default function WorkflowExecutionView({
@@ -183,14 +183,16 @@ export default function WorkflowExecutionView({
     <div className="wf-exec-panel" data-testid="workflow-exec-panel">
       <div className="wf-exec-header">
         <h2>Executions: {workflowName}</h2>
-        <button
-          type="button"
-          className="wf-exec-close"
-          aria-label="Close execution view"
-          onClick={onClose}
-        >
-          ✕
-        </button>
+        {onClose && (
+          <button
+            type="button"
+            className="wf-exec-close"
+            aria-label="Close execution view"
+            onClick={onClose}
+          >
+            ✕
+          </button>
+        )}
       </div>
 
       {/* Execute toolbar */}
