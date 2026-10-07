@@ -12,6 +12,7 @@ import (
 	"github.com/cfgis/cfgms/features/modules"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/cfgis/cfgms/features/workflow/modules/m365/graph"
+	"github.com/cfgis/cfgms/pkg/ctxkeys"
 )
 
 // conditionalAccessModule implements the Module interface for Conditional Access policy management
@@ -292,10 +293,31 @@ func (m *conditionalAccessModule) Set(ctx context.Context, resourceID string, co
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Authenticate with Microsoft Graph
-	token, err := m.authProvider.GetAccessToken(ctx, caConfig.TenantID)
+	// The CFGMS tenant this workflow execution is authenticated as is the sole
+	// authority for which M365 credentials get used — never the tenant_id a
+	// workflow step's own configuration claims (Issue #4325, same fix as
+	// entra_user). Config-supplied tenant_id is still required (Validate
+	// above) and is checked against the authenticated tenant's actual M365
+	// tenant below, but it never selects which credentials are looked up.
+	cfgmsTenantID, err := requireExecutionTenant(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Authenticate with Microsoft Graph using the credentials on file for this
+	// CFGMS tenant.
+	token, err := m.authProvider.GetAccessToken(ctx, cfgmsTenantID)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
+	}
+
+	// Refuse when the workflow step's declared tenant_id does not match the
+	// M365 tenant actually configured for this CFGMS tenant — a mismatch means
+	// the step is either misconfigured or attempting to act on a different
+	// customer's M365 tenant.
+	if caConfig.TenantID != token.TenantID {
+		return fmt.Errorf("configured tenant_id %q does not match the M365 tenant configured for this workflow execution",
+			caConfig.TenantID)
 	}
 
 	// Parse policy ID from resource ID if provided
@@ -331,10 +353,27 @@ func (m *conditionalAccessModule) Get(ctx context.Context, resourceID string) (m
 		return nil, fmt.Errorf("invalid resource ID format: %w", err)
 	}
 
-	// Authenticate with Microsoft Graph
-	token, err := m.authProvider.GetAccessToken(ctx, tenantID)
+	// The CFGMS tenant this workflow execution is authenticated as is the
+	// sole authority for which M365 credentials get used. The resource ID's
+	// own tenant segment is never used to select credentials (Issue #4325) —
+	// it is only checked for agreement below.
+	cfgmsTenantID, err := requireExecutionTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Authenticate with Microsoft Graph using the credentials on file for this
+	// CFGMS tenant.
+	token, err := m.authProvider.GetAccessToken(ctx, cfgmsTenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authenticate with Microsoft Graph: %w", err)
+	}
+
+	// Refuse when the resource ID's declared tenant does not match the M365
+	// tenant actually configured for this CFGMS tenant.
+	if tenantID != token.TenantID {
+		return nil, fmt.Errorf("resource tenant %q does not match the M365 tenant configured for this workflow execution",
+			tenantID)
 	}
 
 	// Get policy from Graph API
@@ -582,4 +621,17 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// requireExecutionTenant reads the CFGMS tenant the current workflow
+// execution is authenticated as. It fails closed: a missing tenant context
+// (wrong context key, a dropped context.Background() call, a forgotten
+// propagation) must never be treated as an unrestricted or default tenant
+// (Issue #4325, matching the fail-closed convention in pkg/ctxkeys).
+func requireExecutionTenant(ctx context.Context) (string, error) {
+	tenantID, _ := ctx.Value(ctxkeys.TenantID).(string)
+	if tenantID == "" {
+		return "", fmt.Errorf("conditional_access: tenant context required")
+	}
+	return tenantID, nil
 }

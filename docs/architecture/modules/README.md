@@ -393,23 +393,22 @@ CFGMS-authored but used on only a subset of the fleet; built as standalone bundl
 **Workflow modules:**
 
 - `m365/*` (workflow kind, hosted by the controller workflow engine, at `features/workflow/modules/m365/`) - Microsoft 365 modules: `auth`, `conditional_access`, `entra_admin_unit`, `entra_application`, `entra_group`, `entra_user`, `intune_policy`. The `gdap/` and `graph/` directories under the same parent are shared support packages, not module roots. These modules declare `executors: [controller]` — they run on the controller workflow engine against cloud APIs and are never pulled by a steward, so `observe_when` and the omission marker do not apply to them.
-  `entra_user` (Issue #4325) and `entra_group` (Issue #4420) are the two
-  modules of the seven that are buildable and resolvable end to end: each has
-  a `cmd/main.go` (built via the Makefile's `WORKFLOW_MODULES` list /
-  `build-workflow-modules` target, separate from `STDLIB_MODULES`), its
+  Six of the listed M365 directories are workflow modules (`auth` is a shared
+  support package): `entra_user` (Issue #4325), `entra_group` (Issue #4420),
+  and `conditional_access`, `entra_admin_unit`, `entra_application` and
+  `intune_policy` (Issue #4421). All six are buildable and resolvable end to
+  end: each has a `cmd/main.go` (built via the Makefile's `WORKFLOW_MODULES`
+  list / `build-workflow-modules` target, separate from `STDLIB_MODULES`), its
   bundle can be published to and approved in the controller module cache
   through the existing cache APIs, and
-  `WorkflowModuleFactory.CreateModuleInstance("m365-entra-user")` /
-  `CreateModuleInstance("m365-entra-group")` resolve and fork/exec them.
+  `WorkflowModuleFactory.CreateModuleInstance("m365-entra-user")` (likewise
+  `m365-entra-group`, `m365-conditional-access`, `m365-entra-admin-unit`,
+  `m365-entra-application`, `m365-intune-policy`) resolves and fork/execs them.
   Their credentials are partitioned by the real CFGMS tenant
   (`SecretStoreCredentialStore`, keyed by the authenticated tenant rather than
   a shared constant) and each takes the CFGMS tenant it acts on from the
   authenticated workflow execution context (`ctxkeys.TenantID`), refusing a
-  disagreeing step-configuration or resource-ID tenant. The other five M365
-  modules remain unwired — no `cmd/main.go`, not in `WORKFLOW_MODULES`, not
-  resolvable by the workflow engine — and are expected to follow the same
-  path later by adding a `cmd/main.go` and a `WORKFLOW_MODULES` entry, without
-  redesign.
+  disagreeing step-configuration or resource-ID tenant.
 
 ## Script Module — Parameter Environment Variables
 

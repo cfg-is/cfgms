@@ -115,17 +115,9 @@ packages:
   # --- are unchanged from Issue #4317's original baseline entries. ----------
   - path: features/workflow/modules/m365
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/conditional_access
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/entra_admin_unit
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/entra_application
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365/gdap
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: features/workflow/modules/m365/gdap/types
-    reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
-  - path: features/workflow/modules/m365/intune_policy
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
   - path: pkg/directory/providers/network_activedirectory
     reason: baseline (Issue #4317) — unreachable from every main package at gate introduction; tracked for removal or wiring-in.
