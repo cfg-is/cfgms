@@ -138,3 +138,39 @@ func TestFlatFileAlertStore_IdempotentAcknowledge(t *testing.T) {
 func TestFlatFileAlertStore_CompileTimeAssertion(t *testing.T) {
 	var _ business.AlertStore = (*FlatFileAlertStore)(nil)
 }
+
+func TestFlatFileAlertStore_Unsilence(t *testing.T) {
+	store := newTestAlertStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	require.NoError(t, store.AcknowledgeAlert(ctx, "t1", "a1", "alice", now))
+	require.NoError(t, store.SilenceAlert(ctx, "t1", "a1", "bob", now.Add(time.Hour)))
+	require.NoError(t, store.UnsilenceAlert(ctx, "t1", "a1", "carol", now))
+
+	st, err := store.GetAlertState(ctx, "t1", "a1")
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	assert.False(t, st.Silenced)
+	assert.Empty(t, st.SilencedBy)
+	assert.True(t, st.SilencedUntil.IsZero() || st.SilencedUntil.Year() <= 1, "silenced_until must be cleared")
+	assert.True(t, st.Acknowledged, "acknowledgement must survive unsilence")
+
+	// Idempotent on an already-unsilenced alert.
+	require.NoError(t, store.UnsilenceAlert(ctx, "t1", "a1", "carol", now))
+}
+
+func TestFlatFileAlertStore_Unsilence_UnknownAndCrossTenant(t *testing.T) {
+	store := newTestAlertStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	assert.ErrorIs(t, store.UnsilenceAlert(ctx, "t1", "missing", "carol", now), business.ErrAlertNotFound)
+
+	require.NoError(t, store.SilenceAlert(ctx, "t1", "a1", "bob", now.Add(time.Hour)))
+	assert.ErrorIs(t, store.UnsilenceAlert(ctx, "t2", "a1", "carol", now), business.ErrAlertNotFound)
+	st, err := store.GetAlertState(ctx, "t1", "a1")
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	assert.True(t, st.Silenced, "other tenant's unsilence must not touch the alert")
+}

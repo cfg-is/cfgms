@@ -679,6 +679,98 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /alerts/{alertId}/unsilence:
+    post:
+      summary: Unsilence an alert
+      description: |
+        Reverses a silence, clearing the silence flag, its expiry and the silencing
+        principal. Requires `alert:unsilence` at Strong assurance (same gate as silence).
+        Idempotent: unsilencing an alert that is not silenced returns its current state.
+      operationId: unsilenceAlert
+      tags:
+        - Alerts
+      parameters:
+        - name: alertId
+          in: path
+          required: true
+          description: Alert identifier
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Updated alert state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertState'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: Alert store not configured
+
+  /reports/dashboard/alerts:
+    get:
+      summary: Dashboard alert feed
+      description: |
+        Drift-derived alerts with acknowledgement and silence state. Actively silenced
+        alerts are excluded unless `include_silenced=true`.
+      operationId: getDashboardAlerts
+      tags:
+        - Alerts
+      parameters:
+        - name: severity
+          in: query
+          required: false
+          description: Comma-separated severity filter (critical, warning, info). Defaults to warning,critical.
+          schema:
+            type: string
+        - name: include_silenced
+          in: query
+          required: false
+          description: When true, include alerts whose silence window is still open (with silenced true).
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Alert feed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        timestamp:
+                          type: string
+                        device_id:
+                          type: string
+                        severity:
+                          type: string
+                        description:
+                          type: string
+                        acknowledged:
+                          type: boolean
+                        silenced:
+                          type: boolean
+                        acknowledged_by:
+                          type: string
+                          description: Present only when known
+                        silenced_by:
+                          type: string
+                          description: Present only when known
+                  total_alerts:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -697,6 +789,25 @@ components:
         type: string
 
   schemas:
+    AlertState:
+      type: object
+      properties:
+        alert_id:
+          type: string
+        acknowledged:
+          type: boolean
+        acknowledged_by:
+          type: string
+        acknowledged_at:
+          type: string
+          format: date-time
+        silenced:
+          type: boolean
+        silenced_by:
+          type: string
+        silenced_until:
+          type: string
+          format: date-time
     SuccessResponse:
       type: object
       properties:

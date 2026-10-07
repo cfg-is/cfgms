@@ -100,6 +100,30 @@ func (s *DatabaseAlertStore) SilenceAlert(ctx context.Context, tenantID, alertID
 	return nil
 }
 
+// UnsilenceAlert implements AlertStore.UnsilenceAlert.
+func (s *DatabaseAlertStore) UnsilenceAlert(ctx context.Context, tenantID, alertID, _ string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE cfgms_alert_states
+		SET silenced = FALSE, silenced_by = '', silenced_until = '0001-01-01 00:00:00+00'
+		WHERE tenant_id = $1 AND alert_id = $2`,
+		tenantID, alertID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to unsilence alert: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to unsilence alert: %w", err)
+	}
+	if n == 0 {
+		return business.ErrAlertNotFound
+	}
+	return nil
+}
+
 // GetAlertState implements AlertStore.GetAlertState.
 // Returns nil, nil when the alertID has never been touched.
 func (s *DatabaseAlertStore) GetAlertState(ctx context.Context, tenantID, alertID string) (*business.AlertState, error) {

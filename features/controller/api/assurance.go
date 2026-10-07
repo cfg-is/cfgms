@@ -135,7 +135,8 @@ var permissionAssurance = map[string]Requirement{
 	// Alert silence (Issue #3266): silencing hides a real alert until it expires —
 	// treat it like other consequential write actions already in this map.
 	// alert:acknowledge is intentionally absent: low-risk read-adjacent action.
-	"alert:silence": {Min: session.AssuranceStrong},
+	"alert:silence":   {Min: session.AssuranceStrong},
+	"alert:unsilence": {Min: session.AssuranceStrong},
 
 	// OSquery ad-hoc fleet query dispatch (Issue #3569): gates POST /api/v1/osquery/query.
 	// RequireUserPresence: true mirrors module:approve/module:reject — catalog templates

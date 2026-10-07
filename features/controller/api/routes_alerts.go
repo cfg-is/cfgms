@@ -18,4 +18,7 @@ func registerAlertRoutes(s *Server, api *mux.Router) {
 	alerts.Handle("/{id}/silence",
 		s.requirePermission("alert", "silence")(http.HandlerFunc(s.handleSilenceAlert)),
 	).Methods("POST")
+	alerts.Handle("/{id}/unsilence",
+		s.requirePermission("alert", "unsilence")(http.HandlerFunc(s.handleUnsilenceAlert)),
+	).Methods("POST")
 }

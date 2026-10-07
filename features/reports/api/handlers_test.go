@@ -1081,6 +1081,57 @@ func TestDashboardAlerts_AckSilence(t *testing.T) {
 	})
 }
 
+// TestDashboardAlerts_IncludeSilencedAndActors verifies include_silenced, the
+// acknowledged_by/silenced_by fields, and that an unsilenced alert returns to the
+// default feed.
+func TestDashboardAlerts_IncludeSilencedAndActors(t *testing.T) {
+	stack := newReportsStack(t)
+	stack.addDeviceWithDrift(t, "sil-device", "tenant-sil",
+		map[string]string{"host:hostname": "old"},
+		map[string]string{"host:hostname": "new"},
+	)
+	fetch := func(params string) []map[string]interface{} {
+		rec := httptest.NewRecorder()
+		stack.handler.getDashboardAlerts(rec, request("GET",
+			"/reports/dashboard/alerts?device_id=sil-device&severity=warning"+params, "tenant-sil", nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Alerts []map[string]interface{} `json:"alerts"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body.Alerts
+	}
+
+	initial := fetch("")
+	require.NotEmpty(t, initial)
+	deviceID, _ := initial[0]["device_id"].(string)
+	description, _ := initial[0]["description"].(string)
+	alertID := deriveAlertID(deviceID, description)
+	_, hasAck := initial[0]["acknowledged_by"]
+	assert.False(t, hasAck, "acknowledged_by absent when unknown")
+
+	ctx := context.Background()
+	require.NoError(t, stack.alertStore.AcknowledgeAlert(ctx, "tenant-sil", alertID, "alice", time.Now()))
+	require.NoError(t, stack.alertStore.SilenceAlert(ctx, "tenant-sil", alertID, "bob", time.Now().Add(time.Hour)))
+
+	assert.Empty(t, fetch(""), "default feed excludes actively silenced alerts")
+	assert.Empty(t, fetch("&include_silenced=false"), "include_silenced=false keeps default")
+
+	included := fetch("&include_silenced=true")
+	require.Len(t, included, 1)
+	assert.Equal(t, true, included[0]["silenced"])
+	assert.Equal(t, "bob", included[0]["silenced_by"])
+	assert.Equal(t, "alice", included[0]["acknowledged_by"])
+
+	require.NoError(t, stack.alertStore.UnsilenceAlert(ctx, "tenant-sil", alertID, "carol", time.Now()))
+	after := fetch("")
+	require.Len(t, after, 1, "unsilenced alert reappears in the default feed")
+	assert.Equal(t, false, after[0]["silenced"])
+	assert.Equal(t, "alice", after[0]["acknowledged_by"])
+	_, hasSilencedBy := after[0]["silenced_by"]
+	assert.False(t, hasSilencedBy)
+}
+
 // TestDashboardAlerts_AlertStateUnavailable verifies the failure path of the
 // AlertStore lookup in getDashboardAlerts: when GetAlertState returns an error
 // the handler must fail closed with 503 rather than serve alerts whose

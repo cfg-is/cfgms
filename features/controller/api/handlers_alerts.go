@@ -121,6 +121,88 @@ func (s *Server) handleSilenceAlert(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// AlertStateResponse is the body returned by POST /api/v1/alerts/{id}/unsilence.
+type AlertStateResponse struct {
+	AlertID        string     `json:"alert_id"`
+	Acknowledged   bool       `json:"acknowledged"`
+	AcknowledgedBy string     `json:"acknowledged_by,omitempty"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	Silenced       bool       `json:"silenced"`
+	SilencedBy     string     `json:"silenced_by,omitempty"`
+	SilencedUntil  *time.Time `json:"silenced_until,omitempty"`
+}
+
+// handleUnsilenceAlert handles POST /api/v1/alerts/{id}/unsilence.
+// Requires "alert:unsilence" permission (AssuranceStrong, same gate as silence).
+// Idempotent: an alert that is not silenced returns 200 with its current state.
+// An alert with no state in the caller's tenant returns 404 without revealing
+// whether another tenant holds one.
+func (s *Server) handleUnsilenceAlert(w http.ResponseWriter, r *http.Request) {
+	alertID := mux.Vars(r)["id"]
+
+	if s.alertStore == nil {
+		http.Error(w, "alert store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	callerTenant := callerTenantFilter(r.Context())
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principalID := ""
+	if principal != nil {
+		principalID = principal.ID
+	}
+
+	if err := s.alertStore.UnsilenceAlert(r.Context(), callerTenant, alertID, principalID, time.Now().UTC()); err != nil {
+		if errors.Is(err, business.ErrAlertNotFound) {
+			http.Error(w, "alert not found", http.StatusNotFound)
+			return
+		}
+		s.logger.Error("Failed to unsilence alert",
+			"alert_id", logging.SanitizeLogValue(alertID),
+			"tenant_id", logging.SanitizeLogValue(callerTenant),
+			"error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "failed to unsilence alert", http.StatusInternalServerError)
+		return
+	}
+
+	st, err := s.alertStore.GetAlertState(r.Context(), callerTenant, alertID)
+	if err != nil || st == nil {
+		if err != nil {
+			s.logger.Error("Failed to read alert state after unsilence",
+				"alert_id", logging.SanitizeLogValue(alertID),
+				"tenant_id", logging.SanitizeLogValue(callerTenant),
+				"error", logging.SanitizeLogValue(err.Error()))
+		}
+		http.Error(w, "failed to read alert state", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info("Alert unsilenced",
+		"alert_id", logging.SanitizeLogValue(alertID),
+		"tenant_id", logging.SanitizeLogValue(callerTenant),
+		"principal", logging.SanitizeLogValue(principalID))
+	s.emitAlertAudit(r, "alert.unsilenced", alertID, callerTenant, principalID, nil)
+
+	resp := AlertStateResponse{
+		AlertID:        st.AlertID,
+		Acknowledged:   st.Acknowledged,
+		AcknowledgedBy: st.AcknowledgedBy,
+		Silenced:       st.Silenced,
+		SilencedBy:     st.SilencedBy,
+	}
+	if !st.AcknowledgedAt.IsZero() {
+		at := st.AcknowledgedAt.UTC()
+		resp.AcknowledgedAt = &at
+	}
+	if !st.SilencedUntil.IsZero() {
+		until := st.SilencedUntil.UTC()
+		resp.SilencedUntil = &until
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 // emitAlertAudit records an alert-state audit event.
 // details carries action-specific fields (acknowledge reason, silence expiry).
 // It is a no-op when auditManager is nil.

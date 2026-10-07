@@ -144,6 +144,27 @@ func (s *FlatFileAlertStore) SilenceAlert(_ context.Context, tenantID, alertID, 
 	return s.save(states)
 }
 
+// UnsilenceAlert implements AlertStore.UnsilenceAlert.
+func (s *FlatFileAlertStore) UnsilenceAlert(_ context.Context, tenantID, alertID, _ string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	states, err := s.load()
+	if err != nil {
+		return err
+	}
+
+	for i, st := range states {
+		if st.TenantID == tenantID && st.AlertID == alertID {
+			states[i].Silenced = false
+			states[i].SilencedBy = ""
+			states[i].SilencedUntil = time.Time{}
+			return s.save(states)
+		}
+	}
+	return business.ErrAlertNotFound
+}
+
 // GetAlertState implements AlertStore.GetAlertState.
 // Returns nil, nil when the alertID has never been acknowledged or silenced.
 func (s *FlatFileAlertStore) GetAlertState(_ context.Context, tenantID, alertID string) (*business.AlertState, error) {

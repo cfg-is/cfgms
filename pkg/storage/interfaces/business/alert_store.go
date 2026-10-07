@@ -25,6 +25,12 @@ type AlertStore interface {
 	// silence window. Silencing is independent of acknowledgement.
 	SilenceAlert(ctx context.Context, tenantID, alertID, principal string, until time.Time) error
 
+	// UnsilenceAlert reverses a silence: it clears Silenced, SilencedBy and SilencedUntil
+	// for (tenantID, alertID). principal and at identify the actor and time for the
+	// caller's audit record. Idempotent: unsilencing a not-silenced alert is a no-op.
+	// Returns ErrAlertNotFound when no state record exists for the alertID.
+	UnsilenceAlert(ctx context.Context, tenantID, alertID, principal string, at time.Time) error
+
 	// GetAlertState returns the persisted state for (tenantID, alertID).
 	// Returns nil, nil when the alertID has never been acknowledged or silenced.
 	GetAlertState(ctx context.Context, tenantID, alertID string) (*AlertState, error)

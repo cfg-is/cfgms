@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -169,6 +170,7 @@ func TestHandleAlertNoStore(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/alerts/some-id/acknowledge",
 		"/api/v1/alerts/some-id/silence",
+		"/api/v1/alerts/some-id/unsilence",
 	} {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -233,4 +235,73 @@ func TestHandleSilenceAlert_MissingUntil(t *testing.T) {
 		AlertSilenceRequest{Until: time.Time{}}, // zero time
 	))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// TestHandleUnsilenceAlert verifies unsilence returns the updated state, is
+// idempotent, and 404s for an alert with no state, on each provider.
+func TestHandleUnsilenceAlert(t *testing.T) {
+	for name, store := range alertStoreProviders(t) {
+		store := store
+		t.Run(name, func(t *testing.T) {
+			server := newAlertServer(t, store)
+			ctx := context.Background()
+			alertID := uniqueAlertID(t, "unsilence", name)
+
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, makeAlertRequest(t, "/api/v1/alerts/"+alertID+"/silence",
+				AlertSilenceRequest{Until: time.Now().Add(time.Hour)}))
+			require.Equal(t, http.StatusNoContent, rec.Code)
+
+			for i := 0; i < 2; i++ { // second pass proves idempotence
+				rec = httptest.NewRecorder()
+				server.router.ServeHTTP(rec, makeAlertRequest(t, "/api/v1/alerts/"+alertID+"/unsilence", nil))
+				require.Equal(t, http.StatusOK, rec.Code)
+				var got AlertStateResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+				assert.Equal(t, alertID, got.AlertID)
+				assert.False(t, got.Silenced)
+				assert.Nil(t, got.SilencedUntil)
+			}
+
+			st, err := store.GetAlertState(ctx, "", alertID)
+			require.NoError(t, err)
+			require.NotNil(t, st)
+			assert.False(t, st.Silenced)
+
+			rec = httptest.NewRecorder()
+			server.router.ServeHTTP(rec, makeAlertRequest(t,
+				"/api/v1/alerts/"+uniqueAlertID(t, "never", name)+"/unsilence", nil))
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		})
+	}
+}
+
+// TestHandleUnsilenceAlert_CrossTenant verifies a caller scoped to another tenant
+// cannot reverse a silence and gets the same 404 as for an unknown alert, and that
+// the handler resolves tenant exactly as silence does (callerTenantFilter).
+func TestHandleUnsilenceAlert_CrossTenant(t *testing.T) {
+	store := newTestFlatFileAlertStore(t)
+	server := newAlertServer(t, store)
+	ctx := context.Background()
+	require.NoError(t, store.SilenceAlert(ctx, "tenant-a", "shared-alert", "bob", time.Now().Add(time.Hour)))
+
+	call := func(tenant string) int {
+		req := httptest.NewRequest("POST", "/api/v1/alerts/shared-alert/unsilence", nil)
+		req = mux.SetURLVars(req, map[string]string{"id": "shared-alert"})
+		req = req.WithContext(withCallerTenant(req.Context(), tenant))
+		rec := httptest.NewRecorder()
+		server.handleUnsilenceAlert(rec, req)
+		return rec.Code
+	}
+
+	assert.Equal(t, http.StatusNotFound, call("tenant-b"))
+	st, err := store.GetAlertState(ctx, "tenant-a", "shared-alert")
+	require.NoError(t, err)
+	require.NotNil(t, st)
+	assert.True(t, st.Silenced, "cross-tenant unsilence must not modify the alert")
+
+	assert.Equal(t, http.StatusOK, call("tenant-a"))
+	st, err = store.GetAlertState(ctx, "tenant-a", "shared-alert")
+	require.NoError(t, err)
+	assert.False(t, st.Silenced)
 }
