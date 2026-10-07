@@ -75,6 +75,12 @@ func TestTenantStore_LifecycleContract(t *testing.T) {
 	business.TenantStoreLifecycleContract(t, newTenantStore(t))
 }
 
+// TestTenantStore_BillingLabelContract holds this provider to the shared opaque
+// billing label contract (Issue #4645).
+func TestTenantStore_BillingLabelContract(t *testing.T) {
+	business.TenantStoreBillingLabelContract(t, newTenantStore(t))
+}
+
 func TestTenantStore_Update(t *testing.T) {
 	store := newTenantStore(t)
 	ctx := context.Background()

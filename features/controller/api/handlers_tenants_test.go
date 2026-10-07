@@ -2066,3 +2066,24 @@ func TestHandleUpdateTenant_OwnCredentialRef_Returns200(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "self-msp/git-token", stored.Metadata["config_source_credential"])
 }
+
+// TestTenantResponses_OmitBillingLabel asserts the opaque billing label never
+// appears on the list or get tenant responses (ADR-025 Amendment 6 A6.2).
+func TestTenantResponses_OmitBillingLabel(t *testing.T) {
+	server := setupTestServer(t)
+	ctx := context.Background()
+
+	created, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "label-tenant", ParentID: testRootTenantID})
+	require.NoError(t, err)
+	require.NotEmpty(t, created.BillingLabel, "pre-condition: tenant has a stored label")
+
+	for _, path := range []string{"/api/v1/tenants", "/api/v1/tenants/label-tenant"} {
+		req := makeAdminRequest(t, http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		server.router.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, path)
+		body := w.Body.String()
+		assert.NotContains(t, body, "billing_label", path)
+		assert.NotContains(t, body, created.BillingLabel, path)
+	}
+}

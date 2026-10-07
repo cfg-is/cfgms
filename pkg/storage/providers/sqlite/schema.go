@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 const currentSchemaVersion = 2
@@ -365,6 +367,69 @@ func backfillTenantLifecycle(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// backfillTenantBillingLabel adds the opaque billing_label column to a
+// pre-existing tenants table (Issue #4645, ADR-025 Amendment 6 A6.2), fills every
+// row that has none with a random label (never derived from any tenant field),
+// and adds the unique index. Fresh databases (table absent) are skipped. Idempotent:
+// labels that already exist are never changed.
+func backfillTenantBillingLabel(ctx context.Context, db *sql.DB) error {
+	exists, err := tableExists(ctx, db, "tenants")
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant billing label back-fill probe failed: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	present, err := columnExists(ctx, db, "tenants", "billing_label")
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant billing label column probe failed: %w", err)
+	}
+	if !present {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tenants ADD COLUMN billing_label TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("sqlite: tenant billing label back-fill failed: %w", err)
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT id FROM tenants WHERE billing_label = ''`)
+	if err != nil {
+		return fmt.Errorf("sqlite: tenant billing label back-fill scan failed: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("sqlite: tenant billing label back-fill scan failed: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("sqlite: tenant billing label back-fill scan failed: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("sqlite: tenant billing label back-fill scan failed: %w", err)
+	}
+	for _, id := range ids {
+		label, err := business.NewBillingLabel()
+		if err != nil {
+			return fmt.Errorf("sqlite: tenant billing label generation failed: %w", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`UPDATE tenants SET billing_label = ? WHERE id = ? AND billing_label = ''`, label, id,
+		); err != nil {
+			return fmt.Errorf("sqlite: tenant billing label back-fill failed: %w", err)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_billing_label ON tenants(billing_label)`,
+	); err != nil {
+		return fmt.Errorf("sqlite: tenant billing label index failed: %w", err)
+	}
+	return nil
+}
+
 // backfillCommandDeliveryColumns adds the outbox delivery-lifecycle columns to a
 // pre-existing commands table (Issue #3757, ADR-031 Decision 2). Fresh databases
 // (table absent) are skipped. Column-existence is checked via PRAGMA before each
@@ -457,6 +522,9 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 	if err := backfillTenantLifecycle(ctx, db); err != nil {
 		return err
 	}
+	if err := backfillTenantBillingLabel(ctx, db); err != nil {
+		return err
+	}
 	if err := backfillCfgmsPendingRegistrationColumns(ctx, db); err != nil {
 		return err
 	}
@@ -490,9 +558,11 @@ func initializeSchema(ctx context.Context, db *sql.DB) error {
 			status                TEXT NOT NULL DEFAULT 'active',
 			directly_suspended    INTEGER NOT NULL DEFAULT 0,
 			cascade_suspended_from TEXT,
+			billing_label         TEXT NOT NULL DEFAULT '',
 			created_at            TEXT NOT NULL,
 			updated_at            TEXT NOT NULL
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_billing_label ON tenants(billing_label)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_parent_id  ON tenants(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_status      ON tenants(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_tenants_name        ON tenants(name)`,

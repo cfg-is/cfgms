@@ -1496,3 +1496,92 @@ func TestBackfillCaseColumns_AlterFailure(t *testing.T) {
 	require.Error(t, err, "ALTER TABLE on read-only DB must return an error")
 	assert.Contains(t, err.Error(), "cases back-fill failed", "error must identify the back-fill stage")
 }
+
+// TestBackfillTenantBillingLabel_LegacyTable verifies that initializeSchema adds
+// billing_label to a tenants table without it, gives every existing row a unique
+// non-empty label, and leaves those labels untouched on later passes.
+func TestBackfillTenantBillingLabel_LegacyTable(t *testing.T) {
+	db := openMemDB(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, legacyTenantsSchema)
+	require.NoError(t, err, "seed legacy tenants schema")
+	for _, id := range []string{"t-a", "t-b", "t-c"} {
+		_, err = db.ExecContext(ctx,
+			`INSERT INTO tenants (id, name, created_at, updated_at) VALUES (?, 'acme-corp', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`, id)
+		require.NoError(t, err)
+	}
+	require.False(t, hasColumn(t, db, "tenants", "billing_label"), "pre-condition: column absent")
+
+	labels := func() map[string]string {
+		rows, err := db.QueryContext(ctx, `SELECT id, billing_label FROM tenants`)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, rows.Close()) }()
+		out := map[string]string{}
+		for rows.Next() {
+			var id, label string
+			require.NoError(t, rows.Scan(&id, &label))
+			out[id] = label
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+
+	require.NoError(t, initializeSchema(ctx, db), "first pass")
+	require.True(t, hasColumn(t, db, "tenants", "billing_label"))
+	first := labels()
+	require.Len(t, first, 3)
+	seen := map[string]bool{}
+	for id, l := range first {
+		assert.NotEmpty(t, l, "tenant %s must get a label", id)
+		assert.NotContains(t, l, "acme", "label must not contain the name")
+		assert.False(t, seen[l], "labels must be unique")
+		seen[l] = true
+	}
+
+	require.NoError(t, initializeSchema(ctx, db), "second pass")
+	assert.Equal(t, first, labels(), "second pass must not change existing labels")
+}
+
+// TestTenantStore_BillingLabelStableAcrossRestarts opens, closes and reopens a
+// file-backed store twice; every label must be unchanged and all unique.
+func TestTenantStore_BillingLabelStableAcrossRestarts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tenants.db")
+	ctx := context.Background()
+
+	open := func() *SQLiteTenantStore {
+		db, err := openAndInit(path)
+		require.NoError(t, err)
+		return &SQLiteTenantStore{db: db}
+	}
+	snapshot := func(s *SQLiteTenantStore) map[string]string {
+		all, err := s.ListTenants(ctx, nil)
+		require.NoError(t, err)
+		out := map[string]string{}
+		for _, td := range all {
+			out[td.ID] = td.BillingLabel
+		}
+		return out
+	}
+
+	s := open()
+	for _, id := range []string{"r-1", "r-2", "r-3"} {
+		require.NoError(t, s.CreateTenant(ctx, &business.TenantData{ID: id, Name: "acme-corp", Status: business.TenantStatusActive}))
+	}
+	before := snapshot(s)
+	require.NoError(t, s.Close())
+
+	for i := 0; i < 2; i++ {
+		s = open()
+		assert.Equal(t, before, snapshot(s), "restart %d must not change labels", i+1)
+		require.NoError(t, s.Close())
+	}
+
+	seen := map[string]bool{}
+	for _, l := range before {
+		assert.NotEmpty(t, l)
+		assert.False(t, seen[l], "labels must be unique")
+		seen[l] = true
+	}
+	assert.Len(t, before, 3)
+}

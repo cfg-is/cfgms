@@ -110,6 +110,13 @@ type TenantData struct {
 	DirectlySuspended    bool    `json:"directly_suspended,omitempty" yaml:"directly_suspended,omitempty"`
 	CascadeSuspendedFrom *string `json:"cascade_suspended_from,omitempty" yaml:"cascade_suspended_from,omitempty"`
 
+	// BillingLabel is a random, opaque, stable label assigned once at tenant
+	// creation (ADR-025 Amendment 6, A6.2). It is never derived from the tenant
+	// name or ID and is tagged json:"-" yaml:"-" so no handler returning
+	// TenantData can serialise it. Stores persist it on create and never
+	// overwrite it on update.
+	BillingLabel string `json:"-" yaml:"-"`
+
 	CreatedAt time.Time `json:"created_at" yaml:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
 }

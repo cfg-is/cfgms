@@ -62,6 +62,12 @@ func TestDatabaseTenantStore_LifecycleContract(t *testing.T) {
 	business.TenantStoreLifecycleContract(t, newRegressionTenantStore(t))
 }
 
+// TestDatabaseTenantStore_BillingLabelContract holds the Postgres provider to the
+// shared opaque billing label contract (Issue #4645).
+func TestDatabaseTenantStore_BillingLabelContract(t *testing.T) {
+	business.TenantStoreBillingLabelContract(t, newRegressionTenantStore(t))
+}
+
 // TestDatabaseRBACStore_StoreRole_NoParent guards against a regression where
 // an empty ParentRoleId was inserted as a literal empty string instead of
 // NULL. parent_role_id has a self-referential foreign key, so every
