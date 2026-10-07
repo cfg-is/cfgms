@@ -17,8 +17,8 @@ import (
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
 	"github.com/cfgis/cfgms/pkg/secrets/providers/steward"
+	"github.com/cfgis/cfgms/pkg/storage/interfaces"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
-	"github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 const approvalTestTenant = "tenant-a"
@@ -28,21 +28,32 @@ const approvalTestTenant = "tenant-a"
 type approvalHarness struct {
 	t         *testing.T
 	storeRoot string
-	store     *flatfile.FlatFileApprovalStore
+	store     business.ApprovalStore
 	secrets   secretsif.SecretStore
 }
 
 func newApprovalHarness(t *testing.T) *approvalHarness {
 	t.Helper()
 	storeRoot := t.TempDir()
-	store, err := flatfile.NewFlatFileApprovalStore(storeRoot)
-	require.NoError(t, err)
+	store := openFlatfileApprovalStore(t, storeRoot)
 	secrets, err := (&steward.StewardProvider{}).CreateSecretStore(map[string]interface{}{
 		"secrets_dir": t.TempDir(),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = secrets.Close() })
 	return &approvalHarness{t: t, storeRoot: storeRoot, store: store, secrets: secrets}
+}
+
+// openFlatfileApprovalStore opens the registered flatfile provider's approval
+// store over root. A second call over the same root is a new handle over the
+// same files, which is what a controller restart sees.
+func openFlatfileApprovalStore(t *testing.T, root string) business.ApprovalStore {
+	t.Helper()
+	provider, err := interfaces.GetStorageProvider("flatfile")
+	require.NoError(t, err)
+	store, err := provider.CreateApprovalStore(map[string]interface{}{"root": root})
+	require.NoError(t, err)
+	return store
 }
 
 // engine starts a new engine over the shared stores and shuts it down at test end.
@@ -313,8 +324,7 @@ func TestApproval_RestartThenApproveCompletes(t *testing.T) {
 	e1.Shutdown()
 
 	// A restart: a new engine, and a new store handle over the same files.
-	reopened, err := flatfile.NewFlatFileApprovalStore(h.storeRoot)
-	require.NoError(t, err)
+	reopened := openFlatfileApprovalStore(t, h.storeRoot)
 	e2 := NewEngine(createTestFactory(), logging.NewNoopLogger(), h.secrets, nil, nil, nil, nil, WithApprovalStore(reopened))
 	t.Cleanup(e2.Shutdown)
 
