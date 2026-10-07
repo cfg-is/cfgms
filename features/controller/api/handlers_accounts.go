@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 
+	controller "github.com/cfgis/cfgms/api/proto/controller"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -135,6 +136,11 @@ type AccountInfo struct {
 	Disabled                     bool      `json:"disabled"` // Issue #3126
 	CreatedAt                    time.Time `json:"created_at"`
 	HasOutstandingEnrollmentLink bool      `json:"has_outstanding_enrollment_link"` // Issue #2974
+	// Roles lists the names of the RBAC roles bound to the account (Issue #4602).
+	// Populated by the list endpoint only, and only for callers holding
+	// rbac:list-subject-roles; nil (field omitted) otherwise, which is distinct
+	// from an empty non-nil slice (account holds no roles).
+	Roles *[]string `json:"roles,omitempty"`
 }
 
 // AccountUpdateRequest is the PUT /api/v1/accounts/{username} body (Issue #3126).
@@ -1086,6 +1092,11 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	// Resolve the caller's subtree once rather than per account.
 	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
 
+	// Issue #4602: role names are resolved per account only for callers who may
+	// read subject roles; everyone else gets the list without the field.
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	includeRoles := s.rbacService != nil && s.hasPermission(principal, "rbac:list-subject-roles")
+
 	accounts := make([]AccountInfo, 0, len(metas))
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
@@ -1123,7 +1134,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		accounts = append(accounts, AccountInfo{
+		info := AccountInfo{
 			ID:                           meta.Metadata["id"],
 			Username:                     meta.Metadata["username"],
 			TenantID:                     tenantID,
@@ -1132,10 +1143,37 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 			Disabled:                     meta.Metadata["disabled"] == "true", // Issue #3126
 			CreatedAt:                    createdAt,
 			HasOutstandingEnrollmentLink: hasOutstandingLink,
-		})
+		}
+		if includeRoles {
+			info.Roles = s.accountRoleNames(r.Context(), info.ID, tenantID)
+		}
+		accounts = append(accounts, info)
 	}
 
 	s.writeSuccessResponse(w, accounts)
+}
+
+// accountRoleNames resolves the role names bound to an account's RBAC subject
+// (Issue #4602). The RBAC manager has no batch read, so the list handler calls
+// this once per returned account. An account with no RBAC subject record (the
+// store reports it as not found) holds no roles, so a lookup failure yields an
+// empty list rather than failing the whole list.
+func (s *Server) accountRoleNames(ctx context.Context, subjectID, tenantID string) *[]string {
+	resp, err := s.rbacService.GetSubjectRoles(ctx, &controller.GetSubjectRolesRequest{
+		SubjectId: subjectID,
+		TenantId:  tenantID,
+	})
+	if err != nil {
+		s.logger.Debug("No roles resolved for account in list",
+			"subject_id", logging.SanitizeLogValue(subjectID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return &[]string{}
+	}
+	names := make([]string, 0, len(resp.Roles))
+	for _, role := range resp.Roles {
+		names = append(names, role.Name)
+	}
+	return &names
 }
 
 // VerifyCredential is the login-gate enforcement point for accounts (Issue #3126).

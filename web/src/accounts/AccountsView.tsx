@@ -216,6 +216,38 @@ function EnrollmentLinkPanel({
   )
 }
 
+const MAX_VISIBLE_ROLE_CHIPS = 2
+
+/**
+ * Role chips for the collapsed account row (Issue #4602). `roles` is undefined
+ * when the caller may not read subject roles. Role names are user-supplied, so
+ * they render as text nodes only.
+ */
+function RoleChips({ roles }: { roles: string[] | undefined }) {
+  if (roles === undefined) return <span className="mono2">—</span>
+  if (roles.length === 0) return <span className="mut" data-testid="account-no-roles">No roles</span>
+  const visible = roles.slice(0, MAX_VISIBLE_ROLE_CHIPS)
+  const overflow = roles.length - visible.length
+  return (
+    <>
+      {visible.map((name) => (
+        <span key={name} className="chip" data-testid="account-role-chip" style={{ marginRight: 4 }}>
+          {name}
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span
+          className="chip"
+          data-testid="account-role-overflow"
+          title={roles.slice(MAX_VISIBLE_ROLE_CHIPS).join(', ')}
+        >
+          +{overflow}
+        </span>
+      )}
+    </>
+  )
+}
+
 /**
  * Inline role management panel (Issue #3134). Renders inside the expansion
  * sub-row of an account row. Shows current roles as chips with a revoke
@@ -504,6 +536,9 @@ function AccountRow({
         <td>
           <span className="mono2">{account.permissions.length > 0 ? account.permissions.join(', ') : '—'}</span>
         </td>
+        <td data-testid="account-roles-cell">
+          <RoleChips roles={account.roles} />
+        </td>
         <td>
           <span className="mono2">{account.created_at ? new Date(account.created_at).toLocaleDateString() : '—'}</span>
         </td>
@@ -556,7 +591,7 @@ function AccountRow({
       </tr>
       {selected && (
         <tr data-testid="account-roles-row">
-          <td colSpan={5} style={{ paddingTop: 0 }} onClick={(e) => e.stopPropagation()}>
+          <td colSpan={6} style={{ paddingTop: 0 }} onClick={(e) => e.stopPropagation()}>
             <AccountExpandPanel account={account} />
           </td>
         </tr>
@@ -1007,6 +1042,7 @@ export default function AccountsView() {
                   <th>Username</th>
                   <th>Tenant</th>
                   <th>Permissions</th>
+                  <th>Roles</th>
                   <th>Created</th>
                   <th>Actions</th>
                 </tr>

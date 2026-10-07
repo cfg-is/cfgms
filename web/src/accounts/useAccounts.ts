@@ -59,6 +59,8 @@ export interface WebAccountInfo {
   disabled: boolean // Issue #3132
   created_at: string
   has_outstanding_enrollment_link: boolean // Issue #2974
+  /** Role names (Issue #4602). Undefined when the caller may not read subject roles. */
+  roles?: string[]
 }
 
 /**
@@ -106,6 +108,7 @@ export function parseWebAccountInfo(value: unknown): WebAccountInfo | null {
     disabled: r.disabled === true,
     created_at: str(r.created_at),
     has_outstanding_enrollment_link: r.has_outstanding_enrollment_link === true,
+    ...(Array.isArray(r.roles) ? { roles: strArr(r.roles) } : {}),
   }
 }
 

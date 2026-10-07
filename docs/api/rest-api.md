@@ -3336,6 +3336,12 @@ List all web admin accounts. No credential material (registered passkey public k
 subtree (filtered silently — out-of-subtree accounts are simply omitted, not
 rejected). Root/unscoped callers see every tenant's accounts.
 
+**Roles:** each item carries `roles`, the names of the RBAC roles bound to the
+account (an empty array when it holds none). Roles are resolved per returned
+account and only for callers holding `rbac:list-subject-roles` — the permission
+that gates `GET /api/v1/rbac/subjects/{id}/roles`. Without it the `roles` field is
+omitted and the list still succeeds.
+
 **Response:**
 
 ```json
@@ -3347,6 +3353,7 @@ rejected). Root/unscoped callers see every tenant's accounts.
       "tenant_id": "root",
       "root_scope": true,
       "permissions": ["steward:list", "steward:read"],
+      "roles": ["fleet-admin"],
       "created_at": "2026-01-12T10:30:00Z"
     },
     {
@@ -3355,6 +3362,7 @@ rejected). Root/unscoped callers see every tenant's accounts.
       "tenant_id": "root/msp-a",
       "root_scope": false,
       "permissions": ["steward:list"],
+      "roles": [],
       "created_at": "2026-01-10T08:00:00Z"
     }
   ],
