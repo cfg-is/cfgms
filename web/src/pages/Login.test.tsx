@@ -354,6 +354,11 @@ describe('forbidden references in source (security A7.1 / A7.2)', () => {
     // survives a reload. Non-secret, session-scoped, and re-validated against
     // the server on mount (useTenantCrossings.ts); not auth data.
     { path: 'tenants/useTenantCrossings.ts', key: 'cfgms.tenants.crossingBanner' },
+    // Session absolute expiry (Story #4597) — an epoch-ms timestamp for the
+    // user menu's "Session expires" line. Informational and non-secret (the
+    // session token itself stays in an HttpOnly cookie); enforcement is
+    // server-side. Cleared on sign-out, and ignored once in the past.
+    { path: 'auth/AuthContext.tsx', key: 'cfgms.session.expiresAt' },
   ]
 
   it('no non-test source file uses localStorage/sessionStorage outside the explicit allowlist', () => {

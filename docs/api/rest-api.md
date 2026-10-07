@@ -3053,6 +3053,24 @@ file is a full controller compromise.
 
 Web accounts are browser-based admin principals authenticated via WebAuthn passkeys (Issue #2993 / ADR-021 Amendment 1) — human web login has no password credential. They are RBAC-equivalent to API-key principals — they carry explicit `permissions` and a tenant scope, and are not implicit global admins.
 
+#### Passkey login finish response
+
+`POST /api/v1/web/passkey/login/finish` issues the web session as HttpOnly cookies. The response body (inside the standard `data` envelope) identifies the principal and reports when the session ends:
+
+```json
+{
+  "data": {
+    "ok": true,
+    "username": "admin@msp-a",
+    "tenant_id": "root/msp-a",
+    "root_scope": false,
+    "expires_at": "2026-10-08T04:00:00Z"
+  }
+}
+```
+
+`expires_at` (RFC 3339) is the session's absolute expiry. The browser cannot read the HttpOnly session cookie, so this field is how the web UI shows the time remaining. It is informational only — the server enforces expiry. The body never contains the session or CSRF token.
+
 #### Tenant scope
 
 Each web account has exactly one of:

@@ -27,6 +27,7 @@ beforeEach(() => {
   fetchMock.mockReset()
   document.documentElement.removeAttribute('data-theme')
   localStorage.clear()
+  sessionStorage.clear()
 })
 
 afterEach(() => {
@@ -77,7 +78,7 @@ function SignedInHarness({ username }: { username: string }) {
   )
 }
 
-async function signIn(username: string) {
+async function signIn(username: string, expiresAt?: string) {
   vi.stubGlobal('navigator', {
     credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
   })
@@ -93,7 +94,7 @@ async function signIn(username: string) {
     if (url.endsWith('/api/v1/web/passkey/login/finish')) {
       return Promise.resolve(
         jsonResponse(200, {
-          data: { ok: true, username, tenant_id: '', root_scope: false },
+          data: { ok: true, username, tenant_id: '', root_scope: false, expires_at: expiresAt },
         }),
       )
     }
@@ -112,6 +113,67 @@ async function signIn(username: string) {
     ),
   )
 }
+
+describe('UserMenu session expiry (Story #4597)', () => {
+  it('shows the remaining time after sign-in', async () => {
+    await signIn('admin@msp-a', new Date(Date.now() + 11 * 3_600_000 + 58 * 60_000 + 30_000).toISOString())
+    await waitFor(() => expect(sessionStorage.getItem('cfgms.session.expiresAt')).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.getByText('Session expires 11h58m')).toBeInTheDocument()
+  })
+
+  it('shows the remaining time after a reload using the stored value', () => {
+    sessionStorage.setItem('cfgms.session.expiresAt', String(Date.now() + 42 * 60_000 + 30_000))
+    renderWithRouter(
+      <AuthProvider>
+        <UserMenu />
+      </AuthProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.getByText('Session expires 42m')).toBeInTheDocument()
+  })
+
+  it('omits the line when the expiry is unknown', async () => {
+    await signIn('admin@msp-a')
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /account menu/i })).toHaveTextContent('AD'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.queryByText(/Session expires/)).toBeNull()
+  })
+
+  it('ignores and clears a stored expiry that is in the past', () => {
+    sessionStorage.setItem('cfgms.session.expiresAt', String(Date.now() - 1000))
+    renderWithRouter(
+      <AuthProvider>
+        <UserMenu />
+      </AuthProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+    expect(screen.queryByText(/Session expires/)).toBeNull()
+    expect(sessionStorage.getItem('cfgms.session.expiresAt')).toBeNull()
+  })
+
+  it('updates each minute', () => {
+    vi.useFakeTimers()
+    try {
+      sessionStorage.setItem('cfgms.session.expiresAt', String(Date.now() + 10 * 60_000 + 30_000))
+      renderWithRouter(
+        <AuthProvider>
+          <UserMenu />
+        </AuthProvider>,
+      )
+      fireEvent.click(screen.getByRole('button', { name: /account menu/i }))
+      expect(screen.getByText('Session expires 10m')).toBeInTheDocument()
+      act(() => {
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(screen.getByText('Session expires 9m')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
 
 describe('UserMenu', () => {
   it('shows initials derived from the signed-in principal', async () => {

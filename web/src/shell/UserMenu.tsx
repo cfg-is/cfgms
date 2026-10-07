@@ -40,8 +40,21 @@ function initials(username: string | undefined): string {
   return text.toUpperCase()
 }
 
+const MINUTE_MS = 60_000
+
+/** "11h58m" / "42m" / "<1m"; null once the expiry has passed. */
+export function formatRemaining(expiresAt: number, now: number): string | null {
+  const mins = Math.floor((expiresAt - now) / MINUTE_MS)
+  if (expiresAt <= now) return null
+  if (mins < 1) return '<1m'
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m`
+}
+
 export default function UserMenu() {
-  const { principal, logout } = useAuth()
+  const { principal, expiresAt, logout } = useAuth()
+  const [now, setNow] = useState(() => Date.now())
   const [open, setOpen] = useState(false)
   const [themeMode, setThemeMode] = useState<ThemeMode>(loadThemeMode)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -50,6 +63,14 @@ export default function UserMenu() {
     applyTheme(themeMode)
     localStorage.setItem('cfgms.theme', themeMode)
   }, [themeMode])
+
+  useEffect(() => {
+    if (expiresAt === null) return
+    const id = setInterval(() => setNow(Date.now()), MINUTE_MS)
+    return () => clearInterval(id)
+  }, [expiresAt])
+
+  const remaining = expiresAt === null ? null : formatRemaining(expiresAt, now)
 
   useEffect(() => {
     if (!open) return
@@ -110,6 +131,11 @@ export default function UserMenu() {
           >
             My Passkeys
           </Link>
+          {remaining !== null && (
+            <div className="row" style={{ cursor: 'default', color: 'var(--text-secondary)' }}>
+              Session expires {remaining}
+            </div>
+          )}
           <div className="sep" />
           <div
             role="menuitem"

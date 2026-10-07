@@ -152,4 +152,7 @@ type PasskeyLoginFinishResponse struct {
 	Username  string `json:"username"`
 	TenantID  string `json:"tenant_id"`
 	RootScope bool   `json:"root_scope"`
+	// ExpiresAt is the session's absolute expiry (RFC 3339). The session cookie
+	// is HttpOnly, so this is how the UI learns the remaining lifetime.
+	ExpiresAt time.Time `json:"expires_at"`
 }

@@ -310,7 +310,13 @@ describe('AuthProvider state transitions', () => {
 
   it('never writes auth state to localStorage or sessionStorage', async () => {
     mockPasskeyLoginEndpoints(200, {
-      data: { ok: true, username: 'admin@msp-a', tenant_id: '', root_scope: false },
+      data: {
+        ok: true,
+        username: 'admin@msp-a',
+        tenant_id: '',
+        root_scope: false,
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
     })
     render(
       <AuthProvider>
@@ -322,7 +328,52 @@ describe('AuthProvider state transitions', () => {
       expect(screen.getByTestId('status')).toHaveTextContent('signedIn'),
     )
     expect(window.localStorage.length).toBe(0)
-    expect(window.sessionStorage.length).toBe(0)
+    // Only the non-secret session expiry may be persisted (Story #4597).
+    expect(Object.keys(window.sessionStorage)).toEqual(['cfgms.session.expiresAt'])
+  })
+
+  it('login stores expires_at on the principal and in sessionStorage (Story #4597)', async () => {
+    const expiry = Date.now() + 3_600_000
+    mockPasskeyLoginEndpoints(200, {
+      data: {
+        ok: true,
+        username: 'admin@msp-a',
+        tenant_id: '',
+        root_scope: false,
+        expires_at: new Date(expiry).toISOString(),
+      },
+    })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedIn'))
+    expect(Number(window.sessionStorage.getItem('cfgms.session.expiresAt'))).toBe(expiry)
+  })
+
+  it('logout clears the stored expiry (Story #4597)', async () => {
+    mockPasskeyLoginEndpoints(200, {
+      data: {
+        ok: true,
+        username: 'a',
+        tenant_id: '',
+        root_scope: false,
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+    })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedIn'))
+    expect(window.sessionStorage.getItem('cfgms.session.expiresAt')).not.toBeNull()
+    act(() => screen.getByText('do-logout').click())
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedOut'))
+    expect(window.sessionStorage.getItem('cfgms.session.expiresAt')).toBeNull()
   })
 })
 

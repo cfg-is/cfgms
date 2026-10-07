@@ -306,6 +306,36 @@ func TestPasskeyLogin_SuccessSetsBothCookies(t *testing.T) {
 		"session must be AssuranceStrong immediately after passkey login")
 }
 
+// TestPasskeyLogin_ResponseCarriesExpiresAt verifies the finish response
+// exposes a future expires_at equal to the issued session's absolute expiry.
+func TestPasskeyLogin_ResponseCarriesExpiresAt(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	rec := doPasskeyLogin(t, srv, username, "")
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var env struct {
+		Data PasskeyLoginFinishResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	assert.Contains(t, rec.Body.String(), `"expires_at"`)
+	assert.True(t, env.Data.ExpiresAt.After(time.Now()), "expires_at must be in the future")
+
+	var sessCookie string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == cookieWebSession {
+			sessCookie = c.Value
+		}
+	}
+	require.NotEmpty(t, sessCookie)
+	srv.mu.RLock()
+	mgr := srv.webSessionManager
+	srv.mu.RUnlock()
+	webSess, err := mgr.Validate(context.Background(), sessCookie)
+	require.NoError(t, err)
+	assert.True(t, webSess.AbsoluteExpiresAt.Equal(env.Data.ExpiresAt),
+		"expires_at %s must equal session AbsoluteExpiresAt %s", env.Data.ExpiresAt, webSess.AbsoluteExpiresAt)
+}
+
 // TestPasskeyLogin_ResponseCarriesTenantScope verifies that the finish response
 // body exposes tenant_id and root_scope. Both the tenant-scoped and root-scoped
 // shapes are asserted (Issue #2919).
