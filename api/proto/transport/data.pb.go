@@ -1046,6 +1046,7 @@ type TelemetrySnapshot struct {
 	Processes     []*ProcessSnapshot     `protobuf:"bytes,2,rep,name=processes,proto3" json:"processes,omitempty"`
 	Services      []*ServiceSnapshot     `protobuf:"bytes,3,rep,name=services,proto3" json:"services,omitempty"`
 	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	Host          *HostTotals            `protobuf:"bytes,5,opt,name=host,proto3" json:"host,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1104,6 +1105,13 @@ func (x *TelemetrySnapshot) GetServices() []*ServiceSnapshot {
 func (x *TelemetrySnapshot) GetTimestamp() *timestamppb.Timestamp {
 	if x != nil {
 		return x.Timestamp
+	}
+	return nil
+}
+
+func (x *TelemetrySnapshot) GetHost() *HostTotals {
+	if x != nil {
+		return x.Host
 	}
 	return nil
 }
@@ -1293,6 +1301,117 @@ func (x *OsqueryRow) GetColumns() map[string]string {
 	return nil
 }
 
+// HostTotals is the host-level resource view carried by a TelemetrySnapshot.
+// Rates are per-second deltas between consecutive snapshots (0 on the first
+// snapshot and across counter wrap/reset). Network counters exclude loopback.
+type HostTotals struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	CpuPercent           float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
+	MemoryUsedBytes      uint64                 `protobuf:"varint,2,opt,name=memory_used_bytes,json=memoryUsedBytes,proto3" json:"memory_used_bytes,omitempty"`
+	MemoryTotalBytes     uint64                 `protobuf:"varint,3,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
+	DiskReadBytesPerSec  float64                `protobuf:"fixed64,4,opt,name=disk_read_bytes_per_sec,json=diskReadBytesPerSec,proto3" json:"disk_read_bytes_per_sec,omitempty"`
+	DiskWriteBytesPerSec float64                `protobuf:"fixed64,5,opt,name=disk_write_bytes_per_sec,json=diskWriteBytesPerSec,proto3" json:"disk_write_bytes_per_sec,omitempty"`
+	DiskUsedBytes        uint64                 `protobuf:"varint,6,opt,name=disk_used_bytes,json=diskUsedBytes,proto3" json:"disk_used_bytes,omitempty"`
+	DiskTotalBytes       uint64                 `protobuf:"varint,7,opt,name=disk_total_bytes,json=diskTotalBytes,proto3" json:"disk_total_bytes,omitempty"`
+	NetRxBytesPerSec     float64                `protobuf:"fixed64,8,opt,name=net_rx_bytes_per_sec,json=netRxBytesPerSec,proto3" json:"net_rx_bytes_per_sec,omitempty"`
+	NetTxBytesPerSec     float64                `protobuf:"fixed64,9,opt,name=net_tx_bytes_per_sec,json=netTxBytesPerSec,proto3" json:"net_tx_bytes_per_sec,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *HostTotals) Reset() {
+	*x = HostTotals{}
+	mi := &file_transport_data_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostTotals) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostTotals) ProtoMessage() {}
+
+func (x *HostTotals) ProtoReflect() protoreflect.Message {
+	mi := &file_transport_data_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostTotals.ProtoReflect.Descriptor instead.
+func (*HostTotals) Descriptor() ([]byte, []int) {
+	return file_transport_data_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *HostTotals) GetCpuPercent() float64 {
+	if x != nil {
+		return x.CpuPercent
+	}
+	return 0
+}
+
+func (x *HostTotals) GetMemoryUsedBytes() uint64 {
+	if x != nil {
+		return x.MemoryUsedBytes
+	}
+	return 0
+}
+
+func (x *HostTotals) GetMemoryTotalBytes() uint64 {
+	if x != nil {
+		return x.MemoryTotalBytes
+	}
+	return 0
+}
+
+func (x *HostTotals) GetDiskReadBytesPerSec() float64 {
+	if x != nil {
+		return x.DiskReadBytesPerSec
+	}
+	return 0
+}
+
+func (x *HostTotals) GetDiskWriteBytesPerSec() float64 {
+	if x != nil {
+		return x.DiskWriteBytesPerSec
+	}
+	return 0
+}
+
+func (x *HostTotals) GetDiskUsedBytes() uint64 {
+	if x != nil {
+		return x.DiskUsedBytes
+	}
+	return 0
+}
+
+func (x *HostTotals) GetDiskTotalBytes() uint64 {
+	if x != nil {
+		return x.DiskTotalBytes
+	}
+	return 0
+}
+
+func (x *HostTotals) GetNetRxBytesPerSec() float64 {
+	if x != nil {
+		return x.NetRxBytesPerSec
+	}
+	return 0
+}
+
+func (x *HostTotals) GetNetTxBytesPerSec() float64 {
+	if x != nil {
+		return x.NetTxBytesPerSec
+	}
+	return 0
+}
+
 var File_transport_data_proto protoreflect.FileDescriptor
 
 const file_transport_data_proto_rawDesc = "" +
@@ -1387,13 +1506,14 @@ const file_transport_data_proto_rawDesc = "" +
 	"\vfragment_id\x18\x01 \x01(\tR\n" +
 	"fragmentId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
-	"\x05state\x18\x03 \x01(\tR\x05state\"\xea\x01\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\"\x9b\x02\n" +
 	"\x11TelemetrySnapshot\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12>\n" +
 	"\tprocesses\x18\x02 \x03(\v2 .cfgms.transport.ProcessSnapshotR\tprocesses\x12<\n" +
 	"\bservices\x18\x03 \x03(\v2 .cfgms.transport.ServiceSnapshotR\bservices\x128\n" +
-	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\xd8\x01\n" +
+	"\ttimestamp\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12/\n" +
+	"\x04host\x18\x05 \x01(\v2\x1b.cfgms.transport.HostTotalsR\x04host\"\xd8\x01\n" +
 	"\x13OsqueryQueryRequest\x12\x1d\n" +
 	"\n" +
 	"steward_id\x18\x01 \x01(\tR\tstewardId\x12\x1d\n" +
@@ -1414,7 +1534,19 @@ const file_transport_data_proto_rawDesc = "" +
 	"\acolumns\x18\x01 \x03(\v2(.cfgms.transport.OsqueryRow.ColumnsEntryR\acolumns\x1a:\n" +
 	"\fColumnsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x99\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa7\x03\n" +
+	"\n" +
+	"HostTotals\x12\x1f\n" +
+	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
+	"cpuPercent\x12*\n" +
+	"\x11memory_used_bytes\x18\x02 \x01(\x04R\x0fmemoryUsedBytes\x12,\n" +
+	"\x12memory_total_bytes\x18\x03 \x01(\x04R\x10memoryTotalBytes\x124\n" +
+	"\x17disk_read_bytes_per_sec\x18\x04 \x01(\x01R\x13diskReadBytesPerSec\x126\n" +
+	"\x18disk_write_bytes_per_sec\x18\x05 \x01(\x01R\x14diskWriteBytesPerSec\x12&\n" +
+	"\x0fdisk_used_bytes\x18\x06 \x01(\x04R\rdiskUsedBytes\x12(\n" +
+	"\x10disk_total_bytes\x18\a \x01(\x04R\x0ediskTotalBytes\x12.\n" +
+	"\x14net_rx_bytes_per_sec\x18\b \x01(\x01R\x10netRxBytesPerSec\x12.\n" +
+	"\x14net_tx_bytes_per_sec\x18\t \x01(\x01R\x10netTxBytesPerSec*\x99\x01\n" +
 	"\fTransferType\x12\x1d\n" +
 	"\x19TRANSFER_TYPE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15TRANSFER_TYPE_PACKAGE\x10\x01\x12\x18\n" +
@@ -1442,7 +1574,7 @@ func file_transport_data_proto_rawDescGZIP() []byte {
 }
 
 var file_transport_data_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_transport_data_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_transport_data_proto_goTypes = []any{
 	(TransferType)(0),             // 0: cfgms.transport.TransferType
 	(TaskMessageType)(0),          // 1: cfgms.transport.TaskMessageType
@@ -1462,32 +1594,34 @@ var file_transport_data_proto_goTypes = []any{
 	(*OsqueryQueryRequest)(nil),   // 15: cfgms.transport.OsqueryQueryRequest
 	(*OsqueryQueryResponse)(nil),  // 16: cfgms.transport.OsqueryQueryResponse
 	(*OsqueryRow)(nil),            // 17: cfgms.transport.OsqueryRow
-	nil,                           // 18: cfgms.transport.BulkChunk.MetadataEntry
-	nil,                           // 19: cfgms.transport.LogEntry.FieldsEntry
-	nil,                           // 20: cfgms.transport.OsqueryQueryRequest.ParamsEntry
-	nil,                           // 21: cfgms.transport.OsqueryRow.ColumnsEntry
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
-	(Severity)(0),                 // 23: cfgms.transport.Severity
+	(*HostTotals)(nil),            // 18: cfgms.transport.HostTotals
+	nil,                           // 19: cfgms.transport.BulkChunk.MetadataEntry
+	nil,                           // 20: cfgms.transport.LogEntry.FieldsEntry
+	nil,                           // 21: cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	nil,                           // 22: cfgms.transport.OsqueryRow.ColumnsEntry
+	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
+	(Severity)(0),                 // 24: cfgms.transport.Severity
 }
 var file_transport_data_proto_depIdxs = []int32{
 	0,  // 0: cfgms.transport.BulkChunk.transfer_type:type_name -> cfgms.transport.TransferType
-	18, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
+	19, // 1: cfgms.transport.BulkChunk.metadata:type_name -> cfgms.transport.BulkChunk.MetadataEntry
 	1,  // 2: cfgms.transport.TaskMessage.type:type_name -> cfgms.transport.TaskMessageType
-	22, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
-	23, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
-	22, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
-	19, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
+	23, // 3: cfgms.transport.TaskMessage.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 4: cfgms.transport.LogEntry.level:type_name -> cfgms.transport.Severity
+	23, // 5: cfgms.transport.LogEntry.timestamp:type_name -> google.protobuf.Timestamp
+	20, // 6: cfgms.transport.LogEntry.fields:type_name -> cfgms.transport.LogEntry.FieldsEntry
 	12, // 7: cfgms.transport.TelemetrySnapshot.processes:type_name -> cfgms.transport.ProcessSnapshot
 	13, // 8: cfgms.transport.TelemetrySnapshot.services:type_name -> cfgms.transport.ServiceSnapshot
-	22, // 9: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
-	20, // 10: cfgms.transport.OsqueryQueryRequest.params:type_name -> cfgms.transport.OsqueryQueryRequest.ParamsEntry
-	17, // 11: cfgms.transport.OsqueryQueryResponse.rows:type_name -> cfgms.transport.OsqueryRow
-	21, // 12: cfgms.transport.OsqueryRow.columns:type_name -> cfgms.transport.OsqueryRow.ColumnsEntry
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	23, // 9: cfgms.transport.TelemetrySnapshot.timestamp:type_name -> google.protobuf.Timestamp
+	18, // 10: cfgms.transport.TelemetrySnapshot.host:type_name -> cfgms.transport.HostTotals
+	21, // 11: cfgms.transport.OsqueryQueryRequest.params:type_name -> cfgms.transport.OsqueryQueryRequest.ParamsEntry
+	17, // 12: cfgms.transport.OsqueryQueryResponse.rows:type_name -> cfgms.transport.OsqueryRow
+	22, // 13: cfgms.transport.OsqueryRow.columns:type_name -> cfgms.transport.OsqueryRow.ColumnsEntry
+	14, // [14:14] is the sub-list for method output_type
+	14, // [14:14] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_transport_data_proto_init() }
@@ -1502,7 +1636,7 @@ func file_transport_data_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transport_data_proto_rawDesc), len(file_transport_data_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

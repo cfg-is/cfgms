@@ -522,6 +522,36 @@ func TestMarshalSnapshot(t *testing.T) {
 		assert.Equal(t, "2026-01-01T00:00:00Z", out["timestamp"])
 	})
 
+	t.Run("host-totals-included", func(t *testing.T) {
+		snap := &transportpb.TelemetrySnapshot{
+			StewardId: "steward-h",
+			Host: &transportpb.HostTotals{
+				CpuPercent: 12.5, MemoryUsedBytes: 100, MemoryTotalBytes: 200,
+				DiskReadBytesPerSec: 1.5, DiskWriteBytesPerSec: 2.5,
+				DiskUsedBytes: 300, DiskTotalBytes: 400,
+				NetRxBytesPerSec: 3.5, NetTxBytesPerSec: 4.5,
+			},
+		}
+		data, err := marshalSnapshot(snap)
+		require.NoError(t, err)
+		var out struct {
+			Host map[string]float64 `json:"host"`
+		}
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, map[string]float64{
+			"cpu_percent": 12.5, "memory_used_bytes": 100, "memory_total_bytes": 200,
+			"disk_read_bytes_per_sec": 1.5, "disk_write_bytes_per_sec": 2.5,
+			"disk_used_bytes": 300, "disk_total_bytes": 400,
+			"net_rx_bytes_per_sec": 3.5, "net_tx_bytes_per_sec": 4.5,
+		}, out.Host)
+	})
+
+	t.Run("host-omitted-when-steward-sent-none", func(t *testing.T) {
+		data, err := marshalSnapshot(&transportpb.TelemetrySnapshot{StewardId: "old-steward"})
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), `"host"`)
+	})
+
 	t.Run("nil-timestamp-omitted", func(t *testing.T) {
 		snap := &transportpb.TelemetrySnapshot{
 			StewardId: "steward-2",

@@ -39,6 +39,9 @@ type windowsCollector struct {
 	mu       sync.Mutex
 	prev     map[int]uint64 // pid -> cumulative CPU (100 ns units) at previous Snapshot
 	prevWall time.Time
+
+	hostPrev     hostCounters // host counters at the previous Snapshot
+	hostPrevWall time.Time    // wall clock of hostPrev; zero before the first Snapshot
 }
 
 // NewCollector returns a Windows telemetry collector.
@@ -57,7 +60,7 @@ func (c *windowsCollector) Snapshot(ctx context.Context) (Telemetry, error) {
 	if err != nil {
 		return Telemetry{}, err
 	}
-	return Telemetry{Processes: procs, Services: collectSCMServices()}, nil
+	return Telemetry{Processes: procs, Services: collectSCMServices(), Host: c.collectHost()}, nil
 }
 
 // ─── processes (NtQuerySystemInformation) ──────────────────────────────────────
@@ -278,4 +281,164 @@ func svcStateString(state svc.State) string {
 	default:
 		return "unknown"
 	}
+}
+
+// ─── host totals ───────────────────────────────────────────────────────────────
+
+var (
+	modkernel32          = windows.NewLazySystemDLL("kernel32.dll")
+	procGetSystemTimes   = modkernel32.NewProc("GetSystemTimes")
+	procGlobalMemoryStat = modkernel32.NewProc("GlobalMemoryStatusEx")
+)
+
+const systemPerformanceInformationClass = 2 // SYSTEM_INFORMATION_CLASS.SystemPerformanceInformation
+
+// SYSTEM_PERFORMANCE_INFORMATION field byte offsets (LARGE_INTEGER, bytes). The
+// kernel's cumulative host-wide I/O transfer counters — the same source the
+// "Disk" row of Task Manager is derived from, covering every volume.
+const (
+	spiPerfIoReadTransferCount  = 8
+	spiPerfIoWriteTransferCount = 16
+	spiPerfMinSize              = 24
+)
+
+// memoryStatusEx mirrors the Win32 MEMORYSTATUSEX struct.
+type memoryStatusEx struct {
+	Length               uint32
+	MemoryLoad           uint32
+	TotalPhys            uint64
+	AvailPhys            uint64
+	TotalPageFile        uint64
+	AvailPageFile        uint64
+	TotalVirtual         uint64
+	AvailVirtual         uint64
+	AvailExtendedVirtual uint64
+}
+
+// collectHost reads the host-level totals through in-process APIs only
+// (GetSystemTimes, GlobalMemoryStatusEx, NtQuerySystemInformation, GetIfTable2Ex,
+// GetDiskFreeSpaceEx). Each source is best-effort: a failing call leaves its
+// fields zero. Rates are 0 on the first call.
+func (c *windowsCollector) collectHost() *HostTotals {
+	now := time.Now()
+	cur := hostCounters{}
+	h := &HostTotals{}
+
+	cur.cpuBusy, cur.cpuTotal = readSystemTimes()
+	h.MemoryUsedBytes, h.MemoryTotalBytes = readMemoryStatus()
+	cur.diskRead, cur.diskWrite = readSystemIOCounters()
+	cur.netRx, cur.netTx = readNetworkOctets()
+	h.DiskUsedBytes, h.DiskTotalBytes = readFixedDriveUsage()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hostPrevWall.IsZero() {
+		applyRates(h, c.hostPrev, cur, now.Sub(c.hostPrevWall).Seconds())
+	}
+	c.hostPrev = cur
+	c.hostPrevWall = now
+	return h
+}
+
+func filetimeToUint64(ft windows.Filetime) uint64 {
+	return uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)
+}
+
+// readSystemTimes returns (busy, total) 100 ns CPU ticks across all cores.
+// GetSystemTimes' kernel time includes idle time.
+func readSystemTimes() (busy, total uint64) {
+	var idle, kernel, user windows.Filetime
+	r, _, _ := procGetSystemTimes.Call(
+		uintptr(unsafe.Pointer(&idle)),
+		uintptr(unsafe.Pointer(&kernel)),
+		uintptr(unsafe.Pointer(&user)),
+	)
+	if r == 0 {
+		return 0, 0
+	}
+	total = filetimeToUint64(kernel) + filetimeToUint64(user)
+	i := filetimeToUint64(idle)
+	if i > total {
+		return 0, total
+	}
+	return total - i, total
+}
+
+// readMemoryStatus returns (used, total) physical memory in bytes.
+func readMemoryStatus() (used, total uint64) {
+	var m memoryStatusEx
+	m.Length = uint32(unsafe.Sizeof(m))
+	r, _, _ := procGlobalMemoryStat.Call(uintptr(unsafe.Pointer(&m)))
+	if r == 0 {
+		return 0, 0
+	}
+	avail := m.AvailPhys
+	if avail > m.TotalPhys {
+		avail = m.TotalPhys
+	}
+	return m.TotalPhys - avail, m.TotalPhys
+}
+
+// readSystemIOCounters returns the kernel's cumulative host-wide I/O read and
+// write transfer byte counts.
+func readSystemIOCounters() (readBytes, writeBytes uint64) {
+	buf := make([]byte, 512) // SYSTEM_PERFORMANCE_INFORMATION is ~312 bytes on x64
+	var retLen uint32
+	status, _, _ := procNtQuerySystemInformation.Call(
+		uintptr(systemPerformanceInformationClass),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+		uintptr(unsafe.Pointer(&retLen)),
+	)
+	if status != 0 || len(buf) < spiPerfMinSize+spiPerfIoWriteTransferCount {
+		return 0, 0
+	}
+	return binary.LittleEndian.Uint64(buf[spiPerfIoReadTransferCount:]),
+		binary.LittleEndian.Uint64(buf[spiPerfIoWriteTransferCount:])
+}
+
+// readNetworkOctets sums received and transmitted octets across every interface
+// except software loopback.
+func readNetworkOctets() (rx, tx uint64) {
+	var table *windows.MibIfTable2
+	if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil || table == nil {
+		return 0, 0
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(table))
+	rows := unsafe.Slice(&table.Table[0], int(table.NumEntries))
+	for i := range rows {
+		if rows[i].Type == windows.IF_TYPE_SOFTWARE_LOOPBACK {
+			continue
+		}
+		rx += rows[i].InOctets
+		tx += rows[i].OutOctets
+	}
+	return rx, tx
+}
+
+// readFixedDriveUsage sums used/total bytes over the local fixed drives.
+func readFixedDriveUsage() (used, total uint64) {
+	mask, err := windows.GetLogicalDrives()
+	if err != nil {
+		return 0, 0
+	}
+	for i := 0; i < 26; i++ {
+		if mask&(1<<uint(i)) == 0 {
+			continue
+		}
+		root, perr := windows.UTF16PtrFromString(string(rune('A'+i)) + `:\`)
+		if perr != nil || windows.GetDriveType(root) != windows.DRIVE_FIXED {
+			continue
+		}
+		var avail, tot, free uint64
+		if windows.GetDiskFreeSpaceEx(root, &avail, &tot, &free) != nil {
+			continue
+		}
+		if free > tot {
+			free = tot
+		}
+		total += tot
+		used += tot - free
+	}
+	return used, total
 }

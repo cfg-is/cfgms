@@ -484,6 +484,20 @@ type telemetrySnapshotJSON struct {
 	Processes []processSnapshotJSON `json:"processes"`
 	Services  []serviceSnapshotJSON `json:"services"`
 	Timestamp string                `json:"timestamp,omitempty"`
+	// Host is omitted when the steward sent no host totals (older steward).
+	Host *hostTotalsJSON `json:"host,omitempty"`
+}
+
+type hostTotalsJSON struct {
+	CPUPercent           float64 `json:"cpu_percent"`
+	MemoryUsedBytes      uint64  `json:"memory_used_bytes"`
+	MemoryTotalBytes     uint64  `json:"memory_total_bytes"`
+	DiskReadBytesPerSec  float64 `json:"disk_read_bytes_per_sec"`
+	DiskWriteBytesPerSec float64 `json:"disk_write_bytes_per_sec"`
+	DiskUsedBytes        uint64  `json:"disk_used_bytes"`
+	DiskTotalBytes       uint64  `json:"disk_total_bytes"`
+	NetRxBytesPerSec     float64 `json:"net_rx_bytes_per_sec"`
+	NetTxBytesPerSec     float64 `json:"net_tx_bytes_per_sec"`
 }
 
 type processSnapshotJSON struct {
@@ -537,6 +551,19 @@ func marshalSnapshot(snap *transportpb.TelemetrySnapshot) ([]byte, error) {
 		Processes: procs,
 		Services:  svcs,
 		Timestamp: ts,
+	}
+	if h := snap.GetHost(); h != nil {
+		out.Host = &hostTotalsJSON{
+			CPUPercent:           h.GetCpuPercent(),
+			MemoryUsedBytes:      h.GetMemoryUsedBytes(),
+			MemoryTotalBytes:     h.GetMemoryTotalBytes(),
+			DiskReadBytesPerSec:  h.GetDiskReadBytesPerSec(),
+			DiskWriteBytesPerSec: h.GetDiskWriteBytesPerSec(),
+			DiskUsedBytes:        h.GetDiskUsedBytes(),
+			DiskTotalBytes:       h.GetDiskTotalBytes(),
+			NetRxBytesPerSec:     h.GetNetRxBytesPerSec(),
+			NetTxBytesPerSec:     h.GetNetTxBytesPerSec(),
+		}
 	}
 	return json.Marshal(out)
 }

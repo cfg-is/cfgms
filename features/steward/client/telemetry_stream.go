@@ -327,10 +327,25 @@ func telemetryToProto(t telemetry.Telemetry, stewardID string) *transportpb.Tele
 			State:      s.State,
 		}
 	}
+	var host *transportpb.HostTotals
+	if h := t.Host; h != nil {
+		host = &transportpb.HostTotals{
+			CpuPercent:           h.CPUPercent,
+			MemoryUsedBytes:      h.MemoryUsedBytes,
+			MemoryTotalBytes:     h.MemoryTotalBytes,
+			DiskReadBytesPerSec:  h.DiskReadBytesPerSec,
+			DiskWriteBytesPerSec: h.DiskWriteBytesPerSec,
+			DiskUsedBytes:        h.DiskUsedBytes,
+			DiskTotalBytes:       h.DiskTotalBytes,
+			NetRxBytesPerSec:     h.NetRxBytesPerSec,
+			NetTxBytesPerSec:     h.NetTxBytesPerSec,
+		}
+	}
 	return &transportpb.TelemetrySnapshot{
 		StewardId: stewardID,
 		Processes: processes,
 		Services:  services,
 		Timestamp: timestamppb.Now(),
+		Host:      host,
 	}
 }

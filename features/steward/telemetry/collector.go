@@ -97,10 +97,80 @@ type ServiceSnapshot struct {
 	FragmentID string `json:"fragment_id"`
 }
 
+// HostTotals is the host-level resource view of one collection: whole-machine
+// CPU, memory, disk and network. Rates are per-second values derived from the
+// delta between consecutive Snapshot calls (0 on the first call, and 0 — never
+// negative or NaN — when a cumulative counter wraps or resets between calls).
+// Network counters sum every non-loopback interface.
+type HostTotals struct {
+	// CPUPercent is whole-host CPU busy time, 0-100, over the interval since the
+	// previous Snapshot.
+	CPUPercent float64 `json:"cpu_percent"`
+	// MemoryUsedBytes / MemoryTotalBytes are physical memory in use / installed.
+	MemoryUsedBytes  uint64 `json:"memory_used_bytes"`
+	MemoryTotalBytes uint64 `json:"memory_total_bytes"`
+	// DiskReadBytesPerSec / DiskWriteBytesPerSec are host-wide storage I/O rates.
+	DiskReadBytesPerSec  float64 `json:"disk_read_bytes_per_sec"`
+	DiskWriteBytesPerSec float64 `json:"disk_write_bytes_per_sec"`
+	// DiskUsedBytes / DiskTotalBytes are summed over the host's local filesystems.
+	DiskUsedBytes  uint64 `json:"disk_used_bytes"`
+	DiskTotalBytes uint64 `json:"disk_total_bytes"`
+	// NetRxBytesPerSec / NetTxBytesPerSec are host-wide network rates.
+	NetRxBytesPerSec float64 `json:"net_rx_bytes_per_sec"`
+	NetTxBytesPerSec float64 `json:"net_tx_bytes_per_sec"`
+}
+
 // Telemetry bundles the process and service snapshots from one collection.
 type Telemetry struct {
 	Processes []ProcessSnapshot `json:"processes"`
 	Services  []ServiceSnapshot `json:"services"`
+	// Host carries host-level totals. Nil on platforms or builds that do not
+	// report them.
+	Host *HostTotals `json:"host,omitempty"`
+}
+
+// hostCounters is one raw reading of the host's cumulative counters. CPU values
+// are in arbitrary but consistent tick units; the byte counters are cumulative
+// since boot.
+type hostCounters struct {
+	cpuBusy, cpuTotal   uint64
+	diskRead, diskWrite uint64
+	netRx, netTx        uint64
+}
+
+// counterRate converts the change in a cumulative counter into a per-second
+// rate. It returns 0 when the interval is not positive or the counter went
+// backwards (wrap or reset), so a rate is never negative, NaN or Inf.
+func counterRate(prev, cur uint64, seconds float64) float64 {
+	if seconds <= 0 || cur < prev {
+		return 0
+	}
+	return float64(cur-prev) / seconds
+}
+
+// cpuPercent returns the busy share of the CPU ticks elapsed between two
+// readings, clamped to [0,100]; 0 on a counter reset or an empty interval.
+func cpuPercent(prev, cur hostCounters) float64 {
+	if cur.cpuTotal <= prev.cpuTotal || cur.cpuBusy < prev.cpuBusy {
+		return 0
+	}
+	pct := float64(cur.cpuBusy-prev.cpuBusy) / float64(cur.cpuTotal-prev.cpuTotal) * 100.0
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+// applyRates fills the rate fields of h from the delta between prev and cur.
+func applyRates(h *HostTotals, prev, cur hostCounters, seconds float64) {
+	h.CPUPercent = cpuPercent(prev, cur)
+	h.DiskReadBytesPerSec = counterRate(prev.diskRead, cur.diskRead, seconds)
+	h.DiskWriteBytesPerSec = counterRate(prev.diskWrite, cur.diskWrite, seconds)
+	h.NetRxBytesPerSec = counterRate(prev.netRx, cur.netRx, seconds)
+	h.NetTxBytesPerSec = counterRate(prev.netTx, cur.netTx, seconds)
 }
 
 // Collector returns point-in-time telemetry snapshots. Implementations are
