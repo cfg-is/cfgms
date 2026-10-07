@@ -1791,3 +1791,121 @@ func TestWorkflowPermission_YAMLEndpoints_GatedOnRead(t *testing.T) {
 		}
 	}
 }
+
+// --- list summary: trigger counts and last execution (Issue #4614) -----------
+
+type listedWorkflowSummary struct {
+	Name                string `json:"name"`
+	TriggerCount        int    `json:"trigger_count"`
+	EnabledTriggerCount int    `json:"enabled_trigger_count"`
+	LastExecution       *struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		StartTime string `json:"start_time"`
+	} `json:"last_execution"`
+}
+
+func listWorkflowSummaries(t *testing.T, router *mux.Router, tenantID string) (map[string]listedWorkflowSummary, string) {
+	t.Helper()
+	req := withTenantContext(httptest.NewRequest("GET", "/workflows", nil), tenantID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body struct {
+		Workflows []listedWorkflowSummary `json:"workflows"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	out := map[string]listedWorkflowSummary{}
+	for _, wf := range body.Workflows {
+		out[wf.Name] = wf
+	}
+	return out, rec.Body.String()
+}
+
+func createManualTrigger(t *testing.T, mgr *trigger.TriggerManagerImpl, tenantID, id, workflowName string, enabled bool) {
+	t.Helper()
+	ctx := context.WithValue(context.Background(), ctxkeys.TenantID, tenantID)
+	require.NoError(t, mgr.CreateTrigger(ctx, &trigger.Trigger{
+		ID: id, Name: id, Type: trigger.TriggerTypeManual, WorkflowName: workflowName,
+	}))
+	if !enabled {
+		require.NoError(t, mgr.DisableTrigger(ctx, id))
+	}
+}
+
+func TestWorkflowHandler_ListWorkflows_NoTriggersOrRuns_ZerosAndNull(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+	rec := postWorkflow(t, router, "/workflows", minimalWorkflowBody("quiet-wf"))
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	got, raw := listWorkflowSummaries(t, router, "test-tenant")
+	wf, ok := got["quiet-wf"]
+	require.True(t, ok)
+	assert.Equal(t, 0, wf.TriggerCount)
+	assert.Equal(t, 0, wf.EnabledTriggerCount)
+	assert.Nil(t, wf.LastExecution)
+	assert.Contains(t, raw, `"last_execution":null`)
+	assert.Contains(t, raw, `"trigger_count":0`)
+}
+
+func TestWorkflowHandler_ListWorkflows_EnabledTriggerCountCountsOnlyEnabled(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	mgr := trigger.NewControllerTriggerManager(nil, nil)
+	h.triggerManager = mgr
+	router := newWorkflowRouter(h)
+	require.Equal(t, http.StatusCreated, postWorkflow(t, router, "/workflows", minimalWorkflowBody("trig-wf")).Code)
+	require.Equal(t, http.StatusCreated, postWorkflow(t, router, "/workflows", minimalWorkflowBody("other-wf")).Code)
+
+	createManualTrigger(t, mgr, "test-tenant", "t-on-1", "trig-wf", true)
+	createManualTrigger(t, mgr, "test-tenant", "t-on-2", "trig-wf", true)
+	createManualTrigger(t, mgr, "test-tenant", "t-off", "trig-wf", false)
+	createManualTrigger(t, mgr, "test-tenant", "t-other", "other-wf", true)
+	// Another tenant's trigger for the same workflow name is never counted.
+	createManualTrigger(t, mgr, "tenant-b", "t-foreign", "trig-wf", true)
+
+	got, _ := listWorkflowSummaries(t, router, "test-tenant")
+	assert.Equal(t, 3, got["trig-wf"].TriggerCount)
+	assert.Equal(t, 2, got["trig-wf"].EnabledTriggerCount)
+	assert.Equal(t, 1, got["other-wf"].TriggerCount)
+	assert.Equal(t, 1, got["other-wf"].EnabledTriggerCount)
+}
+
+func TestWorkflowHandler_ListWorkflows_LastExecutionIsTenantScoped(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	// The same workflow name exists in both tenants; each has its own run.
+	execA := createAndExecuteWorkflow(t, router, engine, "shared-wf", "tenant-a", false)
+	time.Sleep(10 * time.Millisecond)
+	execB := createAndExecuteWorkflow(t, router, engine, "shared-wf", "tenant-b", false)
+	require.NotEqual(t, execA, execB)
+
+	gotA, _ := listWorkflowSummaries(t, router, "tenant-a")
+	require.NotNil(t, gotA["shared-wf"].LastExecution)
+	assert.Equal(t, execA, gotA["shared-wf"].LastExecution.ID, "tenant A must never see tenant B's run")
+	assert.NotEmpty(t, gotA["shared-wf"].LastExecution.Status)
+	assert.NotEmpty(t, gotA["shared-wf"].LastExecution.StartTime)
+
+	gotB, _ := listWorkflowSummaries(t, router, "tenant-b")
+	require.NotNil(t, gotB["shared-wf"].LastExecution)
+	assert.Equal(t, execB, gotB["shared-wf"].LastExecution.ID)
+}
+
+func TestWorkflowHandler_ListWorkflows_LastExecutionIsMostRecent(t *testing.T) {
+	h, _, engine := newTestWorkflowHandlerAndEngine(t)
+	router := newWorkflowRouter(h)
+
+	createAndExecuteWorkflow(t, router, engine, "recent-wf", "test-tenant", false)
+	time.Sleep(10 * time.Millisecond)
+	req := withTenantContext(httptest.NewRequest("POST", "/workflows/recent-wf/execute", bytes.NewReader([]byte("{}"))), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	got, _ := listWorkflowSummaries(t, router, "test-tenant")
+	require.NotNil(t, got["recent-wf"].LastExecution)
+	assert.Equal(t, resp["execution_id"], got["recent-wf"].LastExecution.ID)
+}

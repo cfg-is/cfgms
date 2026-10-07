@@ -257,6 +257,23 @@ func (h *WorkflowHandler) refuseFilesystemWorkflowReference(w http.ResponseWrite
 	return true
 }
 
+// workflowLastExecution is the most recent run of a workflow in the list summary.
+type workflowLastExecution struct {
+	ID        string                   `json:"id"`
+	Status    workflow.ExecutionStatus `json:"status"`
+	StartTime time.Time                `json:"start_time"`
+}
+
+// workflowListItem is one entry of the workflow list: the stored definition plus
+// a summary of its triggers and latest run (Issue #4614). The summary fields are
+// additive, so existing consumers of the definition are unaffected.
+type workflowListItem struct {
+	*workflow.VersionedWorkflow
+	TriggerCount        int                    `json:"trigger_count"`
+	EnabledTriggerCount int                    `json:"enabled_trigger_count"`
+	LastExecution       *workflowLastExecution `json:"last_execution"`
+}
+
 // handleListWorkflows handles GET /api/v1/workflows
 func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	if h.engine == nil || h.configStore == nil {
@@ -270,7 +287,7 @@ func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Req
 	}
 	workflows, err := store.ListWorkflows(r.Context())
 	if err != nil {
-		h.logger.Error("Failed to list workflows", "error", err)
+		h.logger.Error("Failed to list workflows", "error", logging.SanitizeLogValue(err.Error()))
 		h.sendError(w, http.StatusInternalServerError, "failed to list workflows")
 		return
 	}
@@ -279,10 +296,73 @@ func (h *WorkflowHandler) handleListWorkflows(w http.ResponseWriter, r *http.Req
 		workflow.AssignStepIDs(workflows[i].Steps)
 	}
 
+	// One trigger query and one execution scan serve every row. Both are scoped to
+	// the tenant the workflow store resolved, so another tenant's triggers and runs
+	// are never counted.
+	triggerCounts, enabledCounts := h.triggerCountsByWorkflow(r.Context(), store.TenantID())
+	lastRuns := h.lastExecutionsByWorkflow(store.TenantID())
+
+	items := make([]workflowListItem, 0, len(workflows))
+	for _, wf := range workflows {
+		items = append(items, workflowListItem{
+			VersionedWorkflow:   wf,
+			TriggerCount:        triggerCounts[wf.Name],
+			EnabledTriggerCount: enabledCounts[wf.Name],
+			LastExecution:       lastRuns[wf.Name],
+		})
+	}
+
 	h.sendJSON(w, http.StatusOK, map[string]interface{}{
-		"workflows": workflows,
-		"count":     len(workflows),
+		"workflows": items,
+		"count":     len(items),
 	})
+}
+
+// triggerCountsByWorkflow returns per-workflow trigger totals and enabled
+// (active) totals for the tenant, from a single ListTriggers call made with the
+// tenant in context so the manager's own authorization applies. A missing manager
+// or a failed query yields empty counts: the list stays usable without them.
+func (h *WorkflowHandler) triggerCountsByWorkflow(ctx context.Context, tenantID string) (total, enabled map[string]int) {
+	total, enabled = map[string]int{}, map[string]int{}
+	if h.triggerManager == nil {
+		return total, enabled
+	}
+	triggers, err := h.triggerManager.ListTriggers(context.WithValue(ctx, ctxkeys.TenantID, tenantID), nil)
+	if err != nil {
+		h.logger.Warn("Failed to list triggers for workflow summary", "error", logging.SanitizeLogValue(err.Error()))
+		return total, enabled
+	}
+	for _, t := range triggers {
+		if t.TenantID != tenantID {
+			continue
+		}
+		total[t.WorkflowName]++
+		if t.Status == trigger.TriggerStatusActive {
+			enabled[t.WorkflowName]++
+		}
+	}
+	return total, enabled
+}
+
+// lastExecutionsByWorkflow scans the engine's executions once and returns the
+// most recently started run per workflow name, restricted to the tenant.
+func (h *WorkflowHandler) lastExecutionsByWorkflow(tenantID string) map[string]*workflowLastExecution {
+	last := map[string]*workflowLastExecution{}
+	all, err := h.engine.ListExecutions()
+	if err != nil {
+		h.logger.Warn("Failed to list executions for workflow summary", "error", logging.SanitizeLogValue(err.Error()))
+		return last
+	}
+	for _, ex := range all {
+		if ex.TenantID != tenantID {
+			continue
+		}
+		if cur, ok := last[ex.WorkflowName]; ok && !ex.StartTime.After(cur.StartTime) {
+			continue
+		}
+		last[ex.WorkflowName] = &workflowLastExecution{ID: ex.ID, Status: ex.GetStatus(), StartTime: ex.StartTime}
+	}
+	return last
 }
 
 // CreateWorkflowRequest is the request body for creating a workflow.

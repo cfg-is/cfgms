@@ -2127,12 +2127,29 @@ workflows, the response is `{"workflows": [], "count": 0}`.
       "steps": [
         { "name": "run-patch", "type": "task", "module": "patch" }
       ],
-      "semantic_version": { "major": 1, "minor": 0, "patch": 0 }
+      "semantic_version": { "major": 1, "minor": 0, "patch": 0 },
+      "trigger_count": 2,
+      "enabled_trigger_count": 1,
+      "last_execution": {
+        "id": "exec_1791406763145803990_7",
+        "status": "completed",
+        "start_time": "2026-10-07T20:59:23Z"
+      }
     }
   ],
   "count": 1
 }
 ```
+
+Each item also carries a summary, computed from one trigger query and one
+execution scan per request and scoped to the calling tenant:
+
+- `trigger_count` — triggers that start this workflow.
+- `enabled_trigger_count` — those triggers whose status is `active`.
+- `last_execution` — `{id, status, start_time}` of the most recently started run,
+  or `null` when the workflow has never run.
+
+A workflow with no triggers or runs returns `0`, `0` and `null`.
 
 #### POST /api/v1/workflows
 

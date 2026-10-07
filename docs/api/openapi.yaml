@@ -753,6 +753,59 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /workflows:
+    get:
+      summary: List workflows
+      description: >
+        Lists the calling tenant's workflow definitions. Each item carries the
+        stored definition plus a summary of its triggers and latest run, so the
+        list needs no per-row calls. Counts and last_execution are scoped to the
+        caller's tenant. Requires the workflow:list permission.
+      operationId: listWorkflows
+      tags:
+        - Workflows
+      responses:
+        '200':
+          description: Workflows with trigger counts and last execution
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflows, count]
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      type: object
+                      description: The stored workflow definition plus the summary fields below
+                      required: [name, trigger_count, enabled_trigger_count, last_execution]
+                      properties:
+                        name:
+                          type: string
+                        trigger_count:
+                          type: integer
+                          description: Triggers of the tenant that start this workflow
+                        enabled_trigger_count:
+                          type: integer
+                          description: Those triggers whose status is active
+                        last_execution:
+                          type: object
+                          nullable: true
+                          description: Most recently started run of this workflow in the tenant; null when it has never run
+                          required: [id, status, start_time]
+                          properties:
+                            id:
+                              type: string
+                            status:
+                              type: string
+                            start_time:
+                              type: string
+                              format: date-time
+                  count:
+                    type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /workflows/parse-yaml:
     post:
       summary: Parse a YAML workflow document
