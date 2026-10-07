@@ -189,6 +189,12 @@ git push origin feature/story-N-agent
 **Cause**: Story scope too large, or ambiguous requirements.
 **Fix**: Read the draft PR description for the specific failure. Either fix interactively (Option 1 above) or update the issue and re-dispatch (Option 2).
 
+### Salvaged `WIP:` draft PR (agent produced no PR)
+
+**Cause**: The agent's session ended before it opened a PR (for example, its login was revoked mid-run). The entrypoint pushes whatever work exists and opens a draft PR titled `WIP: <branch> (agent produced no PR)`, with a commit subject `WIP: agent attempt for issue #N (...)`. The pipeline then dispatches a fix agent onto that PR.
+**Behaviour**: If the fix agent finds the salvaged work already complete, it makes no commit. When that run is in `fix-pr` mode, `/tmp/agent-validation-passed` exists, a linked issue is known, and the PR is a draft whose title starts with `WIP:`, the entrypoint finishes the PR itself (`ac_promote_salvaged_pr` in `.devcontainer/agent-context.sh`). It retitles the PR `<issue title> (Issue #N)`, sets a body that starts with `Fixes #N`, pushes an empty commit whose subject is that title so the squash subject is correct, marks the PR ready, prints `PROMOTED_SALVAGED_PR:<pr>`, and exits 0 so the PR goes to acceptance review.
+Every other no-commit `fix-pr` or `resolve-conflict` run still fails: exit 1, plus the "Fix agent ran but made no changes" comment on the PR. That covers a missing validation marker, a non-draft or non-`WIP:` PR, no linked issue, and any promotion step that fails (the container log names the step).
+
 ### Agent creates PR that touches unrelated files
 
 **Cause**: Story wasn't scoped to specific files.
