@@ -383,4 +383,4 @@ If there are zero findings, the Findings table should say "None" and the Accepta
 - Merge enqueue uses `--squash` — merge queue handles the rest (rebase + re-validation + actual merge)
 - **A PASS verdict is not self-executing.** The PR moves only when `po-act.sh enqueue` runs and prints `ENQUEUED:<PR>`. Never write the verdict as though the merge happened without that line in hand — a PASS that was never enqueued is indistinguishable, from the outside, from a review that never ran.
 - Clean up the agent container/worktree only after a confirmed `ENQUEUED:<PR>` — the agent infrastructure is no longer needed at that point
-- If the PR targets `main` instead of `develop`, this is a BLOCKING workflow violation. Report it and do not merge.
+- If the PR targets any base other than `develop` — `main`, or a `release/*` branch — this is a BLOCKING workflow violation. Report it and do not merge. Release PRs (`release/*` → `main`) and backport PRs (→ `release/*`) are merged by a human, never through the pipeline; `po-act.sh enqueue` refuses them with `ENQUEUE_REFUSED:<PR>:base_not_develop_*` (Issue #4693).
