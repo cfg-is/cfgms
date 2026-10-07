@@ -807,7 +807,9 @@ certificate, unfiltered.
       "serial_number": "123456789",
       "common_name": "steward-001",
       "steward_id": "steward-001",
+      "tenant_id": "acme-corp",
       "is_valid": true,
+      "issued_at": "2025-01-12T10:30:00Z",
       "expires_at": "2026-01-12T10:30:00Z",
       "days_until_expiration": 365,
       "needs_renewal": false
@@ -816,6 +818,8 @@ certificate, unfiltered.
   "timestamp": "2025-01-12T10:30:00Z"
 }
 ```
+
+`tenant_id` is the tenant of the steward that owns the certificate; it is omitted when the certificate has no owning steward or the steward has no fleet record. `issued_at` is the time the certificate was issued.
 
 #### POST /api/v1/certificates/provision
 

@@ -45,7 +45,9 @@ export interface CertificateInfo {
   serial_number: string
   common_name: string
   steward_id: string
+  tenant_id: string
   is_valid: boolean
+  issued_at: string
   expires_at: string
   days_until_expiration: number
   needs_renewal: boolean
@@ -78,7 +80,9 @@ export function parseCertificateInfo(value: unknown): CertificateInfo | null {
     serial_number,
     common_name: str(r.common_name),
     steward_id: str(r.steward_id),
+    tenant_id: str(r.tenant_id),
     is_valid: bool(r.is_valid),
+    issued_at: str(r.issued_at),
     expires_at: str(r.expires_at),
     days_until_expiration: num(r.days_until_expiration),
     needs_renewal: bool(r.needs_renewal),

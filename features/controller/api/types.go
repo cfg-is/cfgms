@@ -96,7 +96,9 @@ type CertificateInfo struct {
 	SerialNumber        string    `json:"serial_number"`
 	CommonName          string    `json:"common_name"`
 	StewardID           string    `json:"steward_id,omitempty"`
+	TenantID            string    `json:"tenant_id,omitempty"`
 	IsValid             bool      `json:"is_valid"`
+	IssuedAt            time.Time `json:"issued_at,omitzero"`
 	ExpiresAt           time.Time `json:"expires_at"`
 	DaysUntilExpiration int32     `json:"days_until_expiration"`
 	NeedsRenewal        bool      `json:"needs_renewal"`

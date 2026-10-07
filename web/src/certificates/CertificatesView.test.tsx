@@ -7,7 +7,7 @@
  * revoke confirm modal, and CA rotation modal (type-to-confirm).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import CertificatesView from './CertificatesView.tsx'
@@ -36,7 +36,9 @@ function makeCert(overrides: Partial<Record<string, unknown>> = {}) {
     serial_number: '7f:3a:9c:01',
     common_name: 'dc-01.acme-corp',
     steward_id: 'steward-abc',
+    tenant_id: 'acme-corp',
     is_valid: true,
+    issued_at: '2026-01-14T00:00:00Z',
     expires_at: '2027-01-14T00:00:00Z',
     days_until_expiration: 168,
     needs_renewal: false,
@@ -642,5 +644,29 @@ describe('CertificatesView — rotation in progress', () => {
     expect(screen.queryByTestId('rotation-in-progress')).not.toBeInTheDocument()
     expect(screen.getByTestId('rotate-confirm-input')).toHaveValue('')
     expect(screen.getByTestId('rotate-confirm-btn')).toBeDisabled()
+  })
+})
+
+describe('CertificatesView — Tenant and Issued columns', () => {
+  it('renders Tenant and Issued headers and values', async () => {
+    fetchMock.mockResolvedValueOnce(makeCertResponse([makeCert()]))
+    renderCertificatesView()
+    const row = await screen.findByTestId('cert-row')
+    expect(screen.getByRole('columnheader', { name: 'Tenant' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Issued' })).toBeInTheDocument()
+    expect(within(row).getByTestId('cert-tenant')).toHaveTextContent('acme-corp')
+    expect(within(row).getByTestId('cert-issued')).toHaveTextContent(
+      new Date('2026-01-14T00:00:00Z').toLocaleDateString(),
+    )
+  })
+
+  it('shows a dash when tenant and issue date are absent', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeCertResponse([makeCert({ tenant_id: undefined, issued_at: undefined })]),
+    )
+    renderCertificatesView()
+    const row = await screen.findByTestId('cert-row')
+    expect(within(row).getByTestId('cert-tenant')).toHaveTextContent('—')
+    expect(within(row).getByTestId('cert-issued')).toHaveTextContent('—')
   })
 })

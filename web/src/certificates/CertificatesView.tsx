@@ -169,6 +169,9 @@ function CertRow({
 }) {
   const status = certStatus(cert)
   const canRevoke = status === 'valid-ok' || status === 'valid-warn' || status === 'valid-crit'
+  const issuedDate = cert.issued_at
+    ? new Date(cert.issued_at).toLocaleDateString()
+    : '—'
   const expiresDate = cert.expires_at
     ? new Date(cert.expires_at).toLocaleDateString()
     : '—'
@@ -183,6 +186,12 @@ function CertRow({
       </td>
       <td>
         <span className="mono2">{cert.steward_id || '—'}</span>
+      </td>
+      <td>
+        <span className="mono2" data-testid="cert-tenant">{cert.tenant_id || '—'}</span>
+      </td>
+      <td>
+        <span className="mut" data-testid="cert-issued">{issuedDate}</span>
       </td>
       <td>
         <span className="mut">{expiresDate}</span>
@@ -491,6 +500,8 @@ export default function CertificatesView() {
                 <th>Serial</th>
                 <th>Subject / CN</th>
                 <th>Steward</th>
+                <th>Tenant</th>
+                <th>Issued</th>
                 <th>Expires</th>
                 <th>Status</th>
                 <th />
