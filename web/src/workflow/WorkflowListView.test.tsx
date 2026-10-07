@@ -220,7 +220,7 @@ describe('WorkflowListView — overlay drawer', () => {
     fireEvent.click(screen.getByTestId('workflow-row'))
     fireEvent.click(screen.getByTestId('drawer-tab-preview'))
     expect(screen.getByTestId('drawer-pane-preview')).toBeInTheDocument()
-    expect(screen.queryByTestId('drawer-pane-run')).toBeNull()
+    expect(screen.getByTestId('drawer-pane-run')).not.toBeVisible()
   })
 })
 

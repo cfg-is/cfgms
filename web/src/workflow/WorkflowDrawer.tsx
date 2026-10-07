@@ -679,8 +679,10 @@ export default function WorkflowDrawer({ workflow, onClose }: WorkflowDrawerProp
       </div>
 
       <div className="dbody" role="tabpanel">
-        {activeTab === 'run' && (
-          <div data-testid="drawer-pane-run">
+        {/* Stays mounted while the preview is shown so its poll keeps feeding
+            the run-state overlay; hidden rather than unmounted. */}
+        {(activeTab === 'run' || activeTab === 'preview') && (
+          <div data-testid="drawer-pane-run" hidden={activeTab !== 'run'}>
             <WorkflowExecutionView
               workflowName={workflow.name}
               onClose={() => setActiveTab('steps')}

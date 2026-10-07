@@ -296,7 +296,7 @@ describe('WorkflowDrawer — tab bar', () => {
     fireEvent.click(screen.getByTestId('drawer-tab-preview'))
     expect(screen.getByTestId('drawer-tab-preview')).toHaveClass('on')
     expect(screen.getByTestId('drawer-pane-preview')).toBeInTheDocument()
-    expect(screen.queryByTestId('drawer-pane-run')).toBeNull()
+    expect(screen.getByTestId('drawer-pane-run')).not.toBeVisible()
     expect(screen.queryByTestId('drawer-pane-schedule')).toBeNull()
   })
 
@@ -831,6 +831,24 @@ describe('WorkflowDrawer — What it does tab (WorkflowGraph preview)', () => {
     )
     expect(screen.getByTestId('node-a').className).not.toContain('running')
   })
+
+  it('advances the overlay while the preview tab stays active', async () => {
+    api.currentStep = 'b'
+    renderDrawer(makeWorkflow(workflowFromApi({ steps: threeSteps })))
+    fireEvent.click(await screen.findByTestId('execute-btn'))
+    fireEvent.click(screen.getByTestId('exec-confirm-btn'))
+    await screen.findByText('step: b')
+    fireEvent.click(screen.getByTestId('drawer-tab-preview'))
+    await waitFor(() =>
+      expect(screen.getByTestId('node-b').className).toContain('running'),
+    )
+    api.currentStep = 'c'
+    await waitFor(
+      () => expect(screen.getByTestId('node-c').className).toContain('running'),
+      { timeout: 10000 },
+    )
+    expect(screen.getByTestId('node-b').className).not.toContain('running')
+  }, 15000)
 
   it('shows the empty state for a workflow with zero steps', () => {
     renderDrawer(makeWorkflow(workflowFromApi({ steps: [] })))
