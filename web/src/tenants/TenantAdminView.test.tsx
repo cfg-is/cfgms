@@ -1046,3 +1046,189 @@ describe('TenantAdminView — edit form', () => {
     )
   })
 })
+
+// ── Break-glass, banner and support access (Issue #4588) ──────────────────────
+
+describe('TenantAdminView — break-glass, banner and support access', () => {
+  const future = () => new Date(Date.now() + 20 * 60_000).toISOString()
+  const crossingBody = (over: Record<string, unknown> = {}) => ({
+    ID: 'c-1',
+    TenantID: 'msp-a',
+    PrincipalID: 'root-op',
+    Kind: 'break_glass',
+    GrantedBy: 'root-op',
+    Justification: 'outage response',
+    CreatedAt: '2026-01-01T00:00:00Z',
+    ExpiresAt: future(),
+    RevokedAt: null,
+    ...over,
+  })
+
+  function renderSession(
+    session: { username: string; tenant_id: string; root_scope: boolean },
+    rest: (url: string, init?: RequestInit) => Response,
+  ) {
+    window.sessionStorage.clear()
+    routeWithLogin(session, rest)
+    return render(
+      <MemoryRouter initialEntries={['/tenants']}>
+        <AuthProvider>
+          <SignInHarness username={session.username} />
+          <TenantAdminView />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  const rootSession = { username: 'root-admin', tenant_id: '', root_scope: true }
+
+  it('replaces the old out-of-scope copy with a Request break-glass action', async () => {
+    renderSession(rootSession, (url) =>
+      url.endsWith('/api/v1/tenants') ? makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })]) : jsonResponse(404, {}),
+    )
+    await waitFor(() => screen.getByTestId('tenants-table'))
+    await signIn()
+    const boundary = await screen.findByTestId('boundary-empty-state')
+    expect(boundary).not.toHaveTextContent(/out-of-scope action/)
+    expect(screen.getByTestId('request-break-glass-btn')).toHaveTextContent('Request break-glass')
+  })
+
+  it('submits break-glass with the header, then shows the banner and ends the session', async () => {
+    let invoked = false
+    let ended = false
+    renderSession(rootSession, (url, init) => {
+      if (url.endsWith('/api/v1/tenants')) {
+        return makeTenantsResponse(
+          invoked && !ended
+            ? [makeTenant({ id: 'root', name: 'root' }), makeTenant({ id: 'msp-a', parent_id: 'root' })]
+            : [makeTenant({ id: 'root', name: 'root' })],
+        )
+      }
+      if (url.endsWith('/api/v1/tenants/msp-a/break-glass')) {
+        invoked = true
+        expect(new Headers(init?.headers).get('X-Justification')).toBe('outage response')
+        return jsonResponse(201, { data: crossingBody() })
+      }
+      if (url.endsWith('/api/v1/tenants/msp-a/access-grants/c-1') && init?.method === 'DELETE') {
+        ended = true
+        return jsonResponse(200, { data: crossingBody() })
+      }
+      return jsonResponse(404, {})
+    })
+    await waitFor(() => screen.getByTestId('tenants-table'))
+    await signIn()
+    fireEvent.click(await screen.findByTestId('request-break-glass-btn'))
+    fireEvent.change(screen.getByTestId('break-glass-tenant-input'), { target: { value: 'msp-a' } })
+    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
+    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
+
+    const banner = await screen.findByTestId('crossing-banner')
+    expect(banner).toHaveTextContent('msp-a')
+    expect(screen.getByTestId('crossing-banner-reason')).toHaveTextContent('outage response')
+    expect(screen.queryByTestId('break-glass-dialog')).not.toBeInTheDocument()
+    // The crossing exposes the subtree: the tree reloads and the boundary state goes.
+    await waitFor(() => expect(screen.queryByTestId('boundary-empty-state')).not.toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('crossing-end-btn'))
+    await waitFor(() => expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument())
+    expect(ended).toBe(true)
+    expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
+  })
+
+  it('a 403 on break-glass renders an error and no banner', async () => {
+    renderSession(rootSession, (url) => {
+      if (url.endsWith('/api/v1/tenants')) return makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })])
+      if (url.endsWith('/break-glass')) {
+        return jsonResponse(403, { error: { code: 'ROOT_TENANT_NOT_CROSSABLE', message: 'break-glass cannot be invoked on the root tenant' } })
+      }
+      return jsonResponse(404, {})
+    })
+    await waitFor(() => screen.getByTestId('tenants-table'))
+    await signIn()
+    fireEvent.click(await screen.findByTestId('request-break-glass-btn'))
+    fireEvent.change(screen.getByTestId('break-glass-tenant-input'), { target: { value: 'root' } })
+    fireEvent.change(screen.getByTestId('break-glass-justification-input'), { target: { value: 'outage response' } })
+    fireEvent.click(screen.getByTestId('break-glass-submit-btn'))
+    expect(await screen.findByTestId('break-glass-error')).toHaveTextContent('cannot be invoked on the root tenant')
+    expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument()
+  })
+
+  it('restores the banner after a reload when GET confirms the crossing', async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/tenants')) return Promise.resolve(makeTenantsResponse([makeTenant({ id: 'root', name: 'root' })]))
+      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) return Promise.resolve(jsonResponse(200, { data: [crossingBody()] }))
+      return Promise.resolve(jsonResponse(404, {}))
+    })
+    window.sessionStorage.setItem(
+      'cfgms.tenants.crossingBanner',
+      JSON.stringify({ tenantId: 'msp-a', crossingId: 'c-1', expiresAt: future(), reason: 'outage response' }),
+    )
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <TenantAdminView />
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByTestId('crossing-banner')).toHaveTextContent('msp-a')
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/api/v1/tenants/msp-a/access-grants'))).toBe(true),
+    )
+    expect(screen.getByTestId('crossing-banner')).toBeInTheDocument()
+  })
+
+  it('drops the persisted banner when the crossing is expired', async () => {
+    fetchMock.mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/tenants')) return Promise.resolve(makeTenantsResponse([makeTenant()]))
+      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) {
+        return Promise.resolve(jsonResponse(200, { data: [crossingBody({ ExpiresAt: '2020-01-01T00:00:00Z' })] }))
+      }
+      return Promise.resolve(jsonResponse(404, {}))
+    })
+    window.sessionStorage.setItem(
+      'cfgms.tenants.crossingBanner',
+      JSON.stringify({ tenantId: 'msp-a', crossingId: 'c-1', expiresAt: future(), reason: 'x' }),
+    )
+    renderView()
+    await waitFor(() => expect(screen.queryByTestId('crossing-banner')).not.toBeInTheDocument())
+    expect(window.sessionStorage.getItem('cfgms.tenants.crossingBanner')).toBeNull()
+  })
+
+  it('shows Allow support access for an MSP admin and lists the new grant', async () => {
+    let granted = false
+    renderSession({ username: 'msp-owner', tenant_id: 'msp-a', root_scope: false }, (url, init) => {
+      if (url.endsWith('/api/v1/tenants')) return makeTenantsResponse([makeTenant()])
+      if (url.endsWith('/api/v1/tenants/msp-a/access-grants') && init?.method === 'POST') {
+        granted = true
+        expect(JSON.parse(String(init.body))).toMatchObject({ principal_id: 'root-op', duration_minutes: 60 })
+        return jsonResponse(201, { data: crossingBody({ ID: 'g-1', Kind: 'grant' }) })
+      }
+      if (url.endsWith('/api/v1/tenants/msp-a/access-grants')) {
+        return jsonResponse(200, { data: granted ? [crossingBody({ ID: 'g-1', Kind: 'grant' })] : [] })
+      }
+      return jsonResponse(404, {})
+    })
+    await signIn()
+    await waitFor(() => screen.getByTestId('tenants-table'))
+    fireEvent.click(screen.getByTestId('allow-support-btn'))
+    fireEvent.change(screen.getByTestId('support-principal-input'), { target: { value: 'root-op' } })
+    fireEvent.click(screen.getByTestId('support-submit-btn'))
+    const row = await screen.findByTestId('crossing-row')
+    expect(row).toHaveAttribute('data-crossing-id', 'g-1')
+    expect(row).toHaveTextContent('root-op')
+    expect(screen.queryByTestId('support-access-dialog')).not.toBeInTheDocument()
+  })
+
+  it('hides Allow support access for root-scoped sessions', async () => {
+    renderSession(rootSession, (url) =>
+      url.endsWith('/api/v1/tenants')
+        ? makeTenantsResponse([makeTenant({ id: 'root', name: 'root' }), makeTenant({ id: 'msp-a', parent_id: 'root' })])
+        : jsonResponse(404, {}),
+    )
+    await signIn()
+    await waitFor(() => screen.getAllByTestId('tenant-row'))
+    expect(screen.queryByTestId('allow-support-btn')).not.toBeInTheDocument()
+  })
+})
