@@ -16,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	secretsif "github.com/cfgis/cfgms/pkg/secrets/interfaces"
+	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
 
 // executionIDCounter ensures unique IDs even when time.Now().UnixNano() returns
@@ -72,6 +73,17 @@ type Engine struct {
 	ringHealthExecutor            RingHealthStepExecutor
 	setHARoleExecutor             SetHARoleStepExecutor
 	moveResourceToClusterExecutor MoveResourceToClusterStepExecutor
+
+	// Approval gate state (engine_approval.go). secrets holds encrypted
+	// checkpoints, approvalStore the pending/decided approval records.
+	secrets       secretsif.SecretStore
+	approvalStore business.ApprovalStore
+	approvalLease time.Duration
+	nodeID        string
+	baseCtx       context.Context
+	baseCancel    context.CancelFunc
+	resuming      map[string]struct{}
+	background    sync.WaitGroup
 }
 
 // NewEngine creates a new workflow engine instance.
@@ -82,7 +94,9 @@ type Engine struct {
 // setHARoleExecutor handles StepTypeSetHARole steps; pass nil until S2 wires the real executor.
 // moveResourceToClusterExecutor handles StepTypeMoveResourceToCluster steps; pass nil until S3 wires the real executor.
 // executeStep returns a clear error for any step type whose executor is nil.
-func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor, setHARoleExecutor SetHARoleStepExecutor, moveResourceToClusterExecutor MoveResourceToClusterStepExecutor) *Engine {
+// opts configure optional collaborators such as the approval store (WithApprovalStore);
+// without one, approval steps fail with a clear error.
+func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secretsif.SecretStore, transformExecutor TransformStepExecutor, ringHealthExecutor RingHealthStepExecutor, setHARoleExecutor SetHARoleStepExecutor, moveResourceToClusterExecutor MoveResourceToClusterStepExecutor, opts ...EngineOption) *Engine {
 	// Create module logger for structured workflow logging
 	workflowLogger := logging.ForModule("workflow").WithField("component", "engine")
 
@@ -114,6 +128,14 @@ func NewEngine(moduleFactory ModuleLoader, logger logging.Logger, secrets secret
 		ringHealthExecutor:            ringHealthExecutor,
 		setHARoleExecutor:             setHARoleExecutor,
 		moveResourceToClusterExecutor: moveResourceToClusterExecutor,
+		secrets:                       secrets,
+		approvalLease:                 defaultApprovalLease,
+		nodeID:                        defaultApprovalNodeID(),
+		resuming:                      make(map[string]struct{}),
+	}
+	engine.baseCtx, engine.baseCancel = context.WithCancel(context.Background())
+	for _, opt := range opts {
+		opt(engine)
 	}
 
 	// Initialize debug engine
@@ -204,6 +226,13 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow Workflow, variabl
 
 // executeWorkflowAsync executes the workflow asynchronously
 func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Workflow) {
+	e.runWorkflowSteps(execution, workflow, workflow.Steps, nil)
+}
+
+// runWorkflowSteps runs steps (the whole step list, or the tail after an approval
+// gate on resume) to a terminal state, or to an approval gate. onFinished, when
+// non-nil, runs once the final status is set and before Done closes.
+func (e *Engine) runWorkflowSteps(execution *WorkflowExecution, workflow Workflow, steps []Step, onFinished func()) {
 	// Close Done channel after all work (including logging) completes.
 	// This is the first defer so it runs last (LIFO), after the panic recovery
 	// defer below finishes its logging.
@@ -232,8 +261,16 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 		}
 	}()
 
-	// Execute all root steps
-	err := e.executeSteps(execution.Context, workflow.Steps, execution)
+	// Execute the root steps
+	err := e.executeSteps(execution.Context, steps, execution)
+
+	if isAwaitingApproval(err) {
+		e.suspendAtApprovalGate(execution, workflow)
+		if onFinished != nil {
+			onFinished()
+		}
+		return
+	}
 
 	endTime := time.Now()
 	execution.SetEndTime(&endTime)
@@ -281,6 +318,9 @@ func (e *Engine) executeWorkflowAsync(execution *WorkflowExecution, workflow Wor
 			"execution_id", execution.ID,
 			"duration", endTime.Sub(execution.StartTime))
 	}
+	if onFinished != nil {
+		onFinished()
+	}
 }
 
 // executeSteps executes a list of steps based on their type
@@ -299,6 +339,11 @@ func (e *Engine) executeStepsWithRetry(ctx context.Context, steps []Step, execut
 				// Check if it's a loop control error (break/continue)
 				if _, isLoopControl := err.(*LoopControlError); isLoopControl {
 					// Propagate loop control errors without handling
+					return err
+				}
+
+				// An approval gate suspends the run; it is not a failure
+				if isAwaitingApproval(err) {
 					return err
 				}
 
@@ -489,6 +534,8 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 		err = e.executeWebhookStep(ctx, step, execution)
 	case StepTypeDelay:
 		err = e.executeDelayStep(ctx, step, execution)
+	case StepTypeApproval:
+		err = e.executeApprovalStep(step)
 	case StepTypeFor:
 		err = e.executeForStep(ctx, step, execution)
 	case StepTypeWhile:
@@ -568,7 +615,9 @@ func (e *Engine) executeStep(ctx context.Context, step Step, execution *Workflow
 	result.EndTime = &endTime
 	result.Duration = endTime.Sub(startTime)
 
-	if err != nil {
+	if isAwaitingApproval(err) {
+		result.Status = StatusAwaitingApproval
+	} else if err != nil {
 		result.Status = StatusFailed
 		result.Error = err.Error()
 

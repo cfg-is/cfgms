@@ -155,6 +155,23 @@ type Step struct {
 	Composite *CompositeConfig `yaml:"composite,omitempty" json:"composite,omitempty"`
 	// Transform configuration for data transformation steps
 	Transform map[string]interface{} `yaml:"transform,omitempty" json:"transform,omitempty"`
+	// Approval configuration for approval-gate steps
+	Approval *ApprovalConfig `yaml:"approval,omitempty" json:"approval,omitempty"`
+}
+
+// ApprovalConfig defines a durable human approval gate. Reaching the step ends the
+// run in StatusAwaitingApproval; a later decision resumes the steps after it.
+type ApprovalConfig struct {
+	// Message tells the approver what they are approving.
+	Message string `yaml:"message" json:"message"`
+
+	// ApproverPermission is the RBAC permission an approver must hold. It is
+	// recorded on the approval and enforced by the decision endpoint.
+	ApproverPermission string `yaml:"approver_permission,omitempty" json:"approver_permission,omitempty"`
+
+	// Timeout is how long the approval stays pending before it expires and the
+	// run is failed as a rejection.
+	Timeout time.Duration `yaml:"timeout" json:"timeout"`
 }
 
 // StepType defines the type of workflow step
@@ -184,6 +201,9 @@ const (
 
 	// StepTypeDelay introduces delays in workflow execution
 	StepTypeDelay StepType = "delay"
+
+	// StepTypeApproval is a durable approval gate; only valid at the top level
+	StepTypeApproval StepType = "approval"
 
 	// StepTypeFor executes child steps in a for loop
 	StepTypeFor StepType = "for"
@@ -605,6 +625,10 @@ const (
 
 	// StatusPaused indicates the workflow is paused
 	StatusPaused ExecutionStatus = "paused"
+
+	// StatusAwaitingApproval indicates the run stopped at an approval gate; its
+	// state is held in the approval store and no goroutine is running it
+	StatusAwaitingApproval ExecutionStatus = "awaiting_approval"
 )
 
 // StepResult contains the result of a step execution

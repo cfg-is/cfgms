@@ -73,6 +73,7 @@ type stepDefinition struct {
 	Steps     []stepDefinition       `yaml:"steps,omitempty"`
 	Condition *conditionDefinition   `yaml:"condition,omitempty"`
 	Delay     *delayDefinition       `yaml:"delay,omitempty"`
+	Approval  *approvalDefinition    `yaml:"approval,omitempty"`
 	Timeout   string                 `yaml:"timeout,omitempty"`
 	OnFailure string                 `yaml:"on_failure,omitempty"`
 	Variables map[string]interface{} `yaml:"variables,omitempty"`
@@ -81,6 +82,12 @@ type stepDefinition struct {
 type delayDefinition struct {
 	Duration string `yaml:"duration"`
 	Message  string `yaml:"message,omitempty"`
+}
+
+type approvalDefinition struct {
+	Message            string `yaml:"message"`
+	ApproverPermission string `yaml:"approver_permission,omitempty"`
+	Timeout            string `yaml:"timeout"`
 }
 
 type conditionDefinition struct {
@@ -182,6 +189,22 @@ func (p *Parser) convertSteps(stepDefs []stepDefinition) ([]Step, error) {
 			}
 		}
 
+		// Convert approval config
+		if stepDef.Approval != nil {
+			cfg := &ApprovalConfig{
+				Message:            stepDef.Approval.Message,
+				ApproverPermission: stepDef.Approval.ApproverPermission,
+			}
+			if stepDef.Approval.Timeout != "" {
+				timeout, err := time.ParseDuration(stepDef.Approval.Timeout)
+				if err != nil {
+					return nil, fmt.Errorf("invalid approval timeout for step %s: %w", stepDef.Name, err)
+				}
+				cfg.Timeout = timeout
+			}
+			step.Approval = cfg
+		}
+
 		steps[i] = step
 	}
 
@@ -223,6 +246,12 @@ func (p *Parser) ValidateWorkflow(workflow Workflow) error {
 	// Validate each step
 	stepNames := make(map[string]bool)
 	for _, step := range workflow.Steps {
+		// Approval gates are resumed by replaying the top-level step list, so a
+		// gate inside any other block is rejected rather than silently accepted.
+		// Checked first so it is reported whatever the enclosing step's type.
+		if nested := findNestedApproval(step); nested != "" {
+			return fmt.Errorf("step validation failed: %w", &nestedApprovalError{step: nested})
+		}
 		if err := p.validateStep(step, stepNames); err != nil {
 			return fmt.Errorf("step validation failed: %w", err)
 		}
@@ -273,6 +302,16 @@ func (p *Parser) validateStep(step Step, stepNames map[string]bool) error {
 	case StepTypeSequential, StepTypeParallel:
 		if len(step.Steps) == 0 {
 			return fmt.Errorf("%s steps must have child steps", step.Type)
+		}
+	case StepTypeApproval:
+		if step.Approval == nil {
+			return fmt.Errorf("approval configuration is required for approval steps")
+		}
+		if step.Approval.Message == "" {
+			return fmt.Errorf("message is required for approval steps")
+		}
+		if step.Approval.Timeout <= 0 {
+			return fmt.Errorf("timeout must be positive for approval steps")
 		}
 	case StepTypeConditional:
 		if step.Condition == nil {
@@ -342,7 +381,7 @@ func (p *Parser) validateCondition(condition Condition) error {
 func isValidStepType(stepType StepType) bool {
 	switch stepType {
 	case StepTypeTask, StepTypeSequential, StepTypeParallel, StepTypeConditional,
-		StepTypeDelay, StepTypeSetHARole, StepTypeMoveResourceToCluster:
+		StepTypeDelay, StepTypeApproval, StepTypeSetHARole, StepTypeMoveResourceToCluster:
 		return true
 	default:
 		return false
@@ -374,4 +413,50 @@ func isValidComparisonOperator(operator ComparisonOperator) bool {
 	default:
 		return false
 	}
+}
+
+// nestedApprovalError reports an approval step placed anywhere but the top level.
+type nestedApprovalError struct {
+	step string
+}
+
+func (e *nestedApprovalError) Error() string {
+	return fmt.Sprintf("approval steps must be top-level (step %q is nested)", e.step)
+}
+
+// findNestedApproval returns the name of the first approval step found inside a
+// child block of step (parallel, loop, try, conditional, switch, fallback), or "".
+func findNestedApproval(step Step) string {
+	return nestedApprovalIn(step)
+}
+
+func nestedApprovalIn(step Step) string {
+	var blocks [][]Step
+	blocks = append(blocks, step.Steps)
+	if step.Try != nil {
+		blocks = append(blocks, step.Try.Try, step.Try.Finally)
+		for _, c := range step.Try.Catch {
+			blocks = append(blocks, c.Steps)
+		}
+	}
+	if step.Switch != nil {
+		blocks = append(blocks, step.Switch.Default)
+		for _, c := range step.Switch.Cases {
+			blocks = append(blocks, c.Steps)
+		}
+	}
+	if step.ErrorHandling != nil && step.ErrorHandling.FallbackStep != nil {
+		blocks = append(blocks, []Step{*step.ErrorHandling.FallbackStep})
+	}
+	for _, block := range blocks {
+		for _, child := range block {
+			if child.Type == StepTypeApproval {
+				return child.Name
+			}
+			if n := nestedApprovalIn(child); n != "" {
+				return n
+			}
+		}
+	}
+	return ""
 }
