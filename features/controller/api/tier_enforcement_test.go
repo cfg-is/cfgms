@@ -103,6 +103,8 @@ var strongAssuranceRouteTable = []strongAssuranceRouteEntry{
 	{"POST", "/api/v1/modules/approvals/cfgms:test:1.0.0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/reject", "module:reject"},
 	// WebAuthn passkey bootstrap and recovery (Issue #2783) — credential-removal surface.
 	{"POST", "/api/v1/accounts/test-user/webauthn/revoke/Y3JlZGVudGlhbC1pZC0x", "webauthn:revoke"},
+	// WebAuthn passkey rename (Issue #4626) — relabelling a credential is a credential-mutation surface.
+	{"PATCH", "/api/v1/accounts/test-user/webauthn/credentials/Y3JlZGVudGlhbC1pZC0x", "webauthn:rename"},
 	// WebAuthn presence ceremony (Issue #2784) — gates RequireUserPresence-gated actions.
 	{"POST", "/api/v1/webauthn/presence/begin", "webauthn:assert-presence"},
 	{"POST", "/api/v1/webauthn/presence/finish", "webauthn:assert-presence"},

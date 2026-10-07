@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1910,4 +1911,183 @@ func TestRegistrationBegin_RequiresDiscoverableCredential(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		assertResident(t, authenticatorSelectionOf(t, rec.Body.Bytes()))
 	})
+}
+
+// --- Issue #4626: rename, device type, synced and current-device flag ---
+
+func injectCredentialWith(t *testing.T, server *Server, username string, cred WebAuthnCredential) {
+	t.Helper()
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	if cred.RegisteredAt.IsZero() {
+		cred.RegisteredAt = time.Now()
+	}
+	acct.Credentials = append(acct.Credentials, cred)
+	require.NoError(t, server.persistAccount(context.Background(), acct, "test-injector"))
+}
+
+func doRenameCredential(t *testing.T, server *Server, req *http.Request, username, credIDParam string) *httptest.ResponseRecorder {
+	t.Helper()
+	req = withVars(req, map[string]string{"username": username, "credential_id": credIDParam})
+	rec := httptest.NewRecorder()
+	server.handleWebAuthnRenameCredential(rec, req)
+	return rec
+}
+
+func newRenameRequest(username, credIDParam, body string) *http.Request {
+	return httptest.NewRequest(http.MethodPatch,
+		fmt.Sprintf("/api/v1/accounts/%s/webauthn/credentials/%s", username, credIDParam),
+		strings.NewReader(body))
+}
+
+func listCredentialInfos(t *testing.T, rec *httptest.ResponseRecorder) map[string]WebAuthnCredentialInfo {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var envelope struct {
+		Data WebAuthnListResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &envelope))
+	out := map[string]WebAuthnCredentialInfo{}
+	for _, c := range envelope.Data.Credentials {
+		out[c.ID] = c
+	}
+	return out
+}
+
+func TestWebAuthnRenameCredential(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	credID := []byte("rename-cred")
+	param := base64.RawURLEncoding.EncodeToString(credID)
+	injectCredentialWith(t, server, username, WebAuthnCredential{ID: credID, Label: "old"})
+
+	t.Run("rename updates label and list reflects it", func(t *testing.T) {
+		req := withPrincipal(newRenameRequest(username, param, `{"label":"  Work\u0007 laptop \n"}`), testAdminPrincipal())
+		rec := doRenameCredential(t, server, req, username, param)
+		require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+
+		infos := listCredentialInfos(t, doListCredentials(t, server, username))
+		assert.Equal(t, "Work laptop", infos[param].Label)
+	})
+
+	t.Run("label is truncated to 64 runes", func(t *testing.T) {
+		req := withPrincipal(newRenameRequest(username, param, `{"label":"`+strings.Repeat("é", 100)+`"}`), testAdminPrincipal())
+		require.Equal(t, http.StatusNoContent, doRenameCredential(t, server, req, username, param).Code)
+		infos := listCredentialInfos(t, doListCredentials(t, server, username))
+		assert.Len(t, []rune(infos[param].Label), 64)
+	})
+
+	t.Run("empty label is rejected", func(t *testing.T) {
+		req := withPrincipal(newRenameRequest(username, param, `{"label":" \t"}`), testAdminPrincipal())
+		assert.Equal(t, http.StatusBadRequest, doRenameCredential(t, server, req, username, param).Code)
+	})
+
+	t.Run("malformed body is rejected", func(t *testing.T) {
+		req := withPrincipal(newRenameRequest(username, param, `{`), testAdminPrincipal())
+		assert.Equal(t, http.StatusBadRequest, doRenameCredential(t, server, req, username, param).Code)
+	})
+
+	t.Run("unknown credential returns 404", func(t *testing.T) {
+		other := base64.RawURLEncoding.EncodeToString([]byte("nope"))
+		req := withPrincipal(newRenameRequest(username, other, `{"label":"x"}`), testAdminPrincipal())
+		assert.Equal(t, http.StatusNotFound, doRenameCredential(t, server, req, username, other).Code)
+	})
+
+	t.Run("renaming another account's credential is refused", func(t *testing.T) {
+		recB := postAccount(t, server, testAdminPrincipal(), AccountRequest{Username: "rename-account-b"})
+		require.Equal(t, http.StatusCreated, recB.Code)
+		acctB, err := server.getAccount(context.Background(), "rename-account-b")
+		require.NoError(t, err)
+		acctA, err := server.getAccount(context.Background(), username)
+		require.NoError(t, err)
+
+		// B's cookie session targeting A's path: self-scoped, so refused.
+		req := withCookieAuth(newRenameRequest(username, param, `{"label":"hijack"}`), acctB)
+		rec := doRenameCredential(t, server, req, username, param)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+
+		acctA, err = server.getAccount(context.Background(), acctA.Username)
+		require.NoError(t, err)
+		assert.NotEqual(t, "hijack", acctA.Credentials[0].Label)
+	})
+}
+
+// The route-level step-up refusal (401 CFGMS-StepUp for Basic callers) is exercised for
+// this route by TestF2_AssuranceGate_ParityWithPermissionRegistry (strongAssuranceRouteTable).
+func TestWebAuthnRenameCredential_RequiresStrongAssurance(t *testing.T) {
+	assert.Equal(t, session.AssuranceStrong, permissionAssurance["webauthn:rename"].Min)
+	assert.True(t, knownPermissions["webauthn:rename"])
+}
+
+func TestWebAuthnListCredentials_DeviceTypeAndSync(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	cases := []struct {
+		id        string
+		transport []string
+		be, bs    bool
+		want      string
+	}{
+		{"c-platform", []string{"internal"}, false, false, "platform"},
+		{"c-usb", []string{"usb"}, true, false, "security_key"},
+		{"c-hybrid", []string{"hybrid"}, true, true, "phone_or_other"},
+		{"c-empty", nil, false, false, "unknown"},
+	}
+	for _, c := range cases {
+		injectCredentialWith(t, server, username, WebAuthnCredential{
+			ID: []byte(c.id), Transport: c.transport, BackupEligible: c.be, BackupState: c.bs,
+		})
+	}
+	infos := listCredentialInfos(t, doListCredentials(t, server, username))
+	for _, c := range cases {
+		got := infos[base64.RawURLEncoding.EncodeToString([]byte(c.id))]
+		assert.Equal(t, c.want, got.DeviceType, c.id)
+		assert.Equal(t, c.bs, got.Synced, c.id)
+		assert.Equal(t, c.be, got.SyncCapable, c.id)
+		assert.False(t, got.Current, "Bearer/mTLS caller has no web session: %s", c.id)
+	}
+}
+
+func TestWebAuthnListCredentials_CurrentMarksSessionCredential(t *testing.T) {
+	server, username := setupWebAuthnServer(t, tvRPID, []string{tvOrigin})
+	idA, idB := []byte("cur-a"), []byte("cur-b")
+	injectCredentialWith(t, server, username, WebAuthnCredential{ID: idA})
+	injectCredentialWith(t, server, username, WebAuthnCredential{ID: idB})
+	acct, err := server.getAccount(context.Background(), username)
+	require.NoError(t, err)
+
+	webCfg := session.Config{IdleTimeout: 60 * time.Minute, AbsoluteTimeout: 12 * time.Hour, GraceWindow: 30 * time.Second}
+	store := session.NewMemStore(webCfg, time.Now)
+	t.Cleanup(store.Close)
+	server.SetWebSessionManager(session.NewManager(webCfg, store, time.Now))
+
+	ctx := context.Background()
+	_, token, err := server.webSessionManager.Issue(ctx, acct.ID, "web-login", acct.TenantID)
+	require.NoError(t, err)
+	sess, err := server.webSessionManager.Validate(ctx, token)
+	require.NoError(t, err)
+	_, _, err = server.webSessionManager.Elevate(ctx, sess.ID, idB, "127.0.0.1")
+	require.NoError(t, err)
+
+	list := func(sessID string) map[string]WebAuthnCredentialInfo {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+username+"/webauthn/credentials", nil)
+		req = withVars(req, map[string]string{"username": username})
+		req = withCookieAuth(req, acct)
+		if sessID != "" {
+			req = req.WithContext(context.WithValue(req.Context(), webSessionIDContextKey, sessID))
+		}
+		rec := httptest.NewRecorder()
+		server.handleWebAuthnListCredentials(rec, req)
+		return listCredentialInfos(t, rec)
+	}
+
+	infos := list(sess.ID)
+	assert.False(t, infos[base64.RawURLEncoding.EncodeToString(idA)].Current)
+	assert.True(t, infos[base64.RawURLEncoding.EncodeToString(idB)].Current)
+
+	for id, info := range list("") {
+		assert.False(t, info.Current, "no web session => current false for %s", id)
+	}
+	for id, info := range list("unknown-session") {
+		assert.False(t, info.Current, "unknown session => current false for %s", id)
+	}
 }

@@ -40,6 +40,9 @@ func registerAccountRoutes(s *Server, api *mux.Router) {
 	// revoke: webauthn:revoke permission (AssuranceStrong — credential-removal surface).
 	accounts.Handle("/{username}/webauthn/credentials",
 		s.requirePermission("webauthn", "list")(http.HandlerFunc(s.handleWebAuthnListCredentials))).Methods("GET")
+	// rename: webauthn:rename permission (AssuranceStrong — Issue #4626).
+	accounts.Handle("/{username}/webauthn/credentials/{credential_id}",
+		s.requirePermission("webauthn", "rename")(http.HandlerFunc(s.handleWebAuthnRenameCredential))).Methods("PATCH")
 	accounts.Handle("/{username}/webauthn/revoke/{credential_id}",
 		s.requirePermission("webauthn", "revoke")(http.HandlerFunc(s.handleWebAuthnRevokeCredential))).Methods("POST")
 
