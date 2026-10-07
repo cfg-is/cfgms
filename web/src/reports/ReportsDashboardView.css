@@ -336,3 +336,34 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ── Window selector ──────────────────────────────────────────────────── */
+
+.rdb-window {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.rdb-chip {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-sm);
+  padding: 4px var(--space-3);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rdb-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.rdb-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft, transparent);
+}

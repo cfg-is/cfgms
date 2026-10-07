@@ -16,7 +16,13 @@
  */
 
 import { useState, useEffect } from 'react'
-import { useReportsDashboard } from './useReportsDashboard.ts'
+import { useSearchParams } from 'react-router'
+import {
+  useReportsDashboard,
+  REPORT_WINDOWS,
+  DEFAULT_REPORT_WINDOW,
+} from './useReportsDashboard.ts'
+import type { ReportWindow } from './useReportsDashboard.ts'
 import TrendChart from './TrendChart.tsx'
 import Sparkline from './Sparkline.tsx'
 import TemplateList from './TemplateList.tsx'
@@ -26,6 +32,35 @@ import { apiFetch } from '../api/client.ts'
 import './ReportsDashboardView.css'
 
 type Tab = 'overview' | 'templates'
+
+function parseWindow(raw: string | null): ReportWindow {
+  const n = Number(raw)
+  return REPORT_WINDOWS.find((w) => w === n) ?? DEFAULT_REPORT_WINDOW
+}
+
+function WindowSelector({
+  value,
+  onChange,
+}: {
+  value: ReportWindow
+  onChange: (w: ReportWindow) => void
+}) {
+  return (
+    <div className="rdb-window" role="group" aria-label="Reporting window">
+      {REPORT_WINDOWS.map((w) => (
+        <button
+          key={w}
+          type="button"
+          className={`rdb-chip${w === value ? ' active' : ''}`}
+          aria-pressed={w === value}
+          onClick={() => onChange(w)}
+        >
+          {w} days
+        </button>
+      ))}
+    </div>
+  )
+}
 
 function CritIcon() {
   return (
@@ -216,7 +251,23 @@ type TemplateSelState =
 export default function ReportsDashboardView() {
   const [activeTab, setActiveTab] = useState<Tab>('overview')
   const [templateSel, setTemplateSel] = useState<TemplateSelState>({ phase: 'none' })
-  const { data, loading, error, retry } = useReportsDashboard()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const windowDays = parseWindow(searchParams.get('days'))
+  const { data, loading, error, retry } = useReportsDashboard(windowDays)
+
+  function setWindowDays(w: ReportWindow) {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        next.set('days', String(w))
+        return next
+      },
+      { replace: true },
+    )
+  }
+  const windowSelector = (
+    <WindowSelector value={windowDays} onChange={setWindowDays} />
+  )
 
   function switchTab(tab: Tab) {
     setActiveTab(tab)
@@ -241,6 +292,7 @@ export default function ReportsDashboardView() {
       <div className="rdb-content" data-testid="reports-loading">
         <div className="rdb-header">
           <div><h1>{PAGE_TITLE}</h1></div>
+          {windowSelector}
         </div>
         <div className="rdb-kpis">
           {[0, 1, 2, 3].map((i) => (
@@ -273,6 +325,7 @@ export default function ReportsDashboardView() {
       <div className="rdb-content">
         <div className="rdb-header">
           <div><h1>{PAGE_TITLE}</h1></div>
+          {windowSelector}
         </div>
         <div className="rdb-notice err" role="alert">
           <CritIcon />
@@ -294,6 +347,7 @@ export default function ReportsDashboardView() {
       <div className="rdb-content">
         <div className="rdb-header">
           <div><h1>{PAGE_TITLE}</h1></div>
+          {windowSelector}
         </div>
         <div className="rdb-notice" data-testid="reports-empty">
           <p>No data in this window.</p>
@@ -301,6 +355,15 @@ export default function ReportsDashboardView() {
             No stewards reported convergence in the current window. Widen the
             window or check enrollment.
           </p>
+          {windowDays < 30 && (
+            <button
+              type="button"
+              className="rdb-btn"
+              onClick={() => setWindowDays(30)}
+            >
+              Widen to 30 days
+            </button>
+          )}
         </div>
       </div>
     )
@@ -359,6 +422,7 @@ export default function ReportsDashboardView() {
     <div className="rdb-content" data-testid="reports-ready">
       <div className="rdb-header">
         <div><h1>{PAGE_TITLE}</h1></div>
+          {windowSelector}
       </div>
 
       <TabBar active={activeTab} onSwitch={switchTab} />
