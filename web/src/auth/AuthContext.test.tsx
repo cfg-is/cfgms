@@ -124,6 +124,46 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('AuthProvider login abort', () => {
+  it('an aborted ceremony passes the signal to credentials.get and ends signedOut, not invalid', async () => {
+    mockPasskeyLoginEndpoints(200)
+    const controller = new AbortController()
+    let seen: AbortSignal | undefined
+    vi.stubGlobal('navigator', {
+      credentials: {
+        get: vi.fn((opts: CredentialRequestOptions) => {
+          seen = opts.signal as AbortSignal
+          return new Promise((_, reject) => {
+            seen?.addEventListener('abort', () => reject(new DOMException('x', 'AbortError')))
+          })
+        }),
+      },
+    })
+    let result: boolean | undefined
+    function Harness() {
+      const auth = useAuth()
+      return (
+        <>
+          <output data-testid="status">{auth.status}</output>
+          <button onClick={() => void auth.login('u', controller.signal).then((r) => (result = r))}>
+            go
+          </button>
+        </>
+      )
+    }
+    render(
+      <AuthProvider>
+        <Harness />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('go').click())
+    await waitFor(() => expect(seen).toBe(controller.signal))
+    act(() => controller.abort())
+    await waitFor(() => expect(result).toBe(false))
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+  })
+})
+
 describe('AuthProvider state transitions', () => {
   it('starts signed out', () => {
     render(
