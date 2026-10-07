@@ -109,7 +109,8 @@ func isEntityNotFound(err error) bool {
 // parameter (GetHistory, Diff, GetTimeline, GetDriftState, GetNeighborhood).
 func (s *Server) verifyEntityAccess(ctx context.Context, eid eginterfaces.EIDRef, callerTenant string) (ok bool, serverErr error) {
 	_, err := s.egProvider.GetEntity(ctx, eid, eginterfaces.GetEntityOpts{
-		TenantFilter: callerTenant,
+		TenantFilter:     callerTenant,
+		TenantSubtreeIDs: s.tenantDescendantIDs(ctx, callerTenant),
 	})
 	if err != nil {
 		if isEntityNotFound(err) {
@@ -130,9 +131,10 @@ func (s *Server) handleQueryEntities(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	filter := eginterfaces.EntityFilter{
-		TenantFilter: callerTenantSubtree(r),
-		Kind:         q.Get("kind"),
-		TextQuery:    q.Get("text_query"),
+		TenantFilter:     callerTenantSubtree(r),
+		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		Kind:             q.Get("kind"),
+		TextQuery:        q.Get("text_query"),
 	}
 
 	if asOfStr := q.Get("as_of"); asOfStr != "" {
@@ -184,7 +186,8 @@ func (s *Server) handleGetEntity(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	opts := eginterfaces.GetEntityOpts{
-		TenantFilter: callerTenantSubtree(r),
+		TenantFilter:     callerTenantSubtree(r),
+		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
 	}
 
 	if asOfStr := q.Get("as_of"); asOfStr != "" {
@@ -237,10 +240,11 @@ func (s *Server) handleGetEdges(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	filter := eginterfaces.EdgeFilter{
-		FromEID:      &eid,
-		Types:        q["edge_type"],
-		Source:       q.Get("source"),
-		TenantFilter: callerTenantSubtree(r),
+		FromEID:          &eid,
+		Types:            q["edge_type"],
+		Source:           q.Get("source"),
+		TenantFilter:     callerTenantSubtree(r),
+		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
 	}
 
 	if q.Get("direction") == "inbound" {
@@ -808,9 +812,10 @@ func (s *Server) handleListDrifted(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filter := eginterfaces.DriftFilter{
-		TenantFilter:    callerTenantSubtree(r),
-		LifecycleStatus: lifecycleStatus,
-		Kind:            q.Get("kind"),
+		TenantFilter:     callerTenantSubtree(r),
+		TenantSubtreeIDs: s.tenantDescendantIDs(r.Context(), callerTenantSubtree(r)),
+		LifecycleStatus:  lifecycleStatus,
+		Kind:             q.Get("kind"),
 	}
 
 	states, err := s.egProvider.ListDrifted(r.Context(), filter)

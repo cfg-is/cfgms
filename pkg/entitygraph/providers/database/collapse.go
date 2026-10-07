@@ -24,20 +24,21 @@ func escapeLIKE(s string) string {
 	return s
 }
 
-// tenantSubtreeCond returns the SQL predicate "(<col> = $N OR <col> LIKE $M
-// ESCAPE '\')" matching col against tenantPath exactly or any of its
-// descendants. It appends the two bound arguments (literal tenantPath, escaped
-// descendant pattern) to *args and advances *n past the placeholders it
-// consumes. tenantPath is escaped via escapeLIKE so a tenant path containing a
-// LIKE metacharacter ('%' or '_') matches only its own literal subtree — never
-// a sibling tenant that merely looks like a wildcard match against the
-// unescaped pattern. This is the sole builder for tenant subtree predicates in
-// this package; a new call site gets the escaping for free.
-func tenantSubtreeCond(col, tenantPath string, n *int, args *[]interface{}) string {
-	eq, like := *n, *n+1
-	*args = append(*args, tenantPath, escapeLIKE(tenantPath)+"/%")
-	*n += 2
-	return fmt.Sprintf("(%s = $%d OR %s LIKE $%d ESCAPE '\\')", col, eq, col, like)
+// tenantSubtreeCond returns the SQL predicate "<col> IN ($N, $N+1, ...)" matching
+// col against every tenant ID in the cut: the scoped tenant plus the descendant
+// IDs the caller resolved from the tenant tree. Every ID is a bound argument, so
+// no tenant string is ever interpreted as a pattern. It appends the arguments to
+// *args and advances *n past the placeholders it consumes. This is the sole
+// builder for tenant subtree predicates in this package.
+func tenantSubtreeCond(col string, cut interfaces.TenantCut, n *int, args *[]interface{}) string {
+	members := cut.Members()
+	phs := make([]string, len(members))
+	for i, id := range members {
+		phs[i] = fmt.Sprintf("$%d", *n)
+		*n++
+		*args = append(*args, id)
+	}
+	return fmt.Sprintf("%s IN (%s)", col, strings.Join(phs, ", "))
 }
 
 // resolveGroupMembersCurrentState walks the same-as graph from eid using the
@@ -163,8 +164,8 @@ func sortedGroupMembers(visited map[string]struct{}) []interfaces.EIDRef {
 // applyTenantCut filters group members to those whose current owning_tenant is
 // visible to tenantFilter (ADR-022 §3: tenant cut before merge). Uses the current
 // eg_entity_index ownership (not ingest-time tenant_path) as the access-control axis.
-func (p *DatabaseEntityGraphProvider) applyTenantCut(ctx context.Context, members []interfaces.EIDRef, tenantFilter string) ([]interfaces.EIDRef, error) {
-	if tenantFilter == "" {
+func (p *DatabaseEntityGraphProvider) applyTenantCut(ctx context.Context, members []interfaces.EIDRef, cut interfaces.TenantCut) ([]interfaces.EIDRef, error) {
+	if !cut.Active() {
 		return members, nil
 	}
 
@@ -179,7 +180,7 @@ func (p *DatabaseEntityGraphProvider) applyTenantCut(ctx context.Context, member
 			// Not in index (placeholder with no real owning_tenant) → excluded.
 			continue
 		}
-		if tenantVisible(owningTenant, tenantFilter) {
+		if cut.Visible(owningTenant) {
 			visible = append(visible, m)
 		}
 	}
@@ -271,7 +272,7 @@ func buildConflicts(entries []sourceEntry, merged map[string]interface{}) map[st
 //
 // Returns nil when the entity has no same-as group or all other group members
 // are cut by the tenant filter (single-visible-member group is a no-op).
-func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, eid interfaces.EIDRef, asOf *time.Time, tenantFilter string) (*types.CollapseGroupView, error) {
+func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, eid interfaces.EIDRef, asOf *time.Time, cut interfaces.TenantCut) (*types.CollapseGroupView, error) {
 	// Step 1: resolve group membership.
 	var members []interfaces.EIDRef
 	var err error
@@ -290,7 +291,7 @@ func (p *DatabaseEntityGraphProvider) resolveCollapseGroup(ctx context.Context, 
 	}
 
 	// Step 2: tenant cut before merge.
-	visible, err := p.applyTenantCut(ctx, members, tenantFilter)
+	visible, err := p.applyTenantCut(ctx, members, cut)
 	if err != nil {
 		return nil, err
 	}

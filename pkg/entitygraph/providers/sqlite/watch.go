@@ -240,7 +240,7 @@ func watchFilterMatches(ev interfaces.WatchEvent, tenantPath string, f interface
 	// Tenant filter: applied to entity-updated and drift-updated events via the
 	// tenant_path column (which stores owning_tenant from the observation payload).
 	if f.TenantFilter != "" && ev.EventKind != "edge-updated" {
-		if !tenantVisible(tenantPath, f.TenantFilter) {
+		if !interfaces.NewTenantCut(f.TenantFilter, f.TenantSubtreeIDs).Visible(tenantPath) {
 			return false
 		}
 	}

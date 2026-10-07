@@ -50,15 +50,23 @@ type GetEntityOpts struct {
 
 	// TenantFilter is the mandatory caller-tenant-subtree filter (§7).
 	TenantFilter string
+	// TenantSubtreeIDs are the descendant tenant IDs of TenantFilter, resolved by
+	// the caller from the tenant tree's ParentID ancestry. Absent, only entities
+	// owned by TenantFilter itself are visible (fail closed).
+	TenantSubtreeIDs []string
 }
 
 // EntityFilter selects entities for QueryEntities.
 type EntityFilter struct {
 	Kind         string
 	TenantFilter string
-	AsOf         *time.Time
-	TextQuery    string
-	Attributes   map[string]interface{}
+	// TenantSubtreeIDs are the descendant tenant IDs of TenantFilter, resolved by
+	// the caller from the tenant tree's ParentID ancestry. Absent, only entities
+	// owned by TenantFilter itself are visible (fail closed).
+	TenantSubtreeIDs []string
+	AsOf             *time.Time
+	TextQuery        string
+	Attributes       map[string]interface{}
 }
 
 // PageToken is a cursor for paginated queries.
@@ -81,6 +89,10 @@ type EdgeFilter struct {
 	Types        []string
 	Source       string
 	TenantFilter string
+	// TenantSubtreeIDs are the descendant tenant IDs of TenantFilter, resolved by
+	// the caller from the tenant tree's ParentID ancestry. Absent, only entities
+	// owned by TenantFilter itself are visible (fail closed).
+	TenantSubtreeIDs []string
 }
 
 // EdgeView wraps an Edge with freshness metadata.
@@ -144,16 +156,21 @@ type DriftField struct {
 
 // DriftFilter selects entities for ListDrifted.
 type DriftFilter struct {
-	TenantFilter    string
-	LifecycleStatus string
-	Kind            string
+	TenantFilter     string
+	TenantSubtreeIDs []string // descendant tenant IDs of TenantFilter, resolved by the caller (fail closed when absent)
+	LifecycleStatus  string
+	Kind             string
 }
 
 // WatchFilter selects the subjects for a Watch subscription.
 type WatchFilter struct {
 	TenantFilter string
-	Kinds        []string
-	EIDs         []EIDRef
+	// TenantSubtreeIDs are the descendant tenant IDs of TenantFilter, resolved by
+	// the caller from the tenant tree's ParentID ancestry. Absent, only entities
+	// owned by TenantFilter itself are visible (fail closed).
+	TenantSubtreeIDs []string
+	Kinds            []string
+	EIDs             []EIDRef
 }
 
 // WatchEvent is one event delivered by the Watch cursor feed (ADR-022 §9).
@@ -215,8 +232,8 @@ type TenantResolver interface {
 
 // RetentionPolicy configures the observation-history retention window applied
 // by RunRetentionGC. An empty TenantPath sets the cluster-wide default; a
-// non-empty TenantPath installs a per-subtree override (most-specific prefix
-// wins per ADR-023 §7). Zero values for the day counts inherit the global
+// non-empty TenantPath installs a per-subtree override (the nearest ancestor
+// override wins per ADR-023 §7). Zero values for the day counts inherit the global
 // default (90 days history, 7 extra days for tombstones).
 type RetentionPolicy struct {
 	// TenantPath is the tenant subtree this policy applies to.
@@ -231,6 +248,14 @@ type RetentionPolicy struct {
 	// subjects before fully removing their log rows and projections.
 	// Zero uses HistoryDays + 7.
 	TombstoneDays int
+
+	// TenantAncestors maps an owning tenant ID to its ancestor tenant IDs,
+	// nearest first, resolved by the caller from the tenant tree's ParentID
+	// ancestry. RunRetentionGC uses it to let a descendant inherit the nearest
+	// ancestor's override; a tenant absent from the map matches only its own
+	// override and otherwise takes the global default. Ignored by
+	// SetRetentionPolicy.
+	TenantAncestors map[string][]string
 }
 
 // DriftLifecycleUpdate carries a single drift lifecycle transition (ADR-022 §6/§9).
@@ -325,7 +350,7 @@ type EntityGraphProvider interface {
 	// removed (log rows + all projections).
 	//
 	// policy carries the global defaults; per-tenant overrides stored via
-	// SetRetentionPolicy take precedence (most-specific tenant prefix wins).
+	// SetRetentionPolicy take precedence (the nearest ancestor override wins).
 	// The call is idempotent and safe to run on multiple nodes concurrently
 	// (implementations must use a lock or singleton to prevent double-sweeps).
 	RunRetentionGC(ctx context.Context, policy RetentionPolicy) error

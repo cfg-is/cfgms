@@ -203,13 +203,10 @@ func TestHandleOsqueryQuery_TenantScopedCallerLimitedToOwnSubtree(t *testing.T) 
 
 	ids := dispatchedStewardIDs(disp)
 	assert.True(t, ids["steward-a"], "caller's own tenant must be targeted")
-	// NOTE: the unqualified-selector narrowing goes through fleet.Filter.TenantSubtree,
-	// which matches tenant IDs by string prefix (exact OR prefix+"/"), not by tenant
-	// ancestry; a real single-token descendant ID ("client-1") is therefore not
-	// reached by it. Reported as a production gap; this test pins the no-leak bound.
+	assert.True(t, ids["steward-a-child"], "descendant tenant steward must be targeted via the resolved subtree set")
 	assert.False(t, ids["steward-b"], "sibling tenant steward must not be targeted")
 	assert.False(t, ids["steward-root"], "parent tenant steward must not be targeted")
-	assert.Len(t, ids, 1, "only the caller's own tenant may be dispatched to")
+	assert.Len(t, ids, 2, "only the caller's own tenant and its descendants may be dispatched to")
 }
 
 // TestHandleOsqueryQuery_TenantPrefixWithinSubtreeAllowed verifies that a selector

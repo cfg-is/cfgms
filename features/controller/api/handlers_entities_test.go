@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/tenant"
 	eginterfaces "github.com/cfgis/cfgms/pkg/entitygraph/interfaces"
 	"github.com/cfgis/cfgms/pkg/entitygraph/providers/sqlite"
 	egtypes "github.com/cfgis/cfgms/pkg/entitygraph/types"
@@ -605,9 +606,18 @@ func TestHandleGetTimeline_MixedTenantEIDsReturns404(t *testing.T) {
 func TestHandleGetTimeline_MultipleOwnedEIDsSucceeds(t *testing.T) {
 	p := newTestEntityGraphProvider(t)
 	srv := newEntityTestServer(t, p)
+	ctx := context.Background()
+	require.NoError(t, ensureTestRootTenant(ctx, srv.tenantManager))
+	for _, req := range []*tenant.TenantRequest{
+		{ID: "tenant-a", ParentID: testRootTenantID},
+		{ID: "tenant-a-child", ParentID: "tenant-a"},
+	} {
+		_, err := srv.tenantManager.CreateTenant(ctx, req)
+		require.NoError(t, err)
+	}
 
 	reportEntity(t, p, "host:tl-own1", "tenant-a", "host")
-	reportEntity(t, p, "host:tl-own2", "tenant-a/child", "host")
+	reportEntity(t, p, "host:tl-own2", "tenant-a-child", "host")
 
 	apiKey := NewEphemeralTestKey(t, srv, []string{"entity:list"}, "tenant-a", 5*time.Minute)
 	req := httptest.NewRequest(http.MethodGet,

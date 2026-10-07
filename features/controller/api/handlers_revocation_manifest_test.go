@@ -795,3 +795,36 @@ func sortStringsIsSorted(s []string) bool {
 	}
 	return true
 }
+
+// TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_CarriesCoveredTenantIDs
+// verifies the roster entry for a tenant-scoped account names the descendant tenants it
+// covers, resolved from the tenant tree's ParentID ancestry. A steward has no tenant
+// store, so this signed list is its only evidence that its tenant sits beneath the
+// entry's tenant. A root-scope entry carries none (it already covers the fleet).
+func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_CarriesCoveredTenantIDs(t *testing.T) {
+	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
+
+	createManifestAccount(t, server, AccountRequest{
+		Username:    "manifest-user-covered",
+		TenantID:    "msp-a",
+		Permissions: []string{OperatorPayloadSignGrant},
+	})
+	_, pubKeyA := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-covered", []byte("manifest-cred-covered"), pubKeyA, 0)
+
+	createManifestAccount(t, server, AccountRequest{Username: "manifest-user-covered-root", RootScope: true})
+	_, pubKeyRoot := generateSyntheticCredential(t)
+	injectSignCredential(t, server, "manifest-user-covered-root", []byte("manifest-cred-covered-root"), pubKeyRoot, 0)
+
+	rec, body := getRevocationManifest(t, server, certMgr)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	byCred := map[string]AuthorizedWebAuthnCredential{}
+	for _, entry := range body.Manifest.AuthorizedWebAuthnCredentials {
+		byCred[string(entry.CredentialID)] = entry
+	}
+	assert.Equal(t, []string{"client-1"}, byCred["manifest-cred-covered"].CoveredTenantIDs,
+		"msp-a's entry covers its child client-1 and neither msp-b nor msp-ab")
+	assert.Empty(t, byCred["manifest-cred-covered-root"].CoveredTenantIDs)
+}

@@ -104,7 +104,7 @@ func (s *Server) resolveSelectorFilter(ctx context.Context, selectorExpr string)
 		}
 		filter.TenantSubtree = parsedTenantPath
 	} else if tid != "" {
-		filter.TenantSubtree = tid
+		s.scopeFilterToTenantSubtree(ctx, &filter, tid)
 	}
 
 	return filter, nil
@@ -178,7 +178,7 @@ func (s *Server) handleFleetHealth(w http.ResponseWriter, r *http.Request) {
 
 	filter := fleet.Filter{}
 	if tid != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-		filter.TenantSubtree = tid
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, tid)
 	}
 
 	results, err := s.fleetQuery.Search(r.Context(), filter)

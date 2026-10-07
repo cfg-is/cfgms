@@ -29,18 +29,23 @@ type StewardProvider interface {
 // Filter defines criteria for filtering stewards. All fields are optional.
 // Multiple non-empty fields are AND-combined.
 type Filter struct {
-	TenantID      string            // Scope to this tenant (exact match)
-	TenantSubtree string            // Match stewards at or below this tenant path (exact OR prefix+"/"); additive with TenantID
-	OS            string            // Match DNA["os"] (exact)
-	Platform      string            // Match DNA["platform"] (exact)
-	Architecture  string            // Match DNA["arch"] (exact)
-	Tags          []string          // All tags must be present (DNA["tags"] is comma-separated)
-	DNAAttributes map[string]string // All key-value pairs must match exactly
-	Status        string            // "online", "offline", or "any"/empty (any status)
-	Hostname      string            // Substring/prefix-glob match on DNA["hostname"]; query-param path only — do not set from a selector-string parser
-	Name          string            // Glob match on DNA["hostname"] via path.Match (use name: selector key)
-	DeviceID      string            // Match by exact device ID (id: selector)
-	IDs           []string          // Match stewards whose ID is any of these (OR within the set; id: selector)
+	TenantID      string // Scope to this tenant (exact match)
+	TenantSubtree string // Match stewards owned by this tenant or by a tenant in TenantSubtreeIDs; additive with TenantID
+	// TenantSubtreeIDs are the descendant tenant IDs of TenantSubtree, resolved by
+	// the caller from the tenant tree's ParentID ancestry (ADR-025 A1.1: a tenant ID
+	// never contains '/', so containment is never a string-prefix test). Empty means
+	// only TenantSubtree itself matches (fail closed).
+	TenantSubtreeIDs []string
+	OS               string            // Match DNA["os"] (exact)
+	Platform         string            // Match DNA["platform"] (exact)
+	Architecture     string            // Match DNA["arch"] (exact)
+	Tags             []string          // All tags must be present (DNA["tags"] is comma-separated)
+	DNAAttributes    map[string]string // All key-value pairs must match exactly
+	Status           string            // "online", "offline", or "any"/empty (any status)
+	Hostname         string            // Substring/prefix-glob match on DNA["hostname"]; query-param path only — do not set from a selector-string parser
+	Name             string            // Glob match on DNA["hostname"] via path.Match (use name: selector key)
+	DeviceID         string            // Match by exact device ID (id: selector)
+	IDs              []string          // Match stewards whose ID is any of these (OR within the set; id: selector)
 }
 
 // StewardResult is a device record returned by a fleet query.

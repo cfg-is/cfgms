@@ -104,7 +104,7 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.TenantSubtree = parsedTenantPath
 	} else if callerTenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
-		filter.TenantSubtree = callerTenantID
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, callerTenantID)
 	}
 
 	if s.fleetQuery == nil {

@@ -145,10 +145,10 @@ func (p *SQLiteEntityGraphProvider) GetEdges(ctx context.Context, filter interfa
 		conds = append(conds, "ep.source = ?")
 		args = append(args, filter.Source)
 	}
-	if filter.TenantFilter != "" {
+	if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
 		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", filter.TenantFilter, &args),
-			tenantSubtreeCond("ti.owning_tenant", filter.TenantFilter, &args),
+			tenantSubtreeCond("fi.owning_tenant", cut, &args),
+			tenantSubtreeCond("ti.owning_tenant", cut, &args),
 		)
 	}
 

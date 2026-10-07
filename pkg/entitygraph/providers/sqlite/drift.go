@@ -231,8 +231,8 @@ func (p *SQLiteEntityGraphProvider) ListDrifted(ctx context.Context, filter inte
 		query = `SELECT d.subject, d.detected_at, d.config_revision, d.lifecycle_status, d.fields
 				 FROM eg_drift_projection d
 				 JOIN eg_entity_index i ON i.subject = d.subject`
-		if filter.TenantFilter != "" {
-			conds = append(conds, tenantSubtreeCond("i.owning_tenant", filter.TenantFilter, &args))
+		if cut := interfaces.NewTenantCut(filter.TenantFilter, filter.TenantSubtreeIDs); cut.Active() {
+			conds = append(conds, tenantSubtreeCond("i.owning_tenant", cut, &args))
 		}
 		if filter.Kind != "" {
 			conds = append(conds, "i.entity_kind = ?")

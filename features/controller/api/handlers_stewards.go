@@ -150,7 +150,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 			}
 			selectorFilter.TenantSubtree = parsedTenantPath
 		} else if tenantID != "" {
-			selectorFilter.TenantSubtree = tenantID
+			s.scopeFilterToTenantSubtree(r.Context(), &selectorFilter, tenantID)
 		}
 
 		limit, offset, paginated, paginErr := parseStewardPagination(r.URL.Query())
@@ -212,6 +212,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		s.writeErrorResponse(w, http.StatusBadRequest, err.Error(), "INVALID_FILTER")
 		return
 	}
+	s.scopeFilterToTenantSubtree(r.Context(), &filter, tenantID)
 
 	// Parse optional pagination params. Rejected values are logged sanitized;
 	// the error body names the offending param, never the raw client value.

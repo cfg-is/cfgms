@@ -39,6 +39,9 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 	}
 
 	// Derive implicit tenant filter from the root entity's current owning_tenant.
+	// GetNeighborhood carries no resolved descendant set, so the cut is the root's
+	// own tenant only: an edge to a descendant tenant's entity is not followed
+	// (fail closed) rather than matched by a tenant-ID string prefix.
 	var tenantFilter string
 	_ = p.db.QueryRowContext(ctx,
 		`SELECT owning_tenant FROM eg_entity_index WHERE subject = $1`, eid.String(),
@@ -50,7 +53,7 @@ func (p *DatabaseEntityGraphProvider) GetNeighborhood(
 	frontier := []string{eid.String()}
 
 	for hop := 0; hop < depth && len(frontier) > 0; hop++ {
-		hopEdges, err := p.queryNeighborhoodEdges(ctx, frontier, edgeTypes, direction, tenantFilter)
+		hopEdges, err := p.queryNeighborhoodEdges(ctx, frontier, edgeTypes, direction, interfaces.NewTenantCut(tenantFilter, nil))
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +116,7 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 	frontier []string,
 	edgeTypes []string,
 	direction types.TraversalDirection,
-	tenantFilter string,
+	cut interfaces.TenantCut,
 ) ([]*types.Edge, error) {
 	if len(frontier) == 0 {
 		return nil, nil
@@ -163,10 +166,10 @@ func (p *DatabaseEntityGraphProvider) queryNeighborhoodEdges(
 		conds = append(conds, "ep.edge_type IN ("+strings.Join(ephs, ",")+")")
 	}
 
-	if tenantFilter != "" {
+	if cut.Active() {
 		conds = append(conds,
-			tenantSubtreeCond("fi.owning_tenant", tenantFilter, &n, &args),
-			tenantSubtreeCond("ti.owning_tenant", tenantFilter, &n, &args),
+			tenantSubtreeCond("fi.owning_tenant", cut, &n, &args),
+			tenantSubtreeCond("ti.owning_tenant", cut, &n, &args),
 		)
 	}
 
