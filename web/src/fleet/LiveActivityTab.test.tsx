@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, act } from '@testing-library/react'
 import LiveActivityTab from './LiveActivityTab.tsx'
+import { installHarness } from './actionTestHarness.ts'
 
 // ---------------------------------------------------------------------------
 // WebSocket stub
@@ -467,5 +468,73 @@ describe('interrupted vs offline', () => {
     })
     expect(screen.getByText('postgres')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Row action menus (Story #4629)
+// ---------------------------------------------------------------------------
+
+describe('row action menus', () => {
+  function mount(extra?: { onViewDna?: () => void; processes?: unknown[] }) {
+    render(<LiveActivityTab stewardId="stw-test" onViewDna={extra?.onViewDna} />)
+    act(() => {
+      FakeWebSocket.instances[0]!.deliver(makeSnapshot(extra?.processes ? { processes: extra.processes } : undefined))
+    })
+  }
+
+  it('renders a menu per process row and per service row', () => {
+    mount()
+    expect(screen.getByRole('button', { name: 'Actions for PID 42' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Actions for PID 99' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Actions for sshd' })).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: /^Actions for/ })).toHaveLength(6)
+  })
+
+  it('the service menu invokes its endpoint after confirm and sign', async () => {
+    const h = installHarness()
+    mount()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for sshd' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restart' }))
+    fireEvent.change(screen.getByLabelText(/Justification/), { target: { value: 'config reload' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign with passkey' }))
+    await screen.findByText('Restart service: done')
+    expect(h.calls.some((c) => c.url === '/api/v1/stewards/stw-test/services/sshd/actions')).toBe(true)
+  })
+
+  it('Open in DNA switches to the DNA tab', () => {
+    const onViewDna = vi.fn()
+    mount({ onViewDna })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for PID 42' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open in DNA' }))
+    expect(onViewDna).toHaveBeenCalled()
+  })
+
+  it('offers Resume for a suspended process from the stream status', () => {
+    mount({
+      processes: [
+        { pid: 7, name: 'worker', cpu_percent: 0, memory_bytes: 1, disk_read_bytes: 0, disk_write_bytes: 0, net_rx_bytes: 0, net_tx_bytes: 0, status: 'suspended' },
+      ],
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for PID 7' }))
+    expect(screen.getByRole('menuitem', { name: 'Resume' })).toBeTruthy()
+  })
+
+  it('End task on the steward process shows blocked and the row stays', async () => {
+    installHarness({ jobs: [{ status: 'failed', result_code: 'self_protect' }] })
+    mount()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for PID 42' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'End task' }))
+    fireEvent.change(screen.getByLabelText(/Justification/), { target: { value: 'x' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign with passkey' }))
+    await screen.findByText(/blocked\. The steward does not act on its own process/)
+    // A snapshot arriving afterwards still lists the process and keeps the status visible.
+    act(() => {
+      FakeWebSocket.instances[0]!.deliver(makeSnapshot())
+    })
+    expect(screen.getByRole('button', { name: 'Actions for PID 42' })).toBeTruthy()
+    expect(screen.getByText(/blocked\./)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for PID 42' }))
+    expect((screen.getByRole('menuitem', { name: 'End task (blocked)' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })

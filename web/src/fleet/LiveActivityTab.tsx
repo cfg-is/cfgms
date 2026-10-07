@@ -23,6 +23,9 @@
  */
 import { memo, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { SortState } from './FleetTable.tsx'
+import ProcessActionMenu from './ProcessActionMenu.tsx'
+import ServiceActionMenu from './ServiceActionMenu.tsx'
+import { useStewardControl, type StewardControl } from './useStewardControl.ts'
 import './LiveActivityTab.css'
 
 // ---------------------------------------------------------------------------
@@ -38,6 +41,8 @@ interface ProcessSnapshot {
   disk_write_bytes: number
   net_rx_bytes: number
   net_tx_bytes: number
+  // "running" or "suspended"; absent from older stewards.
+  status?: string
 }
 
 interface ServiceSnapshot {
@@ -211,12 +216,15 @@ function SortArrow({ active, direction }: { active: boolean; direction: 1 | -1 }
 }
 
 interface ProcessTableProps {
+  stewardId: string
+  control: StewardControl
+  onViewDna?: () => void
   processes: ProcessSnapshot[]
   sort: SortState
   onSort: (key: string) => void
 }
 
-const ProcessTable = memo(function ProcessTable({ processes, sort, onSort }: ProcessTableProps) {
+const ProcessTable = memo(function ProcessTable({ stewardId, control, onViewDna, processes, sort, onSort }: ProcessTableProps) {
   const sorted = sortProcesses(processes, sort)
 
   const cols: { key: string; label: string; fmt: (p: ProcessSnapshot) => string }[] = [
@@ -254,6 +262,7 @@ const ProcessTable = memo(function ProcessTable({ processes, sort, onSort }: Pro
               </th>
             )
           })}
+          <th className="c-act" aria-label="Actions" />
         </tr>
       </thead>
       <tbody>
@@ -264,6 +273,16 @@ const ProcessTable = memo(function ProcessTable({ processes, sort, onSort }: Pro
                 <span className="mono2">{col.fmt(proc)}</span>
               </td>
             ))}
+            <td className="c-act">
+              <ProcessActionMenu
+                stewardId={stewardId}
+                pid={proc.pid}
+                name={proc.name}
+                status={proc.status}
+                control={control}
+                onViewDna={onViewDna}
+              />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -289,16 +308,19 @@ function stateClass(s: string): string {
 }
 
 interface ServiceListProps {
+  stewardId: string
+  control: StewardControl
   services: ServiceSnapshot[]
 }
 
-const ServiceList = memo(function ServiceList({ services }: ServiceListProps) {
+const ServiceList = memo(function ServiceList({ stewardId, control, services }: ServiceListProps) {
   return (
     <table className="tbl" aria-label="Services">
       <thead>
         <tr>
           <th>Service</th>
           <th>State</th>
+          <th className="c-act" aria-label="Actions" />
         </tr>
       </thead>
       <tbody>
@@ -310,6 +332,9 @@ const ServiceList = memo(function ServiceList({ services }: ServiceListProps) {
                 <span className="dot" />
                 {svc.state}
               </span>
+            </td>
+            <td className="c-act">
+              <ServiceActionMenu stewardId={stewardId} name={svc.name} control={control} />
             </td>
           </tr>
         ))}
@@ -357,6 +382,7 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
   const pausedRef = useRef(false)
   const lastAppliedRef = useRef(0)
   const lastReceivedRef = useRef(0)
+  const control = useStewardControl(stewardId)
 
   useEffect(() => {
     lastReceivedRef.current = Date.now()
@@ -508,11 +534,18 @@ export default function LiveActivityTab({ stewardId, onViewDna }: LiveActivityTa
         <>
           <section>
             <h2>Processes</h2>
-            <ProcessTable processes={processes} sort={state.sort} onSort={onSort} />
+            <ProcessTable
+              stewardId={stewardId}
+              control={control}
+              onViewDna={onViewDna}
+              processes={processes}
+              sort={state.sort}
+              onSort={onSort}
+            />
           </section>
           <section>
             <h2>Services</h2>
-            <ServiceList services={services} />
+            <ServiceList stewardId={stewardId} control={control} services={services} />
           </section>
         </>
       )}
