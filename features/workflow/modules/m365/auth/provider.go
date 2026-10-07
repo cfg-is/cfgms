@@ -140,6 +140,29 @@ type OAuth2Config struct {
 
 	// RequiredDelegatedScopes are the minimum scopes needed for delegated operations
 	RequiredDelegatedScopes []string `yaml:"required_delegated_scopes,omitempty"`
+
+	// PartnerDelegated marks the CFGMS tenant this config is stored for as reached
+	// through a partner GDAP relationship rather than through the customer's own
+	// app credentials. When set, GetAccessToken mints against CustomerTenantID
+	// using ClientID/ClientSecret (the partner's app) after validating the
+	// relationship. This is the only input that selects a customer M365 tenant: it
+	// is read from the CredentialStore keyed by the CFGMS tenant, never from a
+	// caller, a workflow step or a resource ID. It is ignored on the default
+	// config, which is shared by every tenant without a stored config.
+	PartnerDelegated bool `yaml:"partner_delegated,omitempty"`
+
+	// PartnerTenantID is the MSP's own M365 tenant, used to reach Partner Center.
+	PartnerTenantID string `yaml:"partner_tenant_id,omitempty"`
+
+	// CustomerTenantID is the customer M365 tenant a delegated token is minted
+	// against. One CFGMS tenant maps to exactly one customer M365 tenant.
+	CustomerTenantID string `yaml:"customer_tenant_id,omitempty"`
+
+	// GDAPRequiredRoles are the GDAP roles the relationship must grant for this
+	// CFGMS tenant's delegated access to be used. Empty requires only an active,
+	// unexpired relationship. See GDAPRelationshipResolver.GetGDAPRoleRequirements
+	// for the roles a given module operation needs.
+	GDAPRequiredRoles []string `yaml:"gdap_required_roles,omitempty"`
 }
 
 // GetAuthorityURL returns the authority URL for the tenant

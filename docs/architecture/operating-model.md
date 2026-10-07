@@ -456,6 +456,8 @@ Operators interact with CFGMS through layered UX surfaces.
 
 **Workflow engine — automation surface.** For SaaS/cloud operations that don't require a steward (M365, identity providers, ticketing systems), the workflow engine is the primary expression mechanism. See [controller operating model](controller-operating-model.md#workflow-engine).
 
+**Partner-delegated M365 tenant access.** An MSP reaches a customer's M365 tenant through a Granular Delegated Admin Privileges (GDAP) relationship rather than the customer's own app credentials. M365 workflow modules obtain a token through `auth.Provider.GetAccessToken(ctx, cfgmsTenantID)`; when the `OAuth2Config` stored for that CFGMS tenant is marked partner-delegated, the token is minted against the customer M365 tenant named in that same stored config, using the partner's client credentials, after the partner's GDAP relationship with that customer is validated against the required roles. One CFGMS tenant maps to one customer M365 tenant, and the customer tenant is never a caller-supplied argument, so a CFGMS tenant cannot obtain a token for a customer reachable only through another CFGMS tenant's relationship. Modules are unchanged. The minted token's `tid` claim is checked against the intended customer tenant.
+
 ## Controller Blob Store Namespaces
 
 The controller blob store (`pkg/storage/interfaces/blob.BlobStore`) partitions binary artifacts by namespace within each tenant.

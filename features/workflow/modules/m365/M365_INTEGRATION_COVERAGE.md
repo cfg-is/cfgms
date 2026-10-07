@@ -5,7 +5,7 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 ## Executive Summary
 
 ✅ **1-to-1 Enterprise App Integration**: **FULLY IMPLEMENTED**  
-✅ **MSP GDAP Integration**: **FULLY IMPLEMENTED**  
+✅ **MSP GDAP Integration**: **Partner-delegated token acquisition** (one customer M365 tenant per CFGMS tenant)  
 ✅ **Delegated Permissions Model**: **COMPLETE**  
 ✅ **Real-World Testing Framework**: **READY**  
 
@@ -44,32 +44,39 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 
 ### 2. MSP Partner Integration with GDAP
 
-**Use Case**: Managed Service Provider manages multiple customer M365 tenants through partner relationship.
+**Use Case**: A Managed Service Provider reaches a customer's M365 tenant through a Granular Delegated Admin Privileges (GDAP) relationship instead of holding the customer's own app credentials.
 
-**Implementation Status**: ✅ **FULLY IMPLEMENTED**
+**Implementation Status**: Token acquisition is implemented in `features/workflow/modules/m365/auth` behind the existing `auth.Provider.GetAccessToken(ctx, cfgmsTenantID)` call. M365 modules are unchanged. There is no CLI or Web UI for declaring a partner relationship yet; the delegated settings are written to the CFGMS tenant's stored `OAuth2Config`.
 
-**Key Components**:
-- **GDAP Provider**: Complete implementation with Partner Center API integration
-- **Relationship Discovery**: Automatic detection of customer tenants via GDAP
-- **Role-Based Access Control**: Validates operations against GDAP role assignments
-- **Multi-Tenant Operations**: Cross-customer resource management with proper isolation
-- **Partner Center Integration**: Full API client for GDAP relationship management
+**Model**: one CFGMS tenant maps to one customer M365 tenant. An MSP with many customers has many CFGMS tenants (`root/msp-a/client-1`). The customer tenant is never a call argument and never comes from a workflow step's `tenant_id` or a resource ID; it is read from the CFGMS tenant's own stored configuration.
 
-**GDAP Workflow**:
+**Stored configuration** (`auth.OAuth2Config`, kept per CFGMS tenant in the secrets store):
+
+| Field | Meaning |
+|-------|---------|
+| `partner_delegated` | Marks the CFGMS tenant as delegated. Ignored on the shared default config. |
+| `partner_tenant_id` | The MSP's own M365 tenant, used to reach Partner Center. |
+| `customer_tenant_id` | The customer M365 tenant the token is minted against. |
+| `gdap_required_roles` | Roles the relationship must grant. Empty requires an active, unexpired relationship only. |
+| `client_id` / `client_secret` | The partner's app registration. |
+
+**Token flow** (`OAuth2Provider.GetAccessToken`, `delegated_token.go`):
 ```
-1. MSP configures CFGMS with partner tenant credentials
-2. GDAP Provider discovers active customer relationships via Partner Center API
-3. For each operation, validates GDAP permissions for target tenant
-4. Executes operations with partner context but customer tenant scope
-5. All operations tagged with GDAP metadata for audit trails
+1. Read the OAuth2Config stored for the CFGMS tenant
+2. Not marked delegated: direct app token, unchanged
+3. Marked delegated: obtain a Partner Center token with the partner's client credentials
+4. List the partner's GDAP relationships (GDAPRelationshipResolver.ValidateGDAPAccess);
+   require an active, unexpired relationship with customer_tenant_id that grants
+   every role in gdap_required_roles; otherwise refuse, naming the missing roles
+5. Client-credentials grant with the partner's app against the customer tenant's token endpoint
+6. Compare the token's tid claim with customer_tenant_id and refuse a mismatch
+   (a token that is not a JWT, or has no tid, is accepted)
+7. Cache and store the token under the CFGMS tenant
 ```
 
-**Supported GDAP Operations**:
-- **Customer Discovery**: Enumerate all accessible customer tenants
-- **Role Validation**: Verify partner has required roles for operations
-- **Cross-Tenant Queries**: List/manage resources across multiple customers
-- **Relationship Monitoring**: Track GDAP relationship health and expiration
-- **Permission Mapping**: Map CFGMS operations to required Azure AD roles
+The Partner Center token is persisted under a `partnercenter:`-prefixed credential-store key, scoped to the CFGMS tenant, so it can never occupy the Graph token slot; `GetAccessToken` also refuses any stored token carrying the Partner Center scope.
+
+`GDAPRelationshipResolver.GetGDAPRoleRequirements(moduleName, operation)` maps a module name (for example `m365-entra-group`) and `Set`/`Get` to the GDAP roles that satisfy it; any one of the returned roles is sufficient.
 
 ## Technical Architecture
 
@@ -115,15 +122,14 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 ### Model 2: MSP with GDAP (1-to-many)
 
 ```
-[CFGMS Instance] ---> [Partner Tenant] ---> [Customer Tenant 1]
-                                       ---> [Customer Tenant 2]  
-                                       ---> [Customer Tenant N]
+[CFGMS tenant msp-a/client-1] ---> [Partner Tenant] ---> [Customer Tenant 1]
+[CFGMS tenant msp-a/client-2] ---> [Partner Tenant] ---> [Customer Tenant 2]
+[CFGMS tenant msp-a/client-N] ---> [Partner Tenant] ---> [Customer Tenant N]
                       (GDAP Relationships)
-                      
-✅ Partner Center API integration
-✅ Multi-tenant resource management
-✅ Role-based access validation
-✅ Customer tenant isolation
+
+✅ Partner Center relationship validation before every mint
+✅ GDAP role validation against the configured required roles
+✅ One customer tenant per CFGMS tenant, from that tenant's stored config
 ```
 
 ### Model 3: Hybrid MSP (Multi-modal)
@@ -171,8 +177,8 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 - ✅ **Multi-User Scenarios**: Different permission levels
 - ✅ **Error Handling**: Network failures, permission denials
 - ✅ **Token Management**: Caching, encryption, expiration
-- ✅ **GDAP Operations**: Relationship discovery, validation
-- ✅ **Cross-Tenant Operations**: MSP multi-customer scenarios
+- ✅ **GDAP Token Acquisition**: Relationship validation, missing-role refusal, tenant containment, Partner Center key isolation (`auth/delegated_token_test.go`, run against `httptest.Server` fixtures)
+- ✅ **Module Compatibility**: `entra_group` runs unchanged against a delegated tenant (`entra_group/delegated_test.go`)
 
 ## Integration Requirements by Scenario
 
@@ -202,16 +208,14 @@ This document provides a comprehensive analysis of CFGMS's M365 integration cove
 - GDAP relationships established with customers
 - Partner Center API access configured
 
-**CFGMS Configuration**:
-```json
-{
-  "partner_tenant_id": "partner-tenant-id",
-  "partner_client_id": "partner-app-id",
-  "partner_client_secret": "partner-secret",
-  "partner_center_scopes": ["https://api.partnercenter.microsoft.com/user_impersonation"],
-  "validate_gdap_relationships": true,
-  "enforce_role_based_access": true
-}
+**CFGMS Configuration** (stored `OAuth2Config` for the CFGMS tenant that represents the customer):
+```yaml
+client_id: partner-app-id
+client_secret: partner-secret
+partner_delegated: true
+partner_tenant_id: partner-tenant-id
+customer_tenant_id: customer-tenant-id
+gdap_required_roles: [Groups Administrator]
 ```
 
 ## Operational Features

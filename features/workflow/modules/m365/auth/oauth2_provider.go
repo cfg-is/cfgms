@@ -32,6 +32,11 @@ type OAuth2Provider struct {
 	// Default configuration for new tenants
 	defaultConfig *OAuth2Config
 
+	// gdapResolver, when set with SetGDAPResolver, supplies the Partner Center
+	// endpoints used for partner-delegated minting. The partner tenant and
+	// credentials always come from the CFGMS tenant's stored config at call time.
+	gdapResolver *GDAPRelationshipResolver
+
 	logger logging.Logger
 }
 
@@ -75,14 +80,16 @@ func (p *OAuth2Provider) GetAccessToken(ctx context.Context, tenantID string) (*
 
 	// Try to get stored token first
 	storedToken, err := p.credentialStore.GetToken(tenantID)
-	if err == nil && storedToken != nil && !storedToken.IsExpired() {
+	if err == nil && storedToken != nil && !storedToken.IsExpired() && storedTokenUsable(config, storedToken) {
 		p.setCachedToken(tenantID, storedToken)
 		return storedToken, nil
 	}
 
 	// If stored token is expired or doesn't exist, get a new one
 	var token *AccessToken
-	if config.UseClientCredentials {
+	if config.PartnerDelegated {
+		token, err = p.getPartnerDelegatedToken(ctx, tenantID, config)
+	} else if config.UseClientCredentials {
 		token, err = p.getClientCredentialsToken(ctx, config)
 	} else {
 		// Design decision: interactive refresh requires a stored refresh token; callers must call RefreshToken explicitly when a refresh token is available.
@@ -492,6 +499,12 @@ func (p *OAuth2Provider) getOAuth2Config(tenantID string) (*OAuth2Config, error)
 		// Create a copy with the specific tenant ID
 		config := *p.defaultConfig
 		config.TenantID = tenantID
+		// The default config is shared by every tenant without a stored config, so
+		// it can never select a customer tenant: delegation is per-CFGMS-tenant.
+		config.PartnerDelegated = false
+		config.PartnerTenantID = ""
+		config.CustomerTenantID = ""
+		config.GDAPRequiredRoles = nil
 		return &config, nil
 	}
 

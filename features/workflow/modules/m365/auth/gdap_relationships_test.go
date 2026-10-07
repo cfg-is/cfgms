@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026 Jordan Ritz
-package gdap
+package auth
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cfgis/cfgms/features/workflow/modules/m365/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,18 +22,18 @@ import (
 // It is safe for concurrent use via an embedded mutex.
 type testCredentialStore struct {
 	mu     sync.Mutex
-	config *auth.OAuth2Config
-	token  *auth.AccessToken
+	config *OAuth2Config
+	token  *AccessToken
 }
 
-func (s *testCredentialStore) StoreToken(_ string, token *auth.AccessToken) error {
+func (s *testCredentialStore) StoreToken(_ string, token *AccessToken) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.token = token
 	return nil
 }
 
-func (s *testCredentialStore) GetToken(_ string) (*auth.AccessToken, error) {
+func (s *testCredentialStore) GetToken(_ string) (*AccessToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.token == nil {
@@ -45,32 +44,32 @@ func (s *testCredentialStore) GetToken(_ string) (*auth.AccessToken, error) {
 
 func (s *testCredentialStore) DeleteToken(_ string) error { return nil }
 
-func (s *testCredentialStore) StoreDelegatedToken(_, _ string, _ *auth.AccessToken) error {
+func (s *testCredentialStore) StoreDelegatedToken(_, _ string, _ *AccessToken) error {
 	return nil
 }
 
-func (s *testCredentialStore) GetDelegatedToken(_, _ string) (*auth.AccessToken, error) {
+func (s *testCredentialStore) GetDelegatedToken(_, _ string) (*AccessToken, error) {
 	return nil, fmt.Errorf("no delegated token")
 }
 
 func (s *testCredentialStore) DeleteDelegatedToken(_, _ string) error { return nil }
 
-func (s *testCredentialStore) StoreUserContext(_, _ string, _ *auth.UserContext) error { return nil }
+func (s *testCredentialStore) StoreUserContext(_, _ string, _ *UserContext) error { return nil }
 
-func (s *testCredentialStore) GetUserContext(_, _ string) (*auth.UserContext, error) {
+func (s *testCredentialStore) GetUserContext(_, _ string) (*UserContext, error) {
 	return nil, fmt.Errorf("no user context")
 }
 
 func (s *testCredentialStore) DeleteUserContext(_, _ string) error { return nil }
 
-func (s *testCredentialStore) StoreConfig(_ string, cfg *auth.OAuth2Config) error {
+func (s *testCredentialStore) StoreConfig(_ string, cfg *OAuth2Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.config = cfg
 	return nil
 }
 
-func (s *testCredentialStore) GetConfig(_ string) (*auth.OAuth2Config, error) {
+func (s *testCredentialStore) GetConfig(_ string) (*OAuth2Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.config == nil {
@@ -112,7 +111,7 @@ func TestGDAPClient_getPartnerCenterToken_happyPath(t *testing.T) {
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{
+		config: &OAuth2Config{
 			ClientID:     "test-client-id",
 			ClientSecret: "test-client-secret",
 		},
@@ -144,7 +143,7 @@ func TestGDAPClient_getPartnerCenterToken_caching(t *testing.T) {
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{
+		config: &OAuth2Config{
 			ClientID:     "cid",
 			ClientSecret: "csecret",
 		},
@@ -179,14 +178,14 @@ func TestGDAPClient_getPartnerCenterToken_expiredCacheRefetch(t *testing.T) {
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
+		config: &OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
 	}
 	client := NewGDAPClient(tokenServer.Client(), "partner-tenant-id")
 	client.tokenBaseURL = tokenServer.URL
 	client.SetCredentialStore(credStore)
 
 	// Seed an already-expired token in the in-memory cache.
-	client.cachedToken = &auth.AccessToken{
+	client.cachedToken = &AccessToken{
 		Token:     "expired-token",
 		ExpiresAt: time.Now().Add(-time.Hour),
 	}
@@ -214,7 +213,7 @@ func TestGDAPClient_getPartnerCenterToken_missingCredentials(t *testing.T) {
 // an empty client_id returns a descriptive error.
 func TestGDAPClient_getPartnerCenterToken_emptyClientID(t *testing.T) {
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "", ClientSecret: "secret"},
+		config: &OAuth2Config{ClientID: "", ClientSecret: "secret"},
 	}
 	client := NewGDAPClient(nil, "partner-tenant-id")
 	client.SetCredentialStore(credStore)
@@ -228,7 +227,7 @@ func TestGDAPClient_getPartnerCenterToken_emptyClientID(t *testing.T) {
 // with an empty client_secret returns a descriptive error.
 func TestGDAPClient_getPartnerCenterToken_emptyClientSecret(t *testing.T) {
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "cid", ClientSecret: ""},
+		config: &OAuth2Config{ClientID: "cid", ClientSecret: ""},
 	}
 	client := NewGDAPClient(nil, "partner-tenant-id")
 	client.SetCredentialStore(credStore)
@@ -266,7 +265,7 @@ func TestGDAPClient_getPartnerCenterToken_oauthErrorResponse(t *testing.T) {
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "bad-cid", ClientSecret: "bad-secret"},
+		config: &OAuth2Config{ClientID: "bad-cid", ClientSecret: "bad-secret"},
 	}
 	client := NewGDAPClient(tokenServer.Client(), "partner-tenant-id")
 	client.tokenBaseURL = tokenServer.URL
@@ -290,13 +289,13 @@ func TestGDAPClient_getPartnerCenterToken_persistedTokenReused(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	persistedToken := &auth.AccessToken{
+	persistedToken := &AccessToken{
 		Token:     "persisted-token",
 		TokenType: "Bearer",
 		ExpiresAt: time.Now().Add(30 * time.Minute),
 	}
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
+		config: &OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
 		token:  persistedToken,
 	}
 	client := NewGDAPClient(tokenServer.Client(), "partner-tenant-id")
@@ -321,7 +320,7 @@ func TestGDAPClient_getPartnerCenterToken_tokenStoredAfterFetch(t *testing.T) {
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
+		config: &OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
 	}
 	client := NewGDAPClient(tokenServer.Client(), "partner-tenant-id")
 	client.tokenBaseURL = tokenServer.URL
@@ -347,7 +346,7 @@ func TestGDAPClient_getPartnerCenterToken_concurrentCallsNoraceCondition(t *test
 	defer tokenServer.Close()
 
 	credStore := &testCredentialStore{
-		config: &auth.OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
+		config: &OAuth2Config{ClientID: "cid", ClientSecret: "csecret"},
 	}
 	client := NewGDAPClient(tokenServer.Client(), "partner-tenant-id")
 	client.tokenBaseURL = tokenServer.URL
