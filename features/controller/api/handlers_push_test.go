@@ -1404,31 +1404,32 @@ func TestHandleGetConfigPush_SessionPrincipal_CrossTenantBlocked(t *testing.T) {
 }
 
 // TestHandleGetConfigPush_SessionPrincipal_OwnSubtreeAllowed verifies the fix does not
-// over-restrict: a session principal scoped to tenant-a reads its own record and records
+// over-restrict: a session principal scoped to msp-a reads its own record and records
 // in its descendant tenants.
 func TestHandleGetConfigPush_SessionPrincipal_OwnSubtreeAllowed(t *testing.T) {
 	cp := &syncedControlPlane{}
 	server, pushStore := makePushServerWithStore(t, cp)
+	seedTenantTree(t, server)
 
-	own := createPushRecord(t, pushStore, "push-owned-by-tenant-a", "tenant-a", "cfg-own")
-	child := createPushRecord(t, pushStore, "push-owned-by-child", "tenant-a/child-1", "cfg-child")
+	own := createPushRecord(t, pushStore, "push-owned-by-msp-a", "msp-a", "cfg-own")
+	child := createPushRecord(t, pushStore, "push-owned-by-child", "client-1", "cfg-child")
 
 	for _, tc := range []struct {
 		name   string
 		pushID string
 		tenant string
 	}{
-		{"own_tenant", own.ID, "tenant-a"},
-		{"descendant_tenant", child.ID, "tenant-a/child-1"},
+		{"own_tenant", own.ID, "msp-a"},
+		{"descendant_tenant", child.ID, "client-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := withSessionPrincipal(newGetPushRequest(t, tc.pushID), "tenant-a")
+			req := withSessionPrincipal(newGetPushRequest(t, tc.pushID), "msp-a")
 			httpRec := httptest.NewRecorder()
 
 			server.handleGetConfigPush(httpRec, req)
 
 			require.Equal(t, http.StatusOK, httpRec.Code,
-				"session principal scoped to tenant-a must read %s (body: %s)", tc.tenant, httpRec.Body.String())
+				"session principal scoped to msp-a must read %s (body: %s)", tc.tenant, httpRec.Body.String())
 			var resp PushStatusResponse
 			require.NoError(t, json.Unmarshal(httpRec.Body.Bytes(), &resp))
 			assert.Equal(t, tc.tenant, resp.TenantID)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/cfgis/cfgms/features/controller/commands"
 	"github.com/cfgis/cfgms/features/controller/fleet"
+	"github.com/cfgis/cfgms/features/tenant"
 	controlplaneInterfaces "github.com/cfgis/cfgms/pkg/controlplane/interfaces"
 	controlplaneTypes "github.com/cfgis/cfgms/pkg/controlplane/types"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -294,14 +295,17 @@ func TestDispatch_ExplicitTenantPrefix_OutsideSubtreeRejected(t *testing.T) {
 // prefixed sub-tenant, excluding sibling sub-tenants under the caller's tenant.
 func TestDispatch_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	stewards := []fleet.StewardData{
-		{ID: "steward-c1", TenantID: "tenant-a/client-1", Status: "online"},
-		{ID: "steward-c2", TenantID: "tenant-a/client-2", Status: "online"},
+		{ID: "steward-c1", TenantID: "client-1", Status: "online"},
+		{ID: "steward-c2", TenantID: "client-2", Status: "online"},
 	}
-	server, upgradeStore := setupUpgradeServer(t, "tenant-a", stewards)
-	publishApprovedBinary(t, server, "tenant-a", "v0.5.12", "linux", "amd64")
+	server, upgradeStore := setupUpgradeServer(t, "msp-a", stewards)
+	seedTenantTree(t, server)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "client-2", ParentID: "msp-a"})
+	require.NoError(t, err)
+	publishApprovedBinary(t, server, "msp-a", "v0.5.12", "linux", "amd64")
 
-	// Caller tenant-a targets only the client-1 subtree via an explicit prefix.
-	rec := doDispatchUpgrade(server, "tenant-a", "tenant-a/client-1/all", "v0.5.12", "linux", "amd64")
+	// Caller msp-a targets only the client-1 subtree via an explicit prefix.
+	rec := doDispatchUpgrade(server, "msp-a", "client-1/all", "v0.5.12", "linux", "amd64")
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 
 	var resp APIResponse
@@ -310,7 +314,7 @@ func TestDispatch_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	require.True(t, ok)
 	count, _ := data["steward_count"].(float64)
 	assert.Equal(t, float64(1), count,
-		"explicit prefix must scope to tenant-a/client-1, excluding sibling client-2")
+		"explicit prefix must scope to client-1, excluding sibling client-2")
 
 	// The in-subtree steward must have a record; the sibling must have none.
 	c1records, err := upgradeStore.ListUpgradesBySteward(context.Background(), "steward-c1")

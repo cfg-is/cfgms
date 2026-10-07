@@ -430,7 +430,7 @@ func (s *Server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 	// authorized subtree; an empty callerTenantID (mTLS admin) has unrestricted access.
 	// 404 instead of 403 to avoid disclosing upgrade record existence across tenants
 	// (Issue #4091) — mirrors the genuine not-found response above.
-	if !isWithinTenantScope(callerTenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.isWithinTenantScope(r.Context(), callerTenantID, record.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusNotFound, "Upgrade record not found", "UPGRADE_NOT_FOUND")
 		return
 	}

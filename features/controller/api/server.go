@@ -1507,7 +1507,7 @@ func (s *Server) SetRollbackManager(m rollback.RollbackManager) {
 		tenant, _ := s.stewardOwnerTenant(context.Background(), stewardID)
 		return tenant
 	}
-	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager)
+	rollbackHandler := NewRollbackHandler(m, rollbackPrincipalExtractor, stewardTenantLookup, s.auditManager, s.tenantSubtreeContains)
 	rollbackHandler.tenantAccess = s.tenantAccessForScope
 	rollbackRouter := s.apiRouter.PathPrefix("/rollback").Subrouter()
 	// Require config/rollback permission for all rollback endpoints — same gate pattern
@@ -2132,9 +2132,7 @@ func (s *Server) tenantScopedTelemetryWrapper(next http.Handler) http.Handler {
 			if exists {
 				stewardTenant = info.TenantID
 			}
-			sameTenant := stewardTenant == callerTenant
-			ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
-			if !exists || (!sameTenant && !ancestorTenant) {
+			if !exists || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
 				// 404 instead of 403 to avoid disclosing steward existence across tenants.
 				s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 				return

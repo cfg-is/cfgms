@@ -741,10 +741,13 @@ func (s *Server) handleListCredentialRequests(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// Resolve the caller's subtree once rather than per request.
+	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
+
 	result := make([]PendingCredentialRequestInfo, 0, len(metas))
 	for _, m := range metas {
 		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-			if m.TenantID != callerTenant && !strings.HasPrefix(m.TenantID, callerTenant+"/") {
+			if !subtree.Contains(m.TenantID) {
 				continue
 			}
 		}

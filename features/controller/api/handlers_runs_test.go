@@ -970,25 +970,26 @@ func TestPostRunCommand_ExceedsBlastRadius_Rejected(t *testing.T) {
 // inheritance, not just the raw cap.
 func TestPostRunCommand_ChildTenantNarrowerOverride_Enforced(t *testing.T) {
 	stewards := []fleet.StewardResult{
-		{ID: "child-steward-1", TenantID: "root/child"},
-		{ID: "child-steward-2", TenantID: "root/child"},
+		{ID: "child-steward-1", TenantID: "client-1"},
+		{ID: "child-steward-2", TenantID: "client-1"},
 	}
 	server, _, queue := setupRunServer(t, stewards)
+	seedTenantTree(t, server) // real tenants: root > msp-a > client-1
 
 	blastStore := newTestBlastRadiusPolicyStore()
-	// Parent ("root") allows up to 10 targets; child narrows it to 1.
+	// Parent ("msp-a") allows up to 10 targets; child narrows it to 1.
 	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
-		TenantID: "root", MaxTargets: ptrInt(10),
+		TenantID: "msp-a", MaxTargets: ptrInt(10),
 	}))
 	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
-		TenantID: "root/child", MaxTargets: ptrInt(1),
+		TenantID: "client-1", MaxTargets: ptrInt(1),
 	}))
 	server.SetBlastRadiusPolicyStore(blastStore)
 	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
-		"root/child": {"root", "root/child"},
+		"client-1": {"root", "msp-a", "client-1"},
 	}))
 
-	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "root/child")
+	execPrincipal := runPrincipal("exec-caller", []string{"steward:execute-scripts"}, "client-1")
 	// Two targets: within the parent's default of 10, but over the child's own
 	// override of 1 — this must be rejected only if the child's narrower value
 	// (not the parent's) actually governs resolution.
@@ -1407,6 +1408,52 @@ func TestEnforceExecTenantScope_NilFleetQuery_Denies(t *testing.T) {
 	assert.NotEqual(t, execScopeAllowed, decision)
 }
 
+// TestEnforceExecTenantScope_SubtreeDecisionsThroughTenantAncestry is a [REQUIRED
+// TEST] for the ParentID-ancestry scope check: with the real fleet query wiring
+// of setupRunServer and a real tenant tree (root > msp-a > client-1, root > msp-b),
+// a principal scoped to msp-a is allowed on a descendant (client-1) steward and
+// forbidden on a sibling-tenant (msp-b) steward.
+func TestEnforceExecTenantScope_SubtreeDecisionsThroughTenantAncestry(t *testing.T) {
+	server, _, _ := setupRunServer(t, []fleet.StewardResult{
+		{ID: "steward-client-1", TenantID: "client-1"},
+		{ID: "steward-msp-b", TenantID: "msp-b"},
+	})
+	seedTenantTree(t, server)
+	// staticRunFleetQuery ignores the filter; narrow it to the requested device
+	// the way the production fleet query does for fleet.Filter{DeviceID: ...}.
+	server.fleetQuery = deviceFilteringRunFleetQuery{inner: server.fleetQuery}
+
+	assert.Equal(t, execScopeAllowed,
+		server.enforceExecTenantScope(context.Background(), "steward-client-1", "msp-a"),
+		"a client-1 steward is inside msp-a's subtree")
+	assert.Equal(t, execScopeForbidden,
+		server.enforceExecTenantScope(context.Background(), "steward-msp-b", "msp-a"),
+		"an msp-b steward is outside msp-a's subtree")
+}
+
+// deviceFilteringRunFleetQuery wraps a fleet query and keeps only the results
+// matching Filter.DeviceID when one is set.
+type deviceFilteringRunFleetQuery struct{ inner fleet.FleetQuery }
+
+func (q deviceFilteringRunFleetQuery) Search(ctx context.Context, f fleet.Filter) ([]fleet.StewardResult, error) {
+	all, err := q.inner.Search(ctx, f)
+	if err != nil || f.DeviceID == "" {
+		return all, err
+	}
+	var out []fleet.StewardResult
+	for _, r := range all {
+		if r.ID == f.DeviceID {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (q deviceFilteringRunFleetQuery) Count(ctx context.Context, f fleet.Filter) (int, error) {
+	r, err := q.Search(ctx, f)
+	return len(r), err
+}
+
 // ---- Issue #4091: blast-radius inheritance must take the minimum, not the last --
 
 // TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins is the [REQUIRED TEST]
@@ -1425,17 +1472,17 @@ func TestResolveMaxTargetsForTenant_MinAcrossPath_NotLastWins(t *testing.T) {
 		TenantID: "root", MaxTargets: ptrInt(100),
 	}))
 	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
-		TenantID: "root/middle", MaxTargets: ptrInt(5000),
+		TenantID: "msp-a", MaxTargets: ptrInt(5000),
 	}))
 	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
-		TenantID: "root/middle/leaf", MaxTargets: ptrInt(2000),
+		TenantID: "client-1", MaxTargets: ptrInt(2000),
 	}))
 	server.SetBlastRadiusPolicyStore(blastStore)
 	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
-		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+		"client-1": {"root", "msp-a", "client-1"},
 	}))
 
-	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+	got := server.resolveMaxTargetsForTenant(context.Background(), "client-1")
 
 	assert.Equal(t, 100, got,
 		"inheritance must resolve to the root's strictest bound (100), not the leaf's "+
@@ -1484,19 +1531,19 @@ func (s *failingBlastRadiusPolicyStore) GetPolicy(ctx context.Context, tenantID 
 func TestResolveMaxTargetsForTenant_MidWalkPolicyError_KeepsNarrowerKnownBound(t *testing.T) {
 	server := setupTestServer(t)
 
-	blastStore := newFailingBlastRadiusPolicyStore("root/middle")
+	blastStore := newFailingBlastRadiusPolicyStore("msp-a")
 	require.NoError(t, blastStore.SetPolicy(context.Background(), &business.BlastRadiusPolicy{
 		TenantID: "root", MaxTargets: ptrInt(50),
 	}))
 	server.SetBlastRadiusPolicyStore(blastStore)
 	server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
-		"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+		"client-1": {"root", "msp-a", "client-1"},
 	}))
 
-	got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+	got := server.resolveMaxTargetsForTenant(context.Background(), "client-1")
 
 	assert.Equal(t, 50, got,
-		"a GetPolicy error at 'root/middle' must not discard the narrower bound (50) "+
+		"a GetPolicy error at 'msp-a' must not discard the narrower bound (50) "+
 			"already resolved from 'root' in favor of the default (1000)")
 }
 
@@ -1510,7 +1557,7 @@ func TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault(t *test
 		server.SetBlastRadiusPolicyStore(newTestBlastRadiusPolicyStore())
 		server.SetTenantStore(errorTenantStore{})
 
-		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+		got := server.resolveMaxTargetsForTenant(context.Background(), "client-1")
 
 		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
 			"a GetTenantPath error means nothing is known yet; must resolve to the default")
@@ -1521,10 +1568,10 @@ func TestResolveMaxTargetsForTenant_FirstLookupFailure_ResolvesToDefault(t *test
 		blastStore := newFailingBlastRadiusPolicyStore("root")
 		server.SetBlastRadiusPolicyStore(blastStore)
 		server.SetTenantStore(newTestTenantStoreWithPath(map[string][]string{
-			"root/middle/leaf": {"root", "root/middle", "root/middle/leaf"},
+			"client-1": {"root", "msp-a", "client-1"},
 		}))
 
-		got := server.resolveMaxTargetsForTenant(context.Background(), "root/middle/leaf")
+		got := server.resolveMaxTargetsForTenant(context.Background(), "client-1")
 
 		assert.Equal(t, defaultMaxOperatorPayloadTargets, got,
 			"a GetPolicy error on the first path element leaves no narrower bound "+

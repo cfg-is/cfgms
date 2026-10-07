@@ -632,13 +632,15 @@ func TestHandleCockpitWatch_ForwardsInSubscriptionEvent(t *testing.T) {
 func TestHandleCockpitWatch_SubscriptionScopedToCaseTenant(t *testing.T) {
 	probe := newWatchProbe(t)
 	srv := setupCockpitWatchServer(t, probe)
-	c, _ := seedWatchCase(t, srv.CasesStore(), "watch-msp/client-1")
+	createTestTenant(t, srv, "watch-msp", "")
+	createTestTenant(t, srv, "watch-client-1", "watch-msp")
+	c, _ := seedWatchCase(t, srv.CasesStore(), "watch-client-1")
 
 	_, teardown := dialWatchWS(t, srv, c.ID, "watch-msp")
 	defer teardown()
 
 	filter := probe.watchFilter(t)
-	assert.Equal(t, "watch-msp/client-1", filter.TenantFilter,
+	assert.Equal(t, "watch-client-1", filter.TenantFilter,
 		"the feed must be scoped to the case's tenant, not the caller's subtree")
 }
 

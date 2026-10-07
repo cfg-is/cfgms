@@ -255,11 +255,12 @@ func TestHandleGetRevocationManifest_UnscopedCallerServedFleetWide(t *testing.T)
 func setupManifestServerWithWebAuthn(t *testing.T) (*Server, *cert.Manager, string) {
 	t.Helper()
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 
 	const username = "manifest-webauthn-user"
 	createManifestAccount(t, server, AccountRequest{
 		Username:    username,
-		TenantID:    "root/msp-a",
+		TenantID:    "msp-a",
 		Permissions: []string{OperatorPayloadSignGrant},
 	})
 	return server, certMgr, username
@@ -307,7 +308,7 @@ func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_IncludesRegis
 	assert.Equal(t, AuthorizedWebAuthnCredentialKind, entry.Kind)
 	assert.Equal(t, credID, entry.CredentialID)
 	assert.Equal(t, pubKey, entry.PublicKey)
-	assert.Equal(t, "root/msp-a", entry.TenantID,
+	assert.Equal(t, "msp-a", entry.TenantID,
 		"the entry must name the tenant the credential's account belongs to")
 	assert.False(t, entry.RootScope, "a tenant-scoped account's entry must not claim root scope")
 	assert.Contains(t, entry.Grants, OperatorPayloadSignGrant,
@@ -375,8 +376,9 @@ func TestHandleGetRevocationManifest_SignerCertificatePEM_ChainsToCA(t *testing.
 // inline execution on a steward.
 func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_ZeroPrivilegeAccountExcluded(t *testing.T) {
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 	const username = "manifest-zero-privilege"
-	createManifestAccount(t, server, AccountRequest{Username: username, TenantID: "root/msp-a"})
+	createManifestAccount(t, server, AccountRequest{Username: username, TenantID: "msp-a"})
 
 	_, pubKey := generateSyntheticCredential(t)
 	injectSignCredential(t, server, username, []byte("manifest-cred-zero-priv"), pubKey, 0)
@@ -394,10 +396,11 @@ func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_ZeroPrivilege
 // their passkey authorizing execution.
 func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_DisabledAccountExcluded(t *testing.T) {
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 	const username = "manifest-disabled-user"
 	createManifestAccount(t, server, AccountRequest{
 		Username:    username,
-		TenantID:    "root/msp-a",
+		TenantID:    "msp-a",
 		Permissions: []string{OperatorPayloadSignGrant},
 	})
 	_, pubKey := generateSyntheticCredential(t)
@@ -425,6 +428,7 @@ func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_DisabledAccou
 // such and carries no tenant — the only shape a steward accepts fleet-wide.
 func TestHandleGetRevocationManifest_AuthorizedWebAuthnCredentials_RootScopeAccountMarked(t *testing.T) {
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 	const username = "manifest-root-scope-user"
 	createManifestAccount(t, server, AccountRequest{Username: username, RootScope: true})
 
@@ -499,10 +503,11 @@ func getStewardRevocationManifest(t *testing.T, server *Server, certMgr *cert.Ma
 // certificate reaches the endpoint successfully").
 func TestHandleGetStewardRevocationManifest_RegisteredStewardSucceeds(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
+	seedTenantTree(t, server)
 	ensureSharedSigningCertificate(t, certMgr)
 
 	const stewardID = "steward-manifest-ok"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
 
 	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:   "steward-manifest-ok-revoked-cert",
@@ -542,10 +547,11 @@ func TestHandleGetStewardRevocationManifest_UnregisteredCertificateRefused(t *te
 // refused").
 func TestHandleGetStewardRevocationManifest_DecommissionedStewardRefused(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
+	seedTenantTree(t, server)
 	ensureSharedSigningCertificate(t, certMgr)
 
 	const stewardID = "steward-manifest-decommissioned"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
 	require.NoError(t, server.controllerService.UpdateStewardStatus(stewardID, string(business.StewardStatusDeregistered)))
 
 	rec, _ := getStewardRevocationManifest(t, server, certMgr, stewardID)
@@ -566,10 +572,11 @@ func TestHandleGetStewardRevocationManifest_DecommissionedStewardRefused(t *test
 // in the request.
 func TestHandleGetStewardRevocationManifest_RevokedCertificateRefused(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
+	seedTenantTree(t, server)
 	ensureSharedSigningCertificate(t, certMgr)
 
 	const stewardID = "steward-manifest-revoked-cert"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
 
 	issued, err := certMgr.GenerateClientCertificate(&cert.ClientCertConfig{
 		CommonName:   stewardID,
@@ -613,18 +620,19 @@ func TestHandleGetStewardRevocationManifest_NoPeerCertificateRefused(t *testing.
 
 // TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials verifies
 // the tenant-isolation rule for the filtering decision (REQUIRED TEST, Issue #4400 AC):
-// a steward in tenant path root/msp-a/client-1 does not receive AuthorizedWebAuthnCredentials
-// belonging to an operator scoped only to root/msp-b, but does receive its own tenant's
+// a steward in tenant client-1 (child of msp-a) does not receive AuthorizedWebAuthnCredentials
+// belonging to an operator scoped only to msp-b, but does receive its own tenant's
 // credential and any root-scope (fleet-wide) credential.
 func TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials(t *testing.T) {
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 
 	const stewardID = "steward-tenant-isolation"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
 
 	createManifestAccount(t, server, AccountRequest{
 		Username:    "manifest-user-msp-a",
-		TenantID:    "root/msp-a",
+		TenantID:    "msp-a",
 		Permissions: []string{OperatorPayloadSignGrant},
 	})
 	_, pubKeyA := generateSyntheticCredential(t)
@@ -632,7 +640,7 @@ func TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials(
 
 	createManifestAccount(t, server, AccountRequest{
 		Username:    "manifest-user-msp-b",
-		TenantID:    "root/msp-b",
+		TenantID:    "msp-b",
 		Permissions: []string{OperatorPayloadSignGrant},
 	})
 	_, pubKeyB := generateSyntheticCredential(t)
@@ -667,9 +675,10 @@ func TestHandleGetStewardRevocationManifest_TenantIsolation_WebAuthnCredentials(
 // than the steward accepts.
 func TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded(t *testing.T) {
 	server, certMgr := setupManifestServerWithoutAccount(t)
+	seedTenantTree(t, server)
 
 	const stewardID = "steward-untenanted-entry"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a/client-1", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "client-1", "", "active"))
 
 	// No TenantID, no RootScope. handleCreateAccount no longer produces this shape
 	// (an omitted tenant resolves to the caller's own, Issue #4665), but a record
@@ -709,6 +718,8 @@ func TestHandleGetStewardRevocationManifest_UntenantedNonRootEntryExcluded(t *te
 // steward tenant against the steward-side rule this filter mirrors
 // (commands.entryAuthorizedForTenant). Each unset-tenant combination must deny.
 func TestWebAuthnCredentialAuthorizedForSteward(t *testing.T) {
+	srv := setupTestServer(t)
+	seedTenantTree(t, srv)
 	tests := []struct {
 		name          string
 		credential    AuthorizedWebAuthnCredential
@@ -716,31 +727,31 @@ func TestWebAuthnCredentialAuthorizedForSteward(t *testing.T) {
 		want          bool
 	}{
 		{"root scope with no tenant covers the fleet",
-			AuthorizedWebAuthnCredential{RootScope: true}, "root/msp-a", true},
+			AuthorizedWebAuthnCredential{RootScope: true}, "msp-a", true},
 		{"root scope with no tenant covers an untenanted steward",
 			AuthorizedWebAuthnCredential{RootScope: true}, "", true},
 		{"root scope naming a tenant is self-contradictory and authorizes nothing",
-			AuthorizedWebAuthnCredential{RootScope: true, TenantID: "root/msp-a"}, "root/msp-a", false},
+			AuthorizedWebAuthnCredential{RootScope: true, TenantID: "msp-a"}, "msp-a", false},
 		{"no tenant and no root scope authorizes nothing",
-			AuthorizedWebAuthnCredential{}, "root/msp-a", false},
+			AuthorizedWebAuthnCredential{}, "msp-a", false},
 		{"tenant-scoped entry does not reach an untenanted steward",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "", false},
+			AuthorizedWebAuthnCredential{TenantID: "msp-a"}, "", false},
 		{"exact tenant match",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-a", true},
+			AuthorizedWebAuthnCredential{TenantID: "msp-a"}, "msp-a", true},
 		{"ancestor tenant covers a descendant steward",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-a/client-1", true},
+			AuthorizedWebAuthnCredential{TenantID: "msp-a"}, "client-1", true},
 		{"descendant tenant does not cover an ancestor steward",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-a/client-1"}, "root/msp-a", false},
+			AuthorizedWebAuthnCredential{TenantID: "client-1"}, "msp-a", false},
 		{"sibling tenant is excluded",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-b"}, "root/msp-a", false},
+			AuthorizedWebAuthnCredential{TenantID: "msp-b"}, "msp-a", false},
 		{"prefix collision without a separator is excluded",
-			AuthorizedWebAuthnCredential{TenantID: "root/msp-a"}, "root/msp-ab", false},
+			AuthorizedWebAuthnCredential{TenantID: "msp-a"}, "msp-ab", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, webauthnCredentialAuthorizedForSteward(tc.credential, tc.stewardTenant))
+			assert.Equal(t, tc.want, srv.webauthnCredentialAuthorizedForSteward(context.Background(), tc.credential, tc.stewardTenant))
 
-			filtered := filterWebAuthnCredentialsForSteward(
+			filtered := srv.filterWebAuthnCredentialsForSteward(context.Background(),
 				[]AuthorizedWebAuthnCredential{tc.credential}, tc.stewardTenant)
 			assert.Equal(t, tc.want, len(filtered) == 1,
 				"filterWebAuthnCredentialsForSteward must agree with the per-entry rule")
@@ -754,10 +765,11 @@ func TestWebAuthnCredentialAuthorizedForSteward(t *testing.T) {
 // the controller").
 func TestHandleGetStewardRevocationManifest_Signed(t *testing.T) {
 	server, certMgr := setupCertTestServer(t)
+	seedTenantTree(t, server)
 	ensureSharedSigningCertificate(t, certMgr)
 
 	const stewardID = "steward-manifest-signed"
-	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "root/msp-a", "", "active"))
+	require.NoError(t, server.controllerService.RegisterSteward(stewardID, "msp-a", "", "active"))
 
 	rec, body := getStewardRevocationManifest(t, server, certMgr, stewardID)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())

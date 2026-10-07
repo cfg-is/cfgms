@@ -1051,8 +1051,9 @@ func (s *Server) handleRevokeEnrollmentLink(w http.ResponseWriter, r *http.Reque
 // Issue #3137: results are scoped to the caller's tenant subtree. An unscoped
 // mTLS admin (callerTenant == "") sees all accounts. Any other caller sees only
 // accounts whose storage TenantID equals callerTenant or is a descendant of it
-// (i.e. starts with callerTenant + "/"), which covers the full subtree of child
-// tenants without requiring an exact-match-only TenantID filter.
+// (resolved once through the tenant manager's ParentID ancestry), which covers
+// the full subtree of child tenants without requiring an exact-match-only
+// TenantID filter.
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	if s.secretStore == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
@@ -1072,12 +1073,15 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the caller's subtree once rather than per account.
+	subtree := s.tenantSubtreeIDs(r.Context(), callerTenant)
+
 	accounts := make([]AccountInfo, 0, len(metas))
 	for _, meta := range metas {
 		// Issue #3137: enforce tenant-subtree scope. Skip accounts outside the
 		// caller's subtree. Unscoped admins (callerTenant == "") see everything.
 		if callerTenant != "" { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
-			if meta.TenantID != callerTenant && !strings.HasPrefix(meta.TenantID, callerTenant+"/") {
+			if !subtree.Contains(meta.TenantID) {
 				continue
 			}
 		}
@@ -1237,7 +1241,7 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	// Issue #3126: enforce tenant-subtree scope. A cross-tenant caller gets 404 —
 	// not 403 — to avoid disclosing that the account exists in another tenant.
 	callerTenant := callerTenantFilter(r.Context())
-	if !isWithinTenantScope(callerTenant, acct.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.isWithinTenantScope(r.Context(), callerTenant, acct.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
 		return
 	}

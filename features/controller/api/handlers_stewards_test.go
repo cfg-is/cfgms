@@ -1109,13 +1109,14 @@ func TestHandleGetSteward_NilRegistry(t *testing.T) {
 // is indistinguishable from a nonexistent steward ID (AC1, AC5).
 func TestHandleGetSteward_CrossTenant_Returns404(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 
-	// Steward lives in "root/msp-b"; caller is scoped to "root/msp-a".
+	// Steward lives in "msp-b"; caller is scoped to "msp-a".
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
 		"hostname": "msp-b-host", "os": "linux",
-	}, "root/msp-b")
+	}, "msp-b")
 
-	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "msp-a", 5*time.Minute)
 
 	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
 	req.Header.Set("X-API-Key", callerKey)
@@ -1145,12 +1146,13 @@ func TestHandleGetSteward_CrossTenant_Returns404(t *testing.T) {
 // tenant can read a steward belonging to that same tenant (AC2).
 func TestHandleGetSteward_SameTenant_Returns200(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
 		"hostname": "msp-a-host", "os": "linux",
-	}, "root/msp-a")
+	}, "msp-a")
 
-	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "msp-a", 5*time.Minute)
 
 	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
 	req.Header.Set("X-API-Key", callerKey)
@@ -1169,13 +1171,14 @@ func TestHandleGetSteward_SameTenant_Returns200(t *testing.T) {
 // a parent tenant can read a steward in a descendant tenant (AC2).
 func TestHandleGetSteward_DescendantTenant_Returns200(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 
-	// Steward is in "root/msp-a/client-1"; caller is scoped to "root/msp-a".
+	// Steward is in "client-1" (child of msp-a); caller is scoped to "msp-a".
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
 		"hostname": "client-1-host", "os": "linux",
-	}, "root/msp-a/client-1")
+	}, "client-1")
 
-	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "msp-a", 5*time.Minute)
 
 	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
 	req.Header.Set("X-API-Key", callerKey)
@@ -1216,17 +1219,18 @@ func TestHandleGetSteward_UnscopedAdmin_Returns200(t *testing.T) {
 }
 
 // TestHandleGetSteward_SiblingPrefixTenant_Returns404 verifies that a principal scoped
-// to "root/msp-a" cannot read a steward in "root/msp-alpha" (AC4). A bare HasPrefix
-// check without the "/" separator would incorrectly allow this.
+// to "msp-a" cannot read a steward in "msp-ab" (AC4). A bare string-prefix check
+// would incorrectly allow this; scope resolves through ParentID ancestry instead.
 func TestHandleGetSteward_SiblingPrefixTenant_Returns404(t *testing.T) {
 	server := setupTestServer(t)
+	seedTenantTree(t, server)
 
-	// Steward lives in "root/msp-alpha"; caller is scoped to "root/msp-a".
+	// Steward lives in "msp-ab"; caller is scoped to "msp-a".
 	stewardID := registerTestStewardWithDNA(t, server, map[string]string{
 		"hostname": "msp-alpha-host", "os": "linux",
-	}, "root/msp-alpha")
+	}, "msp-ab")
 
-	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "root/msp-a", 5*time.Minute)
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "msp-a", 5*time.Minute)
 
 	req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
 	req.Header.Set("X-API-Key", callerKey)
@@ -1234,10 +1238,42 @@ func TestHandleGetSteward_SiblingPrefixTenant_Returns404(t *testing.T) {
 	server.router.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusNotFound, rec.Code,
-		"sibling-prefix tenant must return 404 (AC4: root/msp-a must not match root/msp-alpha)")
+		"sibling-prefix tenant must return 404 (AC4: msp-a must not match msp-ab)")
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, "STEWARD_NOT_FOUND", errResp.Error.Code)
+}
+
+// TestHandleGetSteward_SubtreeScope_RealTenants is the [REQUIRED TEST] for tenant-subtree
+// resolution through the tenant manager's ParentID ancestry: with real tenants
+// root > {msp-a > client-1, msp-b, msp-ab}, a caller scoped to msp-a reads a steward in
+// client-1 (200) and gets 404 for stewards in msp-b and in msp-ab (shared string prefix).
+func TestHandleGetSteward_SubtreeScope_RealTenants(t *testing.T) {
+	server := setupTestServer(t)
+	seedTenantTree(t, server)
+	callerKey := NewEphemeralTestKey(t, server, []string{"steward:read"}, "msp-a", 5*time.Minute)
+
+	for _, tc := range []struct {
+		tenant string
+		want   int
+	}{
+		{"client-1", http.StatusOK},
+		{"msp-b", http.StatusNotFound},
+		{"msp-ab", http.StatusNotFound},
+	} {
+		t.Run(tc.tenant, func(t *testing.T) {
+			stewardID := registerTestStewardWithDNA(t, server, map[string]string{
+				"hostname": "host-" + tc.tenant, "os": "linux",
+			}, tc.tenant)
+
+			req := httptest.NewRequest("GET", "/api/v1/stewards/"+stewardID, nil)
+			req.Header.Set("X-API-Key", callerKey)
+			rec := httptest.NewRecorder()
+			server.router.ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.want, rec.Code, "body: %s", rec.Body.String())
+		})
+	}
 }
 
 // TestHandleStewardAuthRefresh_UnknownSteward_Returns404 verifies that POSTing to
@@ -3106,54 +3142,28 @@ func TestHandleMoveSteward_ScopedAdmin_NoAuthorityOverDestination(t *testing.T) 
 }
 
 // TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix verifies 200 when a
-// scoped admin has anchored-prefix authority over both source and destination.
-// The source steward is stored with a hierarchical TenantID ("msp-a/child-src") so the
-// prefix check exercises the strings.HasPrefix path.
+// scoped admin has subtree authority over both source and destination. Authority
+// resolves through the tenant manager's ParentID ancestry: the caller (msp-a) owns
+// client-1 (source) and client-2 (destination), both real children of msp-a.
 func TestHandleMoveSteward_ScopedAdmin_AuthorityOverBoth_AnchoredPrefix(t *testing.T) {
 	server, st := setupMoveAuthServer(t)
-
-	// Seed the steward directly with a hierarchical source tenant ID so the stored record
-	// has "msp-a/..." format while the controller service index uses "msp-a".
-	seedSteward(t, st, &business.StewardRecord{
-		ID:       "s-auth-both",
-		TenantID: "msp-a/child-src",
-		Status:   business.StewardStatusRegistered,
-	})
-	require.NoError(t, server.controllerService.RegisterSteward("s-auth-both", "msp-a/child-src", "addr", "registered"))
-
-	// Destination is also a child of "msp-a/" — caller has authority over both.
-	// We use "msp-a-child" (a flat tenant that was pre-created) as destination. The
-	// scope check for dest is strings.HasPrefix("msp-a-child", "msp-a/") == false,
-	// so we need a true hierarchical path. Create a child tenant in the store.
+	seedTenantTree(t, server)
 	ctx := context.Background()
-	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
-		ID:       "s-dest-placeholder",
-		TenantID: "msp-a/child-dst",
-	}))
-	// Register "msp-a/child-dst" as a destination tenant via a direct store insertion
-	// (bypassing tenant manager validation) — we only need GetTenant to return active.
-	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{
-		ParentID: testRootTenantID,
-		ID:       "msp-a-child-dst",
-		Name:     "msp-a-child-dst",
-	})
+	_, err := server.tenantManager.CreateTenant(ctx, &tenant.TenantRequest{ID: "client-2", Name: "client-2", ParentID: "msp-a"})
 	require.NoError(t, err)
 
-	// For the anchored-prefix test, pass a flat destination that's literally under "msp-a/"
-	// by constructing the request with new_tenant_id = "msp-a/child-dst". Since tenantPathRegex
-	// now accepts slashes, this is valid. The tenant store won't have this exact path-style ID
-	// (the tenant manager uses flat IDs), so GetTenant returns not-found → 400 TENANT_NOT_FOUND.
-	// That means the AUTH check passed (no 403) and the failure is the subsequent tenant lookup.
-	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-003", CertFingerprint: "fp-003"}
-	rec := postMoveStewardWithPrincipal(server, "s-auth-both", "msp-a/child-dst", scopedPrincipal)
+	seedSteward(t, st, &business.StewardRecord{
+		ID:       "s-auth-both",
+		TenantID: "client-1",
+		Status:   business.StewardStatusRegistered,
+	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-auth-both", "client-1", "addr", "registered"))
 
-	// The authorization check PASSES (both in scope), but the destination tenant isn't
-	// registered — we get 400 TENANT_NOT_FOUND, not 403 INSUFFICIENT_SCOPE.
-	require.NotEqual(t, http.StatusForbidden, rec.Code, "auth must pass for msp-a scope over msp-a/child-dst destination")
-	var errResp ErrorResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code,
-		"403 would mean auth failed; 400 TENANT_NOT_FOUND confirms auth passed and tenant lookup failed")
+	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-003", CertFingerprint: "fp-003"}
+	rec := postMoveStewardWithPrincipal(server, "s-auth-both", "client-2", scopedPrincipal)
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"msp-a owns both client-1 and client-2 through ParentID ancestry; body: %s", rec.Body.String())
 }
 
 // TestHandleMoveSteward_ScopedAdmin_ExactTenantMatch verifies that a scoped admin with
@@ -3349,28 +3359,29 @@ func TestHandleMoveSteward_AuditOnDenial(t *testing.T) {
 	assert.Equal(t, "FPRINT-DENY", found.Details["cert_fingerprint"])
 }
 
-// TestHandleMoveSteward_TenantPathWithSlash verifies that a hierarchical new_tenant_id
-// (containing a slash) now passes format validation (tenantPathRegex allows slashes).
-func TestHandleMoveSteward_TenantPathWithSlash(t *testing.T) {
+// TestHandleMoveSteward_SlashTenantPathDenied verifies a slash-delimited path is not a
+// tenant ID: tenant authority resolves through the tenant manager's ParentID ancestry,
+// so a scoped admin naming "msp-a/other-child" as destination (a string under the
+// caller's old path-prefix shape, but no real tenant) is refused with 403 rather than
+// treated as in-scope, and the steward is not moved.
+func TestHandleMoveSteward_SlashTenantPathDenied(t *testing.T) {
 	server, st := setupMoveAuthServer(t)
+	seedTenantTree(t, server)
 
 	seedSteward(t, st, &business.StewardRecord{
 		ID:       "s-slash-test",
-		TenantID: "msp-a/child-src",
+		TenantID: "client-1",
 		Status:   business.StewardStatusRegistered,
 	})
+	require.NoError(t, server.controllerService.RegisterSteward("s-slash-test", "client-1", "addr", "registered"))
 
-	// Request with hierarchical new_tenant_id — format validation must pass.
-	// The tenant doesn't exist in the store, so we expect TENANT_NOT_FOUND (400), not INVALID_TENANT_ID (400).
 	scopedPrincipal := &Principal{ID: "msp-admin", Assurance: session.AssuranceStrong, TenantID: "msp-a", CertSerial: "SN-007", CertFingerprint: "fp-007"}
 	rec := postMoveStewardWithPrincipal(server, "s-slash-test", "msp-a/other-child", scopedPrincipal)
 
+	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 	var errResp ErrorResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
-	assert.NotEqual(t, "INVALID_TENANT_ID", errResp.Error.Code,
-		"hierarchical tenant IDs must pass format validation")
-	assert.Equal(t, "TENANT_NOT_FOUND", errResp.Error.Code,
-		"auth passed and tenant lookup failed as expected")
+	assert.Equal(t, "INSUFFICIENT_SCOPE", errResp.Error.Code)
 }
 
 // ---- handleListStewards lost-status read-path test (Issue #2463) ----

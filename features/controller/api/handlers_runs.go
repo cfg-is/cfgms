@@ -858,8 +858,8 @@ func (s *Server) enforceExecTenantScopeForCallerScope(ctx context.Context, devic
 	}
 }
 
-// enforceExecTenantScope checks whether the principal's tenantID is a path-prefix
-// (or exact match) of the target steward's tenantID. See execTenantScopeDecision
+// enforceExecTenantScope checks whether the principal's tenantID is the target
+// steward's tenant or one of its ParentID ancestors. See execTenantScopeDecision
 // for the meaning of each outcome. Callers must deny on execScopeIndeterminate,
 // not treat it as execScopeAllowed.
 func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principalTenantID string) execTenantScopeDecision {
@@ -874,11 +874,8 @@ func (s *Server) enforceExecTenantScope(ctx context.Context, deviceID, principal
 		if sr.ID != deviceID {
 			continue
 		}
-		// Steward found — check tenant path prefix.
-		if sr.TenantID == principalTenantID {
-			return execScopeAllowed
-		}
-		if strings.HasPrefix(sr.TenantID, principalTenantID+"/") {
+		// Steward found — allowed when its tenant is the principal's or a ParentID descendant.
+		if s.tenantSubtreeContains(ctx, principalTenantID, sr.TenantID) {
 			return execScopeAllowed
 		}
 		return execScopeForbidden // steward exists but outside tenant scope

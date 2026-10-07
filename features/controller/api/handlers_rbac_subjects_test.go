@@ -213,9 +213,10 @@ func TestHandleGetSubjectRoles_SameTenantAllowed(t *testing.T) {
 // parent tenant can list roles for a subject in a child tenant.
 func TestHandleGetSubjectRoles_SubtenantAllowed(t *testing.T) {
 	server := setupTestServer(t)
-	createSubjectForTenant(t, server, "parent/child", "subject-subtenant", "Child Subject")
+	seedTenantTree(t, server)
+	createSubjectForTenant(t, server, "client-1", "subject-subtenant", "Child Subject")
 
-	rec := callHandleGetSubjectRoles(server, "parent", "subject-subtenant")
+	rec := callHandleGetSubjectRoles(server, "msp-a", "subject-subtenant")
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 

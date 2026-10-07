@@ -351,9 +351,10 @@ func TestHandleDeleteStewardTags_NilStore(t *testing.T) {
 // can tag stewards in child tenants (subtree access).
 func TestHandleAddStewardTags_SubtreeAccess(t *testing.T) {
 	server := setupTagServer(t)
-	// API key scoped to "msp" can tag stewards in "msp/client-1".
-	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write"}, "msp", 5*time.Minute)
-	addTagTestSteward(t, server, "s-child", "msp/client-1")
+	seedTenantTree(t, server)
+	// API key scoped to "msp-a" can tag stewards in its ParentID child "client-1".
+	apiKey := NewEphemeralTestKey(t, server, []string{"steward:tag:write"}, "msp-a", 5*time.Minute)
+	addTagTestSteward(t, server, "s-child", "client-1")
 
 	rec := doTagRequest(server, http.MethodPost, "/api/v1/stewards/s-child/tags", apiKey,
 		map[string]interface{}{"tags": []string{"prod"}})

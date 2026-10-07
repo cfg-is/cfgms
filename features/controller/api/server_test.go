@@ -21,6 +21,7 @@ import (
 
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -2242,4 +2243,41 @@ func seedLegacyTopLevelTenant(t *testing.T, server *Server, id string) {
 	now := time.Now()
 	require.NoError(t, v.(tenant.Store).CreateTenant(context.Background(), &business.TenantData{
 		ID: id, Name: id, Status: business.TenantStatusActive, CreatedAt: now, UpdatedAt: now}))
+}
+
+// TestTenantScopedTelemetryWrapper_SubtreeThroughTenantAncestry is a [REQUIRED
+// TEST] for the ParentID-ancestry scope check on the telemetry route: a caller
+// scoped to msp-a reaches a steward in its descendant tenant client-1 but gets
+// 404 for a steward in the sibling tenant msp-b. Tenants come from the real
+// tenant manager; stewards register through the real controller service.
+func TestTenantScopedTelemetryWrapper_SubtreeThroughTenantAncestry(t *testing.T) {
+	server := setupTestServer(t)
+	seedTenantTree(t, server)
+
+	inScope := registerActiveSteward(t, server.controllerService, "telemetry-client-1", "client-1")
+	outOfScope := registerActiveSteward(t, server.controllerService, "telemetry-msp-b", "msp-b")
+
+	reached := false
+	handler := server.tenantScopedTelemetryWrapper(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	serve := func(stewardID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/"+stewardID+"/telemetry", nil)
+		req = mux.SetURLVars(req, map[string]string{"id": stewardID})
+		req = req.WithContext(withCallerTenant(req.Context(), "msp-a"))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := serve(inScope)
+	assert.Equal(t, http.StatusOK, rec.Code, "a client-1 steward is inside msp-a's subtree; body: %s", rec.Body.String())
+	assert.True(t, reached, "the wrapped handler must run for an in-subtree steward")
+
+	reached = false
+	rec = serve(outOfScope)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "an msp-b steward is outside msp-a's subtree")
+	assert.False(t, reached, "the wrapped handler must not run for an out-of-subtree steward")
 }

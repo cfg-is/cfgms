@@ -140,7 +140,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 		// Enforce tenant subtree scope — must match handleResolveSelector exactly
 		// (same grammar, same boundary, same 403 CROSS_TENANT response code).
 		if parsedTenantPath != "" {
-			if tenantID != "" && parsedTenantPath != tenantID && !strings.HasPrefix(parsedTenantPath, tenantID+"/") {
+			if tenantID != "" && !selectorPathWithinCaller(tenantID, parsedTenantPath) {
 				s.logger.Info("Selector tenant outside caller subtree",
 					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
 					"caller_tenant", logging.SanitizeLogValue(tenantID))
@@ -286,7 +286,7 @@ func (s *Server) handleListStewards(w http.ResponseWriter, r *http.Request) {
 	for _, steward := range stewards {
 		// A tenant-scoped caller must not see other tenants' stewards. The
 		// node-local map is unscoped, so this filter applies to it too.
-		if !isWithinTenantScope(tenantID, steward.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
+		if !s.isWithinTenantScope(r.Context(), tenantID, steward.TenantID) { //architecture:allow-root-scope -- list breadth; root lists every tenant (ADR-025 A7.2)
 			continue
 		}
 		seen[steward.ID] = true
@@ -451,7 +451,7 @@ func (s *Server) handleGetSteward(w http.ResponseWriter, r *http.Request) {
 	// Cross-tenant scope check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction (callerTenant == "" → always allowed).
 	callerTenant := callerTenantFilter(r.Context())
-	if !isWithinTenantScope(callerTenant, stewardInfo.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
+	if !s.isWithinTenantScope(r.Context(), callerTenant, stewardInfo.TenantID) { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		// 404 instead of 403 to avoid disclosing steward existence across tenants.
 		s.logger.Info("Cross-tenant steward get refused",
 			"steward_tenant", logging.SanitizeLogValue(stewardInfo.TenantID),
@@ -548,7 +548,7 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
-	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a".
 	callerTenant := callerTenantFilter(r.Context())
 	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
 		info, ok := s.controllerService.GetStewardInfo(stewardID)
@@ -556,12 +556,10 @@ func (s *Server) handleGetStewardDNA(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			stewardTenant = info.TenantID
 		}
-		// Allow access when caller's tenant equals or is a hierarchical ancestor of the
-		// steward's tenant (e.g. "root/msp-a" can read "root/msp-a/client-1" stewards).
-		// The "/" separator boundary prevents "tenant-a" from matching "tenant-abc".
-		sameTenant := stewardTenant == callerTenant
-		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
-		if !ok || (!sameTenant && !ancestorTenant) {
+		// Allow access when the caller's tenant is the steward's tenant or one of its
+		// ParentID ancestors (e.g. "msp-a" can read "client-1" stewards). Ancestry
+		// replaces the old separator guard: "msp-ab" is not a descendant of "msp-a".
+		if !ok || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
 			// 404 instead of 403 to avoid disclosing steward existence across tenants.
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
@@ -1389,14 +1387,12 @@ func (s *Server) handleGetStewardModules(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Cross-tenant check: the caller's tenant must be a prefix of or equal to the
+	// Cross-tenant check: the caller's tenant must equal or be a ParentID ancestor of the
 	// steward's tenant. Return 404 (not 403) to avoid existence disclosure.
 	// A root caller has fleet-wide reach; anyone else is confined (Issue #4665).
 	callerTenantID := callerTenantFilter(r.Context())
 	if callerTenantID != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
-		tenantMatch := stewardInfo.TenantID == callerTenantID ||
-			strings.HasPrefix(stewardInfo.TenantID, callerTenantID+"/")
-		if !tenantMatch {
+		if !s.tenantSubtreeContains(r.Context(), callerTenantID, stewardInfo.TenantID) {
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
 		}
@@ -1518,7 +1514,7 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 
 	// Cross-tenant check: API-key principals carry a non-empty TenantID; admin mTLS
 	// principals have TenantID="" meaning no scope restriction.
-	// Use path-separator-aware prefix matching so "tenant-a" cannot match "tenant-abc".
+	// Containment resolves through ParentID ancestry, so "msp-ab" never matches "msp-a".
 	callerTenant := callerTenantFilter(r.Context())
 	info, exists := s.controllerService.GetStewardInfo(stewardID)
 	if callerTenant != "" { //architecture:allow-root-scope -- by-ID read; root read breadth matches its list breadth (ADR-025 A7.2)
@@ -1526,9 +1522,7 @@ func (s *Server) handleGetStewardLogs(w http.ResponseWriter, r *http.Request) {
 		if exists {
 			stewardTenant = info.TenantID
 		}
-		sameTenant := stewardTenant == callerTenant
-		ancestorTenant := strings.HasPrefix(stewardTenant, callerTenant+"/")
-		if !exists || (!sameTenant && !ancestorTenant) {
+		if !exists || !s.tenantSubtreeContains(r.Context(), callerTenant, stewardTenant) {
 			// 404 instead of 403 to avoid disclosing steward existence across tenants.
 			s.writeErrorResponse(w, http.StatusNotFound, "Steward not found", "STEWARD_NOT_FOUND")
 			return
@@ -1734,8 +1728,8 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 	// destination tenant must pass its tenant decision, so a root caller subject to the
 	// ADR-025 boundary needs a crossing for each tenant below root it touches (Issue
 	// #4665). A scoped admin must have scope that is an ancestor of (or equal to) BOTH
-	// source AND destination via the anchored-prefix form. The "/" separator boundary
-	// prevents "tenant-a" from matching "tenant-abc".
+	// source AND destination through ParentID ancestry: a sibling whose ID merely
+	// shares a prefix ("msp-ab" vs "msp-a") is not a descendant and is denied.
 	if callerTenantID == "" { //architecture:allow-root-scope -- an explicitly root caller: both tenants pass tenantAccessForScope here
 		for _, tenant := range []string{oldTenantID, newTenantID} {
 			access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tenant, "POST /api/v1/stewards/{id}/move")
@@ -1760,8 +1754,8 @@ func (s *Server) handleMoveSteward(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if callerTenantID != "" { //architecture:allow-root-scope -- tenant-scoped callers: source and destination must both be in the caller subtree
-		sourceInScope := oldTenantID == callerTenantID || strings.HasPrefix(oldTenantID, callerTenantID+"/")
-		destInScope := newTenantID == callerTenantID || strings.HasPrefix(newTenantID, callerTenantID+"/")
+		sourceInScope := s.tenantSubtreeContains(r.Context(), callerTenantID, oldTenantID)
+		destInScope := s.tenantSubtreeContains(r.Context(), callerTenantID, newTenantID)
 		if !sourceInScope || !destInScope {
 			s.logger.Warn("steward move denied: scoped admin has insufficient scope",
 				"steward_id", stewardIDForLog,

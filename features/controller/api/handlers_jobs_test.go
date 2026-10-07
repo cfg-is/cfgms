@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cfgis/cfgms/features/controller/batchjob"
+	"github.com/cfgis/cfgms/features/tenant"
 	"github.com/cfgis/cfgms/pkg/ctxkeys"
 	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
@@ -289,12 +290,17 @@ func TestHandleCreateJob_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	store := newTestBatchJobStoreForAPI()
 	server.batchJobStore = store
 
-	// Two stewards under sibling sub-tenants of tenant-a.
-	inScope := registerActiveSteward(t, server.controllerService, "job-prefix-c1", "tenant-a/client-1")
-	registerActiveSteward(t, server.controllerService, "job-prefix-c2", "tenant-a/client-2")
+	// Real tenant tree: msp-a > {client-1, client-2}.
+	seedTenantTree(t, server)
+	_, err := server.tenantManager.CreateTenant(context.Background(), &tenant.TenantRequest{ID: "client-2", ParentID: "msp-a"})
+	require.NoError(t, err)
 
-	// Caller tenant-a targets only the client-1 subtree via an explicit prefix.
-	rec := postCreateJobWithTenant(server, `{"selector":"tenant-a/client-1/all","batch_size":2}`, "tenant-a")
+	// Two stewards under sibling sub-tenants of msp-a.
+	inScope := registerActiveSteward(t, server.controllerService, "job-prefix-c1", "client-1")
+	registerActiveSteward(t, server.controllerService, "job-prefix-c2", "client-2")
+
+	// Caller msp-a targets only the client-1 subtree via an explicit prefix.
+	rec := postCreateJobWithTenant(server, `{"selector":"client-1/all","batch_size":2}`, "msp-a")
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 
 	var apiResp APIResponse
@@ -307,7 +313,7 @@ func TestHandleCreateJob_ExplicitTenantPrefix_ScopesToSubtree(t *testing.T) {
 	job, err := store.GetBatchJob(context.Background(), jobID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{inScope}, job.Targets,
-		"explicit prefix must scope targets to tenant-a/client-1, excluding sibling client-2")
+		"explicit prefix must scope targets to client-1, excluding sibling client-2")
 }
 
 // ── handleGetJob: auth guard ──────────────────────────────────────────────────

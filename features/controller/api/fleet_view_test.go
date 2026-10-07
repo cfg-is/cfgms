@@ -85,15 +85,23 @@ func TestFleetRecords_ReturnsClusterWideSet(t *testing.T) {
 // in-process map was node-local. Reading the shared store without it would hand
 // a tenant-scoped caller the entire cluster's fleet, so this must not regress.
 func TestFleetRecords_ScopesToCallerTenant(t *testing.T) {
-	srv := &Server{stewardStore: &fleetViewStore{records: []*business.StewardRecord{
+	// A real tenant manager supplies the ParentID ancestry the scope check walks.
+	srv := setupTestServer(t)
+	createTestTenant(t, srv, "acme", "")
+	createTestTenant(t, srv, "acme-child", "acme")
+	createTestTenant(t, srv, "othercorp", "")
+	// Deliberately adjacent: "acme-evil" shares a name prefix with "acme" but is a
+	// different tenant (a sibling under root), and must not leak through a prefix match.
+	createTestTenant(t, srv, "acme-evil", "")
+	// setupTestServer already started the API-key cleanup goroutine, which reads
+	// srv.logger, so the logger it was built with is kept and the store is wired
+	// through the locked setter rather than by direct field writes.
+	srv.SetStewardStore(&fleetViewStore{records: []*business.StewardRecord{
 		fleetViewRecord("steward-acme", "acme"),
-		fleetViewRecord("steward-acme-child", "acme/child"),
+		fleetViewRecord("steward-acme-child", "acme-child"),
 		fleetViewRecord("steward-other", "othercorp"),
-		// Deliberately adjacent: "acme-evil" shares a prefix with "acme" but is a
-		// different tenant, and must not leak through a naive prefix match.
 		fleetViewRecord("steward-lookalike", "acme-evil"),
-	}}}
-	srv.logger = logging.NewNoopLogger()
+	}})
 
 	got, ok := srv.fleetRecords(context.Background(), "acme")
 
@@ -102,7 +110,7 @@ func TestFleetRecords_ScopesToCallerTenant(t *testing.T) {
 	assert.Contains(t, got, "steward-acme-child", "subtree descendants must be visible")
 	assert.NotContains(t, got, "steward-other", "other tenants must not be visible")
 	assert.NotContainsf(t, got, "steward-lookalike",
-		"tenant %q must not match %q — subtree containment is on a path-segment boundary", "acme-evil", "acme")
+		"tenant %q must not match %q — subtree containment follows ParentID ancestry, not a name prefix", "acme-evil", "acme")
 }
 
 // TestFleetRecords_UnscopedCallerSeesEverything pins the admin case: an mTLS
