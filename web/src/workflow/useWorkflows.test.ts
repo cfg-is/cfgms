@@ -444,3 +444,28 @@ describe('WorkflowStep id field', () => {
     expect(wf!.steps[0]!.id).toBe('')
   })
 })
+
+describe('parseVersionedWorkflow — list summary fields (Story #4618)', () => {
+  it('parses trigger counts and last_execution', () => {
+    const w = parseVersionedWorkflow({
+      name: 'wf',
+      trigger_count: 4,
+      enabled_trigger_count: 1,
+      last_execution: { id: 'e', status: 'completed', start_time: '2026-01-01T00:00:00Z' },
+    })
+    expect(w?.trigger_count).toBe(4)
+    expect(w?.enabled_trigger_count).toBe(1)
+    expect(w?.last_execution).toEqual({
+      id: 'e',
+      status: 'completed',
+      start_time: '2026-01-01T00:00:00Z',
+    })
+  })
+
+  it('defaults to zero counts and null last_execution when absent or malformed', () => {
+    const w = parseVersionedWorkflow({ name: 'wf', trigger_count: 'x', last_execution: 'bad' })
+    expect(w?.trigger_count).toBe(0)
+    expect(w?.enabled_trigger_count).toBe(0)
+    expect(w?.last_execution).toBeNull()
+  })
+})

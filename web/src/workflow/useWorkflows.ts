@@ -97,6 +97,12 @@ export interface InputSpec {
   description?: string
 }
 
+export interface WorkflowLastExecution {
+  id: string
+  status: string
+  start_time: string
+}
+
 export interface VersionedWorkflow {
   name: string
   description: string
@@ -110,6 +116,10 @@ export interface VersionedWorkflow {
   version_tags?: string[]
   deprecated?: boolean
   deprecation_note?: string
+  /* List summary fields (Issue #4614); zero/null when the server omits them. */
+  trigger_count: number
+  enabled_trigger_count: number
+  last_execution: WorkflowLastExecution | null
   /*
    * Verbatim workflow JSON as the controller sent it — same contract as
    * WorkflowStep.raw. Editors consult it to detect stored fields that
@@ -232,6 +242,14 @@ function parseInputSpec(value: unknown): InputSpec | null {
   return spec
 }
 
+function parseLastExecution(value: unknown): WorkflowLastExecution | null {
+  if (typeof value !== 'object' || value === null) return null
+  const r = value as Record<string, unknown>
+  const status = str(r.status)
+  if (!status) return null
+  return { id: str(r.id), status, start_time: str(r.start_time) }
+}
+
 export function parseVersionedWorkflow(value: unknown): VersionedWorkflow | null {
   if (typeof value !== 'object' || value === null) return null
   const r = value as Record<string, unknown>
@@ -266,6 +284,9 @@ export function parseVersionedWorkflow(value: unknown): VersionedWorkflow | null
     deprecated: r.deprecated !== undefined ? bool(r.deprecated) : undefined,
     deprecation_note:
       r.deprecation_note !== undefined ? str(r.deprecation_note) : undefined,
+    trigger_count: num(r.trigger_count),
+    enabled_trigger_count: num(r.enabled_trigger_count),
+    last_execution: parseLastExecution(r.last_execution),
     raw: { ...r },
   }
 }
