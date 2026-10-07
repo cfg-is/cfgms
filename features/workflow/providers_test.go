@@ -13,6 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cfgis/cfgms/pkg/logging"
+
+	// The approval-gate tests open the flatfile approval store through
+	// interfaces.GetStorageProvider; this blank import registers the provider.
+	_ "github.com/cfgis/cfgms/pkg/storage/providers/flatfile"
 )
 
 // capturingLogEntry holds a single captured log entry (message + key-value pairs).
