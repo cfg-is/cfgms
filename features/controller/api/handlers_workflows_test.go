@@ -1084,7 +1084,7 @@ func TestWorkflowHandler_RegisterWorkflowRoutes_NilGate_ReturnsError(t *testing.
 	gated := mux.NewRouter()
 	gatedSub := gated.PathPrefix("/workflows").Subrouter()
 	require.NoError(t, h.RegisterWorkflowRoutes(gatedSub))
-	assert.Len(t, walkRoutes(t, gatedSub), 11,
+	assert.Len(t, walkRoutes(t, gatedSub), 12,
 		"a wired gate must register every workflow route")
 }
 
@@ -1480,4 +1480,159 @@ func TestWorkflowHandler_Inputs_ExecuteEnumOutsideOptionsReturns400(t *testing.T
 	rec := postWorkflow(t, router, "/workflows/in-wf/execute", []byte(`{"inputs":{"host":"a","env":"qa"}}`))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "qa")
+}
+
+// --- validate workflow (Issue #4612) ----------------------------------------
+
+func postValidate(t *testing.T, router *mux.Router, body []byte) (int, ValidateWorkflowResponse) {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/workflows/validate", bytes.NewReader(body))
+	req = withTenantContext(req, "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var resp ValidateWorkflowResponse
+	if rec.Code == http.StatusOK {
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	}
+	return rec.Code, resp
+}
+
+func validTaskStep(name string) workflow.Step {
+	return workflow.Step{Name: name, Type: workflow.StepTypeTask, Module: "file", Config: map[string]interface{}{"path": "/tmp/x"}}
+}
+
+func TestWorkflowHandler_Validate_ValidWorkflow(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	code, resp := postValidate(t, router, mustMarshal(CreateWorkflowRequest{
+		Name: "ok", Steps: []workflow.Step{validTaskStep("a")},
+	}))
+	assert.Equal(t, http.StatusOK, code)
+	assert.True(t, resp.Valid)
+	assert.NotNil(t, resp.Issues)
+	assert.Empty(t, resp.Issues)
+}
+
+func TestWorkflowHandler_Validate_TwoDefectsReturnsBoth(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	code, resp := postValidate(t, router, mustMarshal(CreateWorkflowRequest{
+		Name: "bad",
+		Steps: []workflow.Step{
+			validTaskStep("a"),
+			{Name: "b", Type: workflow.StepTypeTask, Module: "file"},
+			{Name: "c", Type: workflow.StepTypeTask, Config: map[string]interface{}{"k": "v"}},
+		},
+	}))
+	assert.Equal(t, http.StatusOK, code)
+	assert.False(t, resp.Valid)
+	require.Len(t, resp.Issues, 2)
+	assert.Equal(t, "steps[1].config", resp.Issues[0].Path)
+	assert.Equal(t, "b", resp.Issues[0].StepName)
+	assert.Equal(t, "steps[2].module", resp.Issues[1].Path)
+	assert.Equal(t, "c", resp.Issues[1].StepName)
+}
+
+func TestWorkflowHandler_Validate_PersistsAndExecutesNothing(t *testing.T) {
+	h, store := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	for _, wf := range []CreateWorkflowRequest{
+		{Name: "persist-me", Steps: []workflow.Step{validTaskStep("a")}},
+		{Name: "persist-bad", Steps: []workflow.Step{{Name: "x", Type: workflow.StepTypeTask}}},
+	} {
+		code, _ := postValidate(t, router, mustMarshal(wf))
+		require.Equal(t, http.StatusOK, code)
+	}
+
+	listReq := withTenantContext(httptest.NewRequest("GET", "/workflows", nil), "test-tenant")
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+	var list map[string]interface{}
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &list))
+	assert.EqualValues(t, 0, list["count"], "validate must not store a workflow")
+	assert.NotNil(t, store)
+
+	execs, err := h.engine.ListExecutions()
+	require.NoError(t, err)
+	assert.Empty(t, execs, "validate must not start an execution")
+}
+
+func TestWorkflowHandler_Validate_NestedApprovalReportsStepPath(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	gate := workflow.Step{
+		Name: "gate", Type: workflow.StepTypeApproval,
+		Approval: &workflow.ApprovalConfig{Message: "ok?", Timeout: time.Hour},
+	}
+	code, resp := postValidate(t, router, mustMarshal(CreateWorkflowRequest{
+		Name: "nested",
+		Steps: []workflow.Step{
+			validTaskStep("a"),
+			{Name: "fan", Type: workflow.StepTypeParallel, Steps: []workflow.Step{validTaskStep("b"), gate}},
+		},
+	}))
+	assert.Equal(t, http.StatusOK, code)
+	assert.False(t, resp.Valid)
+	require.Len(t, resp.Issues, 1)
+	assert.Equal(t, "steps[1].steps[1]", resp.Issues[0].Path)
+	assert.Equal(t, "gate", resp.Issues[0].StepName)
+	assert.Contains(t, resp.Issues[0].Message, "approval steps must be top-level")
+}
+
+func TestWorkflowHandler_Validate_TruncatesLongValues(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	long := string(bytes.Repeat([]byte("z"), 5000))
+	_, resp := postValidate(t, router, mustMarshal(CreateWorkflowRequest{
+		Name:  "long",
+		Steps: []workflow.Step{{Name: long, Type: workflow.StepType(long)}},
+	}))
+	require.False(t, resp.Valid)
+	for _, is := range resp.Issues {
+		assert.Less(t, len(is.Message), 300)
+		assert.Less(t, len(is.StepName), 100)
+	}
+}
+
+func TestWorkflowHandler_Validate_NotShadowedByID(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+
+	// A workflow literally named "validate" must not capture POST /validate,
+	// and GET /validate still resolves to the {id} route.
+	code, _ := postValidate(t, router, mustMarshal(CreateWorkflowRequest{Name: "w", Steps: []workflow.Step{validTaskStep("a")}}))
+	assert.Equal(t, http.StatusOK, code)
+
+	req := withTenantContext(httptest.NewRequest("GET", "/workflows/validate", nil), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestWorkflowHandler_Validate_InvalidJSON_Returns400(t *testing.T) {
+	h, _ := newTestWorkflowHandler(t)
+	router := newWorkflowRouter(h)
+	code, _ := postValidate(t, router, []byte("not-json"))
+	assert.Equal(t, http.StatusBadRequest, code)
+}
+
+func TestWorkflowPermission_Validate_GatedOnRead(t *testing.T) {
+	h, _, _ := newTestWorkflowHandlerAndEngine(t)
+	router := newPermGatedWorkflowRouter(h)
+	body := mustMarshal(CreateWorkflowRequest{Name: "w", Steps: []workflow.Step{validTaskStep("a")}})
+
+	req := withTenantContext(withPermissions(httptest.NewRequest("POST", "/workflows/validate", bytes.NewReader(body)), "workflow:execute"), "test-tenant")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	req = withTenantContext(withPermissions(httptest.NewRequest("POST", "/workflows/validate", bytes.NewReader(body)), "workflow:read"), "test-tenant")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }

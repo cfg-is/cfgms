@@ -2237,6 +2237,25 @@ Cross-tenant cancellations return `403 Forbidden`. Already-terminal executions r
 - `403 Forbidden` — workflow is not visible in the calling tenant's namespace
 - `409 Conflict` — execution is already in a terminal state (`completed`, `failed`, or `cancelled`)
 
+### Validate a Workflow
+
+#### POST /api/v1/workflows/validate
+
+Validate a workflow definition without saving or running it. The body has the same shape as workflow create. Requires `workflow:read`; no step-up is needed. Returns `200 OK` for any well-formed body, with every issue found rather than only the first. Caller-supplied values echoed in messages are truncated.
+
+**Response:** `200 OK`
+
+```json
+{
+  "valid": false,
+  "issues": [
+    {"path": "steps[1].config", "step_name": "install", "message": "config is required for task steps"}
+  ]
+}
+```
+
+An approval step nested inside a parallel, loop, try, switch or conditional block is reported at its own path with "approval steps must be top-level". A valid definition returns `{"valid": true, "issues": []}`. A body that is not valid JSON returns `400 Bad Request`.
+
 ### Workflow Approvals
 
 An approval step suspends a run until an operator decides it. Both endpoints are scoped to the caller's tenant, resolved as for the workflow endpoints; an approval in another tenant is indistinguishable from an unknown ID and returns `404`.

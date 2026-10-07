@@ -126,6 +126,8 @@ func (h *WorkflowHandler) RegisterWorkflowRoutes(router *mux.Router) error {
 	router.Handle("", wrap("list", h.handleListWorkflows)).Methods("GET")
 	router.Handle("", wrap("write", h.handleCreateWorkflow)).Methods("POST")
 	// Approval routes precede /{id} so "approvals" is never read as a workflow name.
+	// /validate precedes /{id} so "validate" is never read as a workflow name.
+	router.Handle("/validate", wrap("read", h.handleValidateWorkflow)).Methods("POST")
 	router.Handle("/approvals", wrap("read", h.handleListApprovals)).Methods("GET")
 	router.Handle("/approvals/{approval_id}/decision", wrap("approve", h.handleDecideApproval)).Methods("POST")
 	router.Handle("/{id}", wrap("read", h.handleGetWorkflow)).Methods("GET")
@@ -363,6 +365,43 @@ func (h *WorkflowHandler) handleCreateWorkflow(w http.ResponseWriter, r *http.Re
 	}
 
 	h.sendJSON(w, http.StatusCreated, vw)
+}
+
+// ValidateWorkflowResponse is the result of a dry-run validation (Issue #4612).
+type ValidateWorkflowResponse struct {
+	Valid  bool                       `json:"valid"`
+	Issues []workflow.ValidationIssue `json:"issues"`
+}
+
+// handleValidateWorkflow handles POST /api/v1/workflows/validate. It validates
+// the submitted definition and reports every issue; it saves and runs nothing.
+func (h *WorkflowHandler) handleValidateWorkflow(w http.ResponseWriter, r *http.Request) {
+	var req CreateWorkflowRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+
+	issues := workflow.NewParser().ValidateWorkflowDetailed(workflow.Workflow{
+		Name:           req.Name,
+		Description:    req.Description,
+		Version:        req.Version,
+		Steps:          req.Steps,
+		Variables:      req.Variables,
+		Inputs:         req.Inputs,
+		Timeout:        req.Timeout,
+		OnFailure:      req.OnFailure,
+		ErrorWorkflows: req.ErrorWorkflows,
+	})
+	if req.Version != "" {
+		if _, err := workflow.ParseSemanticVersion(req.Version); err != nil {
+			issues = append(issues, workflow.ValidationIssue{Path: "version", Message: "invalid version format"})
+		}
+	}
+	if issues == nil {
+		issues = []workflow.ValidationIssue{}
+	}
+	h.sendJSON(w, http.StatusOK, ValidateWorkflowResponse{Valid: len(issues) == 0, Issues: issues})
 }
 
 // handleGetWorkflow handles GET /api/v1/workflows/{id}

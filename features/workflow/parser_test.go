@@ -692,3 +692,35 @@ func assertStepsEqual(t *testing.T, expected, actual []Step) {
 		}
 	}
 }
+
+func TestParser_ValidateWorkflowDetailed_MultipleIssues(t *testing.T) {
+	p := NewParser()
+	wf := Workflow{
+		Name: "multi",
+		Steps: []Step{
+			{Name: "a", Type: StepTypeTask, Module: "file", Config: map[string]interface{}{"k": "v"}},
+			{Name: "b", Type: StepTypeTask, Module: "file"},
+			{Name: "c", Type: StepTypeParallel, Steps: []Step{
+				{Name: "d", Type: StepTypeTask, Config: map[string]interface{}{"k": "v"}},
+			}},
+		},
+		Timeout: -1,
+	}
+	issues := p.ValidateWorkflowDetailed(wf)
+	require.Len(t, issues, 3)
+	assert.Equal(t, "steps[1].config", issues[0].Path)
+	assert.Equal(t, "b", issues[0].StepName)
+	assert.Equal(t, "steps[2].steps[0].module", issues[1].Path)
+	assert.Equal(t, "d", issues[1].StepName)
+	assert.Equal(t, "timeout", issues[2].Path)
+
+	// ValidateWorkflow keeps returning the first issue only.
+	err := p.ValidateWorkflow(wf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config is required for task steps")
+
+	assert.Empty(t, p.ValidateWorkflowDetailed(Workflow{
+		Name:  "ok",
+		Steps: []Step{{Name: "a", Type: StepTypeTask, Module: "file", Config: map[string]interface{}{"k": "v"}}},
+	}))
+}
