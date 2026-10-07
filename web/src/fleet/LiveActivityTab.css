@@ -11,7 +11,7 @@
 .live-fresh {
   flex: 1;
   font-size: 12.5px;
-  color: var(--text-muted, var(--faint));
+  color: var(--text-secondary);
 }
 
 .live-filter {
@@ -21,8 +21,8 @@
   padding: 7px 10px;
   font: inherit;
   font-size: 12.5px;
-  color: var(--text);
-  background: var(--panel);
+  color: var(--text-primary);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -31,13 +31,13 @@
   padding: 7px 14px;
   font: inherit;
   font-size: 12.5px;
-  color: var(--text);
-  background: var(--panel);
+  color: var(--text-primary);
+  background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   cursor: pointer;
 }
 
 .live-btn:hover {
-  border-color: var(--accent, var(--border));
+  border-color: var(--accent);
 }
